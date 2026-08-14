@@ -3,6 +3,7 @@ name = "quant-foundry"
 version = "0.1.0"
 description = "A FastAPI-based API service."
 readme = "README.md"
+license = "Apache-2.0"
 requires-python = "==3.12.2"
 dependencies = [
     "alembic>=1.14,<2.0",
