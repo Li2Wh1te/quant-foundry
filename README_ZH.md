@@ -41,7 +41,7 @@
 | 关注点 | 当前实现 |
 | --- | --- |
 | 快速部署 | 一条 `make selfhost` 命令完成构建、迁移、启动和就绪检查 |
-| 配置安全 | Pydantic Settings 严格校验，首次部署自动生成 256-bit 数据库密码 |
+| 配置安全 | Settings 严格校验，首次部署自动生成 256-bit 数据库密码和 API Token |
 | 数据演进 | SQLAlchemy 会话管理与 Alembic 版本化迁移 |
 | 可观测性 | JSON 结构化日志、异步写入、轮转压缩和管理查询 API |
 | 运行可靠性 | PostgreSQL 与 Server 健康检查、持久化卷和优雅停止 |
@@ -76,7 +76,7 @@ make selfhost
 
 | 地址 | 用途 |
 | --- | --- |
-| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API 根路径 |
+| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API 根路径（需要 Token） |
 | [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | Swagger UI |
 | [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) | ReDoc |
 | [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | 数据库就绪检查 |
@@ -84,17 +84,24 @@ make selfhost
 Server 和 PostgreSQL 的宿主机端口默认都只绑定到 `127.0.0.1`，不会直接暴露到
 外部网络。
 
+`make selfhost` 会将生成的 API Token 以 `QF_API_TOKEN` 写入 `.env`。可以把该值填入
+Swagger UI 的 **Authorize** 对话框，也可以通过 `Authorization` 请求头调用接口：
+
+```bash
+curl -H "Authorization: Bearer <QF_API_TOKEN>" http://127.0.0.1:8000/
+```
+
 <details>
 <summary><strong>首次部署具体做了什么？</strong></summary>
 
 1. 从 `.env.example` 创建权限为 `0600` 的 `.env`；
-2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码；
+2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码和 API Token；
 3. 基于当前 checkout 构建 Server 镜像；
 4. 创建持久化数据卷并启动 PostgreSQL；
 5. 执行全部 Alembic 迁移；
 6. 启动 Server，并通过实际查询数据库的 `/readyz` 等待服务就绪。
 
-再次执行会复用已有的配置、数据库密码和持久化数据卷。
+再次执行会复用已有的配置、密钥和持久化数据卷。
 
 </details>
 
@@ -120,6 +127,10 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 
 完整请求参数和响应结构以 `/docs` 中的 OpenAPI 文档为准。
 
+所有业务接口都要求提供 `Authorization: Bearer <QF_API_TOKEN>`。`/readyz` 特意不鉴权，
+以便容器编排执行就绪检查。文档页面和 OpenAPI Schema 也可以公开访问，但从 Swagger UI
+调用实际接口时仍需提供 Token。
+
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `GET` | `/` | 基础连通性检查 |
@@ -131,9 +142,9 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 和 `end_time` 过滤。默认查询最近 24 小时，单次时间范围最多为 31 天，最多返回
 1000 条记录。清理操作不会截断正在写入的文件，物理文件仍由保留策略自动清理。
 
-> [!CAUTION]
-> 管理日志接口当前不包含应用层鉴权，日志也可能包含运行细节或敏感上下文。将服务暴露到
-> 非受信网络前，必须在应用层或反向代理中添加身份认证和访问控制。
+> [!IMPORTANT]
+> 共享 API Token 可以验证调用方是否持有凭据，但不提供用户级权限和审计身份。将服务暴露
+> 到非受信网络前，仍必须使用 HTTPS 并配置适当的网络访问控制。
 
 ## 开发指南
 
@@ -154,8 +165,8 @@ cd quant-foundry
 cp .env.example .env
 ```
 
-编辑 `.env`，至少为 `QF_DATABASE_PASSWORD` 设置真实密码，并确保对应的 PostgreSQL
-用户和数据库已经存在。然后执行：
+编辑 `.env`，为 `QF_API_TOKEN` 和 `QF_DATABASE_PASSWORD` 设置真实值，并确保对应的
+PostgreSQL 用户和数据库已经存在。API Token 至少需要 32 个字符。然后执行：
 
 ```bash
 uv sync --locked
@@ -182,6 +193,7 @@ uv run python -m unittest discover -v
 | `QF_ENVIRONMENT` | 运行环境：`local`、`test` 或 `production` |
 | `QF_DEBUG` | 是否启用调试模式，生产环境必须为 `false` |
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | API 监听地址和端口 |
+| `QF_API_TOKEN` | 用于验证 API 请求的共享 Bearer Token |
 | `QF_DATABASE_*` | PostgreSQL 地址、端口、用户、密码和数据库名 |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | 日志目录和最低日志级别 |
 | `QF_LOG_RETENTION_DAYS` | 轮转日志保留天数 |
@@ -211,7 +223,7 @@ uv run alembic upgrade head
 
 ```text
 app/
-├── core/                 # 配置、日志初始化和请求日志中间件
+├── core/                 # 鉴权、配置和日志基础设施
 ├── db/                   # SQLAlchemy 会话与 Alembic 迁移
 ├── logging/              # 日志查询逻辑和管理 API
 ├── models/               # 领域模型
@@ -239,8 +251,8 @@ Makefile                  # 常用自托管命令
 <details>
 <summary><strong>可以直接暴露到公网吗？</strong></summary>
 
-不建议。默认端口仅绑定本机；对外提供服务前，至少需要配置 TLS、身份认证、访问控制和
-可信反向代理。尤其不能在没有鉴权的情况下暴露管理日志接口。
+不建议。默认端口仅绑定本机。API Token 提供了基础身份认证，但公网部署仍需配置 TLS、
+网络访问控制、Token 轮换机制和可信反向代理。
 
 </details>
 

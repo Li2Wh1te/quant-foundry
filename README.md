@@ -43,7 +43,7 @@ and trading.
 | Concern | Current implementation |
 | --- | --- |
 | Fast deployment | One `make selfhost` command builds, migrates, starts, and verifies the stack |
-| Configuration safety | Strict Pydantic Settings validation and an auto-generated 256-bit database password |
+| Configuration safety | Strict settings validation with auto-generated 256-bit database and API secrets |
 | Data evolution | SQLAlchemy session management and versioned Alembic migrations |
 | Observability | Structured JSON logs, asynchronous writes, rotation, compression, and an admin query API |
 | Runtime reliability | PostgreSQL and Server health checks, persistent volumes, and graceful shutdown |
@@ -80,7 +80,7 @@ Once the stack is ready, open:
 
 | URL | Purpose |
 | --- | --- |
-| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API root |
+| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API root (token required) |
 | [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | Swagger UI |
 | [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) | ReDoc |
 | [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | Database readiness check |
@@ -88,17 +88,24 @@ Once the stack is ready, open:
 The Server and PostgreSQL host ports bind to `127.0.0.1` by default and are not directly exposed
 to external networks.
 
+`make selfhost` stores the generated API token as `QF_API_TOKEN` in `.env`. Use that value with the
+Swagger UI **Authorize** button or send it in the `Authorization` header:
+
+```bash
+curl -H "Authorization: Bearer <QF_API_TOKEN>" http://127.0.0.1:8000/
+```
+
 <details>
 <summary><strong>What happens during the first deployment?</strong></summary>
 
 1. Create `.env` from `.env.example` with `0600` permissions;
-2. Generate a random 256-bit PostgreSQL password with Python `secrets`;
+2. Generate a random 256-bit PostgreSQL password and API token with Python `secrets`;
 3. Build the Server image from the current checkout;
 4. Create persistent volumes and start PostgreSQL;
 5. Apply all Alembic migrations;
 6. Start the Server and wait for `/readyz` to verify a real database query.
 
-Subsequent runs reuse the existing configuration, database password, and persistent volumes.
+Subsequent runs reuse the existing configuration, secrets, and persistent volumes.
 
 </details>
 
@@ -126,6 +133,10 @@ the configuration inconsistent with the PostgreSQL role. Change both with `ALTER
 See the generated OpenAPI documentation at `/docs` for complete request parameters and response
 schemas.
 
+All business endpoints require `Authorization: Bearer <QF_API_TOKEN>`. The `/readyz` endpoint is
+intentionally unauthenticated so container orchestration can perform readiness checks. Documentation
+pages and the OpenAPI schema are also public, but calls made from Swagger UI still require the token.
+
 | Method | Path | Description |
 | --- | --- | --- |
 | `GET` | `/` | Basic connectivity check |
@@ -138,10 +149,10 @@ Log queries support `keyword`, `level`, `method`, `status_class`, `path`, `start
 and return at most 1,000 records. Clearing logs does not truncate active files; physical files remain
 subject to the configured retention policy.
 
-> [!CAUTION]
-> The admin log API does not currently include application-level authentication, and logs may contain
-> sensitive operational context. Add authentication and access control at the application or reverse
-> proxy layer before exposing the service to an untrusted network.
+> [!IMPORTANT]
+> The shared API token authenticates the caller but does not provide per-user permissions or audit
+> identity. Use HTTPS and appropriate network access controls before exposing the service to an
+> untrusted network.
 
 ## Development
 
@@ -163,8 +174,9 @@ cd quant-foundry
 cp .env.example .env
 ```
 
-Edit `.env`, set a real value for `QF_DATABASE_PASSWORD`, and make sure the configured PostgreSQL
-user and database exist. Then run:
+Edit `.env`, set real values for `QF_API_TOKEN` and `QF_DATABASE_PASSWORD`, and make sure the
+configured PostgreSQL user and database exist. The API token must contain at least 32 characters.
+Then run:
 
 ```bash
 uv sync --locked
@@ -191,6 +203,7 @@ See [`.env.example`](./.env.example) for complete descriptions and defaults.
 | `QF_ENVIRONMENT` | Runtime environment: `local`, `test`, or `production` |
 | `QF_DEBUG` | Enable debug mode; this must be `false` in production |
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | API bind address and port |
+| `QF_API_TOKEN` | Shared Bearer Token used to authenticate API requests |
 | `QF_DATABASE_*` | PostgreSQL host, port, user, password, and database name |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | Log directory and minimum log level |
 | `QF_LOG_RETENTION_DAYS` | Retention period for rotated logs |
@@ -221,7 +234,7 @@ Migration files are part of the codebase and should be committed with the corres
 
 ```text
 app/
-├── core/                 # Configuration, logging setup, and request logging middleware
+├── core/                 # Authentication, configuration, and logging infrastructure
 ├── db/                   # SQLAlchemy sessions and Alembic migrations
 ├── logging/              # Log query logic and admin API
 ├── models/               # Domain models
@@ -250,9 +263,9 @@ The project status will be updated as these domain capabilities are implemented.
 <details>
 <summary><strong>Can I expose the service directly to the public internet?</strong></summary>
 
-This is not recommended. Ports bind to the local host by default. Before exposing the service,
-configure TLS, authentication, access control, and a trusted reverse proxy. Never expose the admin
-log API without authentication.
+This is not recommended. Ports bind to the local host by default. The API token provides basic
+authentication, but public deployment still requires TLS, network access control, token rotation,
+and a trusted reverse proxy.
 
 </details>
 

@@ -14,10 +14,14 @@ from app.core.config import Settings
 from app.core.logging import configure_logging
 
 
+API_TOKEN = "a" * 64
+
+
 def _write_logs_from_process(log_dir: str, process_number: int, count: int) -> None:
     with contextlib.redirect_stderr(io.StringIO()):
         runtime = configure_logging(
             Settings(
+                api_token=API_TOKEN,
                 log_dir=Path(log_dir),
                 log_queue_size=1000,
                 database_password="test-secret",
@@ -34,6 +38,7 @@ class LoggingTestCase(unittest.TestCase):
     def test_concurrent_records_are_written_as_complete_json_lines(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             settings = Settings(
+                api_token=API_TOKEN,
                 log_dir=Path(temporary_directory),
                 log_queue_size=1000,
                 database_password="test-secret",

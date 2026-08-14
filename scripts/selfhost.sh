@@ -48,7 +48,7 @@ ensure_environment() {
         --volume "${PROJECT_ROOT}:/workspace" \
         --workdir /workspace \
         "${PYTHON_IMAGE}" \
-        python scripts/database_env.py --env .env --template .env.example
+        python scripts/selfhost_env.py --env .env --template .env.example
 }
 
 run_migrations() {

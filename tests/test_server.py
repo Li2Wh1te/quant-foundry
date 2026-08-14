@@ -7,9 +7,13 @@ from app.core.config import Settings
 from app.main import create_app
 
 
+API_TOKEN = "a" * 64
+
+
 class ServerTestCase(unittest.TestCase):
     def test_server_uses_configured_host_and_port(self) -> None:
         settings = Settings(
+            api_token=API_TOKEN,
             server_host="0.0.0.0",
             server_port=9000,
             database_password="test-secret",
@@ -30,7 +34,11 @@ class ServerTestCase(unittest.TestCase):
         )
 
     def test_lifespan_configures_and_stops_logging(self) -> None:
-        settings = Settings(database_password="test-secret", _env_file=None)
+        settings = Settings(
+            api_token=API_TOKEN,
+            database_password="test-secret",
+            _env_file=None,
+        )
         app = create_app(settings)
 
         async def run_lifespan() -> None:

@@ -6,12 +6,16 @@ from app.db.session import dispose_engine, get_db_session, get_engine
 from app.main import check_database_ready
 
 
+API_TOKEN = "a" * 64
+
+
 class DatabaseTestCase(unittest.TestCase):
     def tearDown(self) -> None:
         get_engine.cache_clear()
 
     def test_engine_uses_configured_database_url(self) -> None:
         settings = Settings(
+            api_token=API_TOKEN,
             database_host="db",
             database_user="app",
             database_password="secret",

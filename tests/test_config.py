@@ -7,16 +7,24 @@ from pydantic import ValidationError
 from app.core.config import Settings
 
 
+API_TOKEN = "a" * 64
+
+
 class SettingsTestCase(unittest.TestCase):
     def test_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            settings = Settings(database_password="test-secret", _env_file=None)
+            settings = Settings(
+                api_token=API_TOKEN,
+                database_password="test-secret",
+                _env_file=None,
+            )
 
         self.assertEqual(settings.app_name, "Quant Foundry API")
         self.assertEqual(settings.environment, "local")
         self.assertFalse(settings.debug)
         self.assertEqual(str(settings.server_host), "127.0.0.1")
         self.assertEqual(settings.server_port, 8000)
+        self.assertEqual(settings.api_token.get_secret_value(), API_TOKEN)
         self.assertEqual(settings.log_dir.name, "logs")
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.log_retention_days, 30)
@@ -34,6 +42,7 @@ class SettingsTestCase(unittest.TestCase):
             "QF_DEBUG": "true",
             "QF_SERVER_HOST": "0.0.0.0",
             "QF_SERVER_PORT": "9000",
+            "QF_API_TOKEN": API_TOKEN,
             "QF_LOG_DIR": "var/logs",
             "QF_LOG_LEVEL": "WARNING",
             "QF_LOG_RETENTION_DAYS": "14",
@@ -54,6 +63,7 @@ class SettingsTestCase(unittest.TestCase):
         self.assertTrue(settings.debug)
         self.assertEqual(str(settings.server_host), "0.0.0.0")
         self.assertEqual(settings.server_port, 9000)
+        self.assertEqual(settings.api_token.get_secret_value(), API_TOKEN)
         self.assertTrue(settings.log_dir.is_absolute())
         self.assertEqual(settings.log_dir.parts[-2:], ("var", "logs"))
         self.assertEqual(settings.log_level, "WARNING")
@@ -68,7 +78,11 @@ class SettingsTestCase(unittest.TestCase):
     def test_invalid_environment_is_rejected(self) -> None:
         with patch.dict(
             os.environ,
-            {"QF_ENVIRONMENT": "invalid", "QF_DATABASE_PASSWORD": "test-secret"},
+            {
+                "QF_ENVIRONMENT": "invalid",
+                "QF_API_TOKEN": API_TOKEN,
+                "QF_DATABASE_PASSWORD": "test-secret",
+            },
             clear=True,
         ):
             with self.assertRaises(ValidationError):
@@ -85,15 +99,34 @@ class SettingsTestCase(unittest.TestCase):
             with self.subTest(environment=environment):
                 with patch.dict(os.environ, environment, clear=True):
                     with self.assertRaises(ValidationError):
-                        Settings(database_password="test-secret", _env_file=None)
+                        Settings(
+                            api_token=API_TOKEN,
+                            database_password="test-secret",
+                            _env_file=None,
+                        )
 
     def test_database_password_is_required(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValidationError):
-                Settings(_env_file=None)
+                Settings(api_token=API_TOKEN, _env_file=None)
+
+    def test_api_token_is_required_and_rejects_short_values(self) -> None:
+        invalid_tokens = (None, "too-short")
+
+        for api_token in invalid_tokens:
+            with self.subTest(api_token=api_token):
+                arguments = {"api_token": api_token} if api_token is not None else {}
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaises(ValidationError):
+                        Settings(
+                            database_password="test-secret",
+                            _env_file=None,
+                            **arguments,
+                        )
 
     def test_database_url_encodes_credentials(self) -> None:
         settings = Settings(
+            api_token=API_TOKEN,
             database_user="user@example.com",
             database_password="p@ss/word",
             _env_file=None,

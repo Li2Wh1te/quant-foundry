@@ -1,11 +1,12 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 import structlog
 
+from app.core.auth import require_api_token
 from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.request_logging import log_request
@@ -42,11 +43,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     app.state.settings = current_settings
     app.middleware("http")(log_request)
-    app.include_router(log_router)
 
-    @app.get("/")
+    protected_router = APIRouter(dependencies=[Depends(require_api_token)])
+    protected_router.include_router(log_router)
+
+    @protected_router.get("/")
     def read_root() -> dict[str, str]:
         return {"message": "Hello World"}
+
+    app.include_router(protected_router)
 
     @app.get("/readyz", include_in_schema=False)
     def read_ready(
