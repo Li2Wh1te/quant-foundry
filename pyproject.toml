@@ -1,0 +1,14 @@
+[project]
+name = "quant-foundry"
+version = "0.1.0"
+description = "A FastAPI-based API service."
+readme = "README.md"
+requires-python = "==3.12.2"
+dependencies = [
+    "alembic>=1.14,<2.0",
+    "fastapi>=0.141.1,<1.0",
+    "psycopg[binary]>=3.2,<4.0",
+    "pydantic-settings>=2.15.0,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "uvicorn>=0.52.3,<1.0",
+]
