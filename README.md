@@ -2,10 +2,11 @@
 
 <h1>Quant Foundry</h1>
 
-<p><strong>为量化应用准备的可靠 FastAPI 后端底座</strong></p>
+<p><strong>A reliable FastAPI backend foundation for quantitative applications</strong></p>
 
 <p>
-从配置、数据持久化到可观测性与自托管，提供一套清晰、可验证、可持续演进的服务基础设施。
+Configuration, persistence, observability, and self-hosting in one clear, verifiable,
+and maintainable service foundation.
 </p>
 
 <p>
@@ -17,35 +18,38 @@
 </p>
 
 <p>
-  <a href="#为什么选择-quant-foundry">项目定位</a> ·
-  <a href="#快速开始">快速开始</a> ·
+  <a href="#why-quant-foundry">Overview</a> ·
+  <a href="#quick-start">Quick Start</a> ·
   <a href="#api">API</a> ·
-  <a href="#开发指南">开发指南</a> ·
-  <a href="#参与贡献">参与贡献</a>
+  <a href="#development">Development</a> ·
+  <a href="#contributing">Contributing</a>
 </p>
+
+<p>English | <a href="./README_ZH.md">简体中文</a></p>
 
 </div>
 
 > [!NOTE]
-> Quant Foundry 目前处于早期开发阶段，已经具备后端服务基础设施，但尚未实现行情接入、
-> 策略研究、回测或交易执行能力。
+> Quant Foundry is in early development. The backend infrastructure is in place, but market data
+> ingestion, strategy research, backtesting, and trade execution have not been implemented yet.
 
-## 为什么选择 Quant Foundry？
+## Why Quant Foundry?
 
-量化系统的业务能力各不相同，但可靠运行所需的配置、数据库、迁移、日志和部署能力高度
-相似。Quant Foundry 将这些通用问题沉淀为一个边界清晰的基础项目，让后续开发可以聚焦
-于行情、研究、回测与交易领域本身。
+Quantitative systems vary in their business capabilities, but they share the same operational needs:
+configuration, databases, migrations, logging, and deployment. Quant Foundry provides these concerns
+as a well-defined foundation so future development can focus on market data, research, backtesting,
+and trading.
 
-| 关注点 | 当前实现 |
+| Concern | Current implementation |
 | --- | --- |
-| 快速部署 | 一条 `make selfhost` 命令完成构建、迁移、启动和就绪检查 |
-| 配置安全 | Pydantic Settings 严格校验，首次部署自动生成 256-bit 数据库密码 |
-| 数据演进 | SQLAlchemy 会话管理与 Alembic 版本化迁移 |
-| 可观测性 | JSON 结构化日志、异步写入、轮转压缩和管理查询 API |
-| 运行可靠性 | PostgreSQL 与 Server 健康检查、持久化卷和优雅停止 |
-| 行为验证 | 配置、数据库、服务和日志模块的单元测试 |
+| Fast deployment | One `make selfhost` command builds, migrates, starts, and verifies the stack |
+| Configuration safety | Strict Pydantic Settings validation and an auto-generated 256-bit database password |
+| Data evolution | SQLAlchemy session management and versioned Alembic migrations |
+| Observability | Structured JSON logs, asynchronous writes, rotation, compression, and an admin query API |
+| Runtime reliability | PostgreSQL and Server health checks, persistent volumes, and graceful shutdown |
+| Behavioral verification | Unit tests for configuration, database, server, and logging modules |
 
-## 架构概览
+## Architecture
 
 ```mermaid
 flowchart LR
@@ -57,12 +61,14 @@ flowchart LR
     Admin["Admin Log API"] --> Files
 ```
 
-应用通过显式配置连接 PostgreSQL，通过 Alembic 管理模式变更。请求和应用事件进入异步
-日志队列后写入按天轮转的 JSONL 文件，管理接口从当前及历史文件中执行受限查询。
+The application connects to PostgreSQL through explicit settings and manages schema changes with
+Alembic. Request and application events enter an asynchronous queue before being written to daily
+rotating JSONL files. The admin API performs bounded queries across current and historical log files.
 
-## 快速开始
+## Quick Start
 
-自托管是体验项目的最短路径。请先准备 Docker、Docker Compose v2 和 `make`：
+Self-hosting is the shortest path to a working installation. Install Docker, Docker Compose v2,
+and `make`, then run:
 
 ```bash
 git clone https://github.com/Li2Wh1te/quant-foundry.git
@@ -70,81 +76,86 @@ cd quant-foundry
 make selfhost
 ```
 
-启动完成后可以访问：
+Once the stack is ready, open:
 
-| 地址 | 用途 |
+| URL | Purpose |
 | --- | --- |
-| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API 根路径 |
+| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API root |
 | [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | Swagger UI |
 | [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) | ReDoc |
-| [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | 数据库就绪检查 |
+| [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | Database readiness check |
 
-Server 和 PostgreSQL 的宿主机端口默认都只绑定到 `127.0.0.1`，不会直接暴露到
-外部网络。
+The Server and PostgreSQL host ports bind to `127.0.0.1` by default and are not directly exposed
+to external networks.
 
 <details>
-<summary><strong>首次部署具体做了什么？</strong></summary>
+<summary><strong>What happens during the first deployment?</strong></summary>
 
-1. 从 `.env.example` 创建权限为 `0600` 的 `.env`；
-2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码；
-3. 基于当前 checkout 构建 Server 镜像；
-4. 创建持久化数据卷并启动 PostgreSQL；
-5. 执行全部 Alembic 迁移；
-6. 启动 Server，并通过实际查询数据库的 `/readyz` 等待服务就绪。
+1. Create `.env` from `.env.example` with `0600` permissions;
+2. Generate a random 256-bit PostgreSQL password with Python `secrets`;
+3. Build the Server image from the current checkout;
+4. Create persistent volumes and start PostgreSQL;
+5. Apply all Alembic migrations;
+6. Start the Server and wait for `/readyz` to verify a real database query.
 
-再次执行会复用已有的配置、数据库密码和持久化数据卷。
+Subsequent runs reuse the existing configuration, database password, and persistent volumes.
 
 </details>
 
-## 日常运维
+## Operations
 
 ```bash
-make selfhost-status   # 查看容器状态
-make selfhost-logs     # 跟踪 PostgreSQL 和 Server 日志
-make selfhost-psql     # 打开 psql
-make selfhost-migrate  # 执行待处理的数据库迁移
-make selfhost-down     # 停止服务并保留数据
-make selfhost-reset    # 删除数据库和日志数据，然后重新部署
+make selfhost-status   # Show container status
+make selfhost-logs     # Follow PostgreSQL and Server logs
+make selfhost-psql     # Open psql
+make selfhost-migrate  # Apply pending database migrations
+make selfhost-down     # Stop the stack and preserve data
+make selfhost-reset    # Delete database and log data, then redeploy
 ```
 
 > [!WARNING]
-> `make selfhost-reset` 会在确认后永久删除 Compose 管理的数据库和日志卷。
+> `make selfhost-reset` permanently deletes the database and log volumes managed by Docker Compose
+> after confirmation.
 
-数据库初始化后，不要只修改 `.env` 中的密码，否则配置会与 PostgreSQL 内部账号不一致。
-需要变更密码时，请同时执行 `ALTER ROLE`；如果不需要保留数据，也可以使用
-`make selfhost-reset` 重新初始化。
+Do not change only the password in `.env` after the database has been initialized. Doing so leaves
+the configuration inconsistent with the PostgreSQL role. Change both with `ALTER ROLE`, or use
+`make selfhost-reset` to reinitialize the stack when the existing data is not needed.
 
 ## API
 
-完整请求参数和响应结构以 `/docs` 中的 OpenAPI 文档为准。
+See the generated OpenAPI documentation at `/docs` for complete request parameters and response
+schemas.
 
-| 方法 | 路径 | 说明 |
+| Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | 基础连通性检查 |
-| `GET` | `/readyz` | 执行 `SELECT 1`，检查数据库连接 |
-| `GET` | `/api/admin/logs` | 查询本地结构化日志 |
-| `POST` | `/api/admin/logs/clear` | 隐藏调用时刻之前的日志 |
+| `GET` | `/` | Basic connectivity check |
+| `GET` | `/readyz` | Execute `SELECT 1` to verify the database connection |
+| `GET` | `/api/admin/logs` | Query local structured logs |
+| `POST` | `/api/admin/logs/clear` | Hide logs created before the request |
 
-日志查询支持 `keyword`、`level`、`method`、`status_class`、`path`、`start_time`
-和 `end_time` 过滤。默认查询最近 24 小时，单次时间范围最多为 31 天，最多返回
-1000 条记录。清理操作不会截断正在写入的文件，物理文件仍由保留策略自动清理。
+Log queries support `keyword`, `level`, `method`, `status_class`, `path`, `start_time`, and
+`end_time` filters. The default window is the last 24 hours. A request may cover at most 31 days
+and return at most 1,000 records. Clearing logs does not truncate active files; physical files remain
+subject to the configured retention policy.
 
 > [!CAUTION]
-> 管理日志接口当前不包含应用层鉴权，日志也可能包含运行细节或敏感上下文。将服务暴露到
-> 非受信网络前，必须在应用层或反向代理中添加身份认证和访问控制。
+> The admin log API does not currently include application-level authentication, and logs may contain
+> sensitive operational context. Add authentication and access control at the application or reverse
+> proxy layer before exposing the service to an untrusted network.
 
-## 开发指南
+## Development
 
 <details>
-<summary><strong>本地源码运行</strong></summary>
+<summary><strong>Run from source</strong></summary>
 
-### 环境要求
+### Requirements
 
 - Python 3.12.2
 - [uv](https://docs.astral.sh/uv/)
-- 可访问的 PostgreSQL
+- An accessible PostgreSQL instance
 
-项目通过 `pyproject.toml` 要求 Python 3.12.2，并通过 `uv.lock` 锁定完整依赖树。
+The project requires Python 3.12.2 in `pyproject.toml` and locks the complete dependency graph in
+`uv.lock`.
 
 ```bash
 git clone https://github.com/Li2Wh1te/quant-foundry.git
@@ -152,8 +163,8 @@ cd quant-foundry
 cp .env.example .env
 ```
 
-编辑 `.env`，至少为 `QF_DATABASE_PASSWORD` 设置真实密码，并确保对应的 PostgreSQL
-用户和数据库已经存在。然后执行：
+Edit `.env`, set a real value for `QF_DATABASE_PASSWORD`, and make sure the configured PostgreSQL
+user and database exist. Then run:
 
 ```bash
 uv sync --locked
@@ -161,7 +172,7 @@ uv run alembic upgrade head
 uv run python -m app
 ```
 
-运行完整测试：
+Run the complete test suite:
 
 ```bash
 uv run python -m unittest discover -v
@@ -170,99 +181,104 @@ uv run python -m unittest discover -v
 </details>
 
 <details>
-<summary><strong>环境配置</strong></summary>
+<summary><strong>Environment configuration</strong></summary>
 
-所有应用配置均使用 `QF_` 前缀，并从项目根目录的 `.env` 读取。完整说明和默认值见
-[`.env.example`](./.env.example)。
+All application settings use the `QF_` prefix and are loaded from `.env` in the project root.
+See [`.env.example`](./.env.example) for complete descriptions and defaults.
 
-| 配置 | 说明 |
+| Setting | Description |
 | --- | --- |
-| `QF_ENVIRONMENT` | 运行环境：`local`、`test` 或 `production` |
-| `QF_DEBUG` | 是否启用调试模式，生产环境必须为 `false` |
-| `QF_SERVER_HOST` / `QF_SERVER_PORT` | API 监听地址和端口 |
-| `QF_DATABASE_*` | PostgreSQL 地址、端口、用户、密码和数据库名 |
-| `QF_LOG_DIR` / `QF_LOG_LEVEL` | 日志目录和最低日志级别 |
-| `QF_LOG_RETENTION_DAYS` | 轮转日志保留天数 |
-| `QF_LOG_QUEUE_SIZE` | 异步日志队列容量 |
-| `QF_LOG_QUERY_MAX_FILES` | 单次日志查询最多扫描的文件数 |
+| `QF_ENVIRONMENT` | Runtime environment: `local`, `test`, or `production` |
+| `QF_DEBUG` | Enable debug mode; this must be `false` in production |
+| `QF_SERVER_HOST` / `QF_SERVER_PORT` | API bind address and port |
+| `QF_DATABASE_*` | PostgreSQL host, port, user, password, and database name |
+| `QF_LOG_DIR` / `QF_LOG_LEVEL` | Log directory and minimum log level |
+| `QF_LOG_RETENTION_DAYS` | Retention period for rotated logs |
+| `QF_LOG_QUEUE_SIZE` | Asynchronous log queue capacity |
+| `QF_LOG_QUERY_MAX_FILES` | Maximum number of files scanned by one log query |
 
-不要提交 `.env` 或任何真实凭据。
+Do not commit `.env` or any real credentials.
 
 </details>
 
 <details>
-<summary><strong>数据库迁移</strong></summary>
+<summary><strong>Database migrations</strong></summary>
 
-新增 SQLAlchemy 模型后，先将模型模块导入 `app/models/__init__.py`，再生成并检查迁移：
+After adding a SQLAlchemy model, import its module from `app/models/__init__.py`, then generate and
+review the migration:
 
 ```bash
 uv run alembic revision --autogenerate -m "describe the schema change"
 uv run alembic upgrade head
 ```
 
-迁移文件属于代码的一部分，应与模型变更一起提交。
+Migration files are part of the codebase and should be committed with the corresponding model changes.
 
 </details>
 
 <details>
-<summary><strong>项目结构</strong></summary>
+<summary><strong>Project structure</strong></summary>
 
 ```text
 app/
-├── core/                 # 配置、日志初始化和请求日志中间件
-├── db/                   # SQLAlchemy 会话与 Alembic 迁移
-├── logging/              # 日志查询逻辑和管理 API
-├── models/               # 领域模型
-├── __main__.py           # 本地进程入口
-└── main.py               # FastAPI 应用工厂
-scripts/                  # 自托管与环境初始化脚本
-tests/                    # 单元测试
-compose.yaml              # PostgreSQL 与 Server 编排
-Dockerfile                # Server 生产镜像
-Makefile                  # 常用自托管命令
+├── core/                 # Configuration, logging setup, and request logging middleware
+├── db/                   # SQLAlchemy sessions and Alembic migrations
+├── logging/              # Log query logic and admin API
+├── models/               # Domain models
+├── __main__.py           # Local process entry point
+└── main.py               # FastAPI application factory
+scripts/                  # Self-hosting and environment initialization scripts
+tests/                    # Unit tests
+compose.yaml              # PostgreSQL and Server orchestration
+Dockerfile                # Production Server image
+Makefile                  # Common self-hosting commands
 ```
 
 </details>
 
-## 常见问题
+## FAQ
 
 <details>
-<summary><strong>这是一个可以直接使用的量化交易平台吗？</strong></summary>
+<summary><strong>Is this a ready-to-use quantitative trading platform?</strong></summary>
 
-不是。当前版本提供的是量化应用所需的后端基础设施，不包含行情源、策略引擎、回测系统、
-风控或订单执行。项目状态会随着这些领域能力落地而更新。
+No. The current version provides backend infrastructure for quantitative applications. It does not
+include market data providers, a strategy engine, backtesting, risk management, or order execution.
+The project status will be updated as these domain capabilities are implemented.
 
 </details>
 
 <details>
-<summary><strong>可以直接暴露到公网吗？</strong></summary>
+<summary><strong>Can I expose the service directly to the public internet?</strong></summary>
 
-不建议。默认端口仅绑定本机；对外提供服务前，至少需要配置 TLS、身份认证、访问控制和
-可信反向代理。尤其不能在没有鉴权的情况下暴露管理日志接口。
+This is not recommended. Ports bind to the local host by default. Before exposing the service,
+configure TLS, authentication, access control, and a trusted reverse proxy. Never expose the admin
+log API without authentication.
 
 </details>
 
 <details>
-<summary><strong>自托管数据保存在哪里？</strong></summary>
+<summary><strong>Where is self-hosted data stored?</strong></summary>
 
-PostgreSQL 数据和 Server 日志分别保存在 Docker Compose 管理的持久化卷中。
-`make selfhost-down` 会保留这些数据，`make selfhost-reset` 会在确认后删除它们。
+PostgreSQL data and Server logs are stored in separate persistent volumes managed by Docker Compose.
+`make selfhost-down` preserves these volumes; `make selfhost-reset` deletes them after confirmation.
 
 </details>
 
-## 参与贡献
+## Contributing
 
-欢迎通过 Issue 报告可复现的问题或讨论设计方案，也欢迎提交 Pull Request。提交代码前请：
+Issues with reproducible bug reports and focused design discussions are welcome, as are Pull Requests.
+Before submitting code:
 
-1. 从最新的 `main` 创建范围清晰的分支；
-2. 为行为变更补充或更新测试；
-3. 运行 `uv run python -m unittest discover -v` 并确认通过；
-4. 在 Pull Request 中说明问题、实现方案、验证结果和兼容性影响。
+1. Create a focused branch from the latest `main`;
+2. Add or update tests for behavioral changes;
+3. Run `uv run python -m unittest discover -v` and confirm that it passes;
+4. Explain the problem, implementation, verification, and compatibility impact in the Pull Request.
 
-对于影响公共 API、数据模型或部署方式的较大改动，建议先通过 Issue 对齐目标和边界。
+For larger changes to public APIs, data models, or deployment behavior, open an Issue first to align
+on goals and scope.
 
-## 许可证
+## License
 
-本项目采用 [Apache License 2.0](./LICENSE) 开源许可证。
+This project is licensed under the [Apache License 2.0](./LICENSE).
 
 Copyright 2026 Quant Foundry contributors.
