@@ -26,6 +26,25 @@ uv run python -m app
 QF_DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:5432/quant_foundry
 ```
 
+安装 Docker Desktop 后，可以一条命令启动本地 PostgreSQL 并执行全部 Alembic 迁移：
+
+```bash
+./scripts/postgres.sh up
+```
+
+首次运行会从 `.env.postgres.example` 创建被 Git 忽略的 `.env.postgres`。默认仅监听 `127.0.0.1:5432`，数据保存在 Docker named volume 中。常用管理命令：
+
+```bash
+./scripts/postgres.sh status   # 查看状态
+./scripts/postgres.sh logs     # 跟踪日志
+./scripts/postgres.sh psql     # 进入 psql
+./scripts/postgres.sh migrate  # 执行迁移
+./scripts/postgres.sh down     # 停止容器但保留数据
+./scripts/postgres.sh reset    # 删除数据并重新初始化
+```
+
+如需修改用户名、密码、数据库名或宿主机端口，编辑 `.env.postgres`，并同步修改应用 `.env` 中的 `QF_DATABASE_URL`。`reset` 会删除本地 PostgreSQL 数据卷，执行前需要确认。
+
 路由或服务通过 FastAPI 依赖获取会话，事务由业务逻辑显式提交：
 
 ```python

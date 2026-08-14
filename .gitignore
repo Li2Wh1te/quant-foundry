@@ -1,6 +1,9 @@
 .env
+.env.postgres
 .idea/
 .venv/
 venv/
 __pycache__/
 *.py[cod]
+/data/logs/
+/AGENTS.md
