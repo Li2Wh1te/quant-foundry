@@ -11,7 +11,7 @@ from app.core.config import get_settings
 def get_engine() -> Engine:
     settings = get_settings()
     return create_engine(
-        str(settings.database_url),
+        settings.database_url,
         pool_pre_ping=True,
     )
 

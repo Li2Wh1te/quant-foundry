@@ -1,10 +1,9 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from sqlalchemy.engine import make_url
-
 from app.core.config import Settings
 from app.db.session import dispose_engine, get_db_session, get_engine
+from app.main import check_database_ready
 
 
 class DatabaseTestCase(unittest.TestCase):
@@ -13,14 +12,17 @@ class DatabaseTestCase(unittest.TestCase):
 
     def test_engine_uses_configured_database_url(self) -> None:
         settings = Settings(
-            database_url="postgresql+psycopg://app:secret@db:5432/quant_test",
+            database_host="db",
+            database_user="app",
+            database_password="secret",
+            database_name="quant_test",
             _env_file=None,
         )
 
         with patch("app.db.session.get_settings", return_value=settings):
             engine = get_engine()
 
-        self.assertEqual(engine.url, make_url(str(settings.database_url)))
+        self.assertEqual(engine.url, settings.database_url)
         engine.dispose()
 
     def test_session_dependency_closes_session(self) -> None:
@@ -41,6 +43,15 @@ class DatabaseTestCase(unittest.TestCase):
             dispose_engine()
 
         create_engine.assert_not_called()
+
+    def test_readiness_checks_database_connection(self) -> None:
+        session = Mock()
+
+        response = check_database_ready(session)
+
+        statement = session.execute.call_args.args[0]
+        self.assertEqual(str(statement), "SELECT 1")
+        self.assertEqual(response, {"status": "ok"})
 
 
 if __name__ == "__main__":

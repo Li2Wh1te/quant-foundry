@@ -18,7 +18,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline() -> None:
     context.configure(
-        url=str(get_settings().database_url),
+        url=get_settings().database_url,
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
@@ -31,7 +31,9 @@ def run_migrations_offline() -> None:
 
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section, {})
-    configuration["sqlalchemy.url"] = str(get_settings().database_url)
+    configuration["sqlalchemy.url"] = get_settings().database_url.render_as_string(
+        hide_password=False
+    )
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",

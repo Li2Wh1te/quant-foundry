@@ -2,8 +2,9 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, IPvAnyAddress, PostgresDsn, field_validator
+from pydantic import Field, IPvAnyAddress, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import URL
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -24,16 +25,32 @@ class Settings(BaseSettings):
     debug: bool = False
     server_host: IPvAnyAddress = "127.0.0.1"
     server_port: int = Field(default=8000, ge=1, le=65535)
-    database_url: PostgresDsn = PostgresDsn(
-        "postgresql+psycopg://postgres:postgres@127.0.0.1:5432/quant_foundry"
-    )
+    log_dir: Path = PROJECT_ROOT / "data" / "logs"
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+    log_retention_days: int = Field(default=30, ge=1, le=365)
+    log_queue_size: int = Field(default=10_000, ge=100, le=100_000)
+    log_query_max_files: int = Field(default=32, ge=1, le=366)
+    database_host: str = Field(default="127.0.0.1", min_length=1)
+    database_port: int = Field(default=5432, ge=1, le=65535)
+    database_user: str = Field(default="postgres", min_length=1)
+    database_password: SecretStr
+    database_name: str = Field(default="quant_foundry", min_length=1)
 
-    @field_validator("database_url")
+    @field_validator("log_dir")
     @classmethod
-    def validate_database_driver(cls, value: PostgresDsn) -> PostgresDsn:
-        if value.scheme != "postgresql+psycopg":
-            raise ValueError("database_url must use the postgresql+psycopg scheme")
-        return value
+    def resolve_log_dir(cls, value: Path) -> Path:
+        return value if value.is_absolute() else PROJECT_ROOT / value
+
+    @property
+    def database_url(self) -> URL:
+        return URL.create(
+            "postgresql+psycopg",
+            username=self.database_user,
+            password=self.database_password.get_secret_value(),
+            host=self.database_host,
+            port=self.database_port,
+            database=self.database_name,
+        )
 
 
 @lru_cache

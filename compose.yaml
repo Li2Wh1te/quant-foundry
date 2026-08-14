@@ -1,0 +1,61 @@
+name: quant-foundry
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${QF_DATABASE_USER:?QF_DATABASE_USER is required}
+      POSTGRES_PASSWORD: ${QF_DATABASE_PASSWORD:?QF_DATABASE_PASSWORD is required}
+      POSTGRES_DB: ${QF_DATABASE_NAME:?QF_DATABASE_NAME is required}
+    ports:
+      - "127.0.0.1:${QF_DATABASE_PORT:?QF_DATABASE_PORT is required}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - pg_isready -U "$${POSTGRES_USER}" -d "$${POSTGRES_DB}"
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+    restart: unless-stopped
+    shm_size: 256mb
+    stop_grace_period: 30s
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: quant-foundry-server:local
+    env_file:
+      - .env
+    environment:
+      QF_SERVER_HOST: 0.0.0.0
+      QF_SERVER_PORT: 8000
+      QF_DATABASE_HOST: postgres
+      QF_DATABASE_PORT: 5432
+    ports:
+      - "127.0.0.1:${QF_SERVER_PORT:-8000}:8000"
+    volumes:
+      - server_logs:/app/data/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+volumes:
+  postgres_data:
+  server_logs:

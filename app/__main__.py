@@ -9,6 +9,7 @@ def main() -> None:
         "app.main:app",
         host=str(settings.server_host),
         port=settings.server_port,
+        access_log=False,
     )
 
 
