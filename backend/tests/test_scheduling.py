@@ -5,10 +5,10 @@ from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from apscheduler.triggers.cron import CronTrigger
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from app.core.config import Settings
-from app.scheduling.registry import task_registry
+from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry, task_registry
 from app.scheduling.repository import SchedulerRepository
 from app.scheduling.runtime import SchedulerRuntime
 from app.scheduling.schemas import (
@@ -24,6 +24,30 @@ from app.scheduling.triggers import build_trigger
 
 
 API_TOKEN = "a" * 64
+TEST_TASK_TYPE = "test.noop"
+
+
+class TestTaskParameters(BaseModel):
+    pass
+
+
+def test_task_handler(
+    context: TaskContext, parameters: TestTaskParameters
+) -> dict[str, str]:
+    return {"status": "ok"}
+
+
+def make_test_registry() -> TaskRegistry:
+    registry = TaskRegistry()
+    registry.register(
+        TaskDefinition(
+            key=TEST_TASK_TYPE,
+            name="Test noop",
+            parameters_model=TestTaskParameters,
+            handler=test_task_handler,
+        )
+    )
+    return registry
 
 
 def make_task(**overrides):
@@ -31,8 +55,8 @@ def make_task(**overrides):
         "id": uuid4(),
         "name": "Test task",
         "description": None,
-        "task_type": "system.log_message",
-        "parameters": {"message": "hello"},
+        "task_type": TEST_TASK_TYPE,
+        "parameters": {},
         "parameter_version": 1,
         "schedule": {
             "type": "cron",
@@ -55,8 +79,8 @@ class SchedulingSchemaTestCase(unittest.TestCase):
         payload = TaskCreate.model_validate(
             {
                 "name": " Daily log ",
-                "task_type": "system.log_message",
-                "parameters": {"message": "market closed"},
+                "task_type": TEST_TASK_TYPE,
+                "parameters": {},
                 "schedule": {
                     "type": "cron",
                     "expression": "0 18 * * 1-5",
@@ -73,7 +97,7 @@ class SchedulingSchemaTestCase(unittest.TestCase):
             TaskCreate.model_validate(
                 {
                     "name": "Once",
-                    "task_type": "system.log_message",
+                    "task_type": TEST_TASK_TYPE,
                     "schedule": {
                         "type": "once",
                         "run_at": "2026-08-15T18:00:00",
@@ -97,7 +121,7 @@ class SchedulingSchemaTestCase(unittest.TestCase):
 class SchedulerServiceTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.session = Mock()
-        self.service = SchedulerService(self.session, task_registry)
+        self.service = SchedulerService(self.session, make_test_registry())
         self.service.repository = Mock()
 
     def test_creates_skipped_run_when_skip_policy_is_at_capacity(self) -> None:
@@ -183,11 +207,14 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
         )
         task.parameters["symbols"].append("600519.SH")
 
-        self.assertEqual(run.task_type, "system.log_message")
+        self.assertEqual(run.task_type, TEST_TASK_TYPE)
         self.assertEqual(run.parameters, {"symbols": ["000001.SZ"]})
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_default_registry_has_no_builtin_task_types(self) -> None:
+        self.assertEqual(task_registry.list(), [])
+
     def test_disabled_runtime_does_not_start_scheduler(self) -> None:
         settings = Settings(
             api_token=API_TOKEN,

@@ -4,11 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Protocol
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
-import structlog
-
-
-logger = structlog.get_logger(__name__)
+from pydantic import BaseModel
 
 
 @dataclass(frozen=True)
@@ -54,32 +50,4 @@ class TaskRegistry:
         return sorted(self._definitions.values(), key=lambda item: item.key)
 
 
-class LogMessageParameters(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    message: str = Field(min_length=1, max_length=1_000)
-
-
-def log_message_task(
-    context: TaskContext, parameters: BaseModel
-) -> dict[str, Any]:
-    if not isinstance(parameters, LogMessageParameters):
-        raise TypeError("unexpected parameters model for system.log_message")
-    logger.info(
-        "scheduled_log_message",
-        task_id=str(context.task_id),
-        run_id=str(context.run_id),
-        message=parameters.message,
-    )
-    return {"message": parameters.message}
-
-
 task_registry = TaskRegistry()
-task_registry.register(
-    TaskDefinition(
-        key="system.log_message",
-        name="Log message",
-        parameters_model=LogMessageParameters,
-        handler=log_message_task,
-    )
-)
