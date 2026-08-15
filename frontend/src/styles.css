@@ -1433,6 +1433,10 @@ svg {
   align-items: start;
 }
 
+.task-detail__history li > div {
+  min-width: 0;
+}
+
 .run-history__icon svg {
   width: 16px;
   height: 16px;
@@ -1449,7 +1453,11 @@ svg {
 }
 
 .task-detail__history li strong { color: var(--text); font-weight: 680; }
-.task-detail__history li div > span { margin-top: 2px; color: var(--text-faint); }
+.task-detail__history li div > span {
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--text-faint);
+}
 
 .task-detail__history time {
   color: var(--text-faint);
