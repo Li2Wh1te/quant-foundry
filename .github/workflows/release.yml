@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Validate and publish GitHub Release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.2"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: "11.19.0"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Require a tag commit reachable from main
+        run: |
+          git fetch origin main
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF_NAME")"
+          git merge-base --is-ancestor "$tag_commit" origin/main
+
+      - name: Require the tag to match VERSION
+        run: python3 scripts/release_version.py check --tag "$GITHUB_REF_NAME"
+
+      - name: Install backend dependencies
+        run: cd backend && uv sync --locked
+
+      - name: Install frontend dependencies
+        run: cd frontend && pnpm install --frozen-lockfile
+
+      - name: Run the release test suite
+        run: make test
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --verify-tag \
+            --title "Quant Foundry $GITHUB_REF_NAME" \
+            --generate-notes
