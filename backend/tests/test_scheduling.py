@@ -1,0 +1,208 @@
+import unittest
+from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from unittest.mock import Mock
+from uuid import uuid4
+
+from apscheduler.triggers.cron import CronTrigger
+from pydantic import ValidationError
+
+from app.core.config import Settings
+from app.scheduling.registry import task_registry
+from app.scheduling.repository import SchedulerRepository
+from app.scheduling.runtime import SchedulerRuntime
+from app.scheduling.schemas import (
+    CronSchedule,
+    RunStatus,
+    TaskCreate,
+    TaskState,
+    TaskUpdate,
+    TriggerType,
+)
+from app.scheduling.service import SchedulerService, TaskConflictError
+from app.scheduling.triggers import build_trigger
+
+
+API_TOKEN = "a" * 64
+
+
+def make_task(**overrides):
+    values = {
+        "id": uuid4(),
+        "name": "Test task",
+        "description": None,
+        "task_type": "system.log_message",
+        "parameters": {"message": "hello"},
+        "parameter_version": 1,
+        "schedule": {
+            "type": "cron",
+            "expression": "0 18 * * 1-5",
+            "timezone": "Asia/Shanghai",
+        },
+        "state": "active",
+        "concurrency_limit": 1,
+        "overlap_policy": "skip",
+        "queue_limit": 1,
+        "priority": 0,
+        "version": 1,
+    }
+    values.update(overrides)
+    return SimpleNamespace(**values)
+
+
+class SchedulingSchemaTestCase(unittest.TestCase):
+    def test_validates_discriminated_schedule_and_custom_parameters(self) -> None:
+        payload = TaskCreate.model_validate(
+            {
+                "name": " Daily log ",
+                "task_type": "system.log_message",
+                "parameters": {"message": "market closed"},
+                "schedule": {
+                    "type": "cron",
+                    "expression": "0 18 * * 1-5",
+                    "timezone": "Asia/Shanghai",
+                },
+            }
+        )
+
+        self.assertEqual(payload.name, "Daily log")
+        self.assertIsInstance(build_trigger(payload.schedule), CronTrigger)
+
+    def test_rejects_naive_schedule_times_and_null_updates(self) -> None:
+        with self.assertRaises(ValidationError):
+            TaskCreate.model_validate(
+                {
+                    "name": "Once",
+                    "task_type": "system.log_message",
+                    "schedule": {
+                        "type": "once",
+                        "run_at": "2026-08-15T18:00:00",
+                    },
+                }
+            )
+        with self.assertRaises(ValidationError):
+            TaskUpdate.model_validate({"version": 1, "name": None})
+
+    def test_cron_semantics_are_validated_by_trigger_builder(self) -> None:
+        schedule = CronSchedule(
+            type="cron",
+            expression="99 99 * * *",
+            timezone="UTC",
+        )
+
+        with self.assertRaises(ValueError):
+            build_trigger(schedule)
+
+
+class SchedulerServiceTestCase(unittest.TestCase):
+    def setUp(self) -> None:
+        self.session = Mock()
+        self.service = SchedulerService(self.session, task_registry)
+        self.service.repository = Mock()
+
+    def test_creates_skipped_run_when_skip_policy_is_at_capacity(self) -> None:
+        task = make_task()
+        expected_run = object()
+        self.service.repository.get_task.return_value = task
+        self.service.repository.count_runs.side_effect = [1, 0, 0]
+        self.service.repository.add_run.return_value = expected_run
+
+        run = self.service.enqueue_run(
+            task.id,
+            trigger_type=TriggerType.MANUAL,
+            max_queued_runs=100,
+        )
+
+        self.assertIs(run, expected_run)
+        self.service.repository.add_run.assert_called_once_with(
+            task,
+            trigger_type=TriggerType.MANUAL,
+            status=RunStatus.SKIPPED,
+            error_message="Task concurrency limit reached.",
+            scheduled_at=None,
+        )
+
+    def test_queues_run_and_snapshots_parameters(self) -> None:
+        task = make_task(overlap_policy="queue", queue_limit=2)
+        expected_run = object()
+        self.service.repository.get_task.return_value = task
+        self.service.repository.count_runs.side_effect = [1, 1, 10]
+        self.service.repository.add_run.return_value = expected_run
+
+        run = self.service.enqueue_run(
+            task.id,
+            trigger_type=TriggerType.SCHEDULED,
+            max_queued_runs=100,
+            scheduled_at=datetime.now(UTC),
+        )
+
+        self.assertIs(run, expected_run)
+        call = self.service.repository.add_run.call_args
+        self.assertEqual(call.kwargs["status"], RunStatus.QUEUED)
+
+    def test_completed_task_must_be_rescheduled_before_resume(self) -> None:
+        task = make_task(state="completed")
+        self.service.repository.get_task.return_value = task
+
+        with self.assertRaisesRegex(TaskConflictError, "only paused tasks"):
+            self.service.change_state(
+                task.id,
+                expected_version=task.version,
+                target=TaskState.ACTIVE,
+            )
+
+    def test_completed_once_task_allows_non_schedule_edits(self) -> None:
+        task = make_task(
+            state="completed",
+            schedule={
+                "type": "once",
+                "run_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
+            },
+        )
+        self.service.repository.get_task.return_value = task
+
+        updated = self.service.update_task(
+            task.id,
+            TaskUpdate(version=task.version, description="Historical task"),
+        )
+
+        self.assertIs(updated, task)
+        self.assertEqual(task.state, "completed")
+        self.assertEqual(task.description, "Historical task")
+
+
+class SchedulerRepositoryTestCase(unittest.TestCase):
+    def test_run_keeps_a_deep_parameter_snapshot(self) -> None:
+        session = Mock()
+        task = make_task(parameters={"symbols": ["000001.SZ"]})
+
+        run = SchedulerRepository(session).add_run(
+            task,
+            trigger_type=TriggerType.MANUAL,
+            status=RunStatus.QUEUED,
+        )
+        task.parameters["symbols"].append("600519.SH")
+
+        self.assertEqual(run.task_type, "system.log_message")
+        self.assertEqual(run.parameters, {"symbols": ["000001.SZ"]})
+
+
+class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_disabled_runtime_does_not_start_scheduler(self) -> None:
+        settings = Settings(
+            api_token=API_TOKEN,
+            database_password="test-secret",
+            scheduler_enabled=False,
+            _env_file=None,
+        )
+        runtime = SchedulerRuntime(settings)
+
+        runtime.start()
+        try:
+            self.assertFalse(runtime.running)
+        finally:
+            runtime.stop()
+
+
+if __name__ == "__main__":
+    unittest.main()

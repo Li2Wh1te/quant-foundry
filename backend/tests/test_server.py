@@ -48,12 +48,43 @@ class ServerTestCase(unittest.TestCase):
         with (
             patch("app.main.configure_logging") as configure_logging,
             patch("app.main.dispose_engine") as dispose_engine,
+            patch("app.main.SchedulerRuntime") as scheduler_runtime,
         ):
             asyncio.run(run_lifespan())
 
         configure_logging.assert_called_once_with(settings)
         configure_logging.return_value.stop.assert_called_once_with()
+        scheduler_runtime.assert_called_once_with(settings)
+        scheduler_runtime.return_value.start.assert_called_once_with()
+        scheduler_runtime.return_value.stop.assert_called_once_with()
         dispose_engine.assert_called_once_with()
+
+    def test_lifespan_cleans_up_when_scheduler_start_fails(self) -> None:
+        settings = Settings(
+            api_token=API_TOKEN,
+            database_password="test-secret",
+            _env_file=None,
+        )
+        app = create_app(settings)
+
+        async def run_lifespan() -> None:
+            async with app.router.lifespan_context(app):
+                self.fail("lifespan should not yield after scheduler startup failure")
+
+        with (
+            patch("app.main.configure_logging") as configure_logging,
+            patch("app.main.dispose_engine") as dispose_engine,
+            patch("app.main.SchedulerRuntime") as scheduler_runtime,
+        ):
+            scheduler_runtime.return_value.start.side_effect = RuntimeError(
+                "database is not migrated"
+            )
+            with self.assertRaisesRegex(RuntimeError, "database is not migrated"):
+                asyncio.run(run_lifespan())
+
+        scheduler_runtime.return_value.stop.assert_called_once_with()
+        dispose_engine.assert_called_once_with()
+        configure_logging.return_value.stop.assert_called_once_with()
 
 
 if __name__ == "__main__":

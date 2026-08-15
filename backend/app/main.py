@@ -12,6 +12,8 @@ from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.db.session import dispose_engine, get_db_session
 from app.logging.router import router as log_router
+from app.scheduling.router import router as scheduling_router
+from app.scheduling.runtime import SchedulerRuntime
 
 
 logger = structlog.get_logger(__name__)
@@ -25,11 +27,15 @@ def check_database_ready(session: Session) -> dict[str, str]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logging_runtime = configure_logging(app.state.settings)
-    logger.info("application_started")
+    scheduler_runtime = SchedulerRuntime(app.state.settings)
+    app.state.scheduler_runtime = scheduler_runtime
     try:
+        scheduler_runtime.start()
+        logger.info("application_started")
         yield
     finally:
         logger.info("application_stopped")
+        scheduler_runtime.stop()
         dispose_engine()
         logging_runtime.stop()
 
@@ -46,6 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     protected_router = APIRouter(dependencies=[Depends(require_api_token)])
     protected_router.include_router(log_router)
+    protected_router.include_router(scheduling_router)
 
     @protected_router.get(
         "/api/auth/verify",

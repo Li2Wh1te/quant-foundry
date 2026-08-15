@@ -30,6 +30,11 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.log_retention_days, 30)
         self.assertEqual(settings.log_queue_size, 10_000)
         self.assertEqual(settings.log_query_max_files, 32)
+        self.assertTrue(settings.scheduler_enabled)
+        self.assertEqual(settings.scheduler_max_workers, 4)
+        self.assertEqual(settings.scheduler_dispatch_interval_ms, 500)
+        self.assertEqual(settings.scheduler_max_queued_runs, 1_000)
+        self.assertEqual(settings.scheduler_misfire_grace_seconds, 60)
         self.assertEqual(
             settings.database_url.render_as_string(hide_password=False),
             "postgresql+psycopg://postgres:test-secret@127.0.0.1:5432/quant_foundry",
@@ -48,6 +53,11 @@ class SettingsTestCase(unittest.TestCase):
             "QF_LOG_RETENTION_DAYS": "14",
             "QF_LOG_QUEUE_SIZE": "5000",
             "QF_LOG_QUERY_MAX_FILES": "16",
+            "QF_SCHEDULER_ENABLED": "false",
+            "QF_SCHEDULER_MAX_WORKERS": "8",
+            "QF_SCHEDULER_DISPATCH_INTERVAL_MS": "1000",
+            "QF_SCHEDULER_MAX_QUEUED_RUNS": "500",
+            "QF_SCHEDULER_MISFIRE_GRACE_SECONDS": "120",
             "QF_DATABASE_HOST": "db",
             "QF_DATABASE_PORT": "5433",
             "QF_DATABASE_USER": "app",
@@ -70,6 +80,11 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.log_retention_days, 14)
         self.assertEqual(settings.log_queue_size, 5000)
         self.assertEqual(settings.log_query_max_files, 16)
+        self.assertFalse(settings.scheduler_enabled)
+        self.assertEqual(settings.scheduler_max_workers, 8)
+        self.assertEqual(settings.scheduler_dispatch_interval_ms, 1000)
+        self.assertEqual(settings.scheduler_max_queued_runs, 500)
+        self.assertEqual(settings.scheduler_misfire_grace_seconds, 120)
         self.assertEqual(
             settings.database_url.render_as_string(hide_password=False),
             "postgresql+psycopg://app:secret@db:5433/quant_test",
@@ -93,6 +108,9 @@ class SettingsTestCase(unittest.TestCase):
             {"QF_SERVER_HOST": "not-an-ip"},
             {"QF_SERVER_PORT": "0"},
             {"QF_SERVER_PORT": "65536"},
+            {"QF_SCHEDULER_MAX_WORKERS": "0"},
+            {"QF_SCHEDULER_DISPATCH_INTERVAL_MS": "99"},
+            {"QF_SCHEDULER_MAX_QUEUED_RUNS": "0"},
         )
 
         for environment in invalid_settings:

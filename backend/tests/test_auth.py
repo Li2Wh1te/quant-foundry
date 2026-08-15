@@ -120,6 +120,10 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/auth/verify", "get"),
             ("/api/admin/logs", "get"),
             ("/api/admin/logs/clear", "post"),
+            ("/api/admin/task-types", "get"),
+            ("/api/admin/tasks", "get"),
+            ("/api/admin/tasks", "post"),
+            ("/api/admin/task-runs", "get"),
         )
         schema = self.app.openapi()
 

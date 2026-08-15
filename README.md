@@ -47,6 +47,7 @@ and trading.
 | Configuration safety | Strict settings validation with auto-generated 256-bit database and API secrets |
 | Data evolution | SQLAlchemy session management and versioned Alembic migrations |
 | Observability | Structured JSON logs, asynchronous writes, rotation, compression, and an admin query API |
+| Task scheduling | In-process APScheduler, PostgreSQL-backed queue, concurrency, and overlap controls |
 | Admin interface | React console with token login, responsive layout, and light/dark themes |
 | Runtime reliability | Frontend, Backend, and PostgreSQL health checks, volumes, and graceful shutdown |
 | Behavioral verification | Backend unit tests, frontend type checking, and production builds |
@@ -58,6 +59,9 @@ flowchart LR
     Client["Browser / API Client"] --> Frontend["Nginx + React"]
     Frontend --> Server["FastAPI Backend"]
     Server --> Database["PostgreSQL 17"]
+    Server --> Scheduler["In-process Scheduler"]
+    Scheduler --> Database
+    Scheduler --> Workers["Task Worker Pool"]
     Migration["Alembic"] --> Database
     Server --> Queue["Async Log Queue"]
     Queue --> Files["Rotating JSONL"]
@@ -66,7 +70,9 @@ flowchart LR
 
 Nginx serves the React SPA and forwards `/api`, documentation, and readiness requests to FastAPI over
 the private Compose network. The backend connects to PostgreSQL through explicit settings and manages
-schema changes with Alembic. Request and application events are written to rotating JSONL files.
+schema changes with Alembic. Request and application events are written to rotating JSONL files. The
+task scheduler runs in the same process as FastAPI: APScheduler handles due-time triggers, PostgreSQL
+persists `task_runs`, and a bounded thread pool executes registered task types.
 
 ## Quick Start
 
@@ -165,6 +171,16 @@ pages and the OpenAPI schema are also public, but calls made from Swagger UI sti
 | `GET` | `/api/auth/verify` | Verify a Bearer Token |
 | `GET` | `/api/admin/logs` | Query local structured logs |
 | `POST` | `/api/admin/logs/clear` | Hide logs created before the request |
+| `GET` | `/api/admin/task-types` | List registered task types and parameter schemas |
+| `GET` | `/api/admin/tasks` | List task definitions |
+| `POST` | `/api/admin/tasks` | Create a task |
+| `GET` | `/api/admin/tasks/{id}` | Read a task definition |
+| `PATCH` | `/api/admin/tasks/{id}` | Update a task with optimistic locking |
+| `POST` | `/api/admin/tasks/{id}/pause` | Pause future scheduling |
+| `POST` | `/api/admin/tasks/{id}/resume` | Resume scheduling |
+| `DELETE` | `/api/admin/tasks/{id}` | Archive a task and retain history |
+| `POST` | `/api/admin/tasks/{id}/run` | Queue one manual execution |
+| `GET` | `/api/admin/task-runs` | Query execution history and queue state |
 
 Log queries support `keyword`, `level`, `method`, `status_class`, `path`, `start_time`, and
 `end_time` filters. The default window is the last 24 hours. A request may cover at most 31 days
@@ -245,6 +261,11 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | `QF_LOG_RETENTION_DAYS` | Retention period for rotated logs |
 | `QF_LOG_QUEUE_SIZE` | Asynchronous log queue capacity |
 | `QF_LOG_QUERY_MAX_FILES` | Maximum number of files scanned by one log query |
+| `QF_SCHEDULER_ENABLED` | Enable the in-process scheduler |
+| `QF_SCHEDULER_MAX_WORKERS` | Global task worker pool size |
+| `QF_SCHEDULER_DISPATCH_INTERVAL_MS` | Queue dispatch interval in milliseconds |
+| `QF_SCHEDULER_MAX_QUEUED_RUNS` | Global maximum number of queued runs |
+| `QF_SCHEDULER_MISFIRE_GRACE_SECONDS` | Grace period for missed schedules |
 
 Do not commit `.env` or any real credentials.
 
@@ -283,6 +304,7 @@ Migration files are part of the codebase and should be committed with the corres
 ```text
 backend/                  # FastAPI, Alembic, Backend tests, and production image
 ├── app/                  # Application code
+│   ├── scheduling/       # Persistent scheduling, queue, and task execution
 ├── tests/                # Backend unit tests
 ├── pyproject.toml
 └── Dockerfile
