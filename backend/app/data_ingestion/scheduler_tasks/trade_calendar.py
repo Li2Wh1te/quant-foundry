@@ -5,11 +5,15 @@ from datetime import date
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
+import structlog
 
 from app.core.config import get_settings
 from app.data_ingestion.clients.tushare import TushareClient
 from app.data_ingestion.services.trade_calendar import sync_trade_calendar
 from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
+
+
+logger = structlog.get_logger(__name__)
 
 
 class TradeCalendarSyncParameters(BaseModel):
@@ -39,6 +43,17 @@ def sync_trade_calendar_task(
         result.synced_through_date.isoformat()
         if result.synced_through_date is not None
         else None
+    )
+    logger.info(
+        "trade_calendar_sync_completed",
+        message=(
+            f"交易日历采集完成：{parameters.exchange}，"
+            f"完成 {payload['ranges_completed']} 个分段，拉取 {payload['received']} 条，"
+            f"入库变更 {payload['changed']} 条，未变更 {payload['unchanged']} 条，"
+            f"同步至 {payload['synced_through_date'] or '无须同步'}。"
+        ),
+        exchange=parameters.exchange,
+        **payload,
     )
     return payload
 

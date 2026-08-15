@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, call, patch
 
 from app.data_ingestion.schemas.trading_calendar import (
     DataSyncCheckpointState,
@@ -182,6 +182,7 @@ class FetchTradeCalendarTestCase(unittest.TestCase):
         session.commit.assert_not_called()
         session.rollback.assert_called_once_with()
 
+    @patch("app.data_ingestion.services.trade_calendar.logger")
     @patch("app.data_ingestion.services.trade_calendar._commit_trade_calendar_range")
     @patch("app.data_ingestion.services.trade_calendar.normalize_trade_calendar")
     @patch("app.data_ingestion.services.trade_calendar.fetch_trade_calendar")
@@ -196,6 +197,7 @@ class FetchTradeCalendarTestCase(unittest.TestCase):
         fetch_mock,
         normalize_mock,
         commit_mock,
+        logger_mock,
     ) -> None:
         get_settings_mock.return_value = SimpleNamespace(
             ingestion_request_interval_ms=1_000
@@ -237,3 +239,12 @@ class FetchTradeCalendarTestCase(unittest.TestCase):
             start_date="20180101",
             end_date="20180101",
         )
+        self.assertEqual(
+            [item.args[0] for item in logger_mock.info.call_args_list],
+            [
+                "trade_calendar_sync_planned",
+                "trade_calendar_range_started",
+                "trade_calendar_range_succeeded",
+            ],
+        )
+        logger_mock.exception.assert_not_called()

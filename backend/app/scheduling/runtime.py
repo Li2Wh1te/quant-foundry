@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_STOPPED
 from sqlalchemy.orm import Session
 import structlog
+from structlog.contextvars import bound_contextvars
 
 from app.core.config import Settings
 from app.db.session import get_engine
@@ -202,6 +203,8 @@ class SchedulerRuntime:
             logger.exception("scheduled_run_enqueue_failed", task_id=str(task_id))
 
     def _execute_run(self, run_id: UUID) -> None:
+        task_id: UUID | None = None
+        task_type: str | None = None
         try:
             with Session(get_engine()) as session:
                 repository = SchedulerRepository(session)
@@ -222,30 +225,49 @@ class SchedulerRuntime:
                 parameters = dict(run.parameters)
                 parameter_version = run.parameter_version
 
-            definition = self.registry.require(task_type)
-            if parameter_version != definition.parameter_version:
-                raise ValueError(
-                    f"unsupported parameter version {parameter_version} "
-                    f"for task type {task_type}"
+            # Context variables make every nested task log searchable by this run.
+            with bound_contextvars(
+                task_id=str(task_id), run_id=str(run_id), task_type=task_type
+            ):
+                logger.info(
+                    "task_run_started",
+                    message="开始执行任务。",
+                    parameter_version=parameter_version,
                 )
-            validated_parameters = definition.parameters_model.model_validate(parameters)
-            result = definition.handler(
-                TaskContext(task_id=task_id, run_id=run_id),
-                validated_parameters,
-            )
-            if result is not None and not isinstance(result, dict):
-                raise TypeError("task handlers must return a dictionary or None")
+                definition = self.registry.require(task_type)
+                if parameter_version != definition.parameter_version:
+                    raise ValueError(
+                        f"unsupported parameter version {parameter_version} "
+                        f"for task type {task_type}"
+                    )
+                validated_parameters = definition.parameters_model.model_validate(parameters)
+                result = definition.handler(
+                    TaskContext(task_id=task_id, run_id=run_id),
+                    validated_parameters,
+                )
+                if result is not None and not isinstance(result, dict):
+                    raise TypeError("task handlers must return a dictionary or None")
 
-            with Session(get_engine()) as session:
-                SchedulerRepository(session).finish_run(
-                    run_id,
-                    status=RunStatus.SUCCEEDED,
-                    result=result,
+                with Session(get_engine()) as session:
+                    SchedulerRepository(session).finish_run(
+                        run_id,
+                        status=RunStatus.SUCCEEDED,
+                        result=result,
+                    )
+                    session.commit()
+                logger.info(
+                    "task_run_succeeded",
+                    message="任务执行成功。",
+                    has_result=result is not None,
                 )
-                session.commit()
-            logger.info("task_run_succeeded", task_id=str(task_id), run_id=str(run_id))
         except Exception as exc:
-            logger.exception("task_run_failed", run_id=str(run_id))
+            logger.exception(
+                "task_run_failed",
+                message="任务执行失败。",
+                run_id=str(run_id),
+                task_id=str(task_id) if task_id is not None else None,
+                task_type=task_type,
+            )
             with Session(get_engine()) as session:
                 SchedulerRepository(session).finish_run(
                     run_id,

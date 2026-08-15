@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.orm import Session
+import structlog
 
 from app.data_ingestion.clients.tushare import TushareClient
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
@@ -41,6 +42,7 @@ def fetch_trade_calendar(
 
 TRADE_CALENDAR_SYNC_KEY = "tushare.trade_calendar"
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
+logger = structlog.get_logger(__name__)
 
 
 def sync_trade_calendar(
@@ -64,28 +66,82 @@ def sync_trade_calendar(
         initial_start_date=initial_start_date,
         as_of_date=as_of_date or datetime.now(SHANGHAI_TIMEZONE).date(),
     )
+    logger.info(
+        "trade_calendar_sync_planned",
+        message=(
+            f"交易日历采集计划：{exchange}，共 {len(ranges)} 个分段，"
+            f"请求间隔 {effective_interval_ms} 毫秒。"
+        ),
+        exchange=exchange,
+        ranges_planned=len(ranges),
+        request_interval_ms=effective_interval_ms,
+        checkpoint_synced_through=(
+            _checkpoint_synced_through_date(checkpoint).isoformat()
+            if checkpoint is not None
+            else None
+        ),
+    )
 
     received = changed = unchanged = 0
     for date_range in ranges:
-        tushare_request_pacer.wait_for_turn(effective_interval_ms)
-        dataframe = fetch_trade_calendar(
-            client,
-            exchange=exchange,
-            start_date=date_range.start_date.strftime("%Y%m%d"),
-            end_date=date_range.end_date.strftime("%Y%m%d"),
+        range_fields = {
+            "exchange": exchange,
+            "start_date": date_range.start_date.isoformat(),
+            "end_date": date_range.end_date.isoformat(),
+        }
+        logger.info(
+            "trade_calendar_range_started",
+            message=(
+                f"开始采集 {exchange} 交易日历："
+                f"{date_range.start_date.isoformat()} 至 {date_range.end_date.isoformat()}。"
+            ),
+            **range_fields,
         )
-        days = normalize_trade_calendar(dataframe)
-        _validate_trade_calendar_range(days, exchange=exchange, date_range=date_range)
-        write_result, checkpoint = _commit_trade_calendar_range(
-            days=days,
-            sync_key=TRADE_CALENDAR_SYNC_KEY,
-            scope_key=scope_key,
-            expected_checkpoint=checkpoint,
-            synced_through_date=date_range.end_date,
-        )
+        try:
+            tushare_request_pacer.wait_for_turn(effective_interval_ms)
+            dataframe = fetch_trade_calendar(
+                client,
+                exchange=exchange,
+                start_date=date_range.start_date.strftime("%Y%m%d"),
+                end_date=date_range.end_date.strftime("%Y%m%d"),
+            )
+            days = normalize_trade_calendar(dataframe)
+            _validate_trade_calendar_range(days, exchange=exchange, date_range=date_range)
+            write_result, checkpoint = _commit_trade_calendar_range(
+                days=days,
+                sync_key=TRADE_CALENDAR_SYNC_KEY,
+                scope_key=scope_key,
+                expected_checkpoint=checkpoint,
+                synced_through_date=date_range.end_date,
+            )
+        except Exception:
+            logger.exception(
+                "trade_calendar_range_failed",
+                message=(
+                    f"采集 {exchange} 交易日历失败："
+                    f"{date_range.start_date.isoformat()} 至 {date_range.end_date.isoformat()}。"
+                ),
+                **range_fields,
+            )
+            raise
         received += write_result.received
         changed += write_result.changed
         unchanged += write_result.unchanged
+        logger.info(
+            "trade_calendar_range_succeeded",
+            message=(
+                f"完成采集 {exchange} 交易日历："
+                f"{date_range.start_date.isoformat()} 至 {date_range.end_date.isoformat()}，"
+                f"拉取 {write_result.received} 条，入库变更 {write_result.changed} 条，"
+                f"未变更 {write_result.unchanged} 条，"
+                f"游标已推进至 {checkpoint.cursor['synced_through_date']}。"
+            ),
+            **range_fields,
+            received=write_result.received,
+            changed=write_result.changed,
+            unchanged=write_result.unchanged,
+            synced_through_date=checkpoint.cursor["synced_through_date"],
+        )
 
     return TradeCalendarSyncResult(
         ranges_completed=len(ranges),

@@ -61,10 +61,44 @@ function levelClass(level: string | undefined): string {
   return `log-level log-level--${(level ?? "info").toLowerCase()}`;
 }
 
+interface EventPresentation {
+  title: string;
+  summary?: string;
+}
+
+const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
+  request_completed: { title: "请求完成" },
+  request_failed: { title: "请求失败" },
+  task_run_started: { title: "任务开始", summary: "调度器已开始执行该任务。" },
+  task_run_succeeded: { title: "任务成功", summary: "任务已执行完成。" },
+  task_run_failed: { title: "任务失败", summary: "任务执行失败，请查看异常详情。" },
+  trade_calendar_sync_planned: { title: "生成采集计划" },
+  trade_calendar_range_started: { title: "开始采集分段" },
+  trade_calendar_range_succeeded: { title: "完成采集分段" },
+  trade_calendar_range_failed: { title: "采集分段失败" },
+  trade_calendar_sync_completed: { title: "交易日历采集完成" }
+};
+
+function eventPresentation(entry: LogEntry): EventPresentation {
+  const event = entry.event;
+  if (typeof event !== "string" || !event) return { title: "系统运行事件", summary: "系统记录了一条运行事件。" };
+  const known = EVENT_PRESENTATIONS[event];
+  if (known) return known;
+
+  // APScheduler emits plain English messages through Python logging. Translate
+  // its recurring dispatcher events so the log list stays readable to operators.
+  if (event.includes("dispatch_queued_runs")) {
+    if (event.startsWith("Running job")) return { title: "开始派发任务", summary: "调度器正在检查等待执行的任务。" };
+    if (event.includes("executed successfully")) return { title: "任务派发完成", summary: "调度器已完成本次等待任务检查。" };
+    return { title: "调度任务派发", summary: "调度器正在处理等待执行的任务。" };
+  }
+  if (event.startsWith("Running job")) return { title: "开始执行调度任务", summary: "调度器正在执行一项内部调度操作。" };
+  if (event.includes("executed successfully")) return { title: "调度任务完成", summary: "调度器已成功完成一项内部调度操作。" };
+  return { title: "系统运行事件", summary: "系统记录了一条运行事件。" };
+}
+
 function entryTitle(entry: LogEntry): string {
-  if (entry.event === "request_completed") return "请求完成";
-  if (entry.event === "request_failed") return "请求失败";
-  return entry.event || "应用日志";
+  return eventPresentation(entry).title;
 }
 
 function describeEntry(entry: LogEntry): string {
@@ -75,7 +109,7 @@ function describeEntry(entry: LogEntry): string {
   if (typeof entry.duration_ms === "number") parts.push(`${entry.duration_ms} ms`);
   if (parts.length > 0) return parts.join("  ·  ");
   const message = entry.message;
-  return typeof message === "string" ? message : "查看结构化详情";
+  return typeof message === "string" ? message : eventPresentation(entry).summary ?? "系统记录了一条运行事件。";
 }
 
 function FilterChip({
