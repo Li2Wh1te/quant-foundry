@@ -76,6 +76,15 @@ def make_task(**overrides):
 
 
 class SchedulingSchemaTestCase(unittest.TestCase):
+    def test_etf_daily_parameters_accept_tushare_compact_date(self) -> None:
+        parameters = task_registry.require(
+            "data.sync_etf_daily"
+        ).parameters_model.model_validate(
+            {"calendar_exchange": "SSE", "initial_start_date": "20050101"}
+        )
+
+        self.assertEqual(parameters.initial_start_date, date(2005, 1, 1))
+
     def test_trade_calendar_parameters_accept_tushare_compact_date(self) -> None:
         parameters = task_registry.require(
             "data.sync_trade_calendar"
@@ -251,6 +260,12 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_default_registry_registers_etf_daily_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_daily")
+
+        self.assertEqual(definition.name, "ETF日线采集")
+        self.assertEqual(definition.english_name, "Sync Tushare ETF daily bars")
+
     def test_default_registry_registers_trade_calendar_sync_task(self) -> None:
         definition = task_registry.require("data.sync_trade_calendar")
 
