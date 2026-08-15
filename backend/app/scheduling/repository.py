@@ -55,6 +55,33 @@ class SchedulerRepository:
         statement = statement.order_by(TaskRun.created_at.desc()).limit(limit).offset(offset)
         return list(self.session.scalars(statement))
 
+    def list_latest_runs_for_tasks(
+        self, task_ids: list[UUID]
+    ) -> dict[UUID, TaskRun]:
+        """Return the newest execution for each requested task in one query."""
+        if not task_ids:
+            return {}
+
+        ranked_runs = (
+            select(
+                TaskRun.id.label("run_id"),
+                func.row_number()
+                .over(
+                    partition_by=TaskRun.task_id,
+                    order_by=(TaskRun.created_at.desc(), TaskRun.id.desc()),
+                )
+                .label("run_rank"),
+            )
+            .where(TaskRun.task_id.in_(task_ids))
+            .subquery()
+        )
+        statement = (
+            select(TaskRun)
+            .join(ranked_runs, ranked_runs.c.run_id == TaskRun.id)
+            .where(ranked_runs.c.run_rank == 1)
+        )
+        return {run.task_id: run for run in self.session.scalars(statement)}
+
     def get_run(self, run_id: UUID) -> TaskRun | None:
         return self.session.get(TaskRun, run_id)
 

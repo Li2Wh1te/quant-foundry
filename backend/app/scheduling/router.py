@@ -6,6 +6,7 @@ from pydantic import ValidationError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
+from app.scheduling.models import ScheduledTask, TaskRun
 from app.scheduling.registry import task_registry
 from app.scheduling.repository import SchedulerRepository
 from app.scheduling.runtime import SchedulerDisabledError, SchedulerRuntime
@@ -55,12 +56,19 @@ def list_tasks(
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> list[TaskResponse]:
-    tasks = SchedulerRepository(session).list_tasks(
+    repository = SchedulerRepository(session)
+    tasks = repository.list_tasks(
         include_archived=include_archived,
         limit=limit,
         offset=offset,
     )
-    return [_task_response(task, runtime) for task in tasks]
+    latest_runs = repository.list_latest_runs_for_tasks(
+        [task.id for task in tasks]
+    )
+    return [
+        _task_response(task, runtime, latest_run=latest_runs.get(task.id))
+        for task in tasks
+    ]
 
 
 @router.post("/tasks", response_model=TaskResponse, status_code=status.HTTP_201_CREATED)
@@ -226,9 +234,23 @@ def _change_state(
         raise _http_error(exc) from exc
 
 
-def _task_response(task, runtime: SchedulerRuntime) -> TaskResponse:
+def _task_response(
+    task: ScheduledTask,
+    runtime: SchedulerRuntime,
+    *,
+    latest_run: TaskRun | None = None,
+) -> TaskResponse:
     response = TaskResponse.model_validate(task)
-    return response.model_copy(update={"next_run_at": runtime.next_run_at(task.id)})
+    return response.model_copy(
+        update={
+            "next_run_at": runtime.next_run_at(task.id),
+            "latest_run": (
+                TaskRunResponse.model_validate(latest_run)
+                if latest_run is not None
+                else None
+            ),
+        }
+    )
 
 
 def _http_error(exc: Exception) -> HTTPException:

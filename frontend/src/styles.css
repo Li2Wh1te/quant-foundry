@@ -1145,13 +1145,17 @@ svg {
 }
 
 .task-table {
-  min-width: 900px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-gutter: stable;
 }
 
 .task-table__header,
 .task-row {
+  min-width: 720px;
   display: grid;
-  grid-template-columns: minmax(250px, 1.55fr) minmax(155px, 0.9fr) minmax(135px, 0.8fr) minmax(160px, 0.95fr) 174px;
+  grid-template-columns: minmax(250px, 1.55fr) minmax(155px, 0.9fr) minmax(135px, 0.8fr) minmax(160px, 0.95fr);
   gap: 14px;
   align-items: center;
 }
@@ -1265,50 +1269,6 @@ svg {
 .run-state--succeeded > svg { color: #29a968; }
 .run-state--queued > svg { color: #b98208; }
 .run-state--failed > svg { color: var(--danger); }
-
-.task-row__actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 5px;
-}
-
-.row-action {
-  height: 29px;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 4px;
-  padding: 0 7px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  color: var(--text-muted);
-  background: var(--surface);
-  font-size: 10px;
-  font-weight: 650;
-  cursor: pointer;
-}
-
-.row-action:hover {
-  border-color: var(--border-strong);
-  color: var(--text);
-  background: var(--surface-subtle);
-}
-
-.row-action--run {
-  color: #177044;
-  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
-  background: var(--accent-subtle);
-}
-
-.row-action--icon {
-  width: 29px;
-  padding: 0;
-}
-
-.row-action svg {
-  width: 13px;
-  height: 13px;
-}
 
 .task-detail {
   padding: 18px;
@@ -1787,7 +1747,6 @@ svg {
   .tasks-page { padding: 22px 14px; }
   .tasks-page__heading { align-items: flex-start; }
   .scheduler-stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .task-table { overflow: auto; }
   .task-detail { display: block; }
   .task-detail__history { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border); }
   .task-form__grid { grid-template-columns: 1fr; }

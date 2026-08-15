@@ -145,27 +145,6 @@ class TaskUpdate(BaseModel):
         return self
 
 
-class TaskResponse(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: UUID
-    name: str
-    description: str | None
-    task_type: str
-    parameters: dict[str, Any]
-    parameter_version: int
-    schedule: ScheduleConfig
-    state: TaskState
-    concurrency_limit: int
-    overlap_policy: OverlapPolicy
-    queue_limit: int
-    priority: int
-    version: int
-    next_run_at: datetime | None = None
-    created_at: datetime
-    updated_at: datetime
-
-
 class TaskRunResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -186,6 +165,28 @@ class TaskRunResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+
+
+class TaskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: UUID
+    name: str
+    description: str | None
+    task_type: str
+    parameters: dict[str, Any]
+    parameter_version: int
+    schedule: ScheduleConfig
+    state: TaskState
+    concurrency_limit: int
+    overlap_policy: OverlapPolicy
+    queue_limit: int
+    priority: int
+    version: int
+    next_run_at: datetime | None = None
+    latest_run: TaskRunResponse | None = None
+    created_at: datetime
+    updated_at: datetime
 
 
 class TaskTypeResponse(BaseModel):

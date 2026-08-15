@@ -24,6 +24,7 @@ export interface SchedulerTask {
   priority: number;
   version: number;
   next_run_at: string | null;
+  latest_run: TaskRun | null;
   created_at: string;
   updated_at: string;
 }

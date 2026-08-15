@@ -6,6 +6,7 @@ from uuid import uuid4
 
 from apscheduler.triggers.cron import CronTrigger
 from pydantic import BaseModel, ValidationError
+from sqlalchemy.dialects import postgresql
 
 from app.core.config import Settings
 from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry, task_registry
@@ -218,6 +219,35 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
         self.assertEqual(run.task_type, TEST_TASK_TYPE)
         self.assertEqual(run.parameters, {"symbols": ["000001.SZ"]})
+
+    def test_lists_latest_run_for_each_task_with_one_ranked_query(self) -> None:
+        session = Mock()
+        first_task_id, second_task_id = uuid4(), uuid4()
+        first_run = SimpleNamespace(task_id=first_task_id)
+        second_run = SimpleNamespace(task_id=second_task_id)
+        session.scalars.return_value = [first_run, second_run]
+
+        latest_runs = SchedulerRepository(session).list_latest_runs_for_tasks(
+            [first_task_id, second_task_id]
+        )
+
+        self.assertEqual(
+            latest_runs,
+            {first_task_id: first_run, second_task_id: second_run},
+        )
+        statement = session.scalars.call_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        self.assertIn("row_number() OVER", sql)
+        self.assertIn("PARTITION BY task_runs.task_id", sql)
+        self.assertIn("ORDER BY task_runs.created_at DESC, task_runs.id DESC", sql)
+
+    def test_skips_latest_run_query_when_task_list_is_empty(self) -> None:
+        session = Mock()
+
+        latest_runs = SchedulerRepository(session).list_latest_runs_for_tasks([])
+
+        self.assertEqual(latest_runs, {})
+        session.scalars.assert_not_called()
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
