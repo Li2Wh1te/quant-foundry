@@ -1,4 +1,4 @@
-import { BookOpen, FileSearch, Grid2X2, LogOut } from "lucide-react";
+import { BookOpen, CalendarClock, FileSearch, Grid2X2, LogOut } from "lucide-react";
 import { NavLink, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
@@ -28,6 +28,10 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
           <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/logs">
             <FileSearch aria-hidden="true" />
             <span>日志查询</span>
+          </NavLink>
+          <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/tasks">
+            <CalendarClock aria-hidden="true" />
+            <span>任务调度</span>
           </NavLink>
         </nav>
 

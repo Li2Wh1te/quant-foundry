@@ -5,6 +5,7 @@ import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
+import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
   const { status } = useAuth();
@@ -36,6 +37,14 @@ export function App() {
         element={
           <RequireAuth>
             <AdminPage><LogPage /></AdminPage>
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/admin/tasks"
+        element={
+          <RequireAuth>
+            <AdminPage><TaskSchedulerPage /></AdminPage>
           </RequireAuth>
         }
       />
