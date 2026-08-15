@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from app.__main__ import main
 from app.core.config import Settings
+from app.core.version import get_release_version
 from app.main import create_app
 
 
@@ -11,6 +12,18 @@ API_TOKEN = "a" * 64
 
 
 class ServerTestCase(unittest.TestCase):
+    def test_openapi_uses_the_canonical_release_version(self) -> None:
+        app = create_app(
+            Settings(
+                api_token=API_TOKEN,
+                database_password="test-secret",
+                _env_file=None,
+            )
+        )
+
+        self.assertEqual(app.version, get_release_version())
+        self.assertEqual(app.openapi()["info"]["version"], get_release_version())
+
     def test_server_uses_configured_host_and_port(self) -> None:
         settings = Settings(
             api_token=API_TOKEN,

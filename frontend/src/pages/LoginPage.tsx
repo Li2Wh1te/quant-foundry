@@ -5,6 +5,7 @@ import { Navigate, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { Brand } from "../components/Brand";
 import { LoadingScreen } from "../components/LoadingScreen";
+import { VersionMismatchScreen } from "../components/VersionMismatchScreen";
 
 export function LoginPage() {
   const { status, login } = useAuth();
@@ -19,6 +20,9 @@ export function LoginPage() {
   }
   if (status === "authenticated") {
     return <Navigate to="/admin" replace />;
+  }
+  if (status === "version_mismatch") {
+    return <VersionMismatchScreen />;
   }
 
   async function handleSubmit(event: FormEvent<HTMLFormElement>) {

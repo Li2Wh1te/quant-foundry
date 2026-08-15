@@ -1,0 +1,16 @@
+.env
+.git
+.github
+.idea
+.venv
+venv
+__pycache__
+*.py[cod]
+backend/.env
+backend/.venv
+backend/data
+data
+frontend/dist
+frontend/node_modules
+node_modules
+.pnpm-store

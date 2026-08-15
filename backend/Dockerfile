@@ -14,11 +14,12 @@ RUN groupadd --system app && useradd --system --gid app --home-dir /app app
 
 WORKDIR /app
 
-COPY pyproject.toml uv.lock ./
+COPY backend/pyproject.toml backend/uv.lock ./
 RUN uv sync --locked --no-dev --no-install-project
 
-COPY alembic.ini ./
-COPY app ./app
+COPY VERSION ./VERSION
+COPY backend/alembic.ini ./
+COPY backend/app ./app
 
 RUN mkdir -p /app/data/logs && chown -R app:app /app
 

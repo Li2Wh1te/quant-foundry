@@ -79,6 +79,12 @@ class AuthenticationTestCase(unittest.TestCase):
                     ),
                     204,
                 )
+                self.assertEqual(
+                    asyncio.run(
+                        request_status(self.app, "/api/system/version", API_TOKEN)
+                    ),
+                    200,
+                )
                 self.assertEqual(asyncio.run(request_status(self.app, "/docs")), 200)
                 self.assertEqual(asyncio.run(request_status(self.app, "/readyz")), 200)
         finally:
@@ -118,6 +124,7 @@ class AuthenticationTestCase(unittest.TestCase):
         protected_operations = (
             ("/api", "get"),
             ("/api/auth/verify", "get"),
+            ("/api/system/version", "get"),
             ("/api/admin/logs", "get"),
             ("/api/admin/logs/clear", "post"),
             ("/api/admin/task-types", "get"),
