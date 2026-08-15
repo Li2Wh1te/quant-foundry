@@ -131,6 +131,8 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/tasks", "get"),
             ("/api/admin/tasks", "post"),
             ("/api/admin/task-runs", "get"),
+            ("/api/admin/data-collections/trading-calendar", "get"),
+            ("/api/admin/data-collections/trading-calendar/overview", "get"),
         )
         schema = self.app.openapi()
 

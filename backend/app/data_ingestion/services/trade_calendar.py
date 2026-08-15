@@ -19,6 +19,7 @@ from app.data_ingestion.schemas.trading_calendar import (
     TradingCalendarDayInput,
 )
 from app.core.config import get_settings
+from app.data_ingestion.constants import TRADE_CALENDAR_SYNC_KEY
 from app.db.session import get_engine
 
 if TYPE_CHECKING:
@@ -40,7 +41,6 @@ def fetch_trade_calendar(
     )
 
 
-TRADE_CALENDAR_SYNC_KEY = "tushare.trade_calendar"
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = structlog.get_logger(__name__)
 

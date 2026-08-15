@@ -4,6 +4,7 @@ import { LoadingScreen } from "./components/LoadingScreen";
 import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
+import { DataCollectionPage } from "./pages/DataCollectionPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
@@ -51,6 +52,14 @@ export function App() {
             <AdminPage><TaskSchedulerPage /></AdminPage>
           </RequireAuth>
         }
+      />
+      <Route
+        path="/admin/data/trading-calendar"
+        element={<RequireAuth><AdminPage><DataCollectionPage page="trading-calendar" /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/data/daily-quotes"
+        element={<RequireAuth><AdminPage><DataCollectionPage page="daily-quotes" /></AdminPage></RequireAuth>}
       />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>

@@ -1,5 +1,5 @@
-import { BookOpen, CalendarClock, FileSearch, Grid2X2, LogOut } from "lucide-react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { BookOpen, CalendarClock, Database, FileSearch, Grid2X2, LineChart, LogOut } from "lucide-react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
 import { Brand } from "../components/Brand";
@@ -9,6 +9,8 @@ import { FRONTEND_VERSION } from "../version";
 export function AdminPage({ children }: { children?: React.ReactNode }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const dataCollectionActive = location.pathname.startsWith("/admin/data/");
 
   function handleLogout() {
     logout();
@@ -34,6 +36,18 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
             <CalendarClock aria-hidden="true" />
             <span>任务调度</span>
           </NavLink>
+          <div className={`nav-item nav-item--group${dataCollectionActive ? " nav-item--active" : ""}`}>
+            <Database aria-hidden="true" />
+            <span>数据采集</span>
+          </div>
+          <div className="nav-submenu" aria-label="数据采集页面">
+            <NavLink className={({ isActive }) => `nav-submenu__item${isActive ? " nav-submenu__item--active" : ""}`} to="/admin/data/trading-calendar">
+              <CalendarClock aria-hidden="true" /><span>交易日历</span>
+            </NavLink>
+            <NavLink className={({ isActive }) => `nav-submenu__item${isActive ? " nav-submenu__item--active" : ""}`} to="/admin/data/daily-quotes">
+              <LineChart aria-hidden="true" /><span>日线行情</span>
+            </NavLink>
+          </div>
         </nav>
 
         <div className="sidebar__footer">
