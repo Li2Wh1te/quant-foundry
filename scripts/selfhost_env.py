@@ -37,6 +37,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
 
     lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
     values = _read_values(lines)
+    template_values = _read_values(template_path.read_text(encoding="utf-8").splitlines())
     # Migrate the old local-only default so a previously initialized .env can
     # still be used by the containerized backend over the Compose network.
     if values.get(SERVER_HOST_KEY) == LEGACY_SERVER_HOST:
@@ -55,7 +56,17 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         generated_keys,
         minimum_length=32,
     )
+    # Existing self-hosted installations retain their .env across deployments.
+    # Seed only keys absent from that file with template defaults so new
+    # configuration (for example, a newly added data provider) becomes visible
+    # after an upgrade without replacing any operator-provided value.
+    template_defaults = {
+        key: value
+        for key, value in template_values.items()
+        if key not in values and key != LEGACY_URL_KEY
+    }
     desired = {
+        **template_defaults,
         **DEPLOYMENT_DEFAULTS,
         **DATABASE_DEFAULTS,
         DATABASE_PASSWORD_KEY: database_password,

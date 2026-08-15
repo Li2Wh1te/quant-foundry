@@ -91,6 +91,31 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
 
             self.assertIn("QF_SERVER_HOST=10.8.0.5", env.read_text(encoding="utf-8"))
 
+    def test_appends_new_template_keys_to_an_existing_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            template = root / ".env.example"
+            env = root / ".env"
+            template.write_text(
+                "QF_TUSHARE_TOKEN=\n"
+                "QF_TUSHARE_API_URL=http://api.tushare.pro\n"
+                "QF_INGESTION_REQUEST_INTERVAL_MS=1000\n",
+                encoding="utf-8",
+            )
+            env.write_text(
+                "QF_TUSHARE_API_URL=https://proxy.example.test\n"
+                "QF_DATABASE_PASSWORD=strong-password\n"
+                f"QF_API_TOKEN={'d' * 64}\n",
+                encoding="utf-8",
+            )
+
+            ensure_selfhost_environment(env, template)
+
+            content = env.read_text(encoding="utf-8")
+            self.assertIn("QF_TUSHARE_TOKEN=\n", content)
+            self.assertIn("QF_TUSHARE_API_URL=https://proxy.example.test", content)
+            self.assertIn("QF_INGESTION_REQUEST_INTERVAL_MS=1000", content)
+
 
 if __name__ == "__main__":
     unittest.main()
