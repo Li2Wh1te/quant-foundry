@@ -51,3 +51,13 @@ class TaskRegistry:
 
 
 task_registry = TaskRegistry()
+
+
+def _register_application_tasks() -> None:
+    """Import and register concrete application tasks after registry setup."""
+    from app.data_ingestion.scheduler_tasks.trade_calendar import register_tasks
+
+    register_tasks(task_registry)
+
+
+_register_application_tasks()

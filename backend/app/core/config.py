@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     scheduler_dispatch_interval_ms: int = Field(default=500, ge=100, le=10_000)
     scheduler_max_queued_runs: int = Field(default=1_000, ge=1, le=100_000)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
+    tushare_token: SecretStr | None = None
+    tushare_api_url: str = Field(default="http://api.tushare.pro", min_length=1)
+    ingestion_request_interval_ms: int = Field(default=1_000, ge=0, le=60_000)
     database_host: str = Field(default="127.0.0.1", min_length=1)
     database_port: int = Field(default=5432, ge=1, le=65535)
     database_user: str = Field(default="postgres", min_length=1)

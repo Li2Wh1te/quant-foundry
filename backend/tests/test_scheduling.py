@@ -212,8 +212,10 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
-    def test_default_registry_has_no_builtin_task_types(self) -> None:
-        self.assertEqual(task_registry.list(), [])
+    def test_default_registry_registers_trade_calendar_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_trade_calendar")
+
+        self.assertEqual(definition.name, "Sync Tushare trade calendar")
 
     def test_disabled_runtime_does_not_start_scheduler(self) -> None:
         settings = Settings(

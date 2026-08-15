@@ -266,6 +266,9 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | `QF_SCHEDULER_DISPATCH_INTERVAL_MS` | Queue dispatch interval in milliseconds |
 | `QF_SCHEDULER_MAX_QUEUED_RUNS` | Global maximum number of queued runs |
 | `QF_SCHEDULER_MISFIRE_GRACE_SECONDS` | Grace period for missed schedules |
+| `QF_TUSHARE_TOKEN` | Tushare Pro token; required only when using Tushare |
+| `QF_TUSHARE_API_URL` | Tushare SDK request URL; defaults to `http://api.tushare.pro` |
+| `QF_INGESTION_REQUEST_INTERVAL_MS` | Global minimum interval between external data source requests in milliseconds |
 
 Do not commit `.env` or any real credentials.
 

@@ -256,6 +256,9 @@ cd frontend && pnpm build
 | `QF_SCHEDULER_DISPATCH_INTERVAL_MS` | 队列派发检查间隔（毫秒） |
 | `QF_SCHEDULER_MAX_QUEUED_RUNS` | 全局最大排队执行数 |
 | `QF_SCHEDULER_MISFIRE_GRACE_SECONDS` | 错过计划后的补触发宽限时间 |
+| `QF_TUSHARE_TOKEN` | Tushare Pro Token；仅在使用 Tushare 数据源时设置 |
+| `QF_TUSHARE_API_URL` | Tushare SDK 请求地址，默认 `http://api.tushare.pro` |
+| `QF_INGESTION_REQUEST_INTERVAL_MS` | 外部数据源请求的全局最小间隔（毫秒） |
 
 不要提交 `.env` 或任何真实凭据。
 

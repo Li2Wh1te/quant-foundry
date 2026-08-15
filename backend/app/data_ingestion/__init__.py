@@ -1,0 +1,1 @@
+"""Data ingestion domain package."""

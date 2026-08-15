@@ -35,6 +35,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 500)
         self.assertEqual(settings.scheduler_max_queued_runs, 1_000)
         self.assertEqual(settings.scheduler_misfire_grace_seconds, 60)
+        self.assertIsNone(settings.tushare_token)
+        self.assertEqual(settings.tushare_api_url, "http://api.tushare.pro")
+        self.assertEqual(settings.ingestion_request_interval_ms, 1_000)
         self.assertEqual(
             settings.database_url.render_as_string(hide_password=False),
             "postgresql+psycopg://postgres:test-secret@127.0.0.1:5432/quant_foundry",
@@ -58,6 +61,9 @@ class SettingsTestCase(unittest.TestCase):
             "QF_SCHEDULER_DISPATCH_INTERVAL_MS": "1000",
             "QF_SCHEDULER_MAX_QUEUED_RUNS": "500",
             "QF_SCHEDULER_MISFIRE_GRACE_SECONDS": "120",
+            "QF_TUSHARE_TOKEN": "tushare-secret",
+            "QF_TUSHARE_API_URL": "https://tu.brze.top",
+            "QF_INGESTION_REQUEST_INTERVAL_MS": "1500",
             "QF_DATABASE_HOST": "db",
             "QF_DATABASE_PORT": "5433",
             "QF_DATABASE_USER": "app",
@@ -85,6 +91,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 1000)
         self.assertEqual(settings.scheduler_max_queued_runs, 500)
         self.assertEqual(settings.scheduler_misfire_grace_seconds, 120)
+        self.assertEqual(settings.tushare_token.get_secret_value(), "tushare-secret")
+        self.assertEqual(settings.tushare_api_url, "https://tu.brze.top")
+        self.assertEqual(settings.ingestion_request_interval_ms, 1_500)
         self.assertEqual(
             settings.database_url.render_as_string(hide_password=False),
             "postgresql+psycopg://app:secret@db:5433/quant_test",
@@ -111,6 +120,8 @@ class SettingsTestCase(unittest.TestCase):
             {"QF_SCHEDULER_MAX_WORKERS": "0"},
             {"QF_SCHEDULER_DISPATCH_INTERVAL_MS": "99"},
             {"QF_SCHEDULER_MAX_QUEUED_RUNS": "0"},
+            {"QF_INGESTION_REQUEST_INTERVAL_MS": "-1"},
+            {"QF_INGESTION_REQUEST_INTERVAL_MS": "60001"},
         )
 
         for environment in invalid_settings:

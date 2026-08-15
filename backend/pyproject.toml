@@ -14,5 +14,6 @@ dependencies = [
     "pydantic-settings>=2.15.0,<3.0",
     "sqlalchemy>=2.0,<3.0",
     "structlog>=25,<26",
+    "tushare>=1.2.10,<2.0",
     "uvicorn>=0.52.3,<1.0",
 ]
