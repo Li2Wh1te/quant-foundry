@@ -26,6 +26,7 @@ class TaskDefinition:
     parameters_model: type[BaseModel]
     handler: TaskHandler
     parameter_version: int = 1
+    english_name: str | None = None
 
 
 class TaskRegistry:

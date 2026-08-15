@@ -51,6 +51,7 @@ export interface TaskRun {
 export interface TaskType {
   key: string;
   name: string;
+  english_name: string | null;
   parameter_version: number;
   parameter_schema: Record<string, unknown>;
 }

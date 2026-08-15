@@ -15,3 +15,9 @@
 - When adding a configuration key to `backend/.env.example`, update the self-hosted environment initialization logic so that a missing non-secret key is appended to an existing `.env` with its documented default value.
 - Never overwrite an existing `.env` value during this upgrade, and never generate, log, or replace user-provided secrets unless the existing value is explicitly known to be weak or invalid.
 - Add or update automated coverage for both first-time initialization and upgrades from an existing `.env` whenever the initialization behavior changes.
+
+## Scheduler Task Type Display
+
+- A scheduler task type must have a stable machine-readable `key`, a Chinese display name, and an English display name when it is registered.
+- The frontend must show a task type as `中文名（English name）`; do not expose its internal `key` in ordinary user-facing task-type selectors or labels.
+- Keep the `key` unchanged when renaming a task type. It is used by persisted tasks and is not a user-facing label.

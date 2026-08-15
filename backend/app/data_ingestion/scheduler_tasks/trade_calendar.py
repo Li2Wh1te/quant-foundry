@@ -48,7 +48,8 @@ def register_tasks(registry: TaskRegistry) -> None:
     registry.register(
         TaskDefinition(
             key="data.sync_trade_calendar",
-            name="Sync Tushare trade calendar",
+            name="交易日历采集",
+            english_name="Sync Tushare trade calendar",
             parameters_model=TradeCalendarSyncParameters,
             handler=sync_trade_calendar_task,
         )

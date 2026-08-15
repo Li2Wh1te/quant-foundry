@@ -39,6 +39,7 @@ def list_task_types() -> list[TaskTypeResponse]:
         TaskTypeResponse(
             key=definition.key,
             name=definition.name,
+            english_name=definition.english_name,
             parameter_version=definition.parameter_version,
             parameter_schema=definition.parameters_model.model_json_schema(),
         )

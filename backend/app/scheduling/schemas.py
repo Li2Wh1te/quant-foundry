@@ -191,6 +191,7 @@ class TaskRunResponse(BaseModel):
 class TaskTypeResponse(BaseModel):
     key: str
     name: str
+    english_name: str | None
     parameter_version: int
     parameter_schema: dict[str, Any]
 
