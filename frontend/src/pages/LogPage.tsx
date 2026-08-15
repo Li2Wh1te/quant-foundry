@@ -76,7 +76,23 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   trade_calendar_range_started: { title: "开始采集分段" },
   trade_calendar_range_succeeded: { title: "完成采集分段" },
   trade_calendar_range_failed: { title: "采集分段失败" },
-  trade_calendar_sync_completed: { title: "交易日历采集完成" }
+  trade_calendar_sync_completed: { title: "交易日历采集完成" },
+  etf_basic_sync_started: {
+    title: "开始采集ETF基础信息",
+    summary: "正在拉取全部状态的 ETF 基础信息。"
+  },
+  etf_basic_sync_succeeded: {
+    title: "完成采集ETF基础信息",
+    summary: "ETF 基础信息已成功写入数据库并推进检查点。"
+  },
+  etf_basic_sync_failed: {
+    title: "ETF基础信息采集失败",
+    summary: "ETF 基础信息未完成采集，请查看异常详情。"
+  },
+  etf_basic_sync_completed: {
+    title: "ETF基础信息采集完成",
+    summary: "ETF 基础信息采集任务已执行完成。"
+  }
 };
 
 function eventPresentation(entry: LogEntry): EventPresentation {
