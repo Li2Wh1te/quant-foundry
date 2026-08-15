@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { LoadingScreen } from "./components/LoadingScreen";
+import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
 import { DataCollectionPage } from "./pages/DataCollectionPage";
@@ -16,6 +17,9 @@ function RequireAuth({ children }: { children: React.ReactNode }) {
   }
   if (status === "anonymous") {
     return <Navigate to="/login" replace />;
+  }
+  if (status === "version_mismatch") {
+    return <VersionMismatchScreen />;
   }
   return children;
 }

@@ -11,6 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
+from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session
 from app.logging.router import router as log_router
 from app.scheduling.router import router as scheduling_router
@@ -45,6 +46,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     current_settings = settings if settings is not None else get_settings()
     app = FastAPI(
         title=current_settings.app_name,
+        version=get_release_version(),
         debug=current_settings.debug,
         lifespan=lifespan,
     )
@@ -66,6 +68,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @protected_router.get("/api")
     def read_root() -> dict[str, str]:
         return {"message": "Hello World"}
+
+    @protected_router.get("/api/system/version")
+    def read_system_version() -> dict[str, str]:
+        return {"version": app.version}
 
     app.include_router(protected_router)
 
