@@ -4,6 +4,7 @@ import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { Brand } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
+import { FRONTEND_VERSION } from "../version";
 
 export function AdminPage({ children }: { children?: React.ReactNode }) {
   const { logout } = useAuth();
@@ -44,7 +45,7 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
             <LogOut aria-hidden="true" />
             <span>退出登录</span>
           </button>
-          <span className="sidebar__version">v0.1.0</span>
+          <span className="sidebar__version">v{FRONTEND_VERSION}</span>
         </div>
       </aside>
 

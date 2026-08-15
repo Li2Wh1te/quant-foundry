@@ -187,6 +187,7 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 | `GET` | `/api` | 基础连通性检查 |
 | `GET` | `/readyz` | 执行 `SELECT 1`，检查数据库连接 |
 | `GET` | `/api/auth/verify` | 验证 Bearer Token |
+| `GET` | `/api/system/version` | 查询当前部署的项目版本 |
 | `GET` | `/api/admin/logs` | 查询本地结构化日志 |
 | `POST` | `/api/admin/logs/clear` | 隐藏调用时刻之前的日志 |
 | `GET` | `/api/admin/task-types` | 查询已注册的任务类型和参数 Schema |

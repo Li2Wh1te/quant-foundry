@@ -7,19 +7,21 @@ import {
   useState
 } from "react";
 
-import { verifyApiToken } from "../api/auth";
+import { fetchSystemVersion, verifyApiToken } from "../api/auth";
 import {
   readApiToken,
   removeApiToken,
   writeApiToken
 } from "./tokenStorage";
+import { FRONTEND_VERSION } from "../version";
 
-type AuthStatus = "checking" | "authenticated" | "anonymous";
+type AuthStatus = "checking" | "authenticated" | "anonymous" | "version_mismatch";
 
 interface AuthContextValue {
   status: AuthStatus;
   login: (token: string) => Promise<void>;
   logout: () => void;
+  backendVersion: string | null;
 }
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -29,6 +31,14 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [status, setStatus] = useState<AuthStatus>(
     storedToken ? "checking" : "anonymous"
   );
+  const [backendVersion, setBackendVersion] = useState<string | null>(null);
+
+  const validateSession = useCallback(async (token: string, signal?: AbortSignal) => {
+    await verifyApiToken(token, signal);
+    const { version } = await fetchSystemVersion(token, signal);
+    setBackendVersion(version);
+    setStatus(version === FRONTEND_VERSION ? "authenticated" : "version_mismatch");
+  }, []);
 
   useEffect(() => {
     if (!storedToken) {
@@ -36,34 +46,34 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
     }
 
     const controller = new AbortController();
-    verifyApiToken(storedToken, controller.signal)
-      .then(() => setStatus("authenticated"))
+    validateSession(storedToken, controller.signal)
       .catch((error: unknown) => {
         if (error instanceof DOMException && error.name === "AbortError") {
           return;
         }
         removeApiToken();
+        setBackendVersion(null);
         setStatus("anonymous");
       });
 
     return () => controller.abort();
-  }, [storedToken]);
+  }, [storedToken, validateSession]);
 
   const login = useCallback(async (token: string) => {
     const normalizedToken = token.trim();
-    await verifyApiToken(normalizedToken);
+    await validateSession(normalizedToken);
     writeApiToken(normalizedToken);
-    setStatus("authenticated");
-  }, []);
+  }, [validateSession]);
 
   const logout = useCallback(() => {
     removeApiToken();
+    setBackendVersion(null);
     setStatus("anonymous");
   }, []);
 
   const value = useMemo(
-    () => ({ status, login, logout }),
-    [status, login, logout]
+    () => ({ status, login, logout, backendVersion }),
+    [status, login, logout, backendVersion]
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

@@ -1,7 +1,13 @@
 import { defineConfig } from "vite";
+import { readFileSync } from "node:fs";
 import react from "@vitejs/plugin-react";
 
+const projectVersion = readFileSync(new URL("../VERSION", import.meta.url), "utf-8").trim();
+
 export default defineConfig({
+  define: {
+    __QF_VERSION__: JSON.stringify(projectVersion)
+  },
   plugins: [react()],
   server: {
     host: "127.0.0.1",

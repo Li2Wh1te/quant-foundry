@@ -3,8 +3,8 @@ name: quant-foundry
 services:
   frontend:
     build:
-      context: ./frontend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: frontend/Dockerfile
     image: quant-foundry-frontend:local
     environment:
       QF_BACKEND_PORT: ${QF_SERVER_PORT:-8000}
@@ -50,8 +50,8 @@ services:
 
   backend:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     image: quant-foundry-backend:local
     env_file:
       - .env
