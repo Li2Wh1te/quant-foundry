@@ -1,11 +1,11 @@
-import { BookOpen, Grid2X2, LogOut } from "lucide-react";
-import { useNavigate } from "react-router-dom";
+import { BookOpen, FileSearch, Grid2X2, LogOut } from "lucide-react";
+import { NavLink, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
 import { Brand } from "../components/Brand";
 import { ThemeToggle } from "../components/ThemeToggle";
 
-export function AdminPage() {
+export function AdminPage({ children }: { children?: React.ReactNode }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
 
@@ -21,10 +21,14 @@ export function AdminPage() {
 
         <nav className="sidebar__nav" aria-label="管理导航">
           <span className="sidebar__label">工作区</span>
-          <a className="nav-item nav-item--active" href="/admin" aria-current="page">
+          <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin" end>
             <Grid2X2 aria-hidden="true" />
             <span>概览</span>
-          </a>
+          </NavLink>
+          <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/logs">
+            <FileSearch aria-hidden="true" />
+            <span>日志查询</span>
+          </NavLink>
         </nav>
 
         <div className="sidebar__footer">
@@ -52,7 +56,7 @@ export function AdminPage() {
           </div>
         </header>
 
-        <section className="admin-content" aria-labelledby="empty-state-title">
+        {children ?? <section className="admin-content" aria-labelledby="empty-state-title">
           <div className="empty-state">
             <div className="empty-state__graphic" aria-hidden="true">
               <span>QF</span>
@@ -64,7 +68,7 @@ export function AdminPage() {
               查看 API 文档
             </a>
           </div>
-        </section>
+        </section>}
       </main>
     </div>
   );
