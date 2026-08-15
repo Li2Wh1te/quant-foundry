@@ -20,6 +20,7 @@
 <p>
   <a href="#为什么选择-quant-foundry">项目定位</a> ·
   <a href="#快速开始">快速开始</a> ·
+  <a href="#数据源">数据源</a> ·
   <a href="#api">API</a> ·
   <a href="#开发指南">开发指南</a> ·
   <a href="#参与贡献">参与贡献</a>
@@ -30,8 +31,8 @@
 </div>
 
 > [!NOTE]
-> Quant Foundry 目前处于早期开发阶段，已经具备后端服务基础设施，但尚未实现行情接入、
-> 策略研究、回测或交易执行能力。
+> Quant Foundry 目前处于早期开发阶段，Tushare Pro 已作为首个数据源接入，配置后可通过计划任务
+> 增量同步交易日历；股票、ETF、日线数据，以及策略研究、回测、风控和交易执行能力仍在开发中。
 
 ## 为什么选择 Quant Foundry？
 
@@ -46,6 +47,7 @@
 | 数据演进 | SQLAlchemy 会话管理与 Alembic 版本化迁移 |
 | 可观测性 | JSON 结构化日志、异步写入、轮转压缩和管理查询 API |
 | 任务调度 | FastAPI 进程内 APScheduler、PostgreSQL 持久化队列、并发与排队控制 |
+| 数据源 | 已接入 Tushare Pro，通过调度器执行增量同步；当前支持交易日历，股票、ETF 与日线数据开发中 |
 | 管理界面 | React 管理台、Token 登录、响应式布局和深浅主题 |
 | 运行可靠性 | 前端、后端与 PostgreSQL 健康检查、持久化卷和优雅停止 |
 | 行为验证 | 后端单元测试、前端类型检查和生产构建 |
@@ -60,6 +62,8 @@ flowchart LR
     Server --> Scheduler["In-process Scheduler"]
     Scheduler --> Database
     Scheduler --> Workers["Task Worker Pool"]
+    Workers <--> Tushare["Tushare Pro"]
+    Workers --> Database
     Migration["Alembic"] --> Database
     Server --> Queue["Async Log Queue"]
     Queue --> Files["Rotating JSONL"]
@@ -70,7 +74,8 @@ Nginx 提供 React 单页应用，并通过 Compose 私有网络将 `/api`、API
 转发给 FastAPI。后端通过显式配置连接 PostgreSQL，通过 Alembic 管理模式变更；请求和
 应用事件进入异步日志队列后写入按天轮转的 JSONL 文件。任务调度器与 FastAPI 使用同一进程，
 APScheduler 负责到点触发，PostgreSQL 中的 `task_runs` 负责持久化排队状态，受限线程池负责
-执行注册的任务类型。
+执行注册的任务类型。数据源任务同样在该线程池中执行；当前 Tushare 任务会增量拉取并持久化
+交易日历数据。
 
 ## 快速开始
 
@@ -126,6 +131,25 @@ curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
 
 </details>
 
+## 数据源
+
+Tushare Pro 是当前已接入的首个数据源。自托管部署时，请在根目录 `.env` 中设置
+`QF_TUSHARE_TOKEN`，然后执行 `make selfhost-deploy-backend` 使 Backend 读取新配置。源码运行时，
+请在 `backend/.env` 中设置同名变量并重启 Backend。
+
+进入管理台的 **任务调度**，为已注册任务类型 `data.sync_trade_calendar` 创建计划。启用后，
+调度器会自动执行，后续运行将继续增量同步。当前数据源能力刻意保持在较小范围内：
+
+| 数据集 | 状态 | 同步方式 |
+| --- | --- | --- |
+| 交易日历 | 已支持 | 按配置的计划从 Tushare 增量同步 |
+| 股票数据 | 开发中 | — |
+| ETF 数据 | 开发中 | — |
+| 日线数据 | 开发中 | — |
+
+`QF_INGESTION_REQUEST_INTERVAL_MS` 定义部署级别的外部数据源请求最小间隔。任务级间隔可以设置得
+更保守，但不能低于该全局限制。
+
 ## 日常运维
 
 ```bash
@@ -175,6 +199,8 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 | `DELETE` | `/api/admin/tasks/{id}` | 归档任务并保留历史 |
 | `POST` | `/api/admin/tasks/{id}/run` | 手动排队执行一次 |
 | `GET` | `/api/admin/task-runs` | 查询执行历史和队列状态 |
+| `GET` | `/api/admin/tasks/{id}/runs` | 查询单个任务的执行历史 |
+| `GET` | `/api/admin/task-runs/{id}` | 查询单条任务执行记录 |
 
 日志查询支持 `keyword`、`level`、`method`、`status_class`、`path`、`start_time`
 和 `end_time` 过滤。默认查询最近 24 小时，单次时间范围最多为 31 天，最多返回
@@ -256,7 +282,7 @@ cd frontend && pnpm build
 | `QF_SCHEDULER_DISPATCH_INTERVAL_MS` | 队列派发检查间隔（毫秒） |
 | `QF_SCHEDULER_MAX_QUEUED_RUNS` | 全局最大排队执行数 |
 | `QF_SCHEDULER_MISFIRE_GRACE_SECONDS` | 错过计划后的补触发宽限时间 |
-| `QF_TUSHARE_TOKEN` | Tushare Pro Token；仅在使用 Tushare 数据源时设置 |
+| `QF_TUSHARE_TOKEN` | Tushare Pro Token；运行 Tushare 数据源任务时必填 |
 | `QF_TUSHARE_API_URL` | Tushare SDK 请求地址，默认 `http://api.tushare.pro` |
 | `QF_INGESTION_REQUEST_INTERVAL_MS` | 外部数据源请求的全局最小间隔（毫秒） |
 
@@ -295,6 +321,7 @@ uv run alembic upgrade head
 ```text
 backend/                  # FastAPI、Alembic、后端测试与生产镜像
 ├── app/                  # 应用代码
+│   ├── data_ingestion/   # 数据源客户端、持久化、检查点与计划任务
 │   ├── scheduling/       # 持久化任务调度、队列和执行器
 ├── tests/                # 后端单元测试
 ├── pyproject.toml
@@ -317,8 +344,9 @@ Makefile                  # 常用自托管命令
 <details>
 <summary><strong>这是一个可以直接使用的量化交易平台吗？</strong></summary>
 
-不是。当前版本提供的是量化应用所需的后端基础设施，不包含行情源、策略引擎、回测系统、
-风控或订单执行。项目状态会随着这些领域能力落地而更新。
+不是。当前版本提供量化应用所需的后端基础设施，以及基于 Tushare 的交易日历增量同步。股票、
+ETF 和日线数据，以及策略引擎、回测系统、风控和订单执行仍在开发中。项目状态会随着这些领域
+能力落地而更新。
 
 </details>
 

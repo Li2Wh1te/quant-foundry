@@ -21,6 +21,7 @@ and maintainable service foundation.
 <p>
   <a href="#why-quant-foundry">Overview</a> ·
   <a href="#quick-start">Quick Start</a> ·
+  <a href="#data-sources">Data Sources</a> ·
   <a href="#api">API</a> ·
   <a href="#development">Development</a> ·
   <a href="#contributing">Contributing</a>
@@ -31,8 +32,9 @@ and maintainable service foundation.
 </div>
 
 > [!NOTE]
-> Quant Foundry is in early development. The backend infrastructure is in place, but market data
-> ingestion, strategy research, backtesting, and trade execution have not been implemented yet.
+> Quant Foundry is in early development. Tushare Pro is the first integrated data source and can
+> incrementally synchronize trading calendars through scheduled tasks. Stock, ETF, and daily-bar data,
+> along with strategy research, backtesting, risk management, and trade execution, are in development.
 
 ## Why Quant Foundry?
 
@@ -48,6 +50,7 @@ and trading.
 | Data evolution | SQLAlchemy session management and versioned Alembic migrations |
 | Observability | Structured JSON logs, asynchronous writes, rotation, compression, and an admin query API |
 | Task scheduling | In-process APScheduler, PostgreSQL-backed queue, concurrency, and overlap controls |
+| Data sources | Tushare Pro integration with scheduler-driven incremental ingestion; trading calendars are available, while stock, ETF, and daily-bar data are in development |
 | Admin interface | React console with token login, responsive layout, and light/dark themes |
 | Runtime reliability | Frontend, Backend, and PostgreSQL health checks, volumes, and graceful shutdown |
 | Behavioral verification | Backend unit tests, frontend type checking, and production builds |
@@ -62,6 +65,8 @@ flowchart LR
     Server --> Scheduler["In-process Scheduler"]
     Scheduler --> Database
     Scheduler --> Workers["Task Worker Pool"]
+    Workers <--> Tushare["Tushare Pro"]
+    Workers --> Database
     Migration["Alembic"] --> Database
     Server --> Queue["Async Log Queue"]
     Queue --> Files["Rotating JSONL"]
@@ -72,7 +77,8 @@ Nginx serves the React SPA and forwards `/api`, documentation, and readiness req
 the private Compose network. The backend connects to PostgreSQL through explicit settings and manages
 schema changes with Alembic. Request and application events are written to rotating JSONL files. The
 task scheduler runs in the same process as FastAPI: APScheduler handles due-time triggers, PostgreSQL
-persists `task_runs`, and a bounded thread pool executes registered task types.
+persists `task_runs`, and a bounded thread pool executes registered task types. Data-source tasks run
+in that worker pool; the current Tushare task retrieves and persists trading-calendar data incrementally.
 
 ## Quick Start
 
@@ -129,6 +135,27 @@ Subsequent runs reuse the existing configuration, secrets, and persistent volume
 
 </details>
 
+## Data Sources
+
+Tushare Pro is the first integrated data source. For self-hosting, set `QF_TUSHARE_TOKEN` in the root
+`.env`, then run `make selfhost-deploy-backend` to load the changed Backend configuration. For source
+runs, set the same variable in `backend/.env` and restart the Backend.
+
+Open **Task Scheduler** in the admin console and create a schedule for the registered task type
+`data.sync_trade_calendar`. Once enabled, the scheduler runs it automatically and subsequent runs
+continue the synchronization incrementally. The current data-source scope is intentionally narrow:
+
+| Dataset | Status | Ingestion behavior |
+| --- | --- | --- |
+| Trading calendar | Available | Tushare data can be synchronized incrementally on a configured schedule |
+| Stock data | In development | — |
+| ETF data | In development | — |
+| Daily-bar data | In development | — |
+
+`QF_INGESTION_REQUEST_INTERVAL_MS` sets the deployment-wide minimum interval between external data
+source requests. A task-specific interval can make a task more conservative, but cannot reduce that
+global limit.
+
 ## Operations
 
 ```bash
@@ -181,6 +208,8 @@ pages and the OpenAPI schema are also public, but calls made from Swagger UI sti
 | `DELETE` | `/api/admin/tasks/{id}` | Archive a task and retain history |
 | `POST` | `/api/admin/tasks/{id}/run` | Queue one manual execution |
 | `GET` | `/api/admin/task-runs` | Query execution history and queue state |
+| `GET` | `/api/admin/tasks/{id}/runs` | Query execution history for one task |
+| `GET` | `/api/admin/task-runs/{id}` | Read one task-run record |
 
 Log queries support `keyword`, `level`, `method`, `status_class`, `path`, `start_time`, and
 `end_time` filters. The default window is the last 24 hours. A request may cover at most 31 days
@@ -266,7 +295,7 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | `QF_SCHEDULER_DISPATCH_INTERVAL_MS` | Queue dispatch interval in milliseconds |
 | `QF_SCHEDULER_MAX_QUEUED_RUNS` | Global maximum number of queued runs |
 | `QF_SCHEDULER_MISFIRE_GRACE_SECONDS` | Grace period for missed schedules |
-| `QF_TUSHARE_TOKEN` | Tushare Pro token; required only when using Tushare |
+| `QF_TUSHARE_TOKEN` | Tushare Pro token required by Tushare data-source tasks |
 | `QF_TUSHARE_API_URL` | Tushare SDK request URL; defaults to `http://api.tushare.pro` |
 | `QF_INGESTION_REQUEST_INTERVAL_MS` | Global minimum interval between external data source requests in milliseconds |
 
@@ -307,6 +336,7 @@ Migration files are part of the codebase and should be committed with the corres
 ```text
 backend/                  # FastAPI, Alembic, Backend tests, and production image
 ├── app/                  # Application code
+│   ├── data_ingestion/   # Data-source clients, persistence, checkpoints, and scheduled tasks
 │   ├── scheduling/       # Persistent scheduling, queue, and task execution
 ├── tests/                # Backend unit tests
 ├── pyproject.toml
@@ -329,9 +359,10 @@ Makefile                  # Common self-hosting commands
 <details>
 <summary><strong>Is this a ready-to-use quantitative trading platform?</strong></summary>
 
-No. The current version provides backend infrastructure for quantitative applications. It does not
-include market data providers, a strategy engine, backtesting, risk management, or order execution.
-The project status will be updated as these domain capabilities are implemented.
+No. The current version provides backend infrastructure and Tushare-based incremental trading-calendar
+synchronization. Stock, ETF, and daily-bar data are still in development, as are the strategy engine,
+backtesting, risk management, and order execution. The project status will be updated as these domain
+capabilities are implemented.
 
 </details>
 
