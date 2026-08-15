@@ -6,8 +6,10 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     image: quant-foundry-frontend:local
+    environment:
+      QF_BACKEND_PORT: ${QF_SERVER_PORT:-8000}
     ports:
-      - "127.0.0.1:${QF_WEB_PORT:-8080}:80"
+      - "${QF_WEB_HOST:-127.0.0.1}:${QF_WEB_PORT:-8080}:80"
     depends_on:
       backend:
         condition: service_healthy
@@ -54,10 +56,10 @@ services:
     env_file:
       - .env
     environment:
-      QF_SERVER_HOST: 0.0.0.0
-      QF_SERVER_PORT: 8000
       QF_DATABASE_HOST: postgres
       QF_DATABASE_PORT: 5432
+    expose:
+      - "${QF_SERVER_PORT:-8000}"
     volumes:
       - server_logs:/app/data/logs
     depends_on:
@@ -68,7 +70,7 @@ services:
         - CMD
         - python
         - -c
-        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/readyz', timeout=3)
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:${QF_SERVER_PORT:-8000}/readyz', timeout=3)
       interval: 5s
       timeout: 5s
       retries: 24

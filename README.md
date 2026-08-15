@@ -91,6 +91,16 @@ Once the stack is ready, open:
 Only the Frontend and PostgreSQL host ports bind to `127.0.0.1`; the Backend is available only on the
 private Compose network. The admin console keeps its token in the current tab's `sessionStorage`.
 
+To allow access from other machines on the same LAN, edit the root `.env` first:
+
+```dotenv
+QF_SERVER_HOST=0.0.0.0
+QF_WEB_HOST=0.0.0.0
+QF_WEB_PORT=8080
+```
+
+Then run `make selfhost` and open `http://A-machine-LAN-IP:8080` from the other machine.
+
 `make selfhost` stores the generated API token as `QF_API_TOKEN` in `.env`. Use that value with the
 Swagger UI **Authorize** button or send it in the `Authorization` header:
 
@@ -227,8 +237,8 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | --- | --- |
 | `QF_ENVIRONMENT` | Runtime environment: `local`, `test`, or `production` |
 | `QF_DEBUG` | Enable debug mode; this must be `false` in production |
-| `QF_SERVER_HOST` / `QF_SERVER_PORT` | API bind address and port |
-| `QF_WEB_PORT` | Host port for the self-hosted web console |
+| `QF_SERVER_HOST` / `QF_SERVER_PORT` | Backend container bind address and port; use `0.0.0.0` in containers |
+| `QF_WEB_HOST` / `QF_WEB_PORT` | Host address and port published for the web console; use `0.0.0.0` for LAN access |
 | `QF_API_TOKEN` | Shared Bearer Token used to authenticate API requests |
 | `QF_DATABASE_*` | PostgreSQL host, port, user, password, and database name |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | Log directory and minimum log level |
@@ -237,6 +247,17 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | `QF_LOG_QUERY_MAX_FILES` | Maximum number of files scanned by one log query |
 
 Do not commit `.env` or any real credentials.
+
+`QF_SERVER_PORT` is propagated to the Frontend Nginx Backend proxy and health check. The Backend is
+not published to the host; LAN clients should use `QF_WEB_HOST:QF_WEB_PORT`.
+
+Note: `QF_SERVER_HOST` is the bind address inside the container and should be `0.0.0.0` for
+container deployment. Do not set it to the host machine's LAN IP; LAN binding is controlled by
+`QF_WEB_HOST`.
+
+After editing the root `.env`, run `make selfhost` to reload the configuration and recreate affected
+containers. For a frontend-only change, use `make selfhost-deploy-frontend`; for a backend-only
+change, use `make selfhost-deploy-backend`.
 
 </details>
 

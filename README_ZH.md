@@ -88,6 +88,16 @@ make selfhost
 只有前端和 PostgreSQL 的宿主机端口默认绑定到 `127.0.0.1`；后端仅在 Compose 私有
 网络中提供服务。Web 管理台登录后会把 Token 保存在当前标签页的 `sessionStorage` 中。
 
+如果需要让同一局域网内的其他机器访问，请先修改根目录 `.env`：
+
+```dotenv
+QF_SERVER_HOST=0.0.0.0
+QF_WEB_HOST=0.0.0.0
+QF_WEB_PORT=8080
+```
+
+然后执行 `make selfhost`，在其他机器访问 `http://A机器的局域网IP:8080`。
+
 `make selfhost` 会将生成的 API Token 以 `QF_API_TOKEN` 写入 `.env`。可以把该值填入
 Swagger UI 的 **Authorize** 对话框，也可以通过 `Authorization` 请求头调用接口：
 
@@ -217,8 +227,8 @@ cd frontend && pnpm build
 | --- | --- |
 | `QF_ENVIRONMENT` | 运行环境：`local`、`test` 或 `production` |
 | `QF_DEBUG` | 是否启用调试模式，生产环境必须为 `false` |
-| `QF_SERVER_HOST` / `QF_SERVER_PORT` | API 监听地址和端口 |
-| `QF_WEB_PORT` | 自托管 Web 管理台的宿主机端口 |
+| `QF_SERVER_HOST` / `QF_SERVER_PORT` | Backend 容器内监听地址和端口；容器部署时 Host 应为 `0.0.0.0` |
+| `QF_WEB_HOST` / `QF_WEB_PORT` | Web 管理台发布到宿主机的地址和端口；局域网访问使用 `0.0.0.0` |
 | `QF_API_TOKEN` | 用于验证 API 请求的共享 Bearer Token |
 | `QF_DATABASE_*` | PostgreSQL 地址、端口、用户、密码和数据库名 |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | 日志目录和最低日志级别 |
@@ -227,6 +237,16 @@ cd frontend && pnpm build
 | `QF_LOG_QUERY_MAX_FILES` | 单次日志查询最多扫描的文件数 |
 
 不要提交 `.env` 或任何真实凭据。
+
+`QF_SERVER_PORT` 会同步到 Frontend Nginx 的 Backend 代理和健康检查；Backend 不会直接发布
+到宿主机，局域网客户端应访问 `QF_WEB_HOST:QF_WEB_PORT`。
+
+注意：`QF_SERVER_HOST` 是容器内部监听地址，容器部署应使用 `0.0.0.0`，不要填写宿主机的
+局域网 IP；局域网绑定由 `QF_WEB_HOST` 控制。
+
+修改根目录 `.env` 后，请重新执行 `make selfhost`，脚本会重新读取配置并重建受影响的容器；
+仅修改页面端口时也可以执行 `make selfhost-deploy-frontend`，仅修改 Backend 配置时可以执行
+`make selfhost-deploy-backend`。
 
 </details>
 

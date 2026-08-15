@@ -78,6 +78,8 @@ deploy() {
 }
 
 deploy_frontend() {
+    ensure_environment
+
     echo "Building the Frontend image..."
     compose build frontend
 
@@ -88,6 +90,8 @@ deploy_frontend() {
 }
 
 deploy_backend() {
+    ensure_environment
+
     echo "Building the Backend image..."
     compose build backend
 
@@ -99,8 +103,8 @@ deploy_backend() {
 
     run_migrations
 
-    echo "Starting Backend..."
-    compose up -d --no-deps --no-build --wait --wait-timeout 120 backend
+    echo "Starting Backend and applying its Frontend proxy configuration..."
+    compose up -d --no-build --wait --wait-timeout 120 backend frontend
 }
 
 restart_postgres() {

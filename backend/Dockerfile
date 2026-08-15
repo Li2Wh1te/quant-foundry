@@ -24,6 +24,4 @@ RUN mkdir -p /app/data/logs && chown -R app:app /app
 
 USER app
 
-EXPOSE 8000
-
 CMD ["python", "-m", "app"]
