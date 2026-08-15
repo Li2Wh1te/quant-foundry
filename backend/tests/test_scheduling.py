@@ -1,5 +1,5 @@
 import unittest
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 from uuid import uuid4
@@ -75,6 +75,15 @@ def make_task(**overrides):
 
 
 class SchedulingSchemaTestCase(unittest.TestCase):
+    def test_trade_calendar_parameters_accept_tushare_compact_date(self) -> None:
+        parameters = task_registry.require(
+            "data.sync_trade_calendar"
+        ).parameters_model.model_validate(
+            {"exchange": "SZSE", "initial_start_date": "19910703"}
+        )
+
+        self.assertEqual(parameters.initial_start_date, date(1991, 7, 3))
+
     def test_validates_discriminated_schedule_and_custom_parameters(self) -> None:
         payload = TaskCreate.model_validate(
             {

@@ -1,10 +1,10 @@
 """Scheduler task registration for Tushare trading calendar synchronization."""
 
 from dataclasses import asdict
-from datetime import date
+from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 import structlog
 
 from app.core.config import get_settings
@@ -24,6 +24,25 @@ class TradeCalendarSyncParameters(BaseModel):
     exchange: str = Field(min_length=1, max_length=16)
     initial_start_date: date
     request_interval_ms: int | None = Field(default=None, ge=0, le=60_000)
+
+    @field_validator("initial_start_date", mode="before")
+    @classmethod
+    def parse_tushare_compact_date(cls, value: Any) -> Any:
+        """Accept Tushare's compact YYYYMMDD date format before Pydantic parsing.
+
+        A digit-only eight-character value would otherwise be interpreted as a Unix
+        timestamp by Pydantic's generic date parser, even though Tushare documents
+        calendar dates in YYYYMMDD format. Other inputs retain Pydantic's standard
+        date validation, including the ISO-8601 date format used by persisted tasks.
+        """
+        if not isinstance(value, str) or len(value) != 8 or not value.isdigit():
+            return value
+        try:
+            return datetime.strptime(value, "%Y%m%d").date()
+        except ValueError as exc:
+            raise ValueError(
+                "initial_start_date must be a valid YYYYMMDD or ISO-8601 date"
+            ) from exc
 
 
 def sync_trade_calendar_task(
