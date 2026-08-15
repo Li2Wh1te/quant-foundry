@@ -35,6 +35,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             self.assertEqual(first_content, env.read_text(encoding="utf-8"))
             self.assertIn(f"QF_DATABASE_PASSWORD={'a' * 64}", first_content)
             self.assertIn(f"QF_API_TOKEN={'b' * 64}", first_content)
+            self.assertIn("QF_WEB_PORT=8080", first_content)
             self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
 
     def test_replaces_weak_secrets_and_removes_legacy_url(self) -> None:
@@ -46,7 +47,8 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             env.write_text(
                 "QF_DATABASE_URL=postgresql+psycopg://postgres:postgres@db/test\n"
                 "QF_DATABASE_PASSWORD=postgres\n"
-                "QF_API_TOKEN=short-token\n",
+                "QF_API_TOKEN=short-token\n"
+                "QF_WEB_PORT=9090\n",
                 encoding="utf-8",
             )
 
@@ -61,6 +63,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             self.assertNotIn("QF_DATABASE_URL", content)
             self.assertIn(f"QF_DATABASE_PASSWORD={'b' * 64}", content)
             self.assertIn(f"QF_API_TOKEN={'c' * 64}", content)
+            self.assertIn("QF_WEB_PORT=9090", content)
 
 
 if __name__ == "__main__":

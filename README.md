@@ -102,7 +102,7 @@ curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
 <details>
 <summary><strong>What happens during the first deployment?</strong></summary>
 
-1. Create the root `.env` from `backend/.env.example` with `0600` permissions;
+1. Create the root `.env` from `backend/.env.example`, add the web port, and set `0600` permissions;
 2. Generate a random 256-bit PostgreSQL password and API token with Python `secrets`;
 3. Build separate Backend and Frontend images;
 4. Create persistent volumes and start PostgreSQL;

@@ -15,6 +15,9 @@ DATABASE_DEFAULTS = {
     "QF_DATABASE_USER": "postgres",
     "QF_DATABASE_NAME": "quant_foundry",
 }
+DEPLOYMENT_DEFAULTS = {
+    "QF_WEB_PORT": "8080",
+}
 DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
 LEGACY_URL_KEY = "QF_DATABASE_URL"
@@ -44,6 +47,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         minimum_length=32,
     )
     desired = {
+        **DEPLOYMENT_DEFAULTS,
         **DATABASE_DEFAULTS,
         DATABASE_PASSWORD_KEY: database_password,
         API_TOKEN_KEY: api_token,

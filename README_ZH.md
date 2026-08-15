@@ -99,7 +99,7 @@ curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
 <details>
 <summary><strong>首次部署具体做了什么？</strong></summary>
 
-1. 从 `backend/.env.example` 创建权限为 `0600` 的根目录 `.env`；
+1. 从 `backend/.env.example` 创建权限为 `0600` 的根目录 `.env`，并补充 Web 端口；
 2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码和 API Token；
 3. 分别构建 Backend 和 Frontend 镜像；
 4. 创建持久化数据卷并启动 PostgreSQL；
