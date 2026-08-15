@@ -1515,6 +1515,138 @@ svg {
   gap: 0 12px;
 }
 
+.cron-editor {
+  margin: 4px 0 15px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--accent-subtle) 38%, var(--surface));
+}
+
+.cron-editor fieldset {
+  min-width: 0;
+  padding: 0;
+  margin: 0;
+  border: 0;
+}
+
+.cron-editor legend {
+  margin-bottom: 8px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.cron-editor__mode-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cron-editor__mode-button {
+  height: 30px;
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface);
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.cron-editor__mode-button:hover,
+.cron-editor__mode-button--active {
+  border-color: var(--accent);
+  color: var(--text);
+  background: var(--accent-subtle);
+}
+
+.cron-editor .task-form__grid label {
+  margin: 12px 0 0;
+}
+
+.cron-editor__expression {
+  grid-column: 1 / -1;
+}
+
+.cron-editor__expression small {
+  display: block;
+  margin-top: 6px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.45;
+}
+
+.cron-editor__expression code,
+.cron-editor__preview code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.cron-editor__weekday-picker {
+  margin-top: 14px !important;
+}
+
+.cron-editor__weekday-picker > div {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cron-editor__weekday-picker label {
+  height: 31px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 0 9px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--text-muted);
+  background: var(--surface);
+  cursor: pointer;
+}
+
+.cron-editor__weekday-picker input {
+  width: 14px !important;
+  height: 14px !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  accent-color: var(--accent);
+}
+
+.cron-editor__preview {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 10px;
+  align-items: center;
+  margin-top: 14px;
+  padding: 10px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--surface) 80%, var(--background));
+}
+
+.cron-editor__preview > span,
+.cron-editor__preview small {
+  color: var(--text-faint);
+  font-size: 10px;
+}
+
+.cron-editor__preview code {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cron-editor__preview small {
+  grid-column: 1 / -1;
+  line-height: 1.4;
+}
+
 .task-message,
 .task-empty {
   display: flex;
