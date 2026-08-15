@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 from uuid import uuid4
 
 from apscheduler.triggers.cron import CronTrigger
@@ -202,6 +202,36 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
             self.assertFalse(runtime.running)
         finally:
             runtime.stop()
+
+    def test_dispatch_interval_is_registered_in_seconds(self) -> None:
+        settings = Settings(
+            api_token=API_TOKEN,
+            database_password="test-secret",
+            scheduler_dispatch_interval_ms=500,
+            _env_file=None,
+        )
+        with (
+            patch("app.scheduling.runtime.Session") as session_class,
+            patch("app.scheduling.runtime.get_engine"),
+            patch("app.scheduling.runtime.SchedulerRepository") as repository_class,
+        ):
+            repository_class.return_value.interrupt_running_runs.return_value = 0
+            repository_class.return_value.list_active_task_ids.return_value = []
+            runtime = SchedulerRuntime(settings)
+            runtime.scheduler = Mock()
+            runtime.start()
+
+        runtime.scheduler.add_job.assert_called_once_with(
+            runtime.dispatch_queued_runs,
+            trigger="interval",
+            seconds=0.5,
+            id="scheduler:dispatch",
+            replace_existing=True,
+            max_instances=1,
+            coalesce=True,
+        )
+        session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
+        runtime.stop()
 
 
 if __name__ == "__main__":

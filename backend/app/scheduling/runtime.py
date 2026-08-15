@@ -78,7 +78,7 @@ class SchedulerRuntime:
         self.scheduler.add_job(
             self.dispatch_queued_runs,
             trigger="interval",
-            milliseconds=self.settings.scheduler_dispatch_interval_ms,
+            seconds=self.settings.scheduler_dispatch_interval_ms / 1_000,
             id=DISPATCH_JOB_ID,
             replace_existing=True,
             max_instances=1,
