@@ -1,7 +1,7 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
-from fastapi import APIRouter, Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, Response, status
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 import structlog
@@ -47,7 +47,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router = APIRouter(dependencies=[Depends(require_api_token)])
     protected_router.include_router(log_router)
 
-    @protected_router.get("/")
+    @protected_router.get(
+        "/api/auth/verify",
+        status_code=status.HTTP_204_NO_CONTENT,
+    )
+    def verify_api_token() -> Response:
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+    @protected_router.get("/api")
     def read_root() -> dict[str, str]:
         return {"message": "Hello World"}
 

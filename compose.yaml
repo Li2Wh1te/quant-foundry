@@ -1,6 +1,29 @@
 name: quant-foundry
 
 services:
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: quant-foundry-frontend:local
+    ports:
+      - "127.0.0.1:${QF_WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1/
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
   postgres:
     image: postgres:17-alpine
     environment:
@@ -23,11 +46,11 @@ services:
     shm_size: 256mb
     stop_grace_period: 30s
 
-  server:
+  backend:
     build:
-      context: .
+      context: ./backend
       dockerfile: Dockerfile
-    image: quant-foundry-server:local
+    image: quant-foundry-backend:local
     env_file:
       - .env
     environment:
@@ -35,8 +58,6 @@ services:
       QF_SERVER_PORT: 8000
       QF_DATABASE_HOST: postgres
       QF_DATABASE_PORT: 5432
-    ports:
-      - "127.0.0.1:${QF_SERVER_PORT:-8000}:8000"
     volumes:
       - server_logs:/app/data/logs
     depends_on:

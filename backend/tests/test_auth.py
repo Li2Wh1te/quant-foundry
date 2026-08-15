@@ -68,10 +68,16 @@ class AuthenticationTestCase(unittest.TestCase):
         self.app.dependency_overrides[get_db_session] = lambda: Mock()
         try:
             with patch("app.core.request_logging.logger"):
-                self.assertEqual(asyncio.run(request_status(self.app, "/")), 401)
+                self.assertEqual(asyncio.run(request_status(self.app, "/api")), 401)
                 self.assertEqual(
-                    asyncio.run(request_status(self.app, "/", API_TOKEN)),
+                    asyncio.run(request_status(self.app, "/api", API_TOKEN)),
                     200,
+                )
+                self.assertEqual(
+                    asyncio.run(
+                        request_status(self.app, "/api/auth/verify", API_TOKEN)
+                    ),
+                    204,
                 )
                 self.assertEqual(asyncio.run(request_status(self.app, "/docs")), 200)
                 self.assertEqual(asyncio.run(request_status(self.app, "/readyz")), 200)
@@ -110,7 +116,8 @@ class AuthenticationTestCase(unittest.TestCase):
 
     def test_protects_business_routes_and_exempts_readiness(self) -> None:
         protected_operations = (
-            ("/", "get"),
+            ("/api", "get"),
+            ("/api/auth/verify", "get"),
             ("/api/admin/logs", "get"),
             ("/api/admin/logs/clear", "post"),
         )

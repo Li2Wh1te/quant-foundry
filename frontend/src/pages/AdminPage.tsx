@@ -1,0 +1,71 @@
+import { BookOpen, Grid2X2, LogOut } from "lucide-react";
+import { useNavigate } from "react-router-dom";
+
+import { useAuth } from "../auth/AuthContext";
+import { Brand } from "../components/Brand";
+import { ThemeToggle } from "../components/ThemeToggle";
+
+export function AdminPage() {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+
+  function handleLogout() {
+    logout();
+    navigate("/login", { replace: true });
+  }
+
+  return (
+    <div className="admin-shell">
+      <aside className="sidebar">
+        <Brand compact />
+
+        <nav className="sidebar__nav" aria-label="管理导航">
+          <span className="sidebar__label">工作区</span>
+          <a className="nav-item nav-item--active" href="/admin" aria-current="page">
+            <Grid2X2 aria-hidden="true" />
+            <span>概览</span>
+          </a>
+        </nav>
+
+        <div className="sidebar__footer">
+          <a className="nav-item" href="/docs" target="_blank" rel="noreferrer">
+            <BookOpen aria-hidden="true" />
+            <span>API 文档</span>
+          </a>
+          <button className="nav-item" type="button" onClick={handleLogout}>
+            <LogOut aria-hidden="true" />
+            <span>退出登录</span>
+          </button>
+          <span className="sidebar__version">v0.1.0</span>
+        </div>
+      </aside>
+
+      <main className="admin-main">
+        <header className="admin-header">
+          <h1>管理控制台</h1>
+          <div className="admin-header__actions">
+            <span className="service-health">
+              <i aria-hidden="true" />
+              <span>服务运行正常</span>
+            </span>
+            <ThemeToggle />
+          </div>
+        </header>
+
+        <section className="admin-content" aria-labelledby="empty-state-title">
+          <div className="empty-state">
+            <div className="empty-state__graphic" aria-hidden="true">
+              <span>QF</span>
+            </div>
+            <h2 id="empty-state-title">管理空间已就绪</h2>
+            <p>当前版本尚未配置管理模块。后续能力会出现在左侧导航中。</p>
+            <a className="secondary-button" href="/docs" target="_blank" rel="noreferrer">
+              <BookOpen aria-hidden="true" />
+              查看 API 文档
+            </a>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}

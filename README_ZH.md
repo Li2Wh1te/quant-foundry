@@ -2,14 +2,15 @@
 
 <h1>Quant Foundry</h1>
 
-<p><strong>为量化应用准备的可靠 FastAPI 后端底座</strong></p>
+<p><strong>为量化应用准备的可靠全栈服务底座</strong></p>
 
 <p>
-从配置、数据持久化到可观测性与自托管，提供一套清晰、可验证、可持续演进的服务基础设施。
+从管理控制台、API、数据持久化到可观测性与自托管，提供一套清晰、可验证、可持续演进的服务基础设施。
 </p>
 
 <p>
-  <a href="./pyproject.toml"><img alt="Python 3.12.2" src="https://img.shields.io/badge/Python-3.12.2-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white"></a>
+  <a href="./backend/pyproject.toml"><img alt="Python 3.12.2" src="https://img.shields.io/badge/Python-3.12.2-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white"></a>
+  <a href="./frontend/package.json"><img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&amp;logo=react&amp;logoColor=black"></a>
   <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white"></a>
   <a href="./compose.yaml"><img alt="PostgreSQL 17" src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&amp;logo=postgresql&amp;logoColor=white"></a>
   <a href="./compose.yaml"><img alt="Docker Compose" src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white"></a>
@@ -44,14 +45,16 @@
 | 配置安全 | Settings 严格校验，首次部署自动生成 256-bit 数据库密码和 API Token |
 | 数据演进 | SQLAlchemy 会话管理与 Alembic 版本化迁移 |
 | 可观测性 | JSON 结构化日志、异步写入、轮转压缩和管理查询 API |
-| 运行可靠性 | PostgreSQL 与 Server 健康检查、持久化卷和优雅停止 |
-| 行为验证 | 配置、数据库、服务和日志模块的单元测试 |
+| 管理界面 | React 管理台、Token 登录、响应式布局和深浅主题 |
+| 运行可靠性 | 前端、后端与 PostgreSQL 健康检查、持久化卷和优雅停止 |
+| 行为验证 | 后端单元测试、前端类型检查和生产构建 |
 
 ## 架构概览
 
 ```mermaid
 flowchart LR
-    Client["API Client"] --> Server["FastAPI Server"]
+    Browser["Browser / API Client"] --> Frontend["Nginx + React"]
+    Frontend --> Server["FastAPI Backend"]
     Server --> Database["PostgreSQL 17"]
     Migration["Alembic"] --> Database
     Server --> Queue["Async Log Queue"]
@@ -59,8 +62,9 @@ flowchart LR
     Admin["Admin Log API"] --> Files
 ```
 
-应用通过显式配置连接 PostgreSQL，通过 Alembic 管理模式变更。请求和应用事件进入异步
-日志队列后写入按天轮转的 JSONL 文件，管理接口从当前及历史文件中执行受限查询。
+Nginx 提供 React 单页应用，并通过 Compose 私有网络将 `/api`、API 文档和就绪检查请求
+转发给 FastAPI。后端通过显式配置连接 PostgreSQL，通过 Alembic 管理模式变更；请求和
+应用事件进入异步日志队列后写入按天轮转的 JSONL 文件。
 
 ## 快速开始
 
@@ -76,30 +80,31 @@ make selfhost
 
 | 地址 | 用途 |
 | --- | --- |
-| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API 根路径（需要 Token） |
-| [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | Swagger UI |
-| [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) | ReDoc |
-| [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | 数据库就绪检查 |
+| [http://127.0.0.1:8080](http://127.0.0.1:8080) | Web 管理台 |
+| [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs) | Swagger UI |
+| [http://127.0.0.1:8080/redoc](http://127.0.0.1:8080/redoc) | ReDoc |
+| [http://127.0.0.1:8080/readyz](http://127.0.0.1:8080/readyz) | 数据库就绪检查 |
 
-Server 和 PostgreSQL 的宿主机端口默认都只绑定到 `127.0.0.1`，不会直接暴露到
-外部网络。
+只有前端和 PostgreSQL 的宿主机端口默认绑定到 `127.0.0.1`；后端仅在 Compose 私有
+网络中提供服务。Web 管理台登录后会把 Token 保存在当前标签页的 `sessionStorage` 中。
 
 `make selfhost` 会将生成的 API Token 以 `QF_API_TOKEN` 写入 `.env`。可以把该值填入
 Swagger UI 的 **Authorize** 对话框，也可以通过 `Authorization` 请求头调用接口：
 
 ```bash
-curl -H "Authorization: Bearer <QF_API_TOKEN>" http://127.0.0.1:8000/
+curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
+  http://127.0.0.1:8080/api/auth/verify
 ```
 
 <details>
 <summary><strong>首次部署具体做了什么？</strong></summary>
 
-1. 从 `.env.example` 创建权限为 `0600` 的 `.env`；
+1. 从 `backend/.env.example` 创建权限为 `0600` 的根目录 `.env`；
 2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码和 API Token；
-3. 基于当前 checkout 构建 Server 镜像；
+3. 分别构建 Backend 和 Frontend 镜像；
 4. 创建持久化数据卷并启动 PostgreSQL；
 5. 执行全部 Alembic 迁移；
-6. 启动 Server，并通过实际查询数据库的 `/readyz` 等待服务就绪。
+6. 启动 Backend 和 Frontend，并等待所有健康检查通过。
 
 再次执行会复用已有的配置、密钥和持久化数据卷。
 
@@ -109,12 +114,18 @@ curl -H "Authorization: Bearer <QF_API_TOKEN>" http://127.0.0.1:8000/
 
 ```bash
 make selfhost-status   # 查看容器状态
-make selfhost-logs     # 跟踪 PostgreSQL 和 Server 日志
+make selfhost-logs     # 跟踪 PostgreSQL、Backend 和 Frontend 日志
+make selfhost-deploy-frontend   # 仅构建并重新部署 Frontend
+make selfhost-deploy-backend    # 构建、迁移并重新部署 Backend
+make selfhost-restart-postgres  # 重启 PostgreSQL 并等待恢复健康
 make selfhost-psql     # 打开 psql
 make selfhost-migrate  # 执行待处理的数据库迁移
 make selfhost-down     # 停止服务并保留数据
 make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 ```
+
+`selfhost-deploy-backend` 会在运行数据库迁移前停止旧 Backend，因此部署期间 API 会短暂
+不可用；迁移失败时不会启动可能与数据库结构不匹配的新版本。
 
 > [!WARNING]
 > `make selfhost-reset` 会在确认后永久删除 Compose 管理的数据库和日志卷。
@@ -133,8 +144,9 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| `GET` | `/` | 基础连通性检查 |
+| `GET` | `/api` | 基础连通性检查 |
 | `GET` | `/readyz` | 执行 `SELECT 1`，检查数据库连接 |
+| `GET` | `/api/auth/verify` | 验证 Bearer Token |
 | `GET` | `/api/admin/logs` | 查询本地结构化日志 |
 | `POST` | `/api/admin/logs/clear` | 隐藏调用时刻之前的日志 |
 
@@ -144,7 +156,8 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 
 > [!IMPORTANT]
 > 共享 API Token 可以验证调用方是否持有凭据，但不提供用户级权限和审计身份。将服务暴露
-> 到非受信网络前，仍必须使用 HTTPS 并配置适当的网络访问控制。
+> 到非受信网络前，仍必须使用 HTTPS 并配置适当的网络访问控制。Web 管理台直接在浏览器
+> 中使用 Token，因此不要引入不可信的第三方脚本。
 
 ## 开发指南
 
@@ -155,29 +168,41 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 
 - Python 3.12.2
 - [uv](https://docs.astral.sh/uv/)
+- Node.js 22
+- pnpm 11
 - 可访问的 PostgreSQL
 
-项目通过 `pyproject.toml` 要求 Python 3.12.2，并通过 `uv.lock` 锁定完整依赖树。
+前后端分别维护自己的依赖与锁文件。
 
 ```bash
 git clone https://github.com/Li2Wh1te/quant-foundry.git
 cd quant-foundry
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 编辑 `.env`，为 `QF_API_TOKEN` 和 `QF_DATABASE_PASSWORD` 设置真实值，并确保对应的
 PostgreSQL 用户和数据库已经存在。API Token 至少需要 32 个字符。然后执行：
 
 ```bash
+cd backend
 uv sync --locked
 uv run alembic upgrade head
 uv run python -m app
 ```
 
-运行完整测试：
+另开终端启动前端开发服务器：
 
 ```bash
-uv run python -m unittest discover -v
+cd frontend
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Vite 会将 API 请求代理到 `http://127.0.0.1:8000`。运行后端测试和前端生产构建：
+
+```bash
+cd backend && uv run python -m unittest discover -v
+cd frontend && pnpm build
 ```
 
 </details>
@@ -185,14 +210,15 @@ uv run python -m unittest discover -v
 <details>
 <summary><strong>环境配置</strong></summary>
 
-所有应用配置均使用 `QF_` 前缀，并从项目根目录的 `.env` 读取。完整说明和默认值见
-[`.env.example`](./.env.example)。
+所有后端配置均使用 `QF_` 前缀。源码运行时读取 `backend/.env`；自托管脚本根据
+[`backend/.env.example`](./backend/.env.example) 生成根目录 `.env` 并传给容器。
 
 | 配置 | 说明 |
 | --- | --- |
 | `QF_ENVIRONMENT` | 运行环境：`local`、`test` 或 `production` |
 | `QF_DEBUG` | 是否启用调试模式，生产环境必须为 `false` |
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | API 监听地址和端口 |
+| `QF_WEB_PORT` | 自托管 Web 管理台的宿主机端口 |
 | `QF_API_TOKEN` | 用于验证 API 请求的共享 Bearer Token |
 | `QF_DATABASE_*` | PostgreSQL 地址、端口、用户、密码和数据库名 |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | 日志目录和最低日志级别 |
@@ -210,6 +236,7 @@ uv run python -m unittest discover -v
 新增 SQLAlchemy 模型后，先将模型模块导入 `app/models/__init__.py`，再生成并检查迁移：
 
 ```bash
+cd backend
 uv run alembic revision --autogenerate -m "describe the schema change"
 uv run alembic upgrade head
 ```
@@ -222,17 +249,19 @@ uv run alembic upgrade head
 <summary><strong>项目结构</strong></summary>
 
 ```text
-app/
-├── core/                 # 鉴权、配置和日志基础设施
-├── db/                   # SQLAlchemy 会话与 Alembic 迁移
-├── logging/              # 日志查询逻辑和管理 API
-├── models/               # 领域模型
-├── __main__.py           # 本地进程入口
-└── main.py               # FastAPI 应用工厂
+backend/                  # FastAPI、Alembic、后端测试与生产镜像
+├── app/                  # 应用代码
+├── tests/                # 后端单元测试
+├── pyproject.toml
+└── Dockerfile
+frontend/                 # React、Vite、Nginx 配置与生产镜像
+├── src/                  # 页面、组件、鉴权状态与样式
+├── nginx/                # 同源反向代理配置
+├── package.json
+└── Dockerfile
 scripts/                  # 自托管与环境初始化脚本
-tests/                    # 单元测试
-compose.yaml              # PostgreSQL 与 Server 编排
-Dockerfile                # Server 生产镜像
+tests/                    # 部署脚本测试
+compose.yaml              # Frontend、Backend 与 PostgreSQL 编排
 Makefile                  # 常用自托管命令
 ```
 
@@ -259,7 +288,7 @@ Makefile                  # 常用自托管命令
 <details>
 <summary><strong>自托管数据保存在哪里？</strong></summary>
 
-PostgreSQL 数据和 Server 日志分别保存在 Docker Compose 管理的持久化卷中。
+PostgreSQL 数据和 Backend 日志分别保存在 Docker Compose 管理的持久化卷中。
 `make selfhost-down` 会保留这些数据，`make selfhost-reset` 会在确认后删除它们。
 
 </details>
@@ -270,7 +299,7 @@ PostgreSQL 数据和 Server 日志分别保存在 Docker Compose 管理的持久
 
 1. 从最新的 `main` 创建范围清晰的分支；
 2. 为行为变更补充或更新测试；
-3. 运行 `uv run python -m unittest discover -v` 并确认通过；
+3. 运行后端测试和 `pnpm build` 并确认通过；
 4. 在 Pull Request 中说明问题、实现方案、验证结果和兼容性影响。
 
 对于影响公共 API、数据模型或部署方式的较大改动，建议先通过 Issue 对齐目标和边界。

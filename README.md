@@ -2,15 +2,16 @@
 
 <h1>Quant Foundry</h1>
 
-<p><strong>A reliable FastAPI backend foundation for quantitative applications</strong></p>
+<p><strong>A reliable full-stack service foundation for quantitative applications</strong></p>
 
 <p>
-Configuration, persistence, observability, and self-hosting in one clear, verifiable,
+Admin UI, APIs, persistence, observability, and self-hosting in one clear, verifiable,
 and maintainable service foundation.
 </p>
 
 <p>
-  <a href="./pyproject.toml"><img alt="Python 3.12.2" src="https://img.shields.io/badge/Python-3.12.2-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white"></a>
+  <a href="./backend/pyproject.toml"><img alt="Python 3.12.2" src="https://img.shields.io/badge/Python-3.12.2-3776AB?style=flat-square&amp;logo=python&amp;logoColor=white"></a>
+  <a href="./frontend/package.json"><img alt="React 19" src="https://img.shields.io/badge/React-19-61DAFB?style=flat-square&amp;logo=react&amp;logoColor=black"></a>
   <a href="https://fastapi.tiangolo.com/"><img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-009688?style=flat-square&amp;logo=fastapi&amp;logoColor=white"></a>
   <a href="./compose.yaml"><img alt="PostgreSQL 17" src="https://img.shields.io/badge/PostgreSQL-17-4169E1?style=flat-square&amp;logo=postgresql&amp;logoColor=white"></a>
   <a href="./compose.yaml"><img alt="Docker Compose" src="https://img.shields.io/badge/Docker-Compose-2496ED?style=flat-square&amp;logo=docker&amp;logoColor=white"></a>
@@ -46,14 +47,16 @@ and trading.
 | Configuration safety | Strict settings validation with auto-generated 256-bit database and API secrets |
 | Data evolution | SQLAlchemy session management and versioned Alembic migrations |
 | Observability | Structured JSON logs, asynchronous writes, rotation, compression, and an admin query API |
-| Runtime reliability | PostgreSQL and Server health checks, persistent volumes, and graceful shutdown |
-| Behavioral verification | Unit tests for configuration, database, server, and logging modules |
+| Admin interface | React console with token login, responsive layout, and light/dark themes |
+| Runtime reliability | Frontend, Backend, and PostgreSQL health checks, volumes, and graceful shutdown |
+| Behavioral verification | Backend unit tests, frontend type checking, and production builds |
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client["API Client"] --> Server["FastAPI Server"]
+    Client["Browser / API Client"] --> Frontend["Nginx + React"]
+    Frontend --> Server["FastAPI Backend"]
     Server --> Database["PostgreSQL 17"]
     Migration["Alembic"] --> Database
     Server --> Queue["Async Log Queue"]
@@ -61,9 +64,9 @@ flowchart LR
     Admin["Admin Log API"] --> Files
 ```
 
-The application connects to PostgreSQL through explicit settings and manages schema changes with
-Alembic. Request and application events enter an asynchronous queue before being written to daily
-rotating JSONL files. The admin API performs bounded queries across current and historical log files.
+Nginx serves the React SPA and forwards `/api`, documentation, and readiness requests to FastAPI over
+the private Compose network. The backend connects to PostgreSQL through explicit settings and manages
+schema changes with Alembic. Request and application events are written to rotating JSONL files.
 
 ## Quick Start
 
@@ -80,30 +83,31 @@ Once the stack is ready, open:
 
 | URL | Purpose |
 | --- | --- |
-| [http://127.0.0.1:8000](http://127.0.0.1:8000) | API root (token required) |
-| [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs) | Swagger UI |
-| [http://127.0.0.1:8000/redoc](http://127.0.0.1:8000/redoc) | ReDoc |
-| [http://127.0.0.1:8000/readyz](http://127.0.0.1:8000/readyz) | Database readiness check |
+| [http://127.0.0.1:8080](http://127.0.0.1:8080) | Web admin console |
+| [http://127.0.0.1:8080/docs](http://127.0.0.1:8080/docs) | Swagger UI |
+| [http://127.0.0.1:8080/redoc](http://127.0.0.1:8080/redoc) | ReDoc |
+| [http://127.0.0.1:8080/readyz](http://127.0.0.1:8080/readyz) | Database readiness check |
 
-The Server and PostgreSQL host ports bind to `127.0.0.1` by default and are not directly exposed
-to external networks.
+Only the Frontend and PostgreSQL host ports bind to `127.0.0.1`; the Backend is available only on the
+private Compose network. The admin console keeps its token in the current tab's `sessionStorage`.
 
 `make selfhost` stores the generated API token as `QF_API_TOKEN` in `.env`. Use that value with the
 Swagger UI **Authorize** button or send it in the `Authorization` header:
 
 ```bash
-curl -H "Authorization: Bearer <QF_API_TOKEN>" http://127.0.0.1:8000/
+curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
+  http://127.0.0.1:8080/api/auth/verify
 ```
 
 <details>
 <summary><strong>What happens during the first deployment?</strong></summary>
 
-1. Create `.env` from `.env.example` with `0600` permissions;
+1. Create the root `.env` from `backend/.env.example` with `0600` permissions;
 2. Generate a random 256-bit PostgreSQL password and API token with Python `secrets`;
-3. Build the Server image from the current checkout;
+3. Build separate Backend and Frontend images;
 4. Create persistent volumes and start PostgreSQL;
 5. Apply all Alembic migrations;
-6. Start the Server and wait for `/readyz` to verify a real database query.
+6. Start the Backend and Frontend and wait for every health check to pass.
 
 Subsequent runs reuse the existing configuration, secrets, and persistent volumes.
 
@@ -113,12 +117,19 @@ Subsequent runs reuse the existing configuration, secrets, and persistent volume
 
 ```bash
 make selfhost-status   # Show container status
-make selfhost-logs     # Follow PostgreSQL and Server logs
+make selfhost-logs     # Follow PostgreSQL, Backend, and Frontend logs
+make selfhost-deploy-frontend   # Build and redeploy only the Frontend
+make selfhost-deploy-backend    # Build, migrate, and redeploy the Backend
+make selfhost-restart-postgres  # Restart PostgreSQL and wait until healthy
 make selfhost-psql     # Open psql
 make selfhost-migrate  # Apply pending database migrations
 make selfhost-down     # Stop the stack and preserve data
 make selfhost-reset    # Delete database and log data, then redeploy
 ```
+
+`selfhost-deploy-backend` stops the current Backend before applying database migrations, so the API
+is briefly unavailable during deployment. If migration fails, it does not start a version that may
+be incompatible with the database schema.
 
 > [!WARNING]
 > `make selfhost-reset` permanently deletes the database and log volumes managed by Docker Compose
@@ -139,8 +150,9 @@ pages and the OpenAPI schema are also public, but calls made from Swagger UI sti
 
 | Method | Path | Description |
 | --- | --- | --- |
-| `GET` | `/` | Basic connectivity check |
+| `GET` | `/api` | Basic connectivity check |
 | `GET` | `/readyz` | Execute `SELECT 1` to verify the database connection |
+| `GET` | `/api/auth/verify` | Verify a Bearer Token |
 | `GET` | `/api/admin/logs` | Query local structured logs |
 | `POST` | `/api/admin/logs/clear` | Hide logs created before the request |
 
@@ -152,7 +164,8 @@ subject to the configured retention policy.
 > [!IMPORTANT]
 > The shared API token authenticates the caller but does not provide per-user permissions or audit
 > identity. Use HTTPS and appropriate network access controls before exposing the service to an
-> untrusted network.
+> untrusted network. The web console uses the token directly in the browser, so do not add untrusted
+> third-party scripts.
 
 ## Development
 
@@ -163,15 +176,16 @@ subject to the configured retention policy.
 
 - Python 3.12.2
 - [uv](https://docs.astral.sh/uv/)
+- Node.js 22
+- pnpm 11
 - An accessible PostgreSQL instance
 
-The project requires Python 3.12.2 in `pyproject.toml` and locks the complete dependency graph in
-`uv.lock`.
+The Frontend and Backend maintain independent dependency manifests and lockfiles.
 
 ```bash
 git clone https://github.com/Li2Wh1te/quant-foundry.git
 cd quant-foundry
-cp .env.example .env
+cp backend/.env.example backend/.env
 ```
 
 Edit `.env`, set real values for `QF_API_TOKEN` and `QF_DATABASE_PASSWORD`, and make sure the
@@ -179,15 +193,26 @@ configured PostgreSQL user and database exist. The API token must contain at lea
 Then run:
 
 ```bash
+cd backend
 uv sync --locked
 uv run alembic upgrade head
 uv run python -m app
 ```
 
-Run the complete test suite:
+Start the frontend development server in another terminal:
 
 ```bash
-uv run python -m unittest discover -v
+cd frontend
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+Vite proxies API requests to `http://127.0.0.1:8000`. Run Backend tests and the Frontend production
+build with:
+
+```bash
+cd backend && uv run python -m unittest discover -v
+cd frontend && pnpm build
 ```
 
 </details>
@@ -195,14 +220,15 @@ uv run python -m unittest discover -v
 <details>
 <summary><strong>Environment configuration</strong></summary>
 
-All application settings use the `QF_` prefix and are loaded from `.env` in the project root.
-See [`.env.example`](./.env.example) for complete descriptions and defaults.
+All Backend settings use the `QF_` prefix. Source runs load `backend/.env`; the self-hosting script
+creates the root `.env` from [`backend/.env.example`](./backend/.env.example) and passes it to containers.
 
 | Setting | Description |
 | --- | --- |
 | `QF_ENVIRONMENT` | Runtime environment: `local`, `test`, or `production` |
 | `QF_DEBUG` | Enable debug mode; this must be `false` in production |
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | API bind address and port |
+| `QF_WEB_PORT` | Host port for the self-hosted web console |
 | `QF_API_TOKEN` | Shared Bearer Token used to authenticate API requests |
 | `QF_DATABASE_*` | PostgreSQL host, port, user, password, and database name |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | Log directory and minimum log level |
@@ -221,6 +247,7 @@ After adding a SQLAlchemy model, import its module from `app/models/__init__.py`
 review the migration:
 
 ```bash
+cd backend
 uv run alembic revision --autogenerate -m "describe the schema change"
 uv run alembic upgrade head
 ```
@@ -233,17 +260,19 @@ Migration files are part of the codebase and should be committed with the corres
 <summary><strong>Project structure</strong></summary>
 
 ```text
-app/
-├── core/                 # Authentication, configuration, and logging infrastructure
-├── db/                   # SQLAlchemy sessions and Alembic migrations
-├── logging/              # Log query logic and admin API
-├── models/               # Domain models
-├── __main__.py           # Local process entry point
-└── main.py               # FastAPI application factory
+backend/                  # FastAPI, Alembic, Backend tests, and production image
+├── app/                  # Application code
+├── tests/                # Backend unit tests
+├── pyproject.toml
+└── Dockerfile
+frontend/                 # React, Vite, Nginx configuration, and production image
+├── src/                  # Pages, components, authentication state, and styles
+├── nginx/                # Same-origin reverse proxy configuration
+├── package.json
+└── Dockerfile
 scripts/                  # Self-hosting and environment initialization scripts
-tests/                    # Unit tests
-compose.yaml              # PostgreSQL and Server orchestration
-Dockerfile                # Production Server image
+tests/                    # Deployment script tests
+compose.yaml              # Frontend, Backend, and PostgreSQL orchestration
 Makefile                  # Common self-hosting commands
 ```
 
@@ -272,7 +301,7 @@ and a trusted reverse proxy.
 <details>
 <summary><strong>Where is self-hosted data stored?</strong></summary>
 
-PostgreSQL data and Server logs are stored in separate persistent volumes managed by Docker Compose.
+PostgreSQL data and Backend logs are stored in separate persistent volumes managed by Docker Compose.
 `make selfhost-down` preserves these volumes; `make selfhost-reset` deletes them after confirmation.
 
 </details>
@@ -284,7 +313,7 @@ Before submitting code:
 
 1. Create a focused branch from the latest `main`;
 2. Add or update tests for behavioral changes;
-3. Run `uv run python -m unittest discover -v` and confirm that it passes;
+3. Run the Backend tests and `pnpm build` and confirm that both pass;
 4. Explain the problem, implementation, verification, and compatibility impact in the Pull Request.
 
 For larger changes to public APIs, data models, or deployment behavior, open an Issue first to align
