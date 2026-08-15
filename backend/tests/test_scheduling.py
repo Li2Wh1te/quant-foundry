@@ -251,6 +251,12 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_default_registry_registers_etf_basic_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_basics")
+
+        self.assertEqual(definition.name, "ETF基础信息采集")
+        self.assertEqual(definition.english_name, "Sync Tushare ETF basics")
+
     def test_default_registry_registers_trade_calendar_sync_task(self) -> None:
         definition = task_registry.require("data.sync_trade_calendar")
 
