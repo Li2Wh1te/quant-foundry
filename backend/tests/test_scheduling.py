@@ -266,6 +266,31 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_default_registry_registers_etf_adjustment_incremental_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_adjustment_incremental")
+
+        self.assertEqual(definition.name, "ETF复权因子增量采集")
+        self.assertEqual(
+            definition.english_name, "Incremental Tushare ETF adjustment factors"
+        )
+
+    def test_default_registry_registers_etf_adjustment_full_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_adjustment_full")
+
+        self.assertEqual(definition.name, "ETF复权因子全量采集")
+        self.assertEqual(
+            definition.english_name, "Full Tushare ETF adjustment factors"
+        )
+
+    def test_default_registry_registers_etf_adjustment_reconciliation_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_adjustment_reconciliation")
+
+        self.assertEqual(definition.name, "ETF复权因子近期校验")
+        self.assertEqual(
+            definition.english_name,
+            "Reconcile recent Tushare ETF adjustment factors",
+        )
+
     def test_default_registry_registers_etf_daily_incremental_sync_task(self) -> None:
         definition = task_registry.require("data.sync_etf_daily_incremental")
 

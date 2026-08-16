@@ -21,3 +21,14 @@ class EtfAdjustmentFactorUpsertResult:
     received: int
     changed: int
     unchanged: int
+
+
+@dataclass(frozen=True)
+class EtfAdjustmentSyncResult:
+    """Summary of one whole-market adjustment-factor synchronization."""
+
+    days_completed: int
+    received: int
+    changed: int
+    unchanged: int
+    synced_through_date: date | None
