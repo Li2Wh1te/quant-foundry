@@ -9,6 +9,7 @@ import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
+import { StrategyDataApiPage } from "./pages/StrategyDataApiPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -70,6 +71,10 @@ export function App() {
       <Route
         path="/admin/data/etf-basics/:tsCode"
         element={<RequireAuth><AdminPage><EtfDetailPage /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/strategy-data"
+        element={<RequireAuth><AdminPage><StrategyDataApiPage /></AdminPage></RequireAuth>}
       />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>
