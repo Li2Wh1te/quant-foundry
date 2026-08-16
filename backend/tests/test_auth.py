@@ -135,6 +135,9 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/data-collections/trading-calendar/overview", "get"),
             ("/api/admin/data-collections/etfs", "get"),
             ("/api/admin/data-collections/etfs/overview", "get"),
+            ("/api/admin/data-collections/etfs/{ts_code}", "get"),
+            ("/api/admin/data-collections/etfs/{ts_code}/daily-bars", "get"),
+            ("/api/admin/data-collections/etfs/{ts_code}/adjustment-factors", "get"),
         )
         schema = self.app.openapi()
 
