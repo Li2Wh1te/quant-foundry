@@ -38,6 +38,22 @@ class EtfDetailQueryRepositoryTestCase(unittest.TestCase):
         self.assertIn("etf_daily_bars.trade_date <=", query)
         self.assertIn("ORDER BY etf_daily_bars.trade_date ASC", query)
 
+    def test_daily_bars_return_complete_history_when_limit_is_omitted(self) -> None:
+        session = Mock()
+        session.scalars.return_value.all.return_value = []
+
+        result = EtfDetailQueryRepository(session).list_daily_bars(
+            ts_code="510300.SH",
+            start_date=None,
+            end_date=None,
+            limit=None,
+        )
+
+        self.assertEqual(result, [])
+        query = str(session.scalars.call_args.args[0])
+        self.assertIn("ORDER BY etf_daily_bars.trade_date ASC", query)
+        self.assertNotIn("LIMIT", query)
+
     def test_adjustment_factors_filter_the_selected_code_and_date_range(self) -> None:
         session = Mock()
         session.scalars.return_value.all.return_value = []

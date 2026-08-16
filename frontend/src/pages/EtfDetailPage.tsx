@@ -1,5 +1,6 @@
 import { ChevronLeft, Expand, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { CandlestickSeries, ColorType, CrosshairMode, createChart, HistogramSeries, LineSeries, Time } from "lightweight-charts";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
 import {
@@ -32,16 +33,6 @@ const TABS: { key: DetailTab; label: string }[] = [
   { key: "daily", label: "日线 K 线" },
   { key: "factors", label: "复权因子" }
 ];
-
-function isoDate(value: Date): string {
-  return value.toISOString().slice(0, 10);
-}
-
-function initialStartDate(): string {
-  const value = new Date();
-  value.setFullYear(value.getFullYear() - 1);
-  return isoDate(value);
-}
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
@@ -141,6 +132,10 @@ function aggregateBars(bars: NumericBar[], period: ChartPeriod): NumericBar[] {
   }));
 }
 
+function withinDateRange(value: string, startDate: string, endDate: string): boolean {
+  return (!startDate || value >= startDate) && (!endDate || value <= endDate);
+}
+
 function movingAverage(bars: NumericBar[], length: number): (number | null)[] {
   return bars.map((_, index) => {
     if (index + 1 < length) return null;
@@ -149,49 +144,67 @@ function movingAverage(bars: NumericBar[], length: number): (number | null)[] {
   });
 }
 
-function linePath(values: (number | null)[], x: (index: number) => number, y: (value: number) => number): string {
-  let path = "";
-  let pendingMove = true;
-  values.forEach((value, index) => {
-    if (value === null) { pendingMove = true; return; }
-    path += `${pendingMove ? "M" : "L"}${x(index).toFixed(2)},${y(value).toFixed(2)} `;
-    pendingMove = false;
-  });
-  return path;
-}
+function InteractiveKLineChart({
+  bars,
+  historyBars,
+  visibleCount,
+  visibleAverages
+}: {
+  bars: NumericBar[];
+  historyBars: NumericBar[];
+  visibleCount: number | null;
+  visibleAverages: Record<5 | 10 | 20, boolean>;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
 
-function KLineChart({ bars }: { bars: NumericBar[] }) {
-  // A viewBox keeps the chart readable at every container width while all
-  // coordinates remain derived from the currently loaded series.
-  const chart = useMemo(() => {
-    const width = 920, height = 390, left = 48, right = 70, top = 20, priceBottom = 276, volumeTop = 294, bottom = 342;
-    const prices = bars.flatMap((bar) => [bar.high, bar.low]);
-    const min = Math.min(...prices), max = Math.max(...prices), padding = Math.max((max - min) * 0.08, max * 0.001);
-    const floor = min - padding, ceiling = max + padding, innerWidth = width - left - right;
-    const x = (index: number) => left + ((index + 0.5) / bars.length) * innerWidth;
-    const y = (value: number) => top + ((ceiling - value) / (ceiling - floor)) * (priceBottom - top);
-    const maxVolume = Math.max(...bars.map((bar) => bar.vol), 1);
-    const volumeY = (value: number) => bottom - (value / maxVolume) * (bottom - volumeTop);
-    return { width, height, left, right, top, priceBottom, volumeTop, bottom, floor, ceiling, x, y, volumeY, candleWidth: Math.max(2, Math.min(12, innerWidth / bars.length * 0.62)) };
-  }, [bars]);
-  const ma5 = useMemo(() => movingAverage(bars, 5), [bars]);
-  const ma10 = useMemo(() => movingAverage(bars, 10), [bars]);
-  const ma20 = useMemo(() => movingAverage(bars, 20), [bars]);
-  const priceTicks = Array.from({ length: 5 }, (_, index) => chart.floor + ((chart.ceiling - chart.floor) * index / 4));
-  const dateTicks = bars.length <= 5 ? bars.map((_, index) => index) : [0, Math.floor((bars.length - 1) / 3), Math.floor((bars.length - 1) * 2 / 3), bars.length - 1];
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!container) return;
+    const chart = createChart(container, {
+      width: container.clientWidth,
+      height: 470,
+      layout: { background: { type: ColorType.Solid, color: "#1d2025" }, textColor: "#aab4c4" },
+      grid: { vertLines: { color: "#2b3037" }, horzLines: { color: "#343940" } },
+      crosshair: { mode: CrosshairMode.MagnetOHLC },
+      rightPriceScale: { borderColor: "#343940" },
+      timeScale: { borderColor: "#343940", timeVisible: true, secondsVisible: false }
+    });
+    const candles = chart.addSeries(CandlestickSeries, {
+      upColor: "#f35b69", downColor: "#45cc91", borderUpColor: "#f35b69", borderDownColor: "#45cc91", wickUpColor: "#f35b69", wickDownColor: "#45cc91"
+    });
+    candles.setData(bars.map((bar) => ({ time: bar.tradeDate as Time, open: bar.open, high: bar.high, low: bar.low, close: bar.close })));
+    const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" } }, 1);
+    volume.setData(bars.map((bar) => ({ time: bar.tradeDate as Time, value: bar.vol, color: bar.close >= bar.open ? "rgba(243, 91, 105, 0.72)" : "rgba(69, 204, 145, 0.72)" })));
+    chart.panes()[1].setHeight(92);
 
-  return <svg className="etf-kline" viewBox={`0 0 ${chart.width} ${chart.height}`} role="img" aria-label="ETF K 线图，包含成交量和移动平均线">
-    {priceTicks.map((value) => <g key={value}><line className="etf-kline__grid" x1={chart.left} x2={chart.width - chart.right} y1={chart.y(value)} y2={chart.y(value)} /><text className="etf-kline__axis" x={chart.width - chart.right + 10} y={chart.y(value) + 4}>{value.toFixed(3)}</text></g>)}
-    <line className="etf-kline__grid" x1={chart.left} x2={chart.width - chart.right} y1={chart.volumeTop} y2={chart.volumeTop} />
-    {bars.map((bar, index) => {
-      const rising = bar.close >= bar.open;
-      const className = rising ? "etf-kline__up" : "etf-kline__down";
-      const x = chart.x(index), bodyTop = Math.min(chart.y(bar.open), chart.y(bar.close)), bodyBottom = Math.max(chart.y(bar.open), chart.y(bar.close));
-      return <g key={bar.tradeDate} className={className}><line x1={x} x2={x} y1={chart.y(bar.high)} y2={chart.y(bar.low)} /><rect x={x - chart.candleWidth / 2} y={bodyTop} width={chart.candleWidth} height={Math.max(1.5, bodyBottom - bodyTop)} /><rect x={x - chart.candleWidth / 2} y={chart.volumeY(bar.vol)} width={chart.candleWidth} height={chart.bottom - chart.volumeY(bar.vol)} opacity="0.72" /></g>;
-    })}
-    <path className="etf-kline__ma etf-kline__ma--5" d={linePath(ma5, chart.x, chart.y)} /><path className="etf-kline__ma etf-kline__ma--10" d={linePath(ma10, chart.x, chart.y)} /><path className="etf-kline__ma etf-kline__ma--20" d={linePath(ma20, chart.x, chart.y)} />
-    {dateTicks.map((index) => <text key={index} className="etf-kline__axis" textAnchor="middle" x={chart.x(index)} y={chart.height - 14}>{formatDate(bars[index].tradeDate).slice(5)}</text>)}
-  </svg>;
+    // Moving averages are calculated from the complete loaded history, then
+    // projected onto the current viewport so date filtering never restarts MA.
+    const historyMa5 = movingAverage(historyBars, 5);
+    const historyMa10 = movingAverage(historyBars, 10);
+    const historyMa20 = movingAverage(historyBars, 20);
+    const historyAverages = new Map(historyBars.map((bar, index) => [bar.tradeDate, {
+      ma5: historyMa5[index], ma10: historyMa10[index], ma20: historyMa20[index]
+    }]));
+    const addAverage = (length: 5 | 10 | 20, color: string) => {
+      if (!visibleAverages[length]) return;
+      const series = chart.addSeries(LineSeries, { color, lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
+      series.setData(bars.flatMap((bar) => {
+        const value = historyAverages.get(bar.tradeDate)?.[`ma${length}`];
+        return value === null || value === undefined ? [] : [{ time: bar.tradeDate as Time, value }];
+      }));
+    };
+    addAverage(5, "#10cae6"); addAverage(10, "#ffb317"); addAverage(20, "#ba94ff");
+
+    chart.timeScale().fitContent();
+    if (visibleCount !== null && bars.length > visibleCount) {
+      chart.timeScale().setVisibleLogicalRange({ from: bars.length - visibleCount - 0.5, to: bars.length - 0.5 });
+    }
+    const observer = new ResizeObserver(([entry]) => chart.applyOptions({ width: Math.floor(entry.contentRect.width) }));
+    observer.observe(container);
+    return () => { observer.disconnect(); chart.remove(); };
+  }, [bars, historyBars, visibleAverages, visibleCount]);
+
+  return <div ref={containerRef} className="etf-kline" aria-label="可缩放、可拖拽的 ETF K 线图" />;
 }
 
 export function EtfDetailPage() {
@@ -203,10 +216,12 @@ export function EtfDetailPage() {
   const [etf, setEtf] = useState<EtfCode | null>(null);
   const [dailyBars, setDailyBars] = useState<EtfDailyBar[]>([]);
   const [factors, setFactors] = useState<EtfAdjustmentFactor[]>([]);
-  const [startDate, setStartDate] = useState(initialStartDate);
-  const [endDate, setEndDate] = useState(() => isoDate(new Date()));
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
   const [period, setPeriod] = useState<ChartPeriod>("day");
   const [adjustment, setAdjustment] = useState<AdjustmentMode>("raw");
+  const [visibleCount, setVisibleCount] = useState<number | null>(200);
+  const [visibleAverages, setVisibleAverages] = useState<Record<5 | 10 | 20, boolean>>({ 5: true, 10: true, 20: true });
   const [loading, setLoading] = useState(true);
   const [seriesLoading, setSeriesLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -226,12 +241,11 @@ export function EtfDetailPage() {
   }, [handleError, tsCode]);
 
   const loadSeries = useCallback(async () => {
-    if (startDate > endDate) { setError("开始日期不能晚于结束日期。"); return; }
     setSeriesLoading(true); setError(null);
     try {
       const [nextBars, nextFactors] = await Promise.all([
-        listEtfDailyBars(tsCode, { startDate, endDate, limit: 5_000 }),
-        listEtfAdjustmentFactors(tsCode, { startDate, endDate, limit: 5_000 })
+        listEtfDailyBars(tsCode, {}),
+        listEtfAdjustmentFactors(tsCode, {})
       ]);
       setDailyBars(nextBars); setFactors(nextFactors);
     } catch (caught) {
@@ -239,14 +253,22 @@ export function EtfDetailPage() {
     } finally {
       setSeriesLoading(false);
     }
-  }, [endDate, handleError, startDate, tsCode]);
+  }, [handleError, tsCode]);
 
   useEffect(() => { if (tab !== "basic") void loadSeries(); }, [loadSeries, tab]);
 
-  const chartBars = useMemo(() => {
+  const fullChartBars = useMemo(() => {
     const adjusted = adjustedBars(dailyBars, factors, adjustment);
     return adjusted === null ? null : aggregateBars(adjusted, period);
   }, [adjustment, dailyBars, factors, period]);
+  const chartBars = useMemo(
+    () => fullChartBars?.filter((bar) => withinDateRange(bar.tradeDate, startDate, endDate)) ?? null,
+    [endDate, fullChartBars, startDate]
+  );
+  const visibleFactors = useMemo(
+    () => factors.filter((factor) => withinDateRange(factor.trade_date, startDate, endDate)),
+    [endDate, factors, startDate]
+  );
   const displayName = etf?.csname ?? etf?.extname ?? etf?.ts_code ?? tsCode;
 
   if (loading) return <section className="collection-page"><div className="collection-empty-state">正在加载 ETF 详情…</div></section>;
@@ -258,6 +280,10 @@ export function EtfDetailPage() {
     {error && <div className="page-error" role="alert">{error}</div>}
     <div className="etf-detail__tabs" role="tablist" aria-label="ETF 详情页签">{TABS.map((item) => <button key={item.key} className={tab === item.key ? "active" : ""} type="button" role="tab" aria-selected={tab === item.key} onClick={() => setSearchParams(item.key === "basic" ? {} : { tab: item.key })}>{item.label}</button>)}</div>
     {tab === "basic" && <section className="collection-table etf-detail__basic"><div className="collection-table__heading"><div><h3>基础资料</h3><span>ETF 基础信息的当前数据</span></div></div><dl><div><dt>交易所</dt><dd>{exchangeLabel(etf.exchange)}</dd></div><div><dt>上市状态</dt><dd>{statusLabel(etf.list_status)}</dd></div><div><dt>上市日期</dt><dd>{formatDate(etf.list_date)}</dd></div><div><dt>跟踪指数</dt><dd>{etf.index_name ?? "—"}</dd></div><div><dt>管理人</dt><dd>{etf.mgr_name ?? "—"}</dd></div><div><dt>管理费率</dt><dd>{etf.mgt_fee ? `${numberText(etf.mgt_fee)}%` : "—"}</dd></div></dl></section>}
-    {tab !== "basic" && <><div className="etf-detail__filters"><label>开始日期<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /></label><label>结束日期<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button className="toolbar-button" type="button" disabled={seriesLoading} onClick={() => void loadSeries()}><RefreshCw className={seriesLoading ? "spin" : ""} aria-hidden="true" />查询</button></div>{tab === "daily" && <section className="etf-detail__chart-shell"><div className="etf-detail__chart-heading"><h3>K 线</h3><button className="etf-detail__expand" type="button" onClick={() => document.querySelector(".etf-detail__chart-shell")?.requestFullscreen()}><Expand aria-hidden="true" />全屏</button></div><div className="etf-detail__chart-controls"><div>{(["day", "week", "month", "year"] as ChartPeriod[]).map((item) => <button key={item} className={period === item ? "active" : ""} type="button" onClick={() => setPeriod(item)}>{({ day: "日", week: "周", month: "月", year: "年" })[item]}</button>)}</div><span><i className="ma5" />MA5 <i className="ma10" />MA10 <i className="ma20" />MA20</span><div>{(["raw", "forward", "backward"] as AdjustmentMode[]).map((item) => <button key={item} className={adjustment === item ? "active" : ""} type="button" onClick={() => setAdjustment(item)}>{({ raw: "不复权", forward: "前复权", backward: "后复权" })[item]}</button>)}</div></div>{seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <KLineChart bars={chartBars} />}</section>}{tab === "factors" && <section className="collection-table etf-detail__factor-table"><div className="collection-table__heading"><div><h3>复权因子</h3><span>按交易日期升序展示</span></div><strong>{seriesLoading ? "正在加载…" : `${factors.length.toLocaleString("zh-CN")} 条`}</strong></div><div className="collection-table__scroll"><table><thead><tr><th>交易日期</th><th>复权因子</th><th>数据来源</th><th>更新时间</th></tr></thead><tbody>{seriesLoading ? <tr><td colSpan={4} className="collection-table__empty">正在加载复权因子…</td></tr> : factors.length === 0 ? <tr><td colSpan={4} className="collection-table__empty">该日期范围内没有复权因子数据</td></tr> : factors.map((factor) => <tr key={factor.trade_date}><td>{formatDate(factor.trade_date)}</td><td>{numberText(factor.adj_factor, 12)}</td><td>{factor.source}</td><td>{formatTimestamp(factor.updated_at)}</td></tr>)}</tbody></table></div></section>}</>}
+    {tab !== "basic" && <>
+      <div className="etf-detail__filters"><label>开始日期<input type="date" value={startDate} onChange={(event) => setStartDate(event.target.value)} /><small>留空表示全部日线数据</small></label><label>结束日期<input type="date" value={endDate} onChange={(event) => setEndDate(event.target.value)} /></label><button className="toolbar-button" type="button" disabled={seriesLoading || (Boolean(startDate) && Boolean(endDate) && startDate > endDate)} onClick={() => void loadSeries()}><RefreshCw className={seriesLoading ? "spin" : ""} aria-hidden="true" />刷新数据</button></div>
+      {tab === "daily" && <section className="etf-detail__chart-shell"><div className="etf-detail__chart-heading"><h3>K 线</h3><button className="etf-detail__expand" type="button" onClick={() => document.querySelector(".etf-detail__chart-shell")?.requestFullscreen()}><Expand aria-hidden="true" />全屏</button></div><div className="etf-detail__chart-controls"><div>{(["day", "week", "month", "year"] as ChartPeriod[]).map((item) => <button key={item} className={period === item ? "active" : ""} type="button" onClick={() => setPeriod(item)}>{({ day: "日", week: "周", month: "月", year: "年" })[item]}</button>)}</div><div className="etf-detail__ma-toggles">{([5, 10, 20] as const).map((length) => <button key={length} type="button" aria-pressed={visibleAverages[length]} onClick={() => setVisibleAverages((current) => ({ ...current, [length]: !current[length] }))}><i className={`ma${length}`} />MA{length}</button>)}</div><div>{(["raw", "forward", "backward"] as AdjustmentMode[]).map((item) => <button key={item} className={adjustment === item ? "active" : ""} type="button" onClick={() => setAdjustment(item)}>{({ raw: "不复权", forward: "前复权", backward: "后复权" })[item]}</button>)}</div></div><div className="etf-detail__range-controls">{([30, 60, 90, 200, null] as (number | null)[]).map((count) => <button key={count ?? "all"} className={visibleCount === count ? "active" : ""} type="button" onClick={() => setVisibleCount(count)}>{count === null ? "全部" : `${count} 日`}</button>)}<span>滚轮缩放，拖拽回看</span></div>{seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null || fullChartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <InteractiveKLineChart bars={chartBars} historyBars={fullChartBars} visibleCount={visibleCount} visibleAverages={visibleAverages} />}</section>}
+      {tab === "factors" && <section className="collection-table etf-detail__factor-table"><div className="collection-table__heading"><div><h3>复权因子</h3><span>按交易日期升序展示</span></div><strong>{seriesLoading ? "正在加载…" : `${visibleFactors.length.toLocaleString("zh-CN")} 条`}</strong></div><div className="collection-table__scroll"><table><thead><tr><th>交易日期</th><th>复权因子</th><th>数据来源</th><th>更新时间</th></tr></thead><tbody>{seriesLoading ? <tr><td colSpan={4} className="collection-table__empty">正在加载复权因子…</td></tr> : visibleFactors.length === 0 ? <tr><td colSpan={4} className="collection-table__empty">该日期范围内没有复权因子数据</td></tr> : visibleFactors.map((factor) => <tr key={factor.trade_date}><td>{formatDate(factor.trade_date)}</td><td>{numberText(factor.adj_factor, 12)}</td><td>{factor.source}</td><td>{formatTimestamp(factor.updated_at)}</td></tr>)}</tbody></table></div></section>}
+    </>}
   </section>;
 }

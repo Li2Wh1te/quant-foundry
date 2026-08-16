@@ -233,7 +233,7 @@ def list_etf_daily_bars(
     session: Annotated[Session, Depends(get_db_session)],
     start_date: date | None = None,
     end_date: date | None = None,
-    limit: Annotated[int, Query(ge=1, le=5_000)] = 1_000,
+    limit: Annotated[int | None, Query(ge=1, le=10_000)] = None,
 ) -> list[EtfDailyBarResponse]:
     """List raw daily bars for one ETF in chronological order for chart rendering."""
     _get_etf_or_404(session, ts_code)
@@ -256,7 +256,7 @@ def list_etf_adjustment_factors(
     session: Annotated[Session, Depends(get_db_session)],
     start_date: date | None = None,
     end_date: date | None = None,
-    limit: Annotated[int, Query(ge=1, le=5_000)] = 1_000,
+    limit: Annotated[int | None, Query(ge=1, le=10_000)] = None,
 ) -> list[EtfAdjustmentFactorResponse]:
     """List matching adjustment factors for the selected ETF and date range."""
     _get_etf_or_404(session, ts_code)
