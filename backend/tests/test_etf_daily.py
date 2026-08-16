@@ -13,15 +13,18 @@ from app.data_ingestion.schemas.etf_daily import (
 from app.data_ingestion.schemas.trading_calendar import DataSyncCheckpointState
 from app.data_ingestion.services.etf_daily import (
     ETF_DAILY_FIELDS,
+    ETF_DAILY_FULL_SYNC_KEY,
+    ETF_DAILY_INCREMENTAL_SYNC_KEY,
     ETF_DAILY_MARKET_FIELDS,
     ETF_DAILY_SCOPE_KEY,
-    ETF_DAILY_SYNC_KEY,
     MAX_ETF_DAILY_ROWS,
     _commit_etf_daily_date,
+    _initialize_full_cycle,
     fetch_etf_daily,
     fetch_etf_daily_for_trade_date,
     normalize_etf_daily,
-    sync_etf_daily,
+    sync_etf_daily_full,
+    sync_etf_daily_incremental,
 )
 
 
@@ -124,14 +127,14 @@ class FetchEtfDailyTestCase(unittest.TestCase):
         load_open_dates_mock.return_value = [first_date, second_date]
         fetch_mock.side_effect = [make_dataframe(trade_date="20260813"), make_dataframe()]
         first_checkpoint = DataSyncCheckpointState(
-            sync_key=ETF_DAILY_SYNC_KEY,
+            sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,
             cursor={"synced_through_date": "2026-08-13"},
             cursor_version=1,
             version=1,
         )
         second_checkpoint = DataSyncCheckpointState(
-            sync_key=ETF_DAILY_SYNC_KEY,
+            sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,
             cursor={"synced_through_date": "2026-08-14"},
             cursor_version=1,
@@ -142,7 +145,7 @@ class FetchEtfDailyTestCase(unittest.TestCase):
             (EtfDailyBarUpsertResult(received=1, changed=0, unchanged=1), second_checkpoint),
         ]
 
-        result = sync_etf_daily(
+        result = sync_etf_daily_incremental(
             client,
             calendar_exchange="SSE",
             initial_start_date=first_date,
@@ -167,13 +170,122 @@ class FetchEtfDailyTestCase(unittest.TestCase):
         self.assertEqual(
             [item.args[0] for item in logger_mock.info.call_args_list],
             [
-                "etf_daily_sync_planned",
-                "etf_daily_sync_started",
-                "etf_daily_sync_succeeded",
-                "etf_daily_sync_started",
-                "etf_daily_sync_succeeded",
+                "etf_daily_incremental_sync_planned",
+                "etf_daily_incremental_sync_started",
+                "etf_daily_incremental_sync_succeeded",
+                "etf_daily_incremental_sync_started",
+                "etf_daily_incremental_sync_succeeded",
             ],
         )
+
+    @patch("app.data_ingestion.services.etf_daily._commit_etf_daily_date")
+    @patch("app.data_ingestion.services.etf_daily.fetch_etf_daily_for_trade_date")
+    @patch("app.data_ingestion.services.etf_daily._load_open_dates")
+    @patch("app.data_ingestion.services.etf_daily._load_checkpoint")
+    @patch("app.data_ingestion.services.etf_daily.get_settings")
+    @patch("app.data_ingestion.services.etf_daily.tushare_request_pacer")
+    def test_full_sync_resumes_the_frozen_cycle_target(
+        self,
+        pacer_mock,
+        get_settings_mock,
+        load_checkpoint_mock,
+        load_open_dates_mock,
+        fetch_mock,
+        commit_mock,
+    ) -> None:
+        initial_date = date(2020, 1, 1)
+        resumed_date = date(2026, 8, 14)
+        frozen_target = date(2026, 8, 15)
+        get_settings_mock.return_value = SimpleNamespace(
+            ingestion_request_interval_ms=1_000
+        )
+        checkpoint = DataSyncCheckpointState(
+            sync_key=ETF_DAILY_FULL_SYNC_KEY,
+            scope_key=ETF_DAILY_SCOPE_KEY,
+            cursor={
+                "synced_through_date": "2026-08-13",
+                "target_through_date": "2026-08-15",
+            },
+            cursor_version=1,
+            version=4,
+        )
+        load_checkpoint_mock.return_value = checkpoint
+        load_open_dates_mock.return_value = [resumed_date]
+        fetch_mock.return_value = make_dataframe()
+        completed_checkpoint = DataSyncCheckpointState(
+            sync_key=ETF_DAILY_FULL_SYNC_KEY,
+            scope_key=ETF_DAILY_SCOPE_KEY,
+            cursor={
+                "synced_through_date": "2026-08-15",
+                "target_through_date": "2026-08-15",
+            },
+            cursor_version=1,
+            version=5,
+        )
+        commit_mock.return_value = (
+            EtfDailyBarUpsertResult(received=1, changed=0, unchanged=1),
+            completed_checkpoint,
+        )
+
+        result = sync_etf_daily_full(
+            Mock(),
+            calendar_exchange="SSE",
+            initial_start_date=initial_date,
+            as_of_date=date(2026, 8, 20),
+        )
+
+        self.assertEqual(result.synced_through_date, frozen_target)
+        load_checkpoint_mock.assert_called_once_with(ETF_DAILY_FULL_SYNC_KEY)
+        load_open_dates_mock.assert_called_once_with(
+            exchange="SSE", start_date=resumed_date, end_date=frozen_target
+        )
+        self.assertEqual(
+            commit_mock.call_args.kwargs["full_cycle_target_date"], frozen_target
+        )
+        self.assertEqual(
+            commit_mock.call_args.kwargs["sync_key"], ETF_DAILY_FULL_SYNC_KEY
+        )
+
+    @patch("app.data_ingestion.services.etf_daily.DataSyncCheckpointRepository")
+    @patch("app.data_ingestion.services.etf_daily.get_engine")
+    @patch("app.data_ingestion.services.etf_daily.Session")
+    def test_initializes_a_full_cycle_before_the_first_request(
+        self,
+        session_class,
+        get_engine_mock,
+        checkpoint_repository_class,
+    ) -> None:
+        session = session_class.return_value.__enter__.return_value
+        expected = DataSyncCheckpointState(
+            sync_key=ETF_DAILY_FULL_SYNC_KEY,
+            scope_key=ETF_DAILY_SCOPE_KEY,
+            cursor={
+                "synced_through_date": "2026-08-15",
+                "target_through_date": "2026-08-15",
+            },
+            cursor_version=1,
+            version=8,
+        )
+        checkpoint_repository_class.return_value.advance.return_value = expected
+
+        actual = _initialize_full_cycle(
+            expected_checkpoint=None,
+            initial_start_date=date(2005, 1, 1),
+            target_through_date=date(2026, 8, 15),
+        )
+
+        self.assertIs(actual, expected)
+        checkpoint_repository_class.return_value.advance.assert_called_once_with(
+            sync_key=ETF_DAILY_FULL_SYNC_KEY,
+            scope_key=ETF_DAILY_SCOPE_KEY,
+            cursor={
+                "synced_through_date": "2004-12-31",
+                "target_through_date": "2026-08-15",
+            },
+            expected_version=None,
+        )
+        session.commit.assert_called_once_with()
+        session.rollback.assert_not_called()
 
     @patch("app.data_ingestion.services.etf_daily.DataSyncCheckpointRepository")
     @patch("app.data_ingestion.services.etf_daily.EtfDailyBarRepository")
@@ -190,7 +302,7 @@ class FetchEtfDailyTestCase(unittest.TestCase):
         write_result = EtfDailyBarUpsertResult(received=1, changed=1, unchanged=0)
         bar_repository_class.return_value.upsert_bars.return_value = write_result
         checkpoint = DataSyncCheckpointState(
-            sync_key=ETF_DAILY_SYNC_KEY,
+            sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,
             cursor={"synced_through_date": "2026-08-14"},
             cursor_version=1,
@@ -202,6 +314,7 @@ class FetchEtfDailyTestCase(unittest.TestCase):
             bars=[make_bar()],
             expected_checkpoint=None,
             synced_through_date=date(2026, 8, 14),
+            sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
         )
 
         self.assertIs(result, write_result)
@@ -210,7 +323,7 @@ class FetchEtfDailyTestCase(unittest.TestCase):
             [make_bar()], source="tushare"
         )
         checkpoint_repository_class.return_value.advance.assert_called_once_with(
-            sync_key=ETF_DAILY_SYNC_KEY,
+            sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,
             cursor={"synced_through_date": "2026-08-14"},
             expected_version=None,

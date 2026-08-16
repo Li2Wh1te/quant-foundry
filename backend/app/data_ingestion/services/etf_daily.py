@@ -10,7 +10,10 @@ import structlog
 
 from app.core.config import get_settings
 from app.data_ingestion.clients.tushare import TushareClient
-from app.data_ingestion.constants import ETF_DAILY_SYNC_KEY
+from app.data_ingestion.constants import (
+    ETF_DAILY_FULL_SYNC_KEY,
+    ETF_DAILY_INCREMENTAL_SYNC_KEY,
+)
 from app.data_ingestion.repositories.etf_daily import EtfDailyBarRepository
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.data_ingestion.repositories.trading_calendar import TradingCalendarRepository
@@ -68,6 +71,86 @@ def fetch_etf_daily_for_trade_date(
     )
 
 
+def sync_etf_daily_incremental(
+    client: TushareClient,
+    *,
+    calendar_exchange: str,
+    initial_start_date: date,
+    request_interval_ms: int | None = None,
+    as_of_date: date | None = None,
+) -> EtfDailySyncResult:
+    """Synchronize newly completed whole-market ETF sessions.
+
+    ``as_of_date`` is inclusive and represents the last date known to have
+    completed trading. Omitting it deliberately uses yesterday in Shanghai time,
+    preventing a manually triggered task from treating an in-progress session as
+    an end-of-day bar.
+    """
+    completed_through_date = as_of_date or (
+        datetime.now(SHANGHAI_TIMEZONE).date() - timedelta(days=1)
+    )
+    checkpoint = _load_checkpoint(ETF_DAILY_INCREMENTAL_SYNC_KEY)
+    start_date = (
+        _checkpoint_synced_through_date(checkpoint) + timedelta(days=1)
+        if checkpoint is not None
+        else initial_start_date
+    )
+    return _sync_etf_daily_sessions(
+        client,
+        calendar_exchange=calendar_exchange,
+        start_date=start_date,
+        target_through_date=completed_through_date,
+        checkpoint=checkpoint,
+        sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
+        event_prefix="etf_daily_incremental_sync",
+        task_label="ETF 日线增量",
+        request_interval_ms=request_interval_ms,
+    )
+
+
+def sync_etf_daily_full(
+    client: TushareClient,
+    *,
+    calendar_exchange: str,
+    initial_start_date: date,
+    request_interval_ms: int | None = None,
+    as_of_date: date | None = None,
+) -> EtfDailySyncResult:
+    """Run or resume one full historical ETF daily-bar verification cycle.
+
+    A new cycle freezes its terminal date before the first request. A failed run
+    resumes from its own checkpoint and keeps that terminal date, so it cannot
+    chase newly completed trading days indefinitely.
+    """
+    completed_through_date = as_of_date or (
+        datetime.now(SHANGHAI_TIMEZONE).date() - timedelta(days=1)
+    )
+    checkpoint = _load_checkpoint(ETF_DAILY_FULL_SYNC_KEY)
+    if checkpoint is not None and not _full_cycle_is_complete(checkpoint):
+        target_through_date = _full_checkpoint_target_date(checkpoint)
+        start_date = _checkpoint_synced_through_date(checkpoint) + timedelta(days=1)
+    else:
+        target_through_date = completed_through_date
+        start_date = initial_start_date
+        checkpoint = _initialize_full_cycle(
+            expected_checkpoint=checkpoint,
+            initial_start_date=initial_start_date,
+            target_through_date=target_through_date,
+        )
+    return _sync_etf_daily_sessions(
+        client,
+        calendar_exchange=calendar_exchange,
+        start_date=start_date,
+        target_through_date=target_through_date,
+        checkpoint=checkpoint,
+        sync_key=ETF_DAILY_FULL_SYNC_KEY,
+        event_prefix="etf_daily_full_sync",
+        task_label="ETF 日线全量",
+        request_interval_ms=request_interval_ms,
+        full_cycle_target_date=target_through_date,
+    )
+
+
 def sync_etf_daily(
     client: TushareClient,
     *,
@@ -76,41 +159,49 @@ def sync_etf_daily(
     request_interval_ms: int | None = None,
     as_of_date: date | None = None,
 ) -> EtfDailySyncResult:
-    """Synchronize complete whole-market ETF sessions in chronological order.
+    """Backward-compatible alias for incremental ETF daily synchronization."""
+    return sync_etf_daily_incremental(
+        client,
+        calendar_exchange=calendar_exchange,
+        initial_start_date=initial_start_date,
+        request_interval_ms=request_interval_ms,
+        as_of_date=as_of_date,
+    )
 
-    ``as_of_date`` is inclusive and represents the last date known to have
-    completed trading. Omitting it deliberately uses yesterday in Shanghai time,
-    preventing a manually triggered task from treating an in-progress session as
-    an end-of-day bar.
-    """
+
+def _sync_etf_daily_sessions(
+    client: TushareClient,
+    *,
+    calendar_exchange: str,
+    start_date: date,
+    target_through_date: date,
+    checkpoint: DataSyncCheckpointState | None,
+    sync_key: str,
+    event_prefix: str,
+    task_label: str,
+    request_interval_ms: int | None,
+    full_cycle_target_date: date | None = None,
+) -> EtfDailySyncResult:
+    """Synchronize a known contiguous session range with one checkpoint scope."""
     settings = get_settings()
     effective_interval_ms = max(
         settings.ingestion_request_interval_ms,
         request_interval_ms or 0,
     )
-    checkpoint = _load_checkpoint()
-    completed_through_date = as_of_date or (
-        datetime.now(SHANGHAI_TIMEZONE).date() - timedelta(days=1)
-    )
-    start_date = (
-        _checkpoint_synced_through_date(checkpoint) + timedelta(days=1)
-        if checkpoint is not None
-        else initial_start_date
-    )
     trading_dates = _load_open_dates(
         exchange=calendar_exchange,
         start_date=start_date,
-        end_date=completed_through_date,
+        end_date=target_through_date,
     )
     logger.info(
-        "etf_daily_sync_planned",
+        f"{event_prefix}_planned",
         message=(
-            f"ETF 日线采集计划：{start_date.isoformat()} 至 "
-            f"{completed_through_date.isoformat()}，共 {len(trading_dates)} 个交易日，"
+            f"{task_label}采集计划：{start_date.isoformat()} 至 "
+            f"{target_through_date.isoformat()}，共 {len(trading_dates)} 个交易日，"
             f"请求间隔 {effective_interval_ms} 毫秒。"
         ),
         start_date=start_date.isoformat(),
-        end_date=completed_through_date.isoformat(),
+        end_date=target_through_date.isoformat(),
         days_planned=len(trading_dates),
         request_interval_ms=effective_interval_ms,
     )
@@ -119,8 +210,8 @@ def sync_etf_daily(
     for trading_date in trading_dates:
         date_text = trading_date.isoformat()
         logger.info(
-            "etf_daily_sync_started",
-            message=f"开始采集 ETF 日线：{date_text} 至 {date_text}。",
+            f"{event_prefix}_started",
+            message=f"开始采集 {task_label}：{date_text} 至 {date_text}。",
             start_date=date_text,
             end_date=date_text,
         )
@@ -138,12 +229,14 @@ def sync_etf_daily(
                 bars=bars,
                 expected_checkpoint=checkpoint,
                 synced_through_date=trading_date,
+                sync_key=sync_key,
+                full_cycle_target_date=full_cycle_target_date,
             )
         except Exception:
             logger.exception(
-                "etf_daily_sync_failed",
+                f"{event_prefix}_failed",
                 message=(
-                    f"ETF 日线采集失败：{date_text} 至 {date_text}，"
+                    f"{task_label}采集失败：{date_text} 至 {date_text}，"
                     "未入库，游标未推进。"
                 ),
                 start_date=date_text,
@@ -154,9 +247,9 @@ def sync_etf_daily(
         changed += write_result.changed
         unchanged += write_result.unchanged
         logger.info(
-            "etf_daily_sync_succeeded",
+            f"{event_prefix}_succeeded",
             message=(
-                f"完成采集 ETF 日线：{date_text} 至 {date_text}，"
+                f"完成采集 {task_label}：{date_text} 至 {date_text}，"
                 f"拉取 {write_result.received} 条，入库变更 {write_result.changed} 条，"
                 f"未变更 {write_result.unchanged} 条，"
                 f"游标已推进至 {checkpoint.cursor['synced_through_date']}。"
@@ -198,11 +291,9 @@ def normalize_etf_daily(
     return bars
 
 
-def _load_checkpoint() -> DataSyncCheckpointState | None:
+def _load_checkpoint(sync_key: str) -> DataSyncCheckpointState | None:
     with Session(get_engine()) as session:
-        return DataSyncCheckpointRepository(session).get(
-            ETF_DAILY_SYNC_KEY, ETF_DAILY_SCOPE_KEY
-        )
+        return DataSyncCheckpointRepository(session).get(sync_key, ETF_DAILY_SCOPE_KEY)
 
 
 def _load_open_dates(
@@ -223,6 +314,8 @@ def _commit_etf_daily_date(
     bars: list[EtfDailyBarInput],
     expected_checkpoint: DataSyncCheckpointState | None,
     synced_through_date: date,
+    sync_key: str,
+    full_cycle_target_date: date | None = None,
 ) -> tuple[EtfDailyBarUpsertResult, DataSyncCheckpointState]:
     """Commit one complete ETF session and its checkpoint atomically."""
     with Session(get_engine()) as session:
@@ -231,9 +324,16 @@ def _commit_etf_daily_date(
                 bars, source=TUSHARE_SOURCE
             )
             checkpoint = DataSyncCheckpointRepository(session).advance(
-                sync_key=ETF_DAILY_SYNC_KEY,
+                sync_key=sync_key,
                 scope_key=ETF_DAILY_SCOPE_KEY,
-                cursor={"synced_through_date": synced_through_date.isoformat()},
+                cursor={
+                    "synced_through_date": synced_through_date.isoformat(),
+                    **(
+                        {"target_through_date": full_cycle_target_date.isoformat()}
+                        if full_cycle_target_date is not None
+                        else {}
+                    ),
+                },
                 expected_version=(
                     expected_checkpoint.version
                     if expected_checkpoint is not None
@@ -242,6 +342,42 @@ def _commit_etf_daily_date(
             )
             session.commit()
             return write_result, checkpoint
+        except Exception:
+            session.rollback()
+            raise
+
+
+def _initialize_full_cycle(
+    *,
+    expected_checkpoint: DataSyncCheckpointState | None,
+    initial_start_date: date,
+    target_through_date: date,
+) -> DataSyncCheckpointState:
+    """Persist a new full-cycle target before its first source request starts.
+
+    A dedicated initialization transaction makes an interrupted first request
+    resumable against the same historical endpoint. The date before the initial
+    boundary is only a cursor position; no market-data row is implied by it.
+    """
+    with Session(get_engine()) as session:
+        try:
+            checkpoint = DataSyncCheckpointRepository(session).advance(
+                sync_key=ETF_DAILY_FULL_SYNC_KEY,
+                scope_key=ETF_DAILY_SCOPE_KEY,
+                cursor={
+                    "synced_through_date": (
+                        initial_start_date - timedelta(days=1)
+                    ).isoformat(),
+                    "target_through_date": target_through_date.isoformat(),
+                },
+                expected_version=(
+                    expected_checkpoint.version
+                    if expected_checkpoint is not None
+                    else None
+                ),
+            )
+            session.commit()
+            return checkpoint
         except Exception:
             session.rollback()
             raise
@@ -307,3 +443,16 @@ def _checkpoint_synced_through_date(checkpoint: DataSyncCheckpointState) -> date
     if not isinstance(value, str):
         raise ValueError("ETF daily checkpoint has no synced_through_date")
     return date.fromisoformat(value)
+
+
+def _full_checkpoint_target_date(checkpoint: DataSyncCheckpointState) -> date:
+    value = checkpoint.cursor.get("target_through_date")
+    if not isinstance(value, str):
+        raise ValueError("ETF daily full checkpoint has no target_through_date")
+    return date.fromisoformat(value)
+
+
+def _full_cycle_is_complete(checkpoint: DataSyncCheckpointState) -> bool:
+    return _checkpoint_synced_through_date(checkpoint) >= _full_checkpoint_target_date(
+        checkpoint
+    )

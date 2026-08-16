@@ -77,11 +77,16 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   trade_calendar_range_succeeded: { title: "完成采集分段" },
   trade_calendar_range_failed: { title: "采集分段失败" },
   trade_calendar_sync_completed: { title: "交易日历采集完成" },
-  etf_daily_sync_planned: { title: "生成ETF日线采集计划" },
-  etf_daily_sync_started: { title: "开始采集ETF日线" },
-  etf_daily_sync_succeeded: { title: "完成采集ETF日线" },
-  etf_daily_sync_failed: { title: "ETF日线采集失败" },
-  etf_daily_sync_completed: { title: "ETF日线采集完成" }
+  etf_daily_incremental_sync_planned: { title: "生成ETF日线增量采集计划" },
+  etf_daily_incremental_sync_started: { title: "开始采集ETF日线增量" },
+  etf_daily_incremental_sync_succeeded: { title: "完成采集ETF日线增量" },
+  etf_daily_incremental_sync_failed: { title: "ETF日线增量采集失败" },
+  etf_daily_incremental_sync_completed: { title: "ETF日线增量采集完成" },
+  etf_daily_full_sync_planned: { title: "生成ETF日线全量采集计划" },
+  etf_daily_full_sync_started: { title: "开始采集ETF日线全量" },
+  etf_daily_full_sync_succeeded: { title: "完成采集ETF日线全量" },
+  etf_daily_full_sync_failed: { title: "ETF日线全量采集失败" },
+  etf_daily_full_sync_completed: { title: "ETF日线全量采集完成" }
 };
 
 function eventPresentation(entry: LogEntry): EventPresentation {
