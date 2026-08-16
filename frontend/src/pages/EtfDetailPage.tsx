@@ -1,5 +1,11 @@
 import { ChevronLeft, Expand, RefreshCw } from "lucide-react";
-import { CandlestickSeries, ColorType, CrosshairMode, createChart, HistogramSeries, LineSeries, Time } from "lightweight-charts";
+import {
+  dispose as disposeKLineChart,
+  init as initKLineChart,
+  registerIndicator,
+  type IndicatorTemplate,
+  type KLineData
+} from "klinecharts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 
@@ -19,6 +25,50 @@ type ChartPeriod = "day" | "week" | "month" | "year";
 type AdjustmentMode = "raw" | "forward" | "backward";
 const MOVING_AVERAGE_LENGTHS = [5, 10, 20] as const;
 type MovingAverageLength = (typeof MOVING_AVERAGE_LENGTHS)[number];
+type KLineChartPeriod = "day" | "week" | "month" | "year";
+
+const KLINE_MA_INDICATOR_NAME = "ETF_MA";
+const KLINE_MA_COLORS: Record<MovingAverageLength, string> = {
+  5: "#10cae6",
+  10: "#ffb317",
+  20: "#ba94ff"
+};
+const KLINE_UP_COLOR = "#f35b69";
+const KLINE_DOWN_COLOR = "#45cc91";
+
+interface KLineChartBar extends KLineData {
+  ma5?: number;
+  ma10?: number;
+  ma20?: number;
+}
+
+interface KLineMovingAverageResult {
+  [key: string]: number | undefined;
+}
+
+// KLineChart's built-in MA indicator starts its calculation at the first bar
+// in the current data set.  This adapter renders values precomputed from the
+// complete history, so a date-filtered view keeps the correct MA warm-up data.
+const ETF_MA_INDICATOR = {
+  name: KLINE_MA_INDICATOR_NAME,
+  shortName: "MA",
+  series: "price",
+  precision: 4,
+  calcParams: [...MOVING_AVERAGE_LENGTHS],
+  figures: [],
+  regenerateFigures: (params: number[]) => params.map((length) => ({
+    key: `ma${length}`,
+    title: `MA${length}: `,
+    type: "line"
+  })),
+  calc: (dataList: KLineData[], indicator: { calcParams: number[] }): KLineMovingAverageResult[] => dataList.map((bar) => indicator.calcParams.reduce<KLineMovingAverageResult>((result, length) => {
+    const value = bar[`ma${length}`];
+    if (typeof value === "number") result[`ma${length}`] = value;
+    return result;
+  }, {}))
+} as unknown as IndicatorTemplate<KLineMovingAverageResult, number, unknown>;
+
+registerIndicator(ETF_MA_INDICATOR);
 
 interface NumericBar {
   tradeDate: string;
@@ -160,101 +210,220 @@ function movingAverage(bars: NumericBar[], length: number): (number | null)[] {
   });
 }
 
+function kLineTimestamp(tradeDate: string): number {
+  const timestamp = Date.parse(`${tradeDate}T00:00:00Z`);
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function chartNumber(value: number, fractionDigits = 4): string {
+  return value.toLocaleString("zh-CN", { maximumFractionDigits: fractionDigits });
+}
+
+function chartVolume(value: number): string {
+  const absolute = Math.abs(value);
+  if (absolute >= 100_000_000) return `${(value / 100_000_000).toFixed(2)} 亿`;
+  if (absolute >= 10_000) return `${(value / 10_000).toFixed(2)} 万`;
+  return value.toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+}
+
+const KLINE_PERIOD_TYPES: Record<ChartPeriod, KLineChartPeriod> = {
+  day: "day",
+  week: "week",
+  month: "month",
+  year: "year"
+};
+
+const KLINE_CHART_OPTIONS = {
+  locale: "zh-CN",
+  timezone: "Asia/Shanghai",
+  zoomAnchor: "cursor" as const,
+  layout: {
+    barSpaceLimit: { min: 1, max: 50 },
+    pane: { minHeight: 30, dragEnabled: false },
+    yAxis: {
+      position: "right" as const,
+      inside: false,
+      scrollZoomEnabled: false,
+      gap: { top: 0.16, bottom: 0.12 }
+    }
+  },
+  styles: {
+    grid: {
+      show: true,
+      horizontal: { show: true, style: "solid" as const, size: 1, color: "#343940" },
+      vertical: { show: true, style: "solid" as const, size: 1, color: "#2b3037" }
+    },
+    candle: {
+      type: "candle_solid" as const,
+      bar: {
+        compareRule: "current_open" as const,
+        upColor: KLINE_UP_COLOR,
+        downColor: KLINE_DOWN_COLOR,
+        noChangeColor: "#8c96a6",
+        upBorderColor: KLINE_UP_COLOR,
+        downBorderColor: KLINE_DOWN_COLOR,
+        noChangeBorderColor: "#8c96a6",
+        upWickColor: KLINE_UP_COLOR,
+        downWickColor: KLINE_DOWN_COLOR,
+        noChangeWickColor: "#8c96a6"
+      },
+      priceMark: {
+        show: true,
+        high: { show: false },
+        low: { show: false },
+        // The latest price is presented in the compact summary above the plot.
+        last: { show: false }
+      },
+      tooltip: { showRule: "follow_cross" as const, showType: "standard" as const }
+    },
+    indicator: {
+      bars: [{
+        style: "fill" as const,
+        borderSize: 0,
+        upColor: "rgba(243, 91, 105, 0.72)",
+        downColor: "rgba(69, 204, 145, 0.72)",
+        noChangeColor: "rgba(140, 150, 166, 0.72)"
+      }],
+      lines: MOVING_AVERAGE_LENGTHS.map((length) => ({ style: "solid" as const, smooth: false, size: 2, color: KLINE_MA_COLORS[length] })),
+      lastValueMark: { show: false },
+      tooltip: { showRule: "follow_cross" as const }
+    },
+    xAxis: {
+      show: true,
+      size: 28,
+      axisLine: { show: true, color: "#343940", size: 1 },
+      tickLine: { show: false },
+      tickText: { show: true, color: "#aab4c4", size: 11, marginStart: 4, marginEnd: 4 }
+    },
+    yAxis: {
+      show: true,
+      size: 64,
+      axisLine: { show: true, color: "#343940", size: 1 },
+      tickLine: { show: false },
+      tickText: { show: true, color: "#aab4c4", size: 11, marginStart: 4, marginEnd: 5 }
+    },
+    separator: { size: 1, color: "#343940", fill: true, activeBackgroundColor: "rgba(52, 57, 64, 0.2)" },
+    crosshair: {
+      show: true,
+      horizontal: {
+        show: true,
+        line: { show: true, style: "dashed" as const, dashedValue: [4, 2], size: 1, color: "#718096" },
+        text: { show: true, color: "#ffffff", size: 11, backgroundColor: "#343940", borderColor: "#343940", borderSize: 0, borderRadius: 3 }
+      },
+      vertical: {
+        show: true,
+        line: { show: true, style: "dashed" as const, dashedValue: [4, 2], size: 1, color: "#718096" },
+        text: { show: true, color: "#ffffff", size: 11, backgroundColor: "#343940", borderColor: "#343940", borderSize: 0, borderRadius: 3 }
+      }
+    }
+  }
+};
+
 function InteractiveKLineChart({
   bars,
   historyBars,
+  period,
   visibleCount,
   visibleAverages
 }: {
   bars: NumericBar[];
   historyBars: NumericBar[];
+  period: ChartPeriod;
   visibleCount: number | null;
   visibleAverages: Record<MovingAverageLength, boolean>;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
+  const orderedBars = useMemo(() => [...bars].sort((left, right) => left.tradeDate.localeCompare(right.tradeDate)), [bars]);
+  const orderedHistoryBars = useMemo(() => [...historyBars].sort((left, right) => left.tradeDate.localeCompare(right.tradeDate)), [historyBars]);
+  const latestBar = orderedBars.at(-1);
 
   useEffect(() => {
     const container = containerRef.current;
-    if (!container) return;
-    const chart = createChart(container, {
-      width: Math.max(container.clientWidth, 1),
-      height: Math.max(container.clientHeight, 1),
-      layout: { background: { type: ColorType.Solid, color: "#1d2025" }, textColor: "#aab4c4" },
-      grid: { vertLines: { color: "#2b3037" }, horzLines: { color: "#343940" } },
-      crosshair: { mode: CrosshairMode.MagnetOHLC },
-      rightPriceScale: { borderColor: "#343940" },
-      timeScale: {
-        borderColor: "#343940",
-        timeVisible: true,
-        secondsVisible: false,
-        fixLeftEdge: true,
-        fixRightEdge: true
-      }
-    });
-    const candles = chart.addSeries(CandlestickSeries, {
-      upColor: "#f35b69", downColor: "#45cc91", borderUpColor: "#f35b69", borderDownColor: "#45cc91", wickUpColor: "#f35b69", wickDownColor: "#45cc91"
-    });
-    candles.setData(bars.map((bar) => ({ time: bar.tradeDate as Time, open: bar.open, high: bar.high, low: bar.low, close: bar.close })));
-    const volume = chart.addSeries(HistogramSeries, { priceFormat: { type: "volume" } }, 1);
-    volume.setData(bars.map((bar) => ({ time: bar.tradeDate as Time, value: bar.vol, color: bar.close >= bar.open ? "rgba(243, 91, 105, 0.72)" : "rgba(69, 204, 145, 0.72)" })));
-    chart.panes()[1].setHeight(92);
+    if (!container || orderedBars.length === 0) return;
 
-    // Moving averages are calculated from the complete loaded history, then
-    // projected onto the current viewport so date filtering never restarts MA.
-    const historyMa5 = movingAverage(historyBars, 5);
-    const historyMa10 = movingAverage(historyBars, 10);
-    const historyMa20 = movingAverage(historyBars, 20);
-    const historyAverages = new Map(historyBars.map((bar, index) => [bar.tradeDate, {
-      ma5: historyMa5[index], ma10: historyMa10[index], ma20: historyMa20[index]
-    }]));
-    const addAverage = (length: MovingAverageLength, color: string) => {
-      if (!visibleAverages[length]) return;
-      const series = chart.addSeries(LineSeries, { color, lineWidth: 2, lastValueVisible: false, priceLineVisible: false });
-      series.setData(bars.flatMap((bar) => {
-        const value = historyAverages.get(bar.tradeDate)?.[`ma${length}`];
-        return value === null || value === undefined ? [] : [{ time: bar.tradeDate as Time, value }];
-      }));
-    };
-    addAverage(5, "#10cae6"); addAverage(10, "#ffb317"); addAverage(20, "#ba94ff");
-
-    const resetViewport = () => {
-      const pointCount = visibleCount === null ? bars.length : Math.min(visibleCount, bars.length);
-      chart.timeScale().setVisibleLogicalRange({
-        from: Math.max(0, bars.length - pointCount),
-        to: Math.max(0, bars.length - 1)
+    const historyAverages = new Map<string, Record<string, number | null>>();
+    for (const length of MOVING_AVERAGE_LENGTHS) {
+      const values = movingAverage(orderedHistoryBars, length);
+      values.forEach((value, index) => {
+        const date = orderedHistoryBars[index]?.tradeDate;
+        if (!date) return;
+        historyAverages.set(date, { ...(historyAverages.get(date) ?? {}), [`ma${length}`]: value });
       });
-    };
-    const resizeChart = () => {
-      const width = Math.floor(container.clientWidth);
-      const height = Math.floor(container.clientHeight);
-      if (width <= 0 || height <= 0) return false;
-      chart.resize(width, height);
-      return true;
-    };
+    }
+    const chartData: KLineChartBar[] = orderedBars.map((bar) => ({
+      timestamp: kLineTimestamp(bar.tradeDate),
+      open: bar.open,
+      high: bar.high,
+      low: bar.low,
+      close: bar.close,
+      volume: bar.vol,
+      turnover: bar.amount,
+      ...(historyAverages.get(bar.tradeDate) ?? {})
+    }));
 
-    // React can mount the canvas before the surrounding grid reaches its final
-    // width.  Apply the requested logical range after the first measurable
-    // layout so a short series cannot remain stranded in a narrow initial view.
+    const chart = initKLineChart(container, KLINE_CHART_OPTIONS);
+    if (!chart) return;
+    // KLineChart normally interprets a drag on the x-axis strip as a zoom
+    // gesture.  That makes a horizontal pan change behaviour near the chart
+    // boundary, so keep one predictable rule: dragging reviews history and
+    // the mouse wheel is the only direct zoom control.
+    chart.overrideXAxis({ scrollZoomEnabled: false });
+    chart.setSymbol({ ticker: "ETF", pricePrecision: 4, volumePrecision: 0 });
+    chart.setPeriod({ span: 1, type: KLINE_PERIOD_TYPES[period] });
+    chart.setDataLoader({
+      getBars: ({ callback }) => callback(chartData, false)
+    });
+
+    const activeAverages = MOVING_AVERAGE_LENGTHS.filter((length) => visibleAverages[length] && orderedHistoryBars.length >= length);
+    if (activeAverages.length > 0) {
+      chart.createIndicator({
+        name: KLINE_MA_INDICATOR_NAME,
+        paneId: "candle_pane",
+        calcParams: activeAverages,
+        styles: { lines: activeAverages.map((length) => ({ color: KLINE_MA_COLORS[length], size: 2 })) }
+      }, true);
+    }
+    const volumePaneId = chart.createIndicator({
+      name: "VOL",
+      calcParams: [],
+      styles: { lastValueMark: { show: false } }
+    }, false);
+    if (volumePaneId) chart.setPaneOptions({ id: volumePaneId, height: 92, minHeight: 76, dragEnabled: false });
+    // Apply the selected range after the first measurable layout.  KLineChart
+    // keeps both edges scrollable, so zooming out can reveal the full history.
     let viewportInitialized = false;
     const initializeViewport = () => {
-      if (viewportInitialized || !resizeChart()) return;
-      resetViewport();
+      if (viewportInitialized || container.clientWidth <= 0) return;
+      const plotWidth = Math.max(container.clientWidth - 90, 1);
+      const targetBarCount = visibleCount === null ? orderedBars.length : Math.min(visibleCount, orderedBars.length);
+      const barSpace = Math.min(50, Math.max(1, plotWidth / Math.max(targetBarCount, 1)));
+      chart.setBarSpace(barSpace);
+      chart.setOffsetRightDistance(16);
+      chart.scrollToRealTime();
       viewportInitialized = true;
     };
     const animationFrame = window.requestAnimationFrame(initializeViewport);
     const observer = new ResizeObserver(() => {
-      resizeChart();
       initializeViewport();
     });
     observer.observe(container);
     return () => {
       window.cancelAnimationFrame(animationFrame);
       observer.disconnect();
-      chart.remove();
+      disposeKLineChart(chart);
     };
-  }, [bars, historyBars, visibleAverages, visibleCount]);
+  }, [orderedBars, orderedHistoryBars, period, visibleAverages, visibleCount]);
 
-  return <div ref={containerRef} className="etf-kline" aria-label="可缩放、可拖拽的 ETF K 线图" />;
+  if (!latestBar) return null;
+  const priceDirection = latestBar.close >= latestBar.open ? "up" : "down";
+  return <div className="etf-kline-wrap">
+    <div className="etf-kline__summary" aria-label="最新行情">
+      <span className="etf-kline__summary-date">{formatDate(latestBar.tradeDate)}</span>
+      <span className="etf-kline__summary-item"><span>收盘</span><strong className={`etf-kline__summary-value etf-kline__summary-value--${priceDirection}`}>{chartNumber(latestBar.close)}</strong></span>
+      <span className="etf-kline__summary-item"><span>成交量</span><strong>{chartVolume(latestBar.vol)}</strong></span>
+    </div>
+    <div ref={containerRef} className="etf-kline" aria-label="可缩放、可拖拽的 ETF K 线图" />
+  </div>;
 }
 
 export function EtfDetailPage() {
@@ -383,8 +552,8 @@ export function EtfDetailPage() {
           <div className="etf-detail__ma-toggles">{MOVING_AVERAGE_LENGTHS.map((length) => <button key={length} type="button" aria-pressed={availableAverages[length] && visibleAverages[length]} disabled={!availableAverages[length]} title={availableAverages[length] ? `显示或隐藏 MA${length}` : `至少需要 ${length} 根${PERIOD_KLINE_LABELS[period]}数据`} onClick={() => setVisibleAverages((current) => ({ ...current, [length]: !current[length] }))}><i className={`ma${length}`} aria-hidden="true" />MA{length}</button>)}</div>
           <div>{(["raw", "forward", "backward"] as AdjustmentMode[]).map((item) => <button key={item} className={adjustment === item ? "active" : ""} type="button" onClick={() => setAdjustment(item)}>{({ raw: "不复权", forward: "前复权", backward: "后复权" })[item]}</button>)}</div>
         </div>
-        <div className="etf-detail__range-controls">{([30, 60, 90, 200, null] as (number | null)[]).map((count) => <button key={count ?? "all"} className={visibleCount === count ? "active" : ""} type="button" onClick={() => setVisibleCount(count)}>{count === null ? "全部" : `${count} ${PERIOD_LABELS[period]}`}</button>)}<span>滚轮缩放，拖拽回看</span></div>
-        {hasInvalidDateRange ? <div className="etf-detail__chart-empty">开始日期不能晚于结束日期。</div> : seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null || fullChartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <InteractiveKLineChart bars={chartBars} historyBars={fullChartBars} visibleCount={visibleCount} visibleAverages={visibleAverages} />}
+        <div className="etf-detail__range-controls">{([30, 60, 90, 200, null] as (number | null)[]).map((count) => <button key={count ?? "all"} className={visibleCount === count ? "active" : ""} type="button" onClick={() => setVisibleCount(count)}>{count === null ? "全部" : `${count} ${PERIOD_LABELS[period]}`}</button>)}<span>滚轮缩放；图内横向拖拽回看</span></div>
+        {hasInvalidDateRange ? <div className="etf-detail__chart-empty">开始日期不能晚于结束日期。</div> : seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null || fullChartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <InteractiveKLineChart bars={chartBars} historyBars={fullChartBars} period={period} visibleCount={visibleCount} visibleAverages={visibleAverages} />}
       </section>}
       {tab === "factors" && <section className="collection-table etf-detail__factor-table"><div className="collection-table__heading"><div><h3>复权因子</h3><span>按交易日期升序展示</span></div><strong>{seriesLoading ? "正在加载…" : `${visibleFactors.length.toLocaleString("zh-CN")} 条`}</strong></div><div className="collection-table__scroll"><table><thead><tr><th>交易日期</th><th>复权因子</th><th>数据来源</th><th>更新时间</th></tr></thead><tbody>{seriesLoading ? <tr><td colSpan={4} className="collection-table__empty">正在加载复权因子…</td></tr> : visibleFactors.length === 0 ? <tr><td colSpan={4} className="collection-table__empty">该日期范围内没有复权因子数据</td></tr> : visibleFactors.map((factor) => <tr key={factor.trade_date}><td>{formatDate(factor.trade_date)}</td><td>{numberText(factor.adj_factor, 12)}</td><td>{factor.source}</td><td>{formatTimestamp(factor.updated_at)}</td></tr>)}</tbody></table></div></section>}
     </>}
