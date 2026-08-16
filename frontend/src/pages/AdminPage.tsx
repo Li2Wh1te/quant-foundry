@@ -51,6 +51,12 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
               <Landmark aria-hidden="true" /><span>ETF 基础信息</span>
             </NavLink>
           </div>
+
+          <span className="sidebar__label">策略研究</span>
+          <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/strategy-data">
+            <BookOpen aria-hidden="true" />
+            <span>策略数据接口</span>
+          </NavLink>
         </nav>
 
         <div className="sidebar__footer">
