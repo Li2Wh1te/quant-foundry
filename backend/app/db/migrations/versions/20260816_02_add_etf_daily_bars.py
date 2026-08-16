@@ -1,7 +1,7 @@
 """Add current authoritative ETF daily bars.
 
 Revision ID: 20260816_02
-Revises: 20260815_03
+Revises: 20260816_01
 Create Date: 2026-08-16
 """
 
@@ -12,7 +12,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20260816_02"
-down_revision: str | None = "20260815_03"
+down_revision: str | None = "20260816_01"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

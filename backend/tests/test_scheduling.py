@@ -274,6 +274,12 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
         self.assertEqual(definition.name, "ETF日线全量采集")
         self.assertEqual(definition.english_name, "Full Tushare ETF daily bars")
 
+    def test_default_registry_registers_etf_basic_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_basics")
+
+        self.assertEqual(definition.name, "ETF基础信息采集")
+        self.assertEqual(definition.english_name, "Sync Tushare ETF basics")
+
     def test_default_registry_registers_trade_calendar_sync_task(self) -> None:
         definition = task_registry.require("data.sync_trade_calendar")
 
