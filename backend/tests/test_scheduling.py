@@ -1,4 +1,5 @@
 import unittest
+from concurrent.futures import Future
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -360,6 +361,31 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
             coalesce=True,
         )
         session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
+        runtime.stop()
+
+    def test_worker_crash_finalizes_lingering_running_run(self) -> None:
+        settings = Settings(
+            api_token=API_TOKEN,
+            database_password="test-secret",
+            scheduler_enabled=False,
+            _env_file=None,
+        )
+        runtime = SchedulerRuntime(settings)
+        run_id = uuid4()
+        future: Future[None] = Future()
+
+        with patch.object(runtime, "_finish_running_run") as finish_running_run:
+            with runtime._futures_lock:
+                runtime._futures[future] = run_id
+            future.set_exception(ConnectionError("Tushare connection dropped"))
+            runtime._on_run_future_done(future)
+
+        finish_running_run.assert_called_once_with(
+            run_id,
+            status=RunStatus.FAILED,
+            error_type="ConnectionError",
+            error_message="Tushare connection dropped",
+        )
         runtime.stop()
 
 
