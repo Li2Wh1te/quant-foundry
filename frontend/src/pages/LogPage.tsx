@@ -67,8 +67,8 @@ interface EventPresentation {
 }
 
 const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
-  request_completed: { title: "请求完成" },
-  request_failed: { title: "请求失败" },
+  request_completed: { title: "请求完成", summary: "接口请求已完成。" },
+  request_failed: { title: "请求失败", summary: "接口请求失败，请查看展开详情。" },
   task_run_started: { title: "任务开始", summary: "调度器已开始执行该任务。" },
   task_run_succeeded: { title: "任务成功", summary: "任务已执行完成。" },
   task_run_failed: { title: "任务失败", summary: "任务执行失败，请查看异常详情。" },
@@ -80,31 +80,31 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   trade_calendar_range_failed: { title: "采集分段失败" },
   trade_calendar_sync_completed: { title: "交易日历采集完成" },
   etf_basic_sync_started: {
-    title: "开始采集ETF基础信息",
+    title: "开始采集 ETF 基础信息",
     summary: "正在拉取全部状态的 ETF 基础信息。"
   },
   etf_basic_sync_succeeded: {
-    title: "完成采集ETF基础信息",
+    title: "完成采集 ETF 基础信息",
     summary: "ETF 基础信息已成功写入数据库并推进检查点。"
   },
   etf_basic_sync_failed: {
-    title: "ETF基础信息采集失败",
+    title: "ETF 基础信息采集失败",
     summary: "ETF 基础信息未完成采集，请查看异常详情。"
   },
   etf_basic_sync_completed: {
-    title: "ETF基础信息采集完成",
+    title: "ETF 基础信息采集完成",
     summary: "ETF 基础信息采集任务已执行完成。"
   },
-  etf_daily_incremental_sync_planned: { title: "生成ETF日线增量采集计划" },
-  etf_daily_incremental_sync_started: { title: "开始采集ETF日线增量" },
-  etf_daily_incremental_sync_succeeded: { title: "完成采集ETF日线增量" },
-  etf_daily_incremental_sync_failed: { title: "ETF日线增量采集失败" },
-  etf_daily_incremental_sync_completed: { title: "ETF日线增量采集完成" },
-  etf_daily_full_sync_planned: { title: "生成ETF日线全量采集计划" },
-  etf_daily_full_sync_started: { title: "开始采集ETF日线全量" },
-  etf_daily_full_sync_succeeded: { title: "完成采集ETF日线全量" },
-  etf_daily_full_sync_failed: { title: "ETF日线全量采集失败" },
-  etf_daily_full_sync_completed: { title: "ETF日线全量采集完成" }
+  etf_daily_incremental_sync_planned: { title: "生成 ETF 日线增量采集计划" },
+  etf_daily_incremental_sync_started: { title: "开始采集 ETF 日线增量" },
+  etf_daily_incremental_sync_succeeded: { title: "完成采集 ETF 日线增量" },
+  etf_daily_incremental_sync_failed: { title: "ETF 日线增量采集失败" },
+  etf_daily_incremental_sync_completed: { title: "ETF 日线增量采集完成" },
+  etf_daily_full_sync_planned: { title: "生成 ETF 日线全量采集计划" },
+  etf_daily_full_sync_started: { title: "开始采集 ETF 日线全量" },
+  etf_daily_full_sync_succeeded: { title: "完成采集 ETF 日线全量" },
+  etf_daily_full_sync_failed: { title: "ETF 日线全量采集失败" },
+  etf_daily_full_sync_completed: { title: "ETF 日线全量采集完成" }
 };
 
 function eventPresentation(entry: LogEntry): EventPresentation {
@@ -130,14 +130,18 @@ function entryTitle(entry: LogEntry): string {
 }
 
 function describeEntry(entry: LogEntry): string {
-  const parts: string[] = [];
-  if (entry.method) parts.push(entry.method);
-  if (entry.path) parts.push(entry.path);
-  if (typeof entry.status_code === "number") parts.push(String(entry.status_code));
-  if (typeof entry.duration_ms === "number") parts.push(`${entry.duration_ms} ms`);
-  if (parts.length > 0) return parts.join("  ·  ");
-  const message = entry.message;
-  return typeof message === "string" ? message : eventPresentation(entry).summary ?? "系统记录了一条运行事件。";
+  const message = typeof entry.message === "string" ? entry.message.trim() : "";
+  if (message && /[\u3400-\u9fff]/.test(message)) return message;
+
+  const presentation = eventPresentation(entry);
+  if (presentation.summary) return presentation.summary;
+
+  // Keep operator-facing summaries Chinese even when a web server or a third
+  // party emits only technical English. Raw fields remain available on expand.
+  const scope = entry.path ? `接口 ${entry.path}` : "接口请求";
+  const outcome = typeof entry.status_code === "number" ? `返回 ${entry.status_code}` : "已记录运行结果";
+  const duration = typeof entry.duration_ms === "number" ? `，耗时 ${entry.duration_ms} ms` : "";
+  return `${scope}${outcome}${duration}。`;
 }
 
 function FilterChip({
@@ -419,7 +423,7 @@ export function LogPage() {
 
       <div className="log-results" aria-busy={loading}>
         <div className="log-results__header">
-          <span>时间 / 级别</span><span>事件</span><span>内容</span><span>Request ID</span>
+          <span>时间 / 级别</span><span>事件与结果摘要</span>
         </div>
         {loading ? (
           <div className="log-message"><RefreshCw className="spin" aria-hidden="true" />正在读取日志...</div>
@@ -438,12 +442,21 @@ export function LogPage() {
                     <time dateTime={entry.timestamp}>{formatTime(entry.timestamp)}</time>
                     <span className={levelClass(entry.level)}>{(entry.level ?? "INFO").toUpperCase()}</span>
                   </div>
-                  <strong>{entryTitle(entry)}</strong>
-                  <code className="log-entry__summary">{describeEntry(entry)}</code>
-                  <code className="log-entry__request">{entry.request_id || "-"}</code>
+                  <div className="log-entry__event">
+                    <strong>{entryTitle(entry)}</strong>
+                    <span className="log-entry__summary">{describeEntry(entry)}</span>
+                  </div>
                   <ChevronDown aria-hidden="true" />
                 </summary>
-                <pre>{JSON.stringify(entry, null, 2)}</pre>
+                <div className="log-entry__detail">
+                  <dl>
+                    <div><dt>Request ID</dt><dd>{entry.request_id || "—"}</dd></div>
+                    <div><dt>接口路径</dt><dd>{entry.path || "—"}</dd></div>
+                    <div><dt>HTTP 状态</dt><dd>{entry.status_code ?? "—"}</dd></div>
+                    <div><dt>耗时</dt><dd>{typeof entry.duration_ms === "number" ? `${entry.duration_ms} ms` : "—"}</dd></div>
+                  </dl>
+                  <pre>{JSON.stringify(entry, null, 2)}</pre>
+                </div>
               </details>
             ))}
           </div>
