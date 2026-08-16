@@ -5,6 +5,7 @@ from app.data_ingestion.models import (
     EtfCode,
     EtfCodeMappingAudit,
     EtfEntity,
+    EtfDailyBar,
     TradingCalendarDay,
 )
 from app.scheduling.models import ScheduledTask, TaskRun
@@ -15,6 +16,7 @@ __all__ = [
     "EtfCode",
     "EtfCodeMappingAudit",
     "EtfEntity",
+    "EtfDailyBar",
     "ScheduledTask",
     "TaskRun",
     "TradingCalendarDay",

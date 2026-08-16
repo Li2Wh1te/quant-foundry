@@ -92,7 +92,17 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   etf_basic_sync_completed: {
     title: "ETF基础信息采集完成",
     summary: "ETF 基础信息采集任务已执行完成。"
-  }
+  },
+  etf_daily_incremental_sync_planned: { title: "生成ETF日线增量采集计划" },
+  etf_daily_incremental_sync_started: { title: "开始采集ETF日线增量" },
+  etf_daily_incremental_sync_succeeded: { title: "完成采集ETF日线增量" },
+  etf_daily_incremental_sync_failed: { title: "ETF日线增量采集失败" },
+  etf_daily_incremental_sync_completed: { title: "ETF日线增量采集完成" },
+  etf_daily_full_sync_planned: { title: "生成ETF日线全量采集计划" },
+  etf_daily_full_sync_started: { title: "开始采集ETF日线全量" },
+  etf_daily_full_sync_succeeded: { title: "完成采集ETF日线全量" },
+  etf_daily_full_sync_failed: { title: "ETF日线全量采集失败" },
+  etf_daily_full_sync_completed: { title: "ETF日线全量采集完成" }
 };
 
 function eventPresentation(entry: LogEntry): EventPresentation {
