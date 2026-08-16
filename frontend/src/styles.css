@@ -1264,7 +1264,15 @@ svg {
 .etf-detail__range-controls button { height: 25px; padding: 0 8px; border: 1px solid #333940; border-radius: 4px; color: #aab4c4; background: transparent; font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer; }
 .etf-detail__range-controls button.active { border-color: color-mix(in srgb, var(--accent) 70%, #333940); color: #07140e; background: var(--accent); }
 .etf-detail__range-controls span { margin-left: 5px; color: #7e899a; font-size: 10px; }
-.etf-kline { width: 100%; height: 470px; min-height: 360px; }
+.etf-kline-wrap { min-height: 0; display: flex; flex: 1 1 auto; flex-direction: column; gap: 8px; }
+.etf-kline__summary { min-height: 28px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: #8f9bad; font-size: 10px; }
+.etf-kline__summary-date { margin-right: 2px; color: #7e899a; }
+.etf-kline__summary-item { display: inline-flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid #343b45; border-radius: 5px; background: #22262c; }
+.etf-kline__summary-item > span { color: #8f9bad; }
+.etf-kline__summary-item strong { color: #d4d9e2; font-size: 11px; font-weight: 700; }
+.etf-kline__summary-value--up { color: #f35b69 !important; }
+.etf-kline__summary-value--down { color: #45cc91 !important; }
+.etf-kline { width: 100%; height: 470px; min-height: 360px; overflow: hidden; border-radius: 6px; background: #1d2025; }
 .etf-detail__chart-shell:fullscreen .etf-kline { height: auto; min-height: 0; flex: 1 1 auto; }
 .etf-detail__chart-empty { min-height: 260px; display: grid; place-items: center; color: #aab4c4; font-size: 12px; }
 .etf-detail__factor-table { margin-top: 0; }
@@ -2140,6 +2148,17 @@ svg {
   .etf-kline {
     height: 360px;
     min-height: 0;
+  }
+
+  .etf-kline__summary {
+    justify-content: flex-start;
+    flex-wrap: wrap;
+    height: auto;
+  }
+
+  .etf-kline__summary-date {
+    flex-basis: 100%;
+    margin-right: 0;
   }
 
   .log-query__primary {
