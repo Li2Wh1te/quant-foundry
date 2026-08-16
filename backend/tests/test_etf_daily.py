@@ -20,6 +20,7 @@ from app.data_ingestion.services.etf_daily import (
     MAX_ETF_DAILY_ROWS,
     _commit_etf_daily_date,
     _initialize_full_cycle,
+    _load_earliest_etf_list_date,
     fetch_etf_daily,
     fetch_etf_daily_for_trade_date,
     normalize_etf_daily,
@@ -147,8 +148,6 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         result = sync_etf_daily_incremental(
             client,
-            calendar_exchange="SSE",
-            initial_start_date=first_date,
             as_of_date=second_date,
             request_interval_ms=1_500,
         )
@@ -229,8 +228,6 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         result = sync_etf_daily_full(
             Mock(),
-            calendar_exchange="SSE",
-            initial_start_date=initial_date,
             as_of_date=date(2026, 8, 20),
         )
 
@@ -245,6 +242,40 @@ class FetchEtfDailyTestCase(unittest.TestCase):
         self.assertEqual(
             commit_mock.call_args.kwargs["sync_key"], ETF_DAILY_FULL_SYNC_KEY
         )
+
+    @patch("app.data_ingestion.services.etf_daily.EtfCodeRepository")
+    @patch("app.data_ingestion.services.etf_daily.get_engine")
+    @patch("app.data_ingestion.services.etf_daily.Session")
+    def test_full_sync_start_date_comes_from_etf_reference_data(
+        self,
+        session_class,
+        get_engine_mock,
+        code_repository_class,
+    ) -> None:
+        code_repository_class.return_value.earliest_list_date.return_value = date(
+            2005, 2, 23
+        )
+
+        result = _load_earliest_etf_list_date()
+
+        self.assertEqual(result, date(2005, 2, 23))
+        code_repository_class.return_value.earliest_list_date.assert_called_once_with(
+            source="tushare"
+        )
+
+    @patch("app.data_ingestion.services.etf_daily.EtfCodeRepository")
+    @patch("app.data_ingestion.services.etf_daily.get_engine")
+    @patch("app.data_ingestion.services.etf_daily.Session")
+    def test_full_sync_requires_etf_reference_data(
+        self,
+        session_class,
+        get_engine_mock,
+        code_repository_class,
+    ) -> None:
+        code_repository_class.return_value.earliest_list_date.return_value = None
+
+        with self.assertRaisesRegex(ValueError, "ETF basic data is required"):
+            _load_earliest_etf_list_date()
 
     @patch("app.data_ingestion.services.etf_daily.DataSyncCheckpointRepository")
     @patch("app.data_ingestion.services.etf_daily.get_engine")

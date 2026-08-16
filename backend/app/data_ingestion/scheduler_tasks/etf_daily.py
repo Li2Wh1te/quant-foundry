@@ -1,10 +1,9 @@
 """Scheduler registrations for incremental and full Tushare ETF daily syncing."""
 
 from dataclasses import asdict
-from datetime import date, datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 import structlog
 
 from app.core.config import get_settings
@@ -24,22 +23,23 @@ class EtfDailySyncParameters(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    calendar_exchange: str = Field(min_length=1, max_length=16)
-    initial_start_date: date
     request_interval_ms: int | None = Field(default=None, ge=0, le=60_000)
 
-    @field_validator("initial_start_date", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def parse_tushare_compact_date(cls, value: Any) -> Any:
-        """Accept the compact date format documented by Tushare."""
-        if not isinstance(value, str) or len(value) != 8 or not value.isdigit():
+    def discard_removed_legacy_parameters(cls, value: Any) -> Any:
+        """Accept existing tasks while omitting obsolete fields from new schemas.
+
+        Earlier task definitions required an operator-selected start date and a
+        calendar exchange. Full runs now derive the first date from ETF reference
+        data, and both workflows use the fixed domestic-market SSE calendar.
+        """
+        if not isinstance(value, dict):
             return value
-        try:
-            return datetime.strptime(value, "%Y%m%d").date()
-        except ValueError as exc:
-            raise ValueError(
-                "initial_start_date must be a valid YYYYMMDD or ISO-8601 date"
-            ) from exc
+        normalized = dict(value)
+        normalized.pop("initial_start_date", None)
+        normalized.pop("calendar_exchange", None)
+        return normalized
 
 
 def sync_etf_daily_incremental_task(
@@ -52,8 +52,6 @@ def sync_etf_daily_incremental_task(
         )
     result = sync_etf_daily_incremental(
         TushareClient(get_settings()),
-        calendar_exchange=parameters.calendar_exchange,
-        initial_start_date=parameters.initial_start_date,
         request_interval_ms=parameters.request_interval_ms,
     )
     return _result_payload_and_log(
@@ -71,8 +69,6 @@ def sync_etf_daily_full_task(
         raise TypeError("unexpected parameters model for data.sync_etf_daily_full")
     result = sync_etf_daily_full(
         TushareClient(get_settings()),
-        calendar_exchange=parameters.calendar_exchange,
-        initial_start_date=parameters.initial_start_date,
         request_interval_ms=parameters.request_interval_ms,
     )
     return _result_payload_and_log(

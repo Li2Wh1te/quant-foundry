@@ -1,7 +1,7 @@
 """PostgreSQL persistence for ETF reference data."""
 
 from collections.abc import Iterable
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, or_, select, update
@@ -147,6 +147,19 @@ class EtfCodeRepository:
             )
         )
         return True
+
+    def earliest_list_date(self, *, source: str) -> date | None:
+        """Return the earliest known listed ETF date for a source snapshot.
+
+        Daily-bar full backfills derive their boundary from reference data instead
+        of requiring an operator to guess a date before the ETF market existed.
+        """
+        return self.session.scalar(
+            select(func.min(EtfCode.list_date)).where(
+                EtfCode.source == source,
+                EtfCode.list_date.is_not(None),
+            )
+        )
 
     def _existing_entities(self, *, source: str, ts_codes: list[str]) -> dict[str, UUID]:
         rows = self.session.execute(
