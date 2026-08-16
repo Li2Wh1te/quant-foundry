@@ -34,6 +34,47 @@ export interface TradingCalendarFilters {
   offset?: number;
 }
 
+export interface EtfCode {
+  ts_code: string;
+  csname: string | null;
+  extname: string | null;
+  cname: string | null;
+  index_code: string | null;
+  index_name: string | null;
+  list_date: string | null;
+  list_status: string;
+  exchange: string;
+  mgr_name: string | null;
+  mgt_fee: string | null;
+  etf_type: string | null;
+  updated_at: string;
+}
+
+export interface EtfPage {
+  items: EtfCode[];
+  total: number;
+  limit: number;
+  offset: number;
+}
+
+export interface EtfOverview {
+  total_records: number;
+  exchange_count: number;
+  listed_count: number;
+  first_list_date: string | null;
+  latest_list_date: string | null;
+  last_updated_at: string | null;
+  refreshed_at: string | null;
+}
+
+export interface EtfFilters {
+  keyword?: string;
+  exchange?: string;
+  listStatus?: string;
+  limit?: number;
+  offset?: number;
+}
+
 export class DataCollectionApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -74,4 +115,18 @@ export function listTradingCalendarDays(filters: TradingCalendarFilters): Promis
   params.set("limit", String(filters.limit ?? 50));
   params.set("offset", String(filters.offset ?? 0));
   return request<TradingCalendarPage>(`/api/admin/data-collections/trading-calendar?${params}`);
+}
+
+export function getEtfOverview(): Promise<EtfOverview> {
+  return request<EtfOverview>("/api/admin/data-collections/etfs/overview");
+}
+
+export function listEtfs(filters: EtfFilters): Promise<EtfPage> {
+  const params = new URLSearchParams();
+  if (filters.keyword) params.set("keyword", filters.keyword);
+  if (filters.exchange) params.set("exchange", filters.exchange);
+  if (filters.listStatus) params.set("list_status", filters.listStatus);
+  params.set("limit", String(filters.limit ?? 50));
+  params.set("offset", String(filters.offset ?? 0));
+  return request<EtfPage>(`/api/admin/data-collections/etfs?${params}`);
 }

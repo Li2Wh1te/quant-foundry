@@ -1169,6 +1169,23 @@ svg {
 .collection-empty-state > svg { width: 30px; height: 30px; margin-bottom: 14px; color: var(--accent); }
 .collection-empty-state p { max-width: 380px; margin: 7px 0 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
 
+.collection-filter--etf { grid-template-columns: minmax(220px, 1.25fr) minmax(135px, 0.8fr) minmax(135px, 0.8fr) auto; }
+.etf-search-field { position: relative; }
+.etf-search-field svg { position: absolute; top: 9px; left: 9px; width: 15px; height: 15px; color: var(--text-faint); }
+.collection-filter .etf-search-field input { padding-left: 31px; }
+.etf-data-table { min-width: 1_080px !important; }
+.etf-data-table td { vertical-align: top; }
+.etf-data-table td > strong,
+.etf-data-table td > small { display: block; }
+.etf-data-table td > strong { color: var(--text); font-size: 12px; font-weight: 680; }
+.etf-data-table td > small { max-width: 220px; margin-top: 3px; overflow: hidden; color: var(--text-faint); font-size: 10px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.etf-code { color: #1d7548 !important; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+.etf-status { display: inline-flex; align-items: center; gap: 5px; color: var(--text-muted); font-size: 11px; font-weight: 680; }
+.etf-status::before { width: 6px; height: 6px; border-radius: 50%; background: currentColor; content: ""; }
+.etf-status--l { color: #1d7548; }
+.etf-status--d { color: var(--danger); }
+.etf-status--p { color: #967000; }
+
 .tasks-page__heading {
   margin-bottom: 18px;
 }

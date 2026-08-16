@@ -1,4 +1,4 @@
-import { BookOpen, CalendarClock, Database, FileSearch, Grid2X2, LineChart, LogOut } from "lucide-react";
+import { BookOpen, CalendarClock, Database, FileSearch, Grid2X2, Landmark, LineChart, LogOut } from "lucide-react";
 import { NavLink, useLocation, useNavigate } from "react-router-dom";
 
 import { useAuth } from "../auth/AuthContext";
@@ -46,6 +46,9 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
             </NavLink>
             <NavLink className={({ isActive }) => `nav-submenu__item${isActive ? " nav-submenu__item--active" : ""}`} to="/admin/data/daily-quotes">
               <LineChart aria-hidden="true" /><span>日线行情</span>
+            </NavLink>
+            <NavLink className={({ isActive }) => `nav-submenu__item${isActive ? " nav-submenu__item--active" : ""}`} to="/admin/data/etf-basics">
+              <Landmark aria-hidden="true" /><span>ETF 基础信息</span>
             </NavLink>
           </div>
         </nav>
