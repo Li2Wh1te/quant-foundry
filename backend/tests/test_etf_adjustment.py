@@ -1,16 +1,52 @@
-"""Tests for the minimal ETF adjustment-factor retrieval service."""
+"""Tests for ETF adjustment-factor retrieval and current-value persistence."""
 
 import unittest
-from unittest.mock import Mock
+from datetime import date
+from decimal import Decimal
+from types import SimpleNamespace
+from unittest.mock import Mock, patch
 
-from app.data_ingestion.services.etf_adjustment import fetch_etf_adjustment_factors
+from sqlalchemy.dialects import postgresql
+
+from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
+from app.data_ingestion.repositories.etf_adjustment import (
+    EtfAdjustmentFactorRepository,
+)
+from app.data_ingestion.schemas.etf_adjustment import (
+    EtfAdjustmentFactorInput,
+    EtfAdjustmentFactorUpsertResult,
+)
+from app.data_ingestion.services.etf_adjustment import (
+    fetch_etf_adjustment_factors,
+    normalize_etf_adjustment_factors,
+    sync_etf_adjustment_factors,
+)
+
+
+def make_factor() -> EtfAdjustmentFactorInput:
+    return EtfAdjustmentFactorInput(
+        ts_code="513100.SH",
+        trade_date=date(2026, 8, 14),
+        adj_factor=Decimal("1.123456789012"),
+    )
+
+
+class EtfAdjustmentFactorModelTestCase(unittest.TestCase):
+    def test_uses_source_code_and_trade_date_as_the_primary_key(self) -> None:
+        self.assertEqual(
+            [column.name for column in EtfAdjustmentFactor.__table__.primary_key.columns],
+            ["source", "ts_code", "trade_date"],
+        )
+
+    def test_indexes_trade_date_for_cross_etf_queries(self) -> None:
+        self.assertIn(
+            "ix_etf_adjustment_factors_trade_date_code",
+            {index.name for index in EtfAdjustmentFactor.__table__.indexes},
+        )
 
 
 class FetchEtfAdjustmentFactorsTestCase(unittest.TestCase):
-    """Verify the service preserves Tushare's documented request contract."""
-
     def test_forwards_the_documented_tushare_parameters(self) -> None:
-        """The service should forward the official fund_adj demo parameters unchanged."""
         client = Mock()
 
         result = fetch_etf_adjustment_factors(
@@ -25,4 +61,115 @@ class FetchEtfAdjustmentFactorsTestCase(unittest.TestCase):
             ts_code="513100.SH",
             start_date="20190101",
             end_date="20190926",
+        )
+
+    def test_normalizes_factor_rows(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {
+                "ts_code": "513100.SH",
+                "trade_date": "20260814",
+                "adj_factor": 1.123456789012,
+            }
+        ]
+
+        self.assertEqual(
+            normalize_etf_adjustment_factors(
+                dataframe, expected_ts_code="513100.SH"
+            ),
+            [make_factor()],
+        )
+
+    def test_rejects_non_positive_factor(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {"ts_code": "513100.SH", "trade_date": "20260814", "adj_factor": 0}
+        ]
+
+        with self.assertRaisesRegex(ValueError, "invalid adj_factor"):
+            normalize_etf_adjustment_factors(
+                dataframe, expected_ts_code="513100.SH"
+            )
+
+
+class EtfAdjustmentFactorRepositoryTestCase(unittest.TestCase):
+    def test_upsert_updates_only_changed_factors(self) -> None:
+        session = Mock()
+        session.execute.return_value.all.return_value = [("513100.SH",)]
+
+        result = EtfAdjustmentFactorRepository(session).upsert_factors(
+            [make_factor()], source="tushare"
+        )
+
+        self.assertEqual(
+            (result.received, result.changed, result.unchanged), (1, 1, 0)
+        )
+        statement = session.execute.call_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        self.assertIn(
+            "ON CONFLICT (source, ts_code, trade_date) DO UPDATE", sql
+        )
+        self.assertIn("IS DISTINCT FROM excluded.adj_factor", sql)
+
+    def test_rejects_duplicate_factor_keys_before_writing(self) -> None:
+        session = Mock()
+
+        with self.assertRaisesRegex(ValueError, "duplicate ts_code and trade_date"):
+            EtfAdjustmentFactorRepository(session).upsert_factors(
+                [make_factor(), make_factor()], source="tushare"
+            )
+
+        session.execute.assert_not_called()
+
+
+class SyncEtfAdjustmentFactorsTestCase(unittest.TestCase):
+    @patch("app.data_ingestion.services.etf_adjustment.logger")
+    @patch(
+        "app.data_ingestion.services.etf_adjustment._commit_etf_adjustment_factors"
+    )
+    @patch(
+        "app.data_ingestion.services.etf_adjustment.normalize_etf_adjustment_factors"
+    )
+    @patch("app.data_ingestion.services.etf_adjustment.fetch_etf_adjustment_factors")
+    @patch("app.data_ingestion.services.etf_adjustment.tushare_request_pacer")
+    @patch("app.data_ingestion.services.etf_adjustment.get_settings")
+    def test_fetches_and_commits_one_range(
+        self,
+        get_settings_mock,
+        pacer_mock,
+        fetch_mock,
+        normalize_mock,
+        commit_mock,
+        logger_mock,
+    ) -> None:
+        get_settings_mock.return_value = SimpleNamespace(
+            ingestion_request_interval_ms=1_000
+        )
+        factor = make_factor()
+        normalize_mock.return_value = [factor]
+        commit_mock.return_value = EtfAdjustmentFactorUpsertResult(
+            received=1, changed=1, unchanged=0
+        )
+
+        client = Mock()
+        result = sync_etf_adjustment_factors(
+            client,
+            ts_code="513100.SH",
+            start_date="20260801",
+            end_date="20260814",
+            request_interval_ms=1_500,
+        )
+
+        self.assertEqual(result.changed, 1)
+        pacer_mock.wait_for_turn.assert_called_once_with(1_500)
+        fetch_mock.assert_called_once_with(
+            client,
+            ts_code="513100.SH",
+            start_date="20260801",
+            end_date="20260814",
+        )
+        commit_mock.assert_called_once_with([factor])
+        self.assertEqual(
+            [call.args[0] for call in logger_mock.info.call_args_list],
+            ["etf_adjustment_sync_started", "etf_adjustment_sync_succeeded"],
         )

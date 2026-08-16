@@ -6,10 +6,12 @@ from app.data_ingestion.repositories.trading_calendar import TradingCalendarRepo
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.data_ingestion.repositories.trading_calendar_query import TradingCalendarQueryRepository
 from app.data_ingestion.repositories.etf_daily import EtfDailyBarRepository
+from app.data_ingestion.repositories.etf_adjustment import EtfAdjustmentFactorRepository
 
 __all__ = [
     "DataSyncCheckpointRepository",
     "EtfDailyBarRepository",
+    "EtfAdjustmentFactorRepository",
     "EtfCodeRepository",
     "EtfQueryRepository",
     "TradingCalendarQueryRepository",
