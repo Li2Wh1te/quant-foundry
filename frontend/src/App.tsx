@@ -5,6 +5,7 @@ import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
+import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
@@ -64,6 +65,10 @@ export function App() {
       <Route
         path="/admin/data/etf-basics"
         element={<RequireAuth><AdminPage><EtfBasicsPage /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/data/etf-basics/:tsCode"
+        element={<RequireAuth><AdminPage><EtfDetailPage /></AdminPage></RequireAuth>}
       />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>

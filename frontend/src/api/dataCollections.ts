@@ -75,6 +75,33 @@ export interface EtfFilters {
   offset?: number;
 }
 
+export interface EtfDailyBar {
+  ts_code: string;
+  trade_date: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  vol: string;
+  amount: string;
+  source: string;
+  updated_at: string;
+}
+
+export interface EtfAdjustmentFactor {
+  ts_code: string;
+  trade_date: string;
+  adj_factor: string;
+  source: string;
+  updated_at: string;
+}
+
+export interface EtfTimeSeriesFilters {
+  startDate?: string;
+  endDate?: string;
+  limit?: number;
+}
+
 export class DataCollectionApiError extends Error {
   constructor(message: string, readonly status: number) {
     super(message);
@@ -129,4 +156,34 @@ export function listEtfs(filters: EtfFilters): Promise<EtfPage> {
   params.set("limit", String(filters.limit ?? 50));
   params.set("offset", String(filters.offset ?? 0));
   return request<EtfPage>(`/api/admin/data-collections/etfs?${params}`);
+}
+
+function timeSeriesParams(filters: EtfTimeSeriesFilters): string {
+  const params = new URLSearchParams();
+  if (filters.startDate) params.set("start_date", filters.startDate);
+  if (filters.endDate) params.set("end_date", filters.endDate);
+  params.set("limit", String(filters.limit ?? 1_000));
+  return params.toString();
+}
+
+export function getEtf(tsCode: string): Promise<EtfCode> {
+  return request<EtfCode>(`/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}`);
+}
+
+export function listEtfDailyBars(
+  tsCode: string,
+  filters: EtfTimeSeriesFilters
+): Promise<EtfDailyBar[]> {
+  return request<EtfDailyBar[]>(
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars?${timeSeriesParams(filters)}`
+  );
+}
+
+export function listEtfAdjustmentFactors(
+  tsCode: string,
+  filters: EtfTimeSeriesFilters
+): Promise<EtfAdjustmentFactor[]> {
+  return request<EtfAdjustmentFactor[]>(
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors?${timeSeriesParams(filters)}`
+  );
 }
