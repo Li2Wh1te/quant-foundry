@@ -11,6 +11,18 @@ from app.data_ingestion.models.etf import EtfCode
 from app.data_ingestion.models.sync_checkpoint import DataSyncCheckpoint
 
 
+# Tushare ETF-basic has historically returned both exchange-code conventions.
+# The admin API accepts the documented market identifiers while querying every
+# equivalent persisted source value, so a source normalization rollout cannot
+# make an existing ETF disappear from the operator view.
+EXCHANGE_CODE_ALIASES = {
+    "SSE": ("SSE", "SH"),
+    "SH": ("SSE", "SH"),
+    "SZSE": ("SZSE", "SZ"),
+    "SZ": ("SZSE", "SZ"),
+}
+
+
 @dataclass(frozen=True)
 class EtfOverview:
     """Aggregated values shown above the ETF reference-data table."""
@@ -104,10 +116,16 @@ class EtfQueryRepository:
                 )
             )
         if exchange is not None:
-            filters.append(EtfCode.exchange == exchange)
+            filters.append(EtfCode.exchange.in_(self._exchange_codes(exchange)))
         if list_status is not None:
             filters.append(EtfCode.list_status == list_status)
         return filters
+
+    @staticmethod
+    def _exchange_codes(exchange: str) -> tuple[str, ...]:
+        """Expand compatible Shanghai and Shenzhen source exchange codes."""
+        normalized = exchange.upper()
+        return EXCHANGE_CODE_ALIASES.get(normalized, (normalized,))
 
     @staticmethod
     def _refresh_timestamp(checkpoint: DataSyncCheckpoint | None) -> datetime | None:
