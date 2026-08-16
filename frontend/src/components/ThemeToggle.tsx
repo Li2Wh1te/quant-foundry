@@ -14,9 +14,9 @@ function initialTheme(): Theme {
   } catch {
     // Theme persistence is optional when browser storage is unavailable.
   }
-  return window.matchMedia("(prefers-color-scheme: dark)").matches
-    ? "dark"
-    : "light";
+  // The workbench is optimized for dense operational data, so dark is the
+  // first-visit default. A persisted user decision always takes precedence.
+  return "dark";
 }
 
 export function ThemeToggle() {

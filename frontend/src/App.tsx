@@ -4,6 +4,7 @@ import { LoadingScreen } from "./components/LoadingScreen";
 import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
+import { DashboardPage } from "./pages/DashboardPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -35,7 +36,7 @@ export function App() {
         path="/admin"
         element={
           <RequireAuth>
-            <AdminPage />
+            <AdminPage><DashboardPage /></AdminPage>
           </RequireAuth>
         }
       />
