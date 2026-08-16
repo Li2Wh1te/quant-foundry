@@ -1264,6 +1264,7 @@ svg {
 .etf-detail__range-controls button { height: 25px; padding: 0 8px; border: 1px solid #333940; border-radius: 4px; color: #aab4c4; background: transparent; font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer; }
 .etf-detail__range-controls button.active { border-color: color-mix(in srgb, var(--accent) 70%, #333940); color: #07140e; background: var(--accent); }
 .etf-detail__range-controls span { margin-left: 5px; color: #7e899a; font-size: 10px; }
+.etf-detail__adjustment-note { margin: -1px 0 8px; color: #8f9bad; font-size: 10px; line-height: 1.5; }
 .etf-kline-wrap { min-height: 0; display: flex; flex: 1 1 auto; flex-direction: column; gap: 8px; }
 .etf-kline__summary { min-height: 28px; display: flex; align-items: center; justify-content: flex-end; gap: 8px; color: #8f9bad; font-size: 10px; }
 .etf-kline__summary-date { margin-right: 2px; color: #7e899a; }
