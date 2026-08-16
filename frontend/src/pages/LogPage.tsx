@@ -72,6 +72,8 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   task_run_started: { title: "任务开始", summary: "调度器已开始执行该任务。" },
   task_run_succeeded: { title: "任务成功", summary: "任务已执行完成。" },
   task_run_failed: { title: "任务失败", summary: "任务执行失败，请查看异常详情。" },
+  task_run_worker_crashed: { title: "任务执行器异常退出", summary: "任务执行器异常退出，系统正在补偿结束运行记录。" },
+  task_run_failure_recovery_failed: { title: "任务运行记录补偿失败", summary: "任务执行器异常后的运行记录补偿失败，请查看异常详情。" },
   trade_calendar_sync_planned: { title: "生成采集计划" },
   trade_calendar_range_started: { title: "开始采集分段" },
   trade_calendar_range_succeeded: { title: "完成采集分段" },

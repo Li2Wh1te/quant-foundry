@@ -280,25 +280,74 @@ class SchedulerRuntime:
     def _on_run_future_done(self, future: Future[Any]) -> None:
         with self._futures_lock:
             run_id = self._futures.pop(future, None)
-        if run_id is not None and future.cancelled():
-            with Session(get_engine()) as session:
-                SchedulerRepository(session).finish_run(
+        if run_id is None:
+            return
+        if future.cancelled():
+            self._finish_running_run(
+                run_id,
+                status=RunStatus.INTERRUPTED,
+                error_type="SchedulerStopped",
+                error_message="The scheduler stopped before execution started.",
+            )
+            return
+
+        try:
+            future.result()
+        except BaseException as exc:
+            # _execute_run normally records handler failures itself. This covers
+            # failures while recording that result, so a dead worker cannot leave
+            # the database row consuming the task's only concurrency slot.
+            logger.exception(
+                "task_run_worker_crashed",
+                message="任务执行器异常退出，正在补偿结束运行记录。",
+                run_id=str(run_id),
+            )
+            try:
+                self._finish_running_run(
                     run_id,
-                    status=RunStatus.INTERRUPTED,
-                    error_type="SchedulerStopped",
-                    error_message="The scheduler stopped before execution started.",
+                    status=RunStatus.FAILED,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc)[:10_000]
+                    or "Task worker exited before reporting its result.",
                 )
-                session.commit()
+            except Exception:
+                logger.exception(
+                    "task_run_failure_recovery_failed",
+                    message="任务执行器异常后的运行记录补偿失败。",
+                    run_id=str(run_id),
+                )
 
     def _finish_dispatch_failure(self, run_id: UUID, exc: Exception) -> None:
+        self._finish_running_run(
+            run_id,
+            status=RunStatus.FAILED,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+    def _finish_running_run(
+        self,
+        run_id: UUID,
+        *,
+        status: RunStatus,
+        error_type: str | None = None,
+        error_message: str | None = None,
+    ) -> bool:
+        """Finish only a lingering running row without overwriting terminal state.
+
+        The conditional repository update makes this method safe for worker and
+        callback recovery paths to race: whichever finishes first wins, while a
+        completed, skipped, or interrupted run remains unchanged.
+        """
         with Session(get_engine()) as session:
-            SchedulerRepository(session).finish_run(
+            finished = SchedulerRepository(session).finish_run(
                 run_id,
-                status=RunStatus.FAILED,
-                error_type=type(exc).__name__,
-                error_message=str(exc),
+                status=status,
+                error_type=error_type,
+                error_message=error_message,
             )
             session.commit()
+        return finished
 
     def _remove_job_if_present(self, job_id: str) -> None:
         if self.scheduler.get_job(job_id) is not None:
