@@ -37,6 +37,7 @@ class EtfQueryRepositoryTestCase(unittest.TestCase):
         for query in (page_query, count_query):
             self.assertIn("etf_codes.source", query)
             self.assertIn("etf_codes.exchange", query)
+            self.assertIn(" IN ", query)
             self.assertIn("etf_codes.list_status", query)
             self.assertIn("lower(etf_codes.ts_code) LIKE", query)
 
@@ -65,6 +66,12 @@ class EtfQueryRepositoryTestCase(unittest.TestCase):
         self.assertEqual(overview.latest_list_date, date(2026, 8, 15))
         self.assertEqual(overview.last_updated_at, datetime(2026, 8, 16, 10, 0, tzinfo=UTC))
         self.assertIsNone(overview.refreshed_at)
+
+    def test_expands_exchange_filters_for_existing_tushare_code_variants(self) -> None:
+        self.assertEqual(EtfQueryRepository._exchange_codes("SSE"), ("SSE", "SH"))
+        self.assertEqual(EtfQueryRepository._exchange_codes("SH"), ("SSE", "SH"))
+        self.assertEqual(EtfQueryRepository._exchange_codes("SZSE"), ("SZSE", "SZ"))
+        self.assertEqual(EtfQueryRepository._exchange_codes("SZ"), ("SZSE", "SZ"))
 
 
 if __name__ == "__main__":
