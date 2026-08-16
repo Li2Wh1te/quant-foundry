@@ -38,7 +38,7 @@ class EtfDetailQueryRepository:
         ts_code: str,
         start_date: date | None,
         end_date: date | None,
-        limit: int,
+        limit: int | None,
     ) -> list[EtfDailyBar]:
         """Return oldest-first raw bars so callers can draw an ordered chart."""
         filters: list[object] = [
@@ -49,12 +49,10 @@ class EtfDetailQueryRepository:
             filters.append(EtfDailyBar.trade_date >= start_date)
         if end_date is not None:
             filters.append(EtfDailyBar.trade_date <= end_date)
-        return self.session.scalars(
-            select(EtfDailyBar)
-            .where(*filters)
-            .order_by(EtfDailyBar.trade_date.asc())
-            .limit(limit)
-        ).all()
+        statement = select(EtfDailyBar).where(*filters).order_by(EtfDailyBar.trade_date.asc())
+        if limit is not None:
+            statement = statement.limit(limit)
+        return self.session.scalars(statement).all()
 
     def list_adjustment_factors(
         self,
@@ -62,7 +60,7 @@ class EtfDetailQueryRepository:
         ts_code: str,
         start_date: date | None,
         end_date: date | None,
-        limit: int,
+        limit: int | None,
     ) -> list[EtfAdjustmentFactor]:
         """Return oldest-first factors aligned with daily-bar chart dates."""
         filters: list[object] = [
@@ -73,9 +71,7 @@ class EtfDetailQueryRepository:
             filters.append(EtfAdjustmentFactor.trade_date >= start_date)
         if end_date is not None:
             filters.append(EtfAdjustmentFactor.trade_date <= end_date)
-        return self.session.scalars(
-            select(EtfAdjustmentFactor)
-            .where(*filters)
-            .order_by(EtfAdjustmentFactor.trade_date.asc())
-            .limit(limit)
-        ).all()
+        statement = select(EtfAdjustmentFactor).where(*filters).order_by(EtfAdjustmentFactor.trade_date.asc())
+        if limit is not None:
+            statement = statement.limit(limit)
+        return self.session.scalars(statement).all()

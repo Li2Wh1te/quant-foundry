@@ -162,7 +162,7 @@ function timeSeriesParams(filters: EtfTimeSeriesFilters): string {
   const params = new URLSearchParams();
   if (filters.startDate) params.set("start_date", filters.startDate);
   if (filters.endDate) params.set("end_date", filters.endDate);
-  params.set("limit", String(filters.limit ?? 1_000));
+  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
   return params.toString();
 }
 
@@ -174,8 +174,9 @@ export function listEtfDailyBars(
   tsCode: string,
   filters: EtfTimeSeriesFilters
 ): Promise<EtfDailyBar[]> {
+  const params = timeSeriesParams(filters);
   return request<EtfDailyBar[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars?${timeSeriesParams(filters)}`
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars${params ? `?${params}` : ""}`
   );
 }
 
@@ -183,7 +184,8 @@ export function listEtfAdjustmentFactors(
   tsCode: string,
   filters: EtfTimeSeriesFilters
 ): Promise<EtfAdjustmentFactor[]> {
+  const params = timeSeriesParams(filters);
   return request<EtfAdjustmentFactor[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors?${timeSeriesParams(filters)}`
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors${params ? `?${params}` : ""}`
   );
 }

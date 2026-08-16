@@ -1219,16 +1219,15 @@ svg {
 .etf-detail__chart-controls > div:last-child { justify-self: end; }
 .etf-detail__chart-controls button { height: 27px; padding: 0 9px; border: 0; color: #aab4c4; background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
 .etf-detail__chart-controls button.active { color: #07140e; background: var(--accent); }
-.etf-detail__chart-controls > span { display: inline-flex; align-items: center; gap: 5px; justify-self: center; color: #b7c0cf; font-size: 10px; white-space: nowrap; }
-.etf-detail__chart-controls i { width: 13px; height: 2px; margin-left: 5px; background: currentColor; }
+.etf-detail__ma-toggles { justify-self: center; }
+.etf-detail__ma-toggles button[aria-pressed="false"] { opacity: 0.42; }
+.etf-detail__chart-controls i { width: 13px; height: 2px; margin-right: 5px; background: currentColor; }
 .etf-detail__chart-controls .ma5 { color: #10cae6; } .etf-detail__chart-controls .ma10 { color: #ffb317; } .etf-detail__chart-controls .ma20 { color: #ba94ff; }
-.etf-kline { display: block; width: 100%; height: min(420px, 46vw); min-height: 260px; overflow: visible; }
-.etf-kline__grid { stroke: #343940; stroke-width: 1; }
-.etf-kline__axis { fill: #98a3b5; font-size: 11px; }
-.etf-kline__up { fill: #f35b69; stroke: #f35b69; }
-.etf-kline__down { fill: #45cc91; stroke: #45cc91; }
-.etf-kline__ma { fill: none; stroke-width: 2; }
-.etf-kline__ma--5 { stroke: #10cae6; } .etf-kline__ma--10 { stroke: #ffb317; } .etf-kline__ma--20 { stroke: #ba94ff; }
+.etf-detail__range-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
+.etf-detail__range-controls button { height: 25px; padding: 0 8px; border: 1px solid #333940; border-radius: 4px; color: #aab4c4; background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.etf-detail__range-controls button.active { border-color: color-mix(in srgb, var(--accent) 70%, #333940); color: #07140e; background: var(--accent); }
+.etf-detail__range-controls span { margin-left: 5px; color: #7e899a; font-size: 10px; }
+.etf-kline { width: 100%; min-height: 470px; }
 .etf-detail__chart-empty { min-height: 260px; display: grid; place-items: center; color: #aab4c4; font-size: 12px; }
 .etf-detail__factor-table { margin-top: 0; }
 
