@@ -76,14 +76,20 @@ def make_task(**overrides):
 
 
 class SchedulingSchemaTestCase(unittest.TestCase):
-    def test_etf_daily_parameters_accept_tushare_compact_date(self) -> None:
+    def test_etf_daily_parameters_omit_derived_dates_and_accept_legacy_tasks(self) -> None:
         parameters = task_registry.require(
             "data.sync_etf_daily_incremental"
         ).parameters_model.model_validate(
-            {"calendar_exchange": "SSE", "initial_start_date": "20050101"}
+            {
+                "calendar_exchange": "SSE",
+                "initial_start_date": "20050101",
+                "request_interval_ms": 1_000,
+            }
         )
 
-        self.assertEqual(parameters.initial_start_date, date(2005, 1, 1))
+        self.assertEqual(parameters.request_interval_ms, 1_000)
+        self.assertNotIn("initial_start_date", parameters.model_dump())
+        self.assertNotIn("calendar_exchange", parameters.model_dump())
 
     def test_trade_calendar_parameters_accept_tushare_compact_date(self) -> None:
         parameters = task_registry.require(

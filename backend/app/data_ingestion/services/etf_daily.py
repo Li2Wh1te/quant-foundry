@@ -15,6 +15,7 @@ from app.data_ingestion.constants import (
     ETF_DAILY_INCREMENTAL_SYNC_KEY,
 )
 from app.data_ingestion.repositories.etf_daily import EtfDailyBarRepository
+from app.data_ingestion.repositories.etf import EtfCodeRepository
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.data_ingestion.repositories.trading_calendar import TradingCalendarRepository
 from app.data_ingestion.request_pacing import tushare_request_pacer
@@ -35,6 +36,7 @@ ETF_DAILY_FIELDS = "trade_date,open,high,low,close,vol,amount"
 # The whole-market request needs the provider code to form the database key.
 ETF_DAILY_MARKET_FIELDS = f"ts_code,{ETF_DAILY_FIELDS}"
 ETF_DAILY_SCOPE_KEY = "market=CN"
+ETF_DAILY_CALENDAR_EXCHANGE = "SSE"
 TUSHARE_SOURCE = "tushare"
 MAX_ETF_DAILY_ROWS = 5_000
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
@@ -74,8 +76,6 @@ def fetch_etf_daily_for_trade_date(
 def sync_etf_daily_incremental(
     client: TushareClient,
     *,
-    calendar_exchange: str,
-    initial_start_date: date,
     request_interval_ms: int | None = None,
     as_of_date: date | None = None,
 ) -> EtfDailySyncResult:
@@ -93,11 +93,10 @@ def sync_etf_daily_incremental(
     start_date = (
         _checkpoint_synced_through_date(checkpoint) + timedelta(days=1)
         if checkpoint is not None
-        else initial_start_date
+        else completed_through_date
     )
     return _sync_etf_daily_sessions(
         client,
-        calendar_exchange=calendar_exchange,
         start_date=start_date,
         target_through_date=completed_through_date,
         checkpoint=checkpoint,
@@ -111,8 +110,6 @@ def sync_etf_daily_incremental(
 def sync_etf_daily_full(
     client: TushareClient,
     *,
-    calendar_exchange: str,
-    initial_start_date: date,
     request_interval_ms: int | None = None,
     as_of_date: date | None = None,
 ) -> EtfDailySyncResult:
@@ -131,15 +128,14 @@ def sync_etf_daily_full(
         start_date = _checkpoint_synced_through_date(checkpoint) + timedelta(days=1)
     else:
         target_through_date = completed_through_date
-        start_date = initial_start_date
+        start_date = _load_earliest_etf_list_date()
         checkpoint = _initialize_full_cycle(
             expected_checkpoint=checkpoint,
-            initial_start_date=initial_start_date,
+            initial_start_date=start_date,
             target_through_date=target_through_date,
         )
     return _sync_etf_daily_sessions(
         client,
-        calendar_exchange=calendar_exchange,
         start_date=start_date,
         target_through_date=target_through_date,
         checkpoint=checkpoint,
@@ -154,16 +150,12 @@ def sync_etf_daily_full(
 def sync_etf_daily(
     client: TushareClient,
     *,
-    calendar_exchange: str,
-    initial_start_date: date,
     request_interval_ms: int | None = None,
     as_of_date: date | None = None,
 ) -> EtfDailySyncResult:
     """Backward-compatible alias for incremental ETF daily synchronization."""
     return sync_etf_daily_incremental(
         client,
-        calendar_exchange=calendar_exchange,
-        initial_start_date=initial_start_date,
         request_interval_ms=request_interval_ms,
         as_of_date=as_of_date,
     )
@@ -172,7 +164,6 @@ def sync_etf_daily(
 def _sync_etf_daily_sessions(
     client: TushareClient,
     *,
-    calendar_exchange: str,
     start_date: date,
     target_through_date: date,
     checkpoint: DataSyncCheckpointState | None,
@@ -189,7 +180,7 @@ def _sync_etf_daily_sessions(
         request_interval_ms or 0,
     )
     trading_dates = _load_open_dates(
-        exchange=calendar_exchange,
+        exchange=ETF_DAILY_CALENDAR_EXCHANGE,
         start_date=start_date,
         end_date=target_through_date,
     )
@@ -307,6 +298,19 @@ def _load_open_dates(
             start_date=start_date,
             end_date=end_date,
         )
+
+
+def _load_earliest_etf_list_date() -> date:
+    """Require reference data before launching an ETF daily full backfill."""
+    with Session(get_engine()) as session:
+        earliest_list_date = EtfCodeRepository(session).earliest_list_date(
+            source=TUSHARE_SOURCE
+        )
+    if earliest_list_date is None:
+        raise ValueError(
+            "ETF basic data is required before starting a full ETF daily sync"
+        )
+    return earliest_list_date
 
 
 def _commit_etf_daily_date(
