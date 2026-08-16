@@ -1204,12 +1204,18 @@ svg {
 .etf-detail__basic dl div { min-height: 76px; padding: 12px 13px; border: 1px solid var(--border); border-radius: 7px; background: var(--background); }
 .etf-detail__basic dt { color: var(--text-muted); font-size: 11px; }
 .etf-detail__basic dd { margin: 8px 0 0; color: var(--text); font-size: 13px; font-weight: 680; }
-.etf-detail__filters { display: flex; flex-wrap: wrap; align-items: end; gap: 10px; margin: 16px 0 14px; }
-.etf-detail__filters label { display: grid; gap: 5px; min-width: 150px; color: var(--text-muted); font-size: 10px; font-weight: 650; }
+.etf-detail__filters { display: grid; grid-template-areas: "start end action" "feedback feedback ."; grid-template-columns: 150px 150px auto; align-items: end; column-gap: 10px; row-gap: 5px; margin: 16px 0 14px; }
+.etf-detail__filter-field { display: grid; gap: 5px; min-width: 0; color: var(--text-muted); font-size: 10px; font-weight: 650; }
+.etf-detail__filter-field--start { grid-area: start; }
+.etf-detail__filter-field--end { grid-area: end; }
+.etf-detail__filters .toolbar-button { grid-area: action; align-self: end; }
+.etf-detail__filter-feedback { grid-area: feedback; display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--text-muted); font-size: 10px; line-height: 1.4; }
+.etf-detail__filter-feedback strong { color: var(--danger); font-weight: 700; }
 .etf-detail__filters input { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--border-strong); border-radius: 5px; outline: none; color: var(--text); background: var(--surface); font: inherit; }
 .etf-detail__filters input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.etf-detail__filters input[aria-invalid="true"] { border-color: var(--danger); }
 .etf-detail__chart-shell { overflow: hidden; padding: 17px; border: 1px solid #303a37; border-radius: 8px; color: #d4d9e2; background: #1d2025; }
-.etf-detail__chart-shell:fullscreen { width: 100%; min-height: 100%; padding: 28px; border: 0; border-radius: 0; }
+.etf-detail__chart-shell:fullscreen { width: 100vw; height: 100vh; min-height: 0; display: flex; flex-direction: column; padding: 28px; border: 0; border-radius: 0; }
 .etf-detail__chart-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
 .etf-detail__chart-heading h3 { margin: 0; color: #d4d9e2; font-size: 14px; }
 .etf-detail__expand { display: inline-flex; align-items: center; gap: 5px; padding: 0; border: 0; color: #aab4c4; background: transparent; font: inherit; font-size: 11px; font-weight: 650; cursor: pointer; }
@@ -1217,17 +1223,19 @@ svg {
 .etf-detail__chart-controls { display: grid; grid-template-columns: 1fr auto 1fr; align-items: center; gap: 10px; margin: 13px 0 8px; }
 .etf-detail__chart-controls > div { display: inline-flex; width: max-content; overflow: hidden; border: 1px solid #333940; border-radius: 6px; }
 .etf-detail__chart-controls > div:last-child { justify-self: end; }
-.etf-detail__chart-controls button { height: 27px; padding: 0 9px; border: 0; color: #aab4c4; background: transparent; font: inherit; font-size: 11px; cursor: pointer; }
+.etf-detail__chart-controls button { height: 27px; display: inline-flex; align-items: center; justify-content: center; padding: 0 9px; border: 0; color: #aab4c4; background: transparent; font: inherit; font-size: 11px; white-space: nowrap; cursor: pointer; }
 .etf-detail__chart-controls button.active { color: #07140e; background: var(--accent); }
 .etf-detail__ma-toggles { justify-self: center; }
 .etf-detail__ma-toggles button[aria-pressed="false"] { opacity: 0.42; }
-.etf-detail__chart-controls i { width: 13px; height: 2px; margin-right: 5px; background: currentColor; }
+.etf-detail__ma-toggles button:disabled { cursor: not-allowed; opacity: 0.34; }
+.etf-detail__chart-controls i { width: 13px; height: 2px; display: inline-block; flex: 0 0 13px; margin-right: 5px; background: currentColor; }
 .etf-detail__chart-controls .ma5 { color: #10cae6; } .etf-detail__chart-controls .ma10 { color: #ffb317; } .etf-detail__chart-controls .ma20 { color: #ba94ff; }
 .etf-detail__range-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.etf-detail__range-controls button { height: 25px; padding: 0 8px; border: 1px solid #333940; border-radius: 4px; color: #aab4c4; background: transparent; font: inherit; font-size: 10px; cursor: pointer; }
+.etf-detail__range-controls button { height: 25px; padding: 0 8px; border: 1px solid #333940; border-radius: 4px; color: #aab4c4; background: transparent; font: inherit; font-size: 10px; white-space: nowrap; cursor: pointer; }
 .etf-detail__range-controls button.active { border-color: color-mix(in srgb, var(--accent) 70%, #333940); color: #07140e; background: var(--accent); }
 .etf-detail__range-controls span { margin-left: 5px; color: #7e899a; font-size: 10px; }
-.etf-kline { width: 100%; min-height: 470px; }
+.etf-kline { width: 100%; height: 470px; min-height: 360px; }
+.etf-detail__chart-shell:fullscreen .etf-kline { height: auto; min-height: 0; flex: 1 1 auto; }
 .etf-detail__chart-empty { min-height: 260px; display: grid; place-items: center; color: #aab4c4; font-size: 12px; }
 .etf-detail__factor-table { margin-top: 0; }
 
@@ -2069,6 +2077,37 @@ svg {
     display: none;
   }
 
+  .etf-detail__filters {
+    grid-template-areas: "start end" "action action" "feedback feedback";
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .etf-detail__filters .toolbar-button {
+    justify-self: start;
+  }
+
+  .etf-detail__chart-controls {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+
+  .etf-detail__chart-controls > div,
+  .etf-detail__chart-controls > div:last-child,
+  .etf-detail__ma-toggles {
+    justify-self: auto;
+  }
+
+  .etf-detail__range-controls span {
+    flex-basis: 100%;
+    margin-left: 0;
+  }
+
+  .etf-kline {
+    height: 360px;
+    min-height: 0;
+  }
+
   .log-query__primary {
     flex-wrap: wrap;
   }
@@ -2107,6 +2146,13 @@ svg {
 
   .log-list {
     max-height: calc(100vh - 430px);
+  }
+}
+
+@media (max-width: 420px) {
+  .etf-detail__filters {
+    grid-template-areas: "start" "end" "action" "feedback";
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 
