@@ -1,9 +1,10 @@
-import { CalendarDays, ChevronLeft, ChevronRight, Database, RefreshCw } from "lucide-react";
-import { useCallback, useEffect, useState } from "react";
+import { CalendarDays, ChevronLeft, ChevronRight, Database, RefreshCw, Search } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
 import {
-  DataCollectionApiError, getTradingCalendarOverview, listTradingCalendarDays,
+  DataCollectionApiError, EtfOverview, EtfPage, getEtfOverview,
+  getTradingCalendarOverview, listEtfs, listTradingCalendarDays,
   TradingCalendarOverview, TradingCalendarPage
 } from "../api/dataCollections";
 import { useAuth } from "../auth/AuthContext";
@@ -14,6 +15,7 @@ type CollectionPage = "trading-calendar" | "daily-quotes";
 type OpenFilter = "" | "open" | "closed";
 
 const EMPTY_PAGE: TradingCalendarPage = { items: [], total: 0, limit: PAGE_SIZE, offset: 0 };
+const EMPTY_ETF_PAGE: EtfPage = { items: [], total: 0, limit: PAGE_SIZE, offset: 0 };
 
 function formatDate(value: string | null): string {
   if (!value) return "—";
@@ -47,6 +49,125 @@ function DailyQuotesEmptyState() {
       <h3>日线行情尚未接入</h3>
       <p>当前版本尚未配置日线行情的数据模型和采集任务，因此没有可展示的数据库数据。</p>
     </div>
+  </section>;
+}
+
+function etfStatusLabel(value: string): string {
+  return { L: "上市", D: "退市", P: "待上市" }[value] ?? value;
+}
+
+function etfExchangeLabel(value: string): string {
+  return { SSE: "上交所", SZSE: "深交所", SH: "上交所", SZ: "深交所" }[value] ?? value;
+}
+
+function formatManagementFee(value: string | null): string {
+  if (!value) return "—";
+  const fee = Number(value);
+  return Number.isFinite(fee) ? `${fee.toLocaleString("zh-CN", { maximumFractionDigits: 4 })}%` : value;
+}
+
+function etfRefreshSummary(overview: EtfOverview | null): string {
+  if (!overview) return "正在加载 ETF 采集状态…";
+  const refreshedAt = overview.refreshed_at ?? overview.last_updated_at;
+  if (!refreshedAt) return "尚未完成 ETF 基础信息同步。";
+  return `Tushare ETF 基础信息已于 ${formatTimestamp(refreshedAt)} 同步完成。`;
+}
+
+/**
+ * Display persisted ETF reference data only after fetching it from the admin API.
+ *
+ * This page deliberately keeps source filtering server-side so that future data
+ * providers cannot be mixed with Tushare records without an explicit UI choice.
+ */
+export function EtfBasicsPage() {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+  const [overview, setOverview] = useState<EtfOverview | null>(null);
+  const [result, setResult] = useState<EtfPage>(EMPTY_ETF_PAGE);
+  const [keyword, setKeyword] = useState("");
+  const [exchange, setExchange] = useState("");
+  const [listStatus, setListStatus] = useState("");
+  const [offset, setOffset] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const hasLoadedRef = useRef(false);
+  const latestRequestRef = useRef(0);
+
+  const load = useCallback(async (background = false) => {
+    const requestId = latestRequestRef.current + 1;
+    latestRequestRef.current = requestId;
+    const initialLoad = !hasLoadedRef.current;
+    if (initialLoad && !background) setLoading(true); else setRefreshing(true);
+    setError(null);
+    try {
+      const [nextOverview, nextResult] = await Promise.all([
+        getEtfOverview(),
+        listEtfs({
+          keyword: keyword.trim() || undefined,
+          exchange: exchange || undefined,
+          listStatus: listStatus || undefined,
+          limit: PAGE_SIZE,
+          offset
+        })
+      ]);
+      if (requestId !== latestRequestRef.current) return;
+      setOverview(nextOverview);
+      setResult(nextResult);
+      hasLoadedRef.current = true;
+    } catch (caught) {
+      if (requestId !== latestRequestRef.current) return;
+      if (caught instanceof DataCollectionApiError && caught.status === 401) {
+        logout(); navigate("/login", { replace: true }); return;
+      }
+      setError(caught instanceof Error ? caught.message : "ETF 数据加载失败。");
+    } finally {
+      if (requestId === latestRequestRef.current) {
+        setLoading(false); setRefreshing(false);
+      }
+    }
+  }, [exchange, keyword, listStatus, logout, navigate, offset]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const currentPage = Math.floor(result.offset / PAGE_SIZE) + 1;
+  const pageCount = Math.max(1, Math.ceil(result.total / PAGE_SIZE));
+  const visibleStart = result.total === 0 ? 0 : result.offset + 1;
+  const visibleEnd = Math.min(result.offset + result.items.length, result.total);
+  const refreshTime = overview?.refreshed_at ?? overview?.last_updated_at ?? null;
+
+  function resetFilters() {
+    setKeyword(""); setExchange(""); setListStatus(""); setOffset(0);
+  }
+
+  return <section className="collection-page" aria-labelledby="collection-title">
+    <div className="page-heading">
+      <div><h2 id="collection-title">ETF 基础信息</h2><p>查看 ETF 标识、上市状态及跟踪指数等基础资料</p></div>
+      <button className="toolbar-button" type="button" disabled={refreshing} onClick={() => void load(true)}>
+        <RefreshCw className={refreshing ? "spin" : ""} aria-hidden="true" />刷新数据
+      </button>
+    </div>
+    {error && <div className="page-error" role="alert">{error}</div>}
+    <section className="collection-status" aria-labelledby="etf-status-title">
+      <div className="collection-status__heading"><div><h3 id="etf-status-title">采集情况</h3><p>ETF 基础信息的数据库覆盖与最近同步状态</p></div><span>{formatTimestamp(refreshTime)} 更新</span></div>
+      <div className="collection-status__stats">
+        <div><span>上市日期范围</span><strong>{overview?.first_list_date ? `${formatDate(overview.first_list_date)} — ${formatDate(overview.latest_list_date)}` : "暂无数据"}</strong><small>仅统计已提供上市日期的 ETF</small></div>
+        <div><span>数据库记录</span><strong>{(overview?.total_records ?? 0).toLocaleString("zh-CN")}</strong><small>共 {overview?.exchange_count ?? 0} 个交易所</small></div>
+        <div><span>上市 ETF</span><strong>{(overview?.listed_count ?? 0).toLocaleString("zh-CN")}</strong><small>当前上市状态为上市</small></div>
+      </div>
+      <div className="collection-status__checkpoint"><CalendarDays aria-hidden="true" /><div><strong>最近同步</strong><span>{etfRefreshSummary(overview)}</span></div></div>
+    </section>
+    <section className="collection-table etf-table" aria-labelledby="etf-list-title">
+      <div className="collection-table__heading"><div><h3 id="etf-list-title">ETF 列表</h3><span>筛选条件在服务端执行</span></div><strong aria-live="polite">{refreshing ? "正在更新…" : `${result.total.toLocaleString("zh-CN")} 条`}</strong></div>
+      <div className="collection-filter collection-filter--etf" aria-label="ETF 筛选">
+        <label>代码或名称<div className="etf-search-field"><Search aria-hidden="true" /><input type="search" value={keyword} placeholder="例如：510300 或 沪深300" onChange={(event) => { setKeyword(event.target.value); setOffset(0); }} /></div></label>
+        <label>交易所<select value={exchange} onChange={(event) => { setExchange(event.target.value); setOffset(0); }}><option value="">全部交易所</option><option value="SSE">上交所</option><option value="SZSE">深交所</option></select></label>
+        <label>上市状态<select value={listStatus} onChange={(event) => { setListStatus(event.target.value); setOffset(0); }}><option value="">全部状态</option><option value="L">上市</option><option value="D">退市</option><option value="P">待上市</option></select></label>
+        <button type="button" onClick={resetFilters}>重置筛选</button>
+      </div>
+      <div className="collection-table__scroll"><table className="etf-data-table" aria-busy={loading || refreshing}><thead><tr><th>基金代码</th><th>名称</th><th>交易所</th><th>上市状态</th><th>上市日期</th><th>跟踪指数</th><th>管理人</th><th>管理费率</th><th>更新时间</th></tr></thead><tbody>{loading ? <tr><td colSpan={9} className="collection-table__empty">正在加载 ETF 数据…</td></tr> : result.items.length === 0 ? <tr><td colSpan={9} className="collection-table__empty">没有符合筛选条件的数据</td></tr> : result.items.map((etf) => <tr key={etf.ts_code}><td><strong className="etf-code">{etf.ts_code}</strong><small>{etf.etf_type ?? "—"}</small></td><td><strong>{etf.csname ?? etf.extname ?? "—"}</strong><small>{etf.cname ?? ""}</small></td><td>{etfExchangeLabel(etf.exchange)}</td><td><span className={`etf-status etf-status--${etf.list_status.toLowerCase()}`}>{etfStatusLabel(etf.list_status)}</span></td><td>{formatDate(etf.list_date)}</td><td><strong>{etf.index_name ?? "—"}</strong><small>{etf.index_code ?? ""}</small></td><td>{etf.mgr_name ?? "—"}</td><td>{formatManagementFee(etf.mgt_fee)}</td><td>{formatTimestamp(etf.updated_at)}</td></tr>)}</tbody></table></div>
+      <div className="collection-table__pagination"><span>显示 {visibleStart}–{visibleEnd} 条，共 {result.total.toLocaleString("zh-CN")} 条</span><div><button type="button" aria-label="上一页" disabled={offset === 0} onClick={() => setOffset((value) => Math.max(0, value - PAGE_SIZE))}><ChevronLeft aria-hidden="true" /></button><span>{currentPage} / {pageCount}</span><button type="button" aria-label="下一页" disabled={offset + PAGE_SIZE >= result.total} onClick={() => setOffset((value) => value + PAGE_SIZE)}><ChevronRight aria-hidden="true" /></button></div></div>
+    </section>
   </section>;
 }
 

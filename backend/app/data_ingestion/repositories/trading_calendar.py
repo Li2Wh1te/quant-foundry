@@ -1,8 +1,9 @@
 """PostgreSQL persistence for trading calendar data."""
 
 from collections.abc import Iterable
+from datetime import date
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -60,6 +61,32 @@ class TradingCalendarRepository:
             received=len(days),
             changed=changed,
             unchanged=len(days) - changed,
+        )
+
+    def list_open_dates(
+        self,
+        *,
+        exchange: str,
+        start_date: date,
+        end_date: date,
+    ) -> list[date]:
+        """Return ordered exchange sessions for atomic daily-bar ingestion.
+
+        The daily ETF task uses actual open sessions instead of calendar-day
+        arithmetic, which prevents it from advancing a market-data cursor across
+        a weekend or holiday.
+        """
+        return list(
+            self.session.scalars(
+                select(TradingCalendarDay.calendar_date)
+                .where(
+                    TradingCalendarDay.exchange == exchange,
+                    TradingCalendarDay.is_open.is_(True),
+                    TradingCalendarDay.calendar_date >= start_date,
+                    TradingCalendarDay.calendar_date <= end_date,
+                )
+                .order_by(TradingCalendarDay.calendar_date.asc())
+            )
         )
 
     @staticmethod

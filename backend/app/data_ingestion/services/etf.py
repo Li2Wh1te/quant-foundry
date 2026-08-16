@@ -10,7 +10,7 @@ import structlog
 
 from app.core.config import get_settings
 from app.data_ingestion.clients.tushare import TushareClient
-from app.data_ingestion.constants import ETF_BASIC_SYNC_KEY
+from app.data_ingestion.constants import ETF_BASIC_SYNC_KEY, TUSHARE_SOURCE
 from app.data_ingestion.repositories.etf import EtfCodeRepository
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.data_ingestion.request_pacing import tushare_request_pacer
@@ -31,7 +31,6 @@ ETF_BASIC_FIELDS = (
     "list_status,exchange,mgr_name,custod_name,mgt_fee,etf_type"
 )
 ETF_BASIC_SCOPE_KEY = "market=CN"
-TUSHARE_SOURCE = "tushare"
 SHANGHAI_TIMEZONE = ZoneInfo("Asia/Shanghai")
 logger = structlog.get_logger(__name__)
 

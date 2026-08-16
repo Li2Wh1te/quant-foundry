@@ -76,6 +76,21 @@ def make_task(**overrides):
 
 
 class SchedulingSchemaTestCase(unittest.TestCase):
+    def test_etf_daily_parameters_omit_derived_dates_and_accept_legacy_tasks(self) -> None:
+        parameters = task_registry.require(
+            "data.sync_etf_daily_incremental"
+        ).parameters_model.model_validate(
+            {
+                "calendar_exchange": "SSE",
+                "initial_start_date": "20050101",
+                "request_interval_ms": 1_000,
+            }
+        )
+
+        self.assertEqual(parameters.request_interval_ms, 1_000)
+        self.assertNotIn("initial_start_date", parameters.model_dump())
+        self.assertNotIn("calendar_exchange", parameters.model_dump())
+
     def test_trade_calendar_parameters_accept_tushare_compact_date(self) -> None:
         parameters = task_registry.require(
             "data.sync_trade_calendar"
@@ -251,6 +266,20 @@ class SchedulerRepositoryTestCase(unittest.TestCase):
 
 
 class SchedulerRuntimeTestCase(unittest.TestCase):
+    def test_default_registry_registers_etf_daily_incremental_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_daily_incremental")
+
+        self.assertEqual(definition.name, "ETF日线增量采集")
+        self.assertEqual(
+            definition.english_name, "Incremental Tushare ETF daily bars"
+        )
+
+    def test_default_registry_registers_etf_daily_full_sync_task(self) -> None:
+        definition = task_registry.require("data.sync_etf_daily_full")
+
+        self.assertEqual(definition.name, "ETF日线全量采集")
+        self.assertEqual(definition.english_name, "Full Tushare ETF daily bars")
+
     def test_default_registry_registers_etf_basic_sync_task(self) -> None:
         definition = task_registry.require("data.sync_etf_basics")
 
