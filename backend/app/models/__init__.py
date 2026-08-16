@@ -5,6 +5,7 @@ from app.data_ingestion.models import (
     EtfCode,
     EtfCodeMappingAudit,
     EtfEntity,
+    EtfAdjustmentFactor,
     EtfDailyBar,
     TradingCalendarDay,
 )
@@ -16,6 +17,7 @@ __all__ = [
     "EtfCode",
     "EtfCodeMappingAudit",
     "EtfEntity",
+    "EtfAdjustmentFactor",
     "EtfDailyBar",
     "ScheduledTask",
     "TaskRun",
