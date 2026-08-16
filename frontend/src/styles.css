@@ -1544,6 +1544,14 @@ svg {
   width: 100%;
 }
 
+.task-detail__run-hint {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
 .task-detail__history {
   margin-top: 20px;
   padding-top: 16px;
