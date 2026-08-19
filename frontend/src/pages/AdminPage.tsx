@@ -2,6 +2,7 @@ import {
   BookOpen,
   CalendarClock,
   CalendarDays,
+  Code2,
   FileSearch,
   Landmark,
   LayoutDashboard,
@@ -24,7 +25,8 @@ const QUICK_DESTINATIONS = [
   { to: "/admin/data/trading-calendar", label: "交易日历", description: "查看交易日覆盖与检查点", icon: CalendarDays, shortcut: "⌘ 3" },
   { to: "/admin/tasks", label: "任务调度", description: "管理计划与查看最近执行", icon: CalendarClock, shortcut: "⌘ 4" },
   { to: "/admin/logs", label: "运行日志", description: "按中文事件摘要定位问题", icon: FileSearch, shortcut: "⌘ 5" },
-  { to: "/admin/strategy-data", label: "策略数据接口", description: "查看策略可调用的 ETF 数据接口", icon: BookOpen, shortcut: "⌘ 6" }
+  { to: "/admin/strategies", label: "策略工作台", description: "编写、校验和发布私有策略", icon: Code2, shortcut: "⌘ 6" },
+  { to: "/admin/strategy-data", label: "策略数据接口", description: "查看策略可调用的 ETF 数据接口", icon: BookOpen, shortcut: "⌘ 7" }
 ] as const;
 
 function pageTitle(pathname: string): string {
@@ -35,6 +37,7 @@ function pageTitle(pathname: string): string {
   if (pathname === "/admin/data/etf-basics") return "ETF 基础信息";
   if (pathname === "/admin/data/trading-calendar") return "交易日历";
   if (pathname === "/admin/data/daily-quotes") return "日线行情";
+  if (pathname === "/admin/strategies" || pathname.startsWith("/admin/strategies/")) return "策略工作台";
   if (pathname === "/admin/strategy-data") return "策略数据接口";
   return "管理工作区";
 }
@@ -127,6 +130,10 @@ export function AdminPage({ children }: { children?: React.ReactNode }) {
           </NavLink>
 
           <span className="sidebar__label">策略研究</span>
+          <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/strategies">
+            <Code2 aria-hidden="true" />
+            <span>策略工作台</span>
+          </NavLink>
           <NavLink className={({ isActive }) => `nav-item${isActive ? " nav-item--active" : ""}`} to="/admin/strategy-data">
             <BookOpen aria-hidden="true" />
             <span>策略数据接口</span>

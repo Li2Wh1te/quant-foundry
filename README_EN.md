@@ -198,6 +198,16 @@ pages and the OpenAPI schema are also public, but calls made from Swagger UI sti
 | `GET` | `/api/auth/verify` | Verify a Bearer Token |
 | `GET` | `/api/admin/logs` | Query local structured logs |
 | `POST` | `/api/admin/logs/clear` | Hide logs created before the request |
+| `GET` | `/api/admin/strategies` | List strategy metadata without private source code |
+| `POST` | `/api/admin/strategies` | Create a strategy and its first editable draft |
+| `GET` | `/api/admin/strategies/{id}` | Read a strategy and its editable draft |
+| `PATCH` | `/api/admin/strategies/{id}` | Update a strategy name or description with optimistic locking |
+| `PATCH` | `/api/admin/strategies/{id}/draft` | Save a partial or complete draft with optimistic locking |
+| `POST` | `/api/admin/strategies/{id}/validate` | Statically validate a draft without executing private source |
+| `POST` | `/api/admin/strategies/{id}/publish` | Publish a validated immutable strategy revision |
+| `GET` | `/api/admin/strategies/{id}/revisions` | List revision metadata without every private source body |
+| `GET` | `/api/admin/strategies/{id}/revisions/{revision_number}` | Read one private revision source snapshot |
+| `DELETE` | `/api/admin/strategies/{id}` | Archive a strategy while retaining draft and revision history |
 | `GET` | `/api/admin/task-types` | List registered task types and parameter schemas |
 | `GET` | `/api/admin/tasks` | List task definitions |
 | `POST` | `/api/admin/tasks` | Create a task |
@@ -210,6 +220,11 @@ pages and the OpenAPI schema are also public, but calls made from Swagger UI sti
 | `GET` | `/api/admin/task-runs` | Query execution history and queue state |
 | `GET` | `/api/admin/tasks/{id}/runs` | Query execution history for one task |
 | `GET` | `/api/admin/task-runs/{id}` | Read one task-run record |
+
+Private strategy drafts and published revision source are stored only in PostgreSQL, never in the
+project checkout or image. Current validation checks Python syntax, the fixed
+`run(context, parameters)` entry point, and the basic parameter-schema shape without importing or
+executing private source. A strategy execution worker is a later delivery stage.
 
 Log queries support `keyword`, `level`, `method`, `status_class`, `path`, `start_time`, and
 `end_time` filters. The default window is the last 24 hours. A request may cover at most 31 days

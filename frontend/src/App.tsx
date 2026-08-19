@@ -10,6 +10,7 @@ import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
 import { StrategyDataApiPage } from "./pages/StrategyDataApiPage";
+import { StrategiesPage } from "./pages/StrategiesPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -75,6 +76,14 @@ export function App() {
       <Route
         path="/admin/strategy-data"
         element={<RequireAuth><AdminPage><StrategyDataApiPage /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/strategies"
+        element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/strategies/:strategyId"
+        element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
       />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>
