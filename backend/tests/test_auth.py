@@ -138,6 +138,19 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/data-collections/etfs/{ts_code}", "get"),
             ("/api/admin/data-collections/etfs/{ts_code}/daily-bars", "get"),
             ("/api/admin/data-collections/etfs/{ts_code}/adjustment-factors", "get"),
+            ("/api/admin/strategies", "get"),
+            ("/api/admin/strategies", "post"),
+            ("/api/admin/strategies/{strategy_id}", "get"),
+            ("/api/admin/strategies/{strategy_id}", "patch"),
+            ("/api/admin/strategies/{strategy_id}", "delete"),
+            ("/api/admin/strategies/{strategy_id}/draft", "patch"),
+            ("/api/admin/strategies/{strategy_id}/validate", "post"),
+            ("/api/admin/strategies/{strategy_id}/publish", "post"),
+            ("/api/admin/strategies/{strategy_id}/revisions", "get"),
+            (
+                "/api/admin/strategies/{strategy_id}/revisions/{revision_number}",
+                "get",
+            ),
         )
         schema = self.app.openapi()
 

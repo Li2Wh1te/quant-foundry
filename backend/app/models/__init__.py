@@ -10,6 +10,7 @@ from app.data_ingestion.models import (
     TradingCalendarDay,
 )
 from app.scheduling.models import ScheduledTask, TaskRun
+from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 
 
 __all__ = [
@@ -20,6 +21,9 @@ __all__ = [
     "EtfAdjustmentFactor",
     "EtfDailyBar",
     "ScheduledTask",
+    "Strategy",
+    "StrategyDraft",
+    "StrategyRevision",
     "TaskRun",
     "TradingCalendarDay",
 ]

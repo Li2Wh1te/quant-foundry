@@ -190,6 +190,16 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 | `GET` | `/api/system/version` | 查询当前部署的项目版本 |
 | `GET` | `/api/admin/logs` | 查询本地结构化日志 |
 | `POST` | `/api/admin/logs/clear` | 隐藏调用时刻之前的日志 |
+| `GET` | `/api/admin/strategies` | 查询策略元数据，不返回私有源码 |
+| `POST` | `/api/admin/strategies` | 创建策略及其首份可编辑草稿 |
+| `GET` | `/api/admin/strategies/{id}` | 查询策略详情和可编辑草稿 |
+| `PATCH` | `/api/admin/strategies/{id}` | 按版本更新策略名称或说明 |
+| `PATCH` | `/api/admin/strategies/{id}/draft` | 按草稿版本保存部分或完整草稿 |
+| `POST` | `/api/admin/strategies/{id}/validate` | 静态校验草稿，不执行私有源码 |
+| `POST` | `/api/admin/strategies/{id}/publish` | 发布经过校验的不可变策略版本 |
+| `GET` | `/api/admin/strategies/{id}/revisions` | 查询版本元数据，不返回全部私有源码 |
+| `GET` | `/api/admin/strategies/{id}/revisions/{revision_number}` | 查询指定私有版本源码 |
+| `DELETE` | `/api/admin/strategies/{id}` | 归档策略并保留草稿和版本历史 |
 | `GET` | `/api/admin/task-types` | 查询已注册的任务类型和参数 Schema |
 | `GET` | `/api/admin/tasks` | 查询任务定义 |
 | `POST` | `/api/admin/tasks` | 创建任务 |
@@ -202,6 +212,10 @@ make selfhost-reset    # 删除数据库和日志数据，然后重新部署
 | `GET` | `/api/admin/task-runs` | 查询执行历史和队列状态 |
 | `GET` | `/api/admin/tasks/{id}/runs` | 查询单个任务的执行历史 |
 | `GET` | `/api/admin/task-runs/{id}` | 查询单条任务执行记录 |
+
+策略草稿和已发布版本的源码仅保存在 PostgreSQL，不写入项目目录或镜像。当前的策略校验只进行
+Python 语法、固定 `run(context, parameters)` 入口和参数 Schema 基础结构检查，不会导入或执行
+私有源码；策略执行器将在后续阶段提供。
 
 日志查询支持 `keyword`、`level`、`method`、`status_class`、`path`、`start_time`
 和 `end_time` 过滤。默认查询最近 24 小时，单次时间范围最多为 31 天，最多返回

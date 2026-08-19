@@ -80,6 +80,17 @@ interface NumericBar {
   amount: number;
 }
 
+interface MatchedAdjustmentBar {
+  bar: NumericBar;
+  factor: number;
+}
+
+interface AdjustmentFactorSummary {
+  first: number;
+  last: number;
+  changeCount: number;
+}
+
 const TABS: { key: DetailTab; label: string }[] = [
   { key: "basic", label: "基础信息" },
   { key: "daily", label: "日线 K 线" },
@@ -98,6 +109,12 @@ const PERIOD_KLINE_LABELS: Record<ChartPeriod, string> = {
   week: "周 K 线",
   month: "月 K 线",
   year: "年 K 线"
+};
+
+const ADJUSTMENT_LABELS: Record<AdjustmentMode, string> = {
+  raw: "不复权",
+  forward: "前复权",
+  backward: "后复权"
 };
 
 function formatDate(value: string | null): string {
@@ -150,20 +167,35 @@ function toNumericBars(bars: EtfDailyBar): NumericBar | null {
   return { tradeDate: bars.trade_date, open, high, low, close, vol, amount };
 }
 
+function toNumericBarList(sourceBars: EtfDailyBar[]): NumericBar[] {
+  return sourceBars.map(toNumericBars).filter((bar): bar is NumericBar => bar !== null);
+}
+
+function matchAdjustmentFactors(
+  rawBars: NumericBar[],
+  factors: EtfAdjustmentFactor[]
+): MatchedAdjustmentBar[] | null {
+  // A valid cumulative factor is required for every plotted trading session.
+  // Falling back to an unadjusted price would silently mix price bases.
+  const factorByDate = new Map(factors.map((factor) => [factor.trade_date, decimal(factor.adj_factor)]));
+  const matched = rawBars.map((bar) => ({ bar, factor: factorByDate.get(bar.tradeDate) }));
+  if (matched.some(({ factor }) => factor === null || factor === undefined || factor <= 0)) return null;
+  return matched.map(({ bar, factor }) => ({ bar, factor: factor! }));
+}
+
 function adjustedBars(
   sourceBars: EtfDailyBar[],
   factors: EtfAdjustmentFactor[],
   adjustment: AdjustmentMode
 ): NumericBar[] | null {
-  const rawBars = sourceBars.map(toNumericBars).filter((bar): bar is NumericBar => bar !== null);
+  const rawBars = toNumericBarList(sourceBars);
   if (adjustment === "raw") return rawBars;
 
   // Tushare factors are normalized against the selected range endpoint so that
   // forward-adjusted prices end at the raw latest price and backward-adjusted
   // prices start at the raw earliest price.
-  const factorByDate = new Map(factors.map((factor) => [factor.trade_date, decimal(factor.adj_factor)]));
-  const matched = rawBars.map((bar) => ({ bar, factor: factorByDate.get(bar.tradeDate) }));
-  if (matched.some(({ factor }) => factor === null || factor === undefined)) return null;
+  const matched = matchAdjustmentFactors(rawBars, factors);
+  if (matched === null) return null;
 
   const anchor = adjustment === "forward" ? matched.at(-1)?.factor : matched[0]?.factor;
   if (!anchor || anchor <= 0) return null;
@@ -177,6 +209,24 @@ function adjustedBars(
       close: bar.close * multiplier
     };
   });
+}
+
+function summarizeAdjustmentFactors(
+  sourceBars: EtfDailyBar[],
+  factors: EtfAdjustmentFactor[]
+): AdjustmentFactorSummary | null {
+  const matched = matchAdjustmentFactors(toNumericBarList(sourceBars), factors);
+  if (matched === null || matched.length === 0) return null;
+
+  let changeCount = 0;
+  for (let index = 1; index < matched.length; index += 1) {
+    if (matched[index]!.factor !== matched[index - 1]!.factor) changeCount += 1;
+  }
+  return {
+    first: matched[0]!.factor,
+    last: matched.at(-1)!.factor,
+    changeCount
+  };
 }
 
 function aggregateBars(bars: NumericBar[], period: ChartPeriod): NumericBar[] {
@@ -224,6 +274,22 @@ function chartVolume(value: number): string {
   if (absolute >= 100_000_000) return `${(value / 100_000_000).toFixed(2)} 亿`;
   if (absolute >= 10_000) return `${(value / 10_000).toFixed(2)} 万`;
   return value.toLocaleString("zh-CN", { maximumFractionDigits: 0 });
+}
+
+function adjustmentFactorText(value: number): string {
+  return value.toLocaleString("zh-CN", { maximumFractionDigits: 12 });
+}
+
+function adjustmentNotice(
+  adjustment: AdjustmentMode,
+  summary: AdjustmentFactorSummary | null
+): string | null {
+  if (adjustment === "raw" || summary === null) return null;
+  const label = ADJUSTMENT_LABELS[adjustment];
+  if (summary.changeCount === 0) {
+    return `${label}：当前日期筛选范围内复权因子未变化，K 线价格与不复权一致。`;
+  }
+  return `${label}：已按复权因子调整（${adjustmentFactorText(summary.first)} → ${adjustmentFactorText(summary.last)}，共 ${summary.changeCount} 次变动）。`;
 }
 
 const KLINE_PERIOD_TYPES: Record<ChartPeriod, KLineChartPeriod> = {
@@ -324,13 +390,15 @@ function InteractiveKLineChart({
   historyBars,
   period,
   visibleCount,
-  visibleAverages
+  visibleAverages,
+  adjustment
 }: {
   bars: NumericBar[];
   historyBars: NumericBar[];
   period: ChartPeriod;
   visibleCount: number | null;
   visibleAverages: Record<MovingAverageLength, boolean>;
+  adjustment: AdjustmentMode;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const orderedBars = useMemo(() => [...bars].sort((left, right) => left.tradeDate.localeCompare(right.tradeDate)), [bars]);
@@ -363,6 +431,12 @@ function InteractiveKLineChart({
 
     const chart = initKLineChart(container, KLINE_CHART_OPTIONS);
     if (!chart) return;
+    // KLineChart otherwise keeps two bars visible at either edge, allowing a
+    // pan gesture to leave most of the viewport empty. Zero-distance limits
+    // keep every draggable position inside the available market data.
+    chart.setMaxOffsetLeftDistance(0);
+    chart.setMaxOffsetRightDistance(0);
+    chart.setOffsetRightDistance(0);
     // KLineChart normally interprets a drag on the x-axis strip as a zoom
     // gesture.  That makes a horizontal pan change behaviour near the chart
     // boundary, so keep one predictable rule: dragging reviews history and
@@ -389,8 +463,8 @@ function InteractiveKLineChart({
       styles: { lastValueMark: { show: false } }
     }, false);
     if (volumePaneId) chart.setPaneOptions({ id: volumePaneId, height: 92, minHeight: 76, dragEnabled: false });
-    // Apply the selected range after the first measurable layout.  KLineChart
-    // keeps both edges scrollable, so zooming out can reveal the full history.
+    // Apply the selected density after the first measurable layout, then align
+    // the newest bar to the data boundary without introducing blank space.
     let viewportInitialized = false;
     const initializeViewport = () => {
       if (viewportInitialized || container.clientWidth <= 0) return;
@@ -398,7 +472,7 @@ function InteractiveKLineChart({
       const targetBarCount = visibleCount === null ? orderedBars.length : Math.min(visibleCount, orderedBars.length);
       const barSpace = Math.min(50, Math.max(1, plotWidth / Math.max(targetBarCount, 1)));
       chart.setBarSpace(barSpace);
-      chart.setOffsetRightDistance(16);
+      chart.setOffsetRightDistance(0);
       chart.scrollToRealTime();
       viewportInitialized = true;
     };
@@ -416,13 +490,14 @@ function InteractiveKLineChart({
 
   if (!latestBar) return null;
   const priceDirection = latestBar.close >= latestBar.open ? "up" : "down";
+  const closeLabel = adjustment === "raw" ? "收盘" : `${ADJUSTMENT_LABELS[adjustment]}收盘`;
   return <div className="etf-kline-wrap">
     <div className="etf-kline__summary" aria-label="最新行情">
       <span className="etf-kline__summary-date">{formatDate(latestBar.tradeDate)}</span>
-      <span className="etf-kline__summary-item"><span>收盘</span><strong className={`etf-kline__summary-value etf-kline__summary-value--${priceDirection}`}>{chartNumber(latestBar.close)}</strong></span>
+      <span className="etf-kline__summary-item"><span>{closeLabel}</span><strong className={`etf-kline__summary-value etf-kline__summary-value--${priceDirection}`}>{chartNumber(latestBar.close)}</strong></span>
       <span className="etf-kline__summary-item"><span>成交量</span><strong>{chartVolume(latestBar.vol)}</strong></span>
     </div>
-    <div ref={containerRef} className="etf-kline" aria-label="可缩放、可拖拽的 ETF K 线图" />
+    <div ref={containerRef} className="etf-kline" aria-label="可缩放、可在数据范围内横向拖拽回看的 ETF K 线图" />
   </div>;
 }
 
@@ -484,15 +559,24 @@ export function EtfDetailPage() {
     return () => document.removeEventListener("fullscreenchange", syncFullscreenState);
   }, []);
 
+  const hasInvalidDateRange = Boolean(startDate && endDate && startDate > endDate);
+  const selectedDailyBars = useMemo(
+    () => hasInvalidDateRange ? [] : dailyBars.filter((bar) => withinDateRange(bar.trade_date, startDate, endDate)),
+    [dailyBars, endDate, hasInvalidDateRange, startDate]
+  );
   const fullChartBars = useMemo(() => {
     const adjusted = adjustedBars(dailyBars, factors, adjustment);
     return adjusted === null ? null : aggregateBars(adjusted, period);
   }, [adjustment, dailyBars, factors, period]);
-  const hasInvalidDateRange = Boolean(startDate && endDate && startDate > endDate);
   const chartBars = useMemo(() => {
     if (hasInvalidDateRange) return [];
     return fullChartBars?.filter((bar) => withinDateRange(bar.tradeDate, startDate, endDate)) ?? null;
   }, [endDate, fullChartBars, hasInvalidDateRange, startDate]);
+  const adjustmentSummary = useMemo(
+    () => adjustment === "raw" ? null : summarizeAdjustmentFactors(selectedDailyBars, factors),
+    [adjustment, factors, selectedDailyBars]
+  );
+  const currentAdjustmentNotice = adjustmentNotice(adjustment, adjustmentSummary);
   const visibleFactors = useMemo(
     () => factors.filter((factor) => withinDateRange(factor.trade_date, startDate, endDate)),
     [endDate, factors, startDate]
@@ -550,10 +634,11 @@ export function EtfDetailPage() {
         <div className="etf-detail__chart-controls">
           <div>{(["day", "week", "month", "year"] as ChartPeriod[]).map((item) => <button key={item} className={period === item ? "active" : ""} type="button" onClick={() => setPeriod(item)}>{PERIOD_LABELS[item]}</button>)}</div>
           <div className="etf-detail__ma-toggles">{MOVING_AVERAGE_LENGTHS.map((length) => <button key={length} type="button" aria-pressed={availableAverages[length] && visibleAverages[length]} disabled={!availableAverages[length]} title={availableAverages[length] ? `显示或隐藏 MA${length}` : `至少需要 ${length} 根${PERIOD_KLINE_LABELS[period]}数据`} onClick={() => setVisibleAverages((current) => ({ ...current, [length]: !current[length] }))}><i className={`ma${length}`} aria-hidden="true" />MA{length}</button>)}</div>
-          <div>{(["raw", "forward", "backward"] as AdjustmentMode[]).map((item) => <button key={item} className={adjustment === item ? "active" : ""} type="button" onClick={() => setAdjustment(item)}>{({ raw: "不复权", forward: "前复权", backward: "后复权" })[item]}</button>)}</div>
+          <div>{(["raw", "forward", "backward"] as AdjustmentMode[]).map((item) => <button key={item} className={adjustment === item ? "active" : ""} type="button" onClick={() => setAdjustment(item)}>{ADJUSTMENT_LABELS[item]}</button>)}</div>
         </div>
         <div className="etf-detail__range-controls">{([30, 60, 90, 200, null] as (number | null)[]).map((count) => <button key={count ?? "all"} className={visibleCount === count ? "active" : ""} type="button" onClick={() => setVisibleCount(count)}>{count === null ? "全部" : `${count} ${PERIOD_LABELS[period]}`}</button>)}<span>滚轮缩放；图内横向拖拽回看</span></div>
-        {hasInvalidDateRange ? <div className="etf-detail__chart-empty">开始日期不能晚于结束日期。</div> : seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null || fullChartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <InteractiveKLineChart bars={chartBars} historyBars={fullChartBars} period={period} visibleCount={visibleCount} visibleAverages={visibleAverages} />}
+        {currentAdjustmentNotice && <p className="etf-detail__adjustment-note" role="status" aria-live="polite">{currentAdjustmentNotice}</p>}
+        {hasInvalidDateRange ? <div className="etf-detail__chart-empty">开始日期不能晚于结束日期。</div> : seriesLoading ? <div className="etf-detail__chart-empty">正在加载日线数据…</div> : chartBars === null || fullChartBars === null ? <div className="etf-detail__chart-empty">所选区间的复权因子不完整，无法生成复权 K 线。</div> : chartBars.length === 0 ? <div className="etf-detail__chart-empty">该日期范围内没有日线数据。</div> : <InteractiveKLineChart bars={chartBars} historyBars={fullChartBars} period={period} visibleCount={visibleCount} visibleAverages={visibleAverages} adjustment={adjustment} />}
       </section>}
       {tab === "factors" && <section className="collection-table etf-detail__factor-table"><div className="collection-table__heading"><div><h3>复权因子</h3><span>按交易日期升序展示</span></div><strong>{seriesLoading ? "正在加载…" : `${visibleFactors.length.toLocaleString("zh-CN")} 条`}</strong></div><div className="collection-table__scroll"><table><thead><tr><th>交易日期</th><th>复权因子</th><th>数据来源</th><th>更新时间</th></tr></thead><tbody>{seriesLoading ? <tr><td colSpan={4} className="collection-table__empty">正在加载复权因子…</td></tr> : visibleFactors.length === 0 ? <tr><td colSpan={4} className="collection-table__empty">该日期范围内没有复权因子数据</td></tr> : visibleFactors.map((factor) => <tr key={factor.trade_date}><td>{formatDate(factor.trade_date)}</td><td>{numberText(factor.adj_factor, 12)}</td><td>{factor.source}</td><td>{formatTimestamp(factor.updated_at)}</td></tr>)}</tbody></table></div></section>}
     </>}
