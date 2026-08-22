@@ -10,3 +10,6 @@ __pycache__/
 /frontend/node_modules/
 /.pnpm-store/
 /AGENTS.md
+
+# Ignore documentation directories at any level while preserving local files.
+**/docs/
