@@ -1,0 +1,247 @@
+"""Tests for the strategy data-query contract and its boundaries."""
+
+import unittest
+from dataclasses import FrozenInstanceError
+from datetime import date, datetime, timedelta, timezone
+from decimal import Decimal
+from uuid import uuid4
+
+from app.strategy_protocol.contract import (
+    MAX_LOOKBACK_SESSIONS,
+    AdjustmentNotActiveError,
+    DataCutoffViolationError,
+    IdentityMappingMissingError,
+    IncompleteHistoryError,
+    LookbackLimitExceededError,
+)
+from app.strategy_protocol.data_view import (
+    AdjustmentBasis,
+    AdjustmentPolicyGate,
+    AdjustedSeriesPointDTO,
+    BarDTO,
+    InstrumentCandidateDTO,
+    PitSegment,
+    StrategyDataDTO,
+    UniverseQueryDTO,
+    stitch_segmented_history,
+)
+
+AWARE_CUTOFF = datetime(2026, 8, 21, 15, 0, 0, tzinfo=timezone(timedelta(hours=8)))
+INSTRUMENT_ID = uuid4()
+
+
+class _CountingView:
+    """Read side that records whether any read actually happened."""
+
+    def __init__(self, rows=()):
+        self.rows = list(rows)
+        self.reads = 0
+
+    def bars(self, instrument_id, *, start_date, end_date, lookback_sessions):
+        self.reads += 1
+        selected = [
+            row
+            for row in self.rows
+            if (start_date is None or row.trade_date >= start_date)
+            and (end_date is None or row.trade_date <= end_date)
+        ]
+        if lookback_sessions is not None:
+            selected = selected[-lookback_sessions:]
+        return tuple(selected)
+
+    def adjusted_series(
+        self, instrument_id, *, start_date, end_date, lookback_sessions, basis
+    ):
+        self.reads += 1
+        if basis is AdjustmentBasis.RAW:
+            # Raw series carry no adjustment factors by contract.
+            return ()
+        return (
+            AdjustedSeriesPointDTO(instrument_id=instrument_id, trade_date=day, adj_factor=Decimal("1.1"))
+            for day in (date(2026, 8, 20), date(2026, 8, 21))
+        )
+
+
+def _bar(day: date, close: str = "10") -> BarDTO:
+    return BarDTO(
+        instrument_id=INSTRUMENT_ID,
+        trade_date=day,
+        values={"close": Decimal(close)},
+    )
+
+
+class DataBoundaryTestCase(unittest.TestCase):
+    """Cover cutoff and lookback enforcement before any read happens."""
+
+    def test_query_past_data_cutoff_is_rejected_without_reading(self) -> None:
+        view = _CountingView()
+        facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
+        with self.assertRaises(DataCutoffViolationError):
+            facade.bars(INSTRUMENT_ID, end_date=AWARE_CUTOFF.date() + timedelta(days=1))
+        with self.assertRaises(DataCutoffViolationError):
+            facade.bars(INSTRUMENT_ID, start_date=AWARE_CUTOFF.date() + timedelta(days=1))
+        self.assertEqual(view.reads, 0)
+
+    def test_lookback_over_512_fails_before_reading(self) -> None:
+        view = _CountingView()
+        facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
+        with self.assertRaises(LookbackLimitExceededError):
+            facade.bars(INSTRUMENT_ID, lookback_sessions=MAX_LOOKBACK_SESSIONS + 1)
+        self.assertEqual(view.reads, 0)
+        with self.assertRaises(LookbackLimitExceededError):
+            facade.adjusted_series(INSTRUMENT_ID, lookback_sessions=513)
+
+    def test_valid_window_within_limits_reads_normally(self) -> None:
+        view = _CountingView([_bar(AWARE_CUTOFF.date())])
+        facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
+        bars = facade.bars(INSTRUMENT_ID, lookback_sessions=MAX_LOOKBACK_SESSIONS)
+        self.assertEqual(len(bars), 1)
+        self.assertEqual(bars[0].values["close"], Decimal("10"))
+
+    def test_bar_dto_values_are_read_only_and_float_free(self) -> None:
+        bar = _bar(AWARE_CUTOFF.date())
+        with self.assertRaises(TypeError):
+            bar.values["close"] = Decimal("1")
+
+
+class AdjustmentPolicyTestCase(unittest.TestCase):
+    """Cover raw/qfq/hfq gating rules."""
+
+    def setUp(self) -> None:
+        self.view = _CountingView()
+
+    def test_raw_needs_no_active_policy(self) -> None:
+        facade = StrategyDataDTO(
+            self.view,
+            data_cutoff=AWARE_CUTOFF,
+            adjustment_gate=AdjustmentPolicyGate.inactive_gate(),
+        )
+        points = facade.adjusted_series(INSTRUMENT_ID, basis="raw")
+        self.assertEqual(list(points), [])
+
+    def test_qfq_hfq_blocked_until_policy_active(self) -> None:
+        facade = StrategyDataDTO(
+            self.view,
+            data_cutoff=AWARE_CUTOFF,
+            adjustment_gate=AdjustmentPolicyGate.inactive_gate(),
+        )
+        for basis in ("qfq", "hfq"):
+            with self.assertRaises(AdjustmentNotActiveError):
+                facade.adjusted_series(INSTRUMENT_ID, basis=basis)
+
+    def test_adjusted_series_served_only_with_active_verified_policy(self) -> None:
+        gate = AdjustmentPolicyGate.from_policy_key("tushare_adj_factor_native@1")
+        facade = StrategyDataDTO(
+            self.view, data_cutoff=AWARE_CUTOFF, adjustment_gate=gate
+        )
+        points = facade.adjusted_series(
+            INSTRUMENT_ID,
+            end_date=AWARE_CUTOFF.date(),
+            basis=AdjustmentBasis.QFQ,
+        )
+        self.assertTrue(all(point.adj_factor == Decimal("1.1") for point in points))
+        # An unknown policy key never activates the gate.
+        inactive = AdjustmentPolicyGate.from_policy_key("some_other@9")
+        self.assertFalse(inactive.is_active())
+
+
+class PitStitchingTestCase(unittest.TestCase):
+    """Cover cross-code PIT segmentation and blocking semantics."""
+
+    def _segments(self) -> tuple[PitSegment, ...]:
+        return (
+            PitSegment("OLD.CODE", date(2026, 8, 17), date(2026, 8, 19)),
+            PitSegment("NEW.CODE", date(2026, 8, 20), date(2026, 8, 21)),
+        )
+
+    def test_segments_stitch_back_to_one_sorted_series(self) -> None:
+        sessions = [date(2026, 8, d) for d in (18, 19, 20, 21)]
+
+        def reader(code, start, end):
+            days = [day for day in sessions if start <= day <= end]
+            return [
+                BarDTO(instrument_id=INSTRUMENT_ID, trade_date=day, values={"close": Decimal("1")})
+                for day in days
+            ]
+
+        stitched = stitch_segmented_history(
+            self._segments(), sessions=sessions, read_segment=reader
+        )
+        self.assertEqual([bar.trade_date for bar in stitched], sessions)
+        # All bars carry the same stable identity, not the historical codes.
+        self.assertTrue(all(bar.instrument_id == INSTRUMENT_ID for bar in stitched))
+
+    def test_mapping_gap_blocks_instead_of_returning_shorter_window(self) -> None:
+        # Session 2026-08-20 is covered by neither segment.
+        segments = (
+            PitSegment("OLD.CODE", date(2026, 8, 17), date(2026, 8, 19)),
+            PitSegment("NEW.CODE", date(2026, 8, 21), date(2026, 8, 21)),
+        )
+
+        def reader(code, start, end):
+            return [
+                BarDTO(instrument_id=INSTRUMENT_ID, trade_date=start, values={"close": Decimal("1")})
+            ]
+
+        with self.assertRaises(IdentityMappingMissingError):
+            stitch_segmented_history(
+                segments,
+                sessions=[date(2026, 8, 18), date(2026, 8, 20), date(2026, 8, 21)],
+                read_segment=reader,
+            )
+
+    def test_missing_history_bars_block_instead_of_forward_fill(self) -> None:
+        sessions = [date(2026, 8, 18), date(2026, 8, 19)]
+
+        def reader(code, start, end):
+            # The old code only has the first session; the second is missing.
+            return [
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=date(2026, 8, 18),
+                    values={"close": Decimal("1")},
+                )
+            ]
+
+        with self.assertRaises(IncompleteHistoryError):
+            stitch_segmented_history(
+                self._segments(), sessions=sessions, read_segment=reader
+            )
+
+
+class UniverseQueryTestCase(unittest.TestCase):
+    """Cover candidate identity and immutability."""
+
+    def test_query_returns_read_only_candidates_with_display_identity(self) -> None:
+        candidate = InstrumentCandidateDTO(
+            instrument_id=uuid4(),
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            asset_class="etf",
+            exchange="SSE",
+        )
+
+        class _Universe:
+            def query(self, *, exchanges=None, asset_classes=None):
+                if exchanges is not None and "SSE" not in set(exchanges):
+                    return ()
+                return (candidate,)
+
+        facade = UniverseQueryDTO(_Universe())
+        result = facade.query()
+        self.assertIsInstance(result, tuple)
+        row = result[0]
+        self.assertEqual(row.trading_code, "SYN.A")
+        self.assertEqual(row.asset_class, "etf")
+        self.assertEqual(row.exchange, "SSE")
+        with self.assertRaises(FrozenInstanceError):
+            row.name = "改写"
+        with self.assertRaises(TypeError):
+            row.metadata["x"] = "y"
+        # Filtering by another exchange returns nothing.
+        self.assertEqual(facade.query(exchanges=["SZSE"]), ())
+
+
+if __name__ == "__main__":
+    unittest.main()
