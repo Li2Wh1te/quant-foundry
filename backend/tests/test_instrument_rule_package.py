@@ -95,6 +95,7 @@ def make_fact(
     """Build one ordinary (non-exception) fact candidate."""
 
     kwargs: dict[str, Any] = dict(
+        fact_reference=VersionedReference(key="etf_rule_fact", version=1),
         instrument_id=instrument_id,
         package_reference=PACKAGE_REF,
         source="fixture_provider",
@@ -103,6 +104,7 @@ def make_fact(
         observed_at=KNOWN_AT,
         quality_status=FactQualityStatus.COMPLETE,
         fixture_only=False,
+        content_hash="a" * 64,
         fields=complete_fields() if fields is None else fields,
         valid_from=date(2024, 1, 1),
         valid_to=None,
@@ -150,6 +152,7 @@ def make_exception_fact(
     if fields is not None:
         exception_fields.update(fields)
     return RuleFactCandidate(
+        fact_reference=EXCEPTION_FACT_REF,
         instrument_id=instrument_id,
         package_reference=PACKAGE_REF,
         source="exception_fact_provider",
@@ -158,6 +161,7 @@ def make_exception_fact(
         observed_at=KNOWN_AT,
         quality_status=FactQualityStatus.COMPLETE,
         fixture_only=False,
+        content_hash="b" * 64,
         fields=exception_fields,
         exception_fact_ref=EXCEPTION_FACT_REF,
         valid_from=date(2024, 1, 1),

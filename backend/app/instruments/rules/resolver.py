@@ -40,6 +40,7 @@ from app.instruments.rules.contracts import (
     StrategyRuleDeclaration,
     TradingStatusRequirement,
     canonical_payload,
+    exception_set_content_hash,
     reference_display,
     stable_hash,
 )
@@ -47,7 +48,9 @@ from app.instruments.rules.registry import RulePackageRegistry
 
 
 #: Bumped whenever resolution semantics change; participates in the hash.
-PARSER_REVISION = "rule-package-resolver@1"
+#: Revision 2 adds fact references, knowledge times, the rule-package
+#: semantic hash, and the exception-set content hash to the payload.
+PARSER_REVISION = "rule-package-resolver@2"
 
 
 class RulePackageResolver:
@@ -256,6 +259,9 @@ class RulePackageResolver:
 
         exception_reference: VersionedReference | None = None
         exception_set_reference: VersionedReference | None = None
+        # The definition of the single selected exception set, kept so its
+        # order-independent content hash can join the resolution hash.
+        selected_exception_set: RuleExceptionSetDefinition | None = None
         # Stable order (key, version): the audit trail must not depend on
         # the caller's exception-set iteration order.
         exception_set_references = tuple(
@@ -288,10 +294,16 @@ class RulePackageResolver:
             # the fact reference so audits can tell which set version was
             # actually used even when two versions share a fact reference.
             exception_set_reference = matched_set.reference
+            selected_exception_set = matched_set
+            # Strict identity: the referenced fact row must carry exactly
+            # this key/version as its own fact_reference (and be marked as
+            # exception-sourced for it).  A different fact version — even
+            # of the same key — must never stand in for the declared one.
             pool = [
                 candidate
                 for candidate in relevant
-                if candidate.exception_fact_ref == entry.exception_fact_ref
+                if candidate.fact_reference == entry.exception_fact_ref
+                and candidate.exception_fact_ref == entry.exception_fact_ref
                 and candidate.covers(effective_date)
                 and candidate.known_at <= cutoff
             ]
@@ -357,11 +369,41 @@ class RulePackageResolver:
                     )
                 )
 
-        # Step 7: overlay exception fields onto ordinary fields.
+        # Step 7: overlay exception fields onto ordinary fields.  Overlay
+        # routing is retained from the frozen parse order, but the
+        # exception fact must be a *complete* fact row on its own: any
+        # required field it does not provide blocks the resolution instead
+        # of being silently filled from the ordinary fact.
         merged: dict[str, Any] = {}
         if normal_fact is not None:
             merged.update(normal_fact.fields)
         if exception_fact is not None:
+            missing_in_exception = [
+                field_definition.name
+                for field_definition in definition.field_definitions
+                if field_definition.required
+                and field_definition.name not in exception_fact.fields
+            ]
+            if missing_in_exception:
+                for missing_name in sorted(missing_in_exception):
+                    issues.append(
+                        self._issue(
+                            RulePackageIssueCode.RULE_REQUIRED_FIELD_MISSING,
+                            instrument_id=instrument_id,
+                            field=missing_name,
+                            message_zh=(
+                                "例外事实 "
+                                f"{reference_display(exception_fact.fact_reference)} "
+                                f"自身缺少必填字段 {missing_name}，"
+                                "禁止从普通事实隐式补齐"
+                            ),
+                            details={
+                                "exception_fact_reference": reference_display(
+                                    exception_fact.fact_reference
+                                ),
+                            },
+                        )
+                    )
             merged.update(exception_fact.fields)
 
         # Steps 8-10: required-field presence, per-field validation, and
@@ -498,6 +540,7 @@ class RulePackageResolver:
                 exception_reference=exception_reference,
                 exception_set_reference=exception_set_reference,
                 exception_set_references=exception_set_references,
+                selected_exception_set=selected_exception_set,
             )
         capability = dict(normalized["trading_status_applicability"])
         return self._finalize(
@@ -510,6 +553,7 @@ class RulePackageResolver:
             exception_reference=exception_reference,
             exception_set_reference=exception_set_reference,
             exception_set_references=exception_set_references,
+            selected_exception_set=selected_exception_set,
         )
 
     # ------------------------------------------------------------------
@@ -528,19 +572,36 @@ class RulePackageResolver:
         exception_reference: VersionedReference | None,
         exception_set_reference: VersionedReference | None,
         exception_set_references: tuple[VersionedReference, ...],
+        selected_exception_set: RuleExceptionSetDefinition | None = None,
     ) -> RulePackageResolution:
         """Build the immutable resolution and its stable semantic hash.
 
-        Both statuses hash the same provenance core (package, exception
-        fact and set references, parse order, contributing fact summaries)
-        so run snapshots remain auditable even when resolution blocks.
-        Issue messages never participate in the hash.
+        Both statuses hash the same provenance core (package identity and
+        semantic hash, exception fact and set references plus the set
+        content hash, parse order, and per-fact provenance including the
+        exact ``fact_reference`` and ``known_at``).  Issue messages never
+        participate in the hash; ``observed_at`` is audit-only.
         """
 
+        # Order-independent content hash of the selected exception set;
+        # ``None`` when no single set was selected (no match or conflict).
+        exception_set_hash = (
+            exception_set_content_hash(selected_exception_set)
+            if selected_exception_set is not None
+            else None
+        )
+        normal_summaries = [
+            summary for summary in summaries if summary.exception_set_reference is None
+        ]
+        exception_summaries = [
+            summary for summary in summaries if summary.exception_set_reference is not None
+        ]
         fact_provenance = [
             {
+                "fact_reference": summary.fact_reference,
                 "source": summary.source,
                 "source_revision": summary.source_revision,
+                "known_at": summary.known_at,
                 "exception_fact_ref": summary.exception_fact_ref,
                 "exception_set_reference": summary.exception_set_reference,
                 "valid_from": summary.valid_from,
@@ -548,34 +609,48 @@ class RulePackageResolver:
             }
             for summary in summaries
         ]
+        def _unique_reference_payloads(
+            summaries_: Sequence[ResolvedFactSummary],
+        ) -> list[dict[str, Any]]:
+            """Deduplicate fact references as canonical payloads, stably."""
+
+            unique: dict[tuple[str, int], dict[str, Any]] = {}
+            for summary_ in summaries_:
+                payload = canonical_payload(summary_.fact_reference)
+                unique[(payload["key"], payload["version"])] = payload
+            return [unique[identity] for identity in sorted(unique)]
+
+        provenance_core = {
+            "kind": "rule_package_resolution",
+            "status": status,
+            "parser_revision": PARSER_REVISION,
+            "package_reference": definition.reference,
+            "package_semantic_hash": definition.semantic_hash,
+            "exception_reference": exception_reference,
+            "exception_set_reference": exception_set_reference,
+            "exception_set_hash": exception_set_hash,
+            "exception_set_references": exception_set_references,
+            "normal_fact_references": _unique_reference_payloads(
+                normal_summaries
+            ),
+            "exception_fact_references": _unique_reference_payloads(
+                exception_summaries
+            ),
+            "parse_order": definition.parse_order,
+            "selected_facts": fact_provenance,
+        }
         if status is ResolutionStatus.READY:
             payload = {
-                "kind": "rule_package_resolution",
-                "status": status,
-                "parser_revision": PARSER_REVISION,
-                "package_reference": definition.reference,
-                "exception_reference": exception_reference,
-                "exception_set_reference": exception_set_reference,
-                "exception_set_references": exception_set_references,
-                "parse_order": definition.parse_order,
+                **provenance_core,
                 "normalized_values": dict(normalized),
                 "capability_declarations": dict(capability),
-                "selected_facts": fact_provenance,
             }
         else:
             # Blocked resolutions keep their full fact provenance in the
             # hash: two fact revisions triggering the same issue codes
             # must stay distinguishable for preflight/run audits.
             payload = {
-                "kind": "rule_package_resolution",
-                "status": status,
-                "parser_revision": PARSER_REVISION,
-                "package_reference": definition.reference,
-                "exception_reference": exception_reference,
-                "exception_set_reference": exception_set_reference,
-                "exception_set_references": exception_set_references,
-                "parse_order": definition.parse_order,
-                "selected_facts": fact_provenance,
+                **provenance_core,
                 "issue_identities": sorted(
                     (issue.code, issue.field) for issue in issues
                 ),
@@ -815,6 +890,45 @@ def _normalize_strategy_rule(
         except DomainValidationError:
             return None, _invalid_issue(prefix + "的策略声明语句不能为空")
     return _normalize_versioned_reference(prefix, raw)
+
+
+def restore_normalized_values(
+    definition: RulePackageDefinition,
+    payload: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Restore canonical-JSON snapshot values into domain-normalized types.
+
+    Run snapshots persist ``normalized_values`` in canonical JSON form
+    (decimal strings, ``{key, version}`` maps, lists).  Execution must not
+    consume those raw JSON types: this function re-runs the resolver's
+    per-field normalization so a restored segment carries exactly the same
+    ``Decimal``/``VersionedReference``/tuple values the original ready
+    resolution produced.  Unknown or invalid entries are rejected instead
+    of being passed through.
+    """
+
+    if not isinstance(payload, Mapping):
+        raise DomainValidationError("payload must be a mapping")
+    known = {field.name for field in definition.field_definitions}
+    unknown = sorted(set(payload) - known)
+    if unknown:
+        raise DomainValidationError(
+            f"stored normalized values contain fields unknown to rule "
+            f"package {reference_display(definition.reference)}: {unknown}"
+        )
+    restored: dict[str, Any] = {}
+    for field_definition in definition.field_definitions:
+        name = field_definition.name
+        if name not in payload:
+            continue
+        value, issue = _normalize_field_value(field_definition, payload[name])
+        if issue is not None:
+            raise DomainValidationError(
+                f"stored normalized value for field {name} is invalid: "
+                f"{issue.message}"
+            )
+        restored[name] = value
+    return restored
 
 
 def _invalid_issue(

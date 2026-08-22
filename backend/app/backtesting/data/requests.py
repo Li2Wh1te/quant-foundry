@@ -758,6 +758,7 @@ class DataRequest(DataPreflightRequest):
     admission_preflight_status: PreflightStatus = PreflightStatus.READY
     admission_preflight_hash: str = ""
     accepted_degraded_preflight_hash: str | None = None
+    resolved_rule_snapshot_hash: str = ""
 
     def __post_init__(self) -> None:
         # Explicit parent call: zero-arg super() breaks inside __post_init__
@@ -820,6 +821,22 @@ class DataRequest(DataPreflightRequest):
                 "accepted_degraded_preflight_hash must be None unless the "
                 "admission preflight is degraded"
             )
+        # A formal run must have passed the fixed-instrument rule gate, and
+        # the frozen rule snapshot it produced is recorded here so the run
+        # can never be replayed against different rules.  The reference is
+        # mandatory: an official request without a snapshot hash was never
+        # rule-admitted.
+        snapshot_hash = _non_blank_text(
+            self.resolved_rule_snapshot_hash, "resolved_rule_snapshot_hash"
+        )
+        if len(snapshot_hash) != 64 or any(
+            character not in _HASH_ALPHABET for character in snapshot_hash
+        ):
+            raise InvalidDataRequestError(
+                "resolved_rule_snapshot_hash must be a lowercase SHA-256 "
+                "hex digest"
+            )
+        object.__setattr__(self, "resolved_rule_snapshot_hash", snapshot_hash)
 
     @classmethod
     def from_admission(
@@ -828,6 +845,7 @@ class DataRequest(DataPreflightRequest):
         report: "DataPreflightReport",
         *,
         accepted_degraded: bool = False,
+        rule_preflight_report: "RulePreflightReport",
     ) -> "DataRequest":
         """Freeze an official run request from a request/report pair.
 
@@ -839,12 +857,25 @@ class DataRequest(DataPreflightRequest):
         calendar axis out of the report.  The report hash covers the full
         request semantics plus the report status, so the stored
         ``admission_preflight_hash`` binds everything a later audit needs.
+
+        ``rule_preflight_report`` is a mandatory admission input: the READY
+        fixed-instrument rule preflight report for this same intent.  The
+        frozen snapshot hash is taken from the report's verified bundle —
+        the report DTO itself guarantees that a READY report carries a
+        consistent, non-forged bundle — and the report must match this
+        request's rule package, exception set, window, knowledge cutoff,
+        and full fixed-instrument scope.  A blocked or foreign rule
+        preflight can never admit a formal run.
         """
 
         from dataclasses import fields
 
         from app.backtesting.data.errors import InvalidDataRequestError as _Invalid
         from app.backtesting.data.reports import DataPreflightReport  # noqa: F401
+        from app.instruments.rule_preflight import (
+            RulePreflightReport as _RulePreflightReport,
+        )
+        from app.instruments.rules.contracts import ResolutionStatus as _RuleStatus
 
         if not isinstance(request, DataPreflightRequest):
             raise _Invalid("request must be a DataPreflightRequest")
@@ -886,6 +917,56 @@ class DataRequest(DataPreflightRequest):
                     "accepted_degraded is only valid for degraded reports"
                 )
             confirmed_hash = None
+
+        # The rule gate is a second mandatory admission input: only the
+        # verified snapshot hash of a READY, bound rule preflight report
+        # may freeze into the official request.  A fabricated string can
+        # no longer smuggle an unadmitted run through.
+        if not isinstance(rule_preflight_report, _RulePreflightReport):
+            raise _Invalid(
+                "rule_preflight_report must be a ready fixed-instrument "
+                "rule preflight report"
+            )
+        if rule_preflight_report.status is not _RuleStatus.READY:
+            raise DataPreflightBlockedError(
+                "a blocked rule preflight report cannot be admitted",
+                details={"rule_report_hash": rule_preflight_report.report_hash},
+            )
+        rule_mismatches = []
+        if rule_preflight_report.rule_package_reference != (
+            request.rule_package
+        ):
+            rule_mismatches.append("rule_package")
+        if rule_preflight_report.exception_set_reference != (
+            request.rule_exception_set
+        ):
+            rule_mismatches.append("rule_exception_set")
+        if rule_preflight_report.start_date != (
+            request.requested_window.start_date
+        ) or rule_preflight_report.end_date != request.requested_window.end_date:
+            rule_mismatches.append("requested_window")
+        if (
+            request.knowledge_as_of is not None
+            and rule_preflight_report.data_cutoff != request.knowledge_as_of
+        ):
+            rule_mismatches.append("knowledge_as_of")
+        required_instrument_ids = (
+            set(request.static_instrument_ids)
+            | set(request.mandatory_instrument_ids)
+        )
+        checked_instrument_ids = {
+            result.instrument_id
+            for result in rule_preflight_report.checked_instruments
+        }
+        if not required_instrument_ids <= checked_instrument_ids:
+            rule_mismatches.append("static_instrument_ids/mandatory_instrument_ids")
+        if rule_mismatches:
+            raise _Invalid(
+                "rule preflight report does not belong to this request",
+                details={"mismatched_fields": sorted(rule_mismatches)},
+            )
+        resolved_rule_snapshot_hash = rule_preflight_report.snapshot_hash
+
         return cls(
             **{field.name: getattr(request, field.name) for field in fields(DataPreflightRequest)},
             resolved_calendar_ids=report.resolved_calendar_ids,
@@ -894,6 +975,7 @@ class DataRequest(DataPreflightRequest):
             admission_preflight_status=report.status,
             admission_preflight_hash=report.report_hash,
             accepted_degraded_preflight_hash=confirmed_hash,
+            resolved_rule_snapshot_hash=resolved_rule_snapshot_hash,
         )
 
 

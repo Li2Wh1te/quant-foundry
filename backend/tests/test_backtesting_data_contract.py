@@ -165,6 +165,84 @@ def _preflight_request(**overrides) -> DataPreflightRequest:
     return DataPreflightRequest(**values)
 
 
+def _rule_report_for(request: DataPreflightRequest):
+    """A minimal READY fixed-instrument rule preflight bound to ``request``."""
+
+    from datetime import datetime, timezone
+
+    from datetime import timedelta as _td
+
+    from app.instruments.domain import VersionedReference as _VR
+    from app.instruments.rule_preflight import (
+        InstrumentRulePreflightResult,
+        RuleCheckStatus,
+        RulePreflightReport,
+    )
+    from app.instruments.rule_snapshots import (
+        InstrumentRuleSnapshotSegment,
+        RunRuleSnapshotBundle,
+    )
+    from app.instruments.rules import ResolutionStatus
+
+    ids = sorted(
+        set(request.static_instrument_ids)
+        | set(request.mandatory_instrument_ids)
+    )
+    results = tuple(
+        InstrumentRulePreflightResult(
+            instrument_id=iid,
+            status=ResolutionStatus.READY,
+            rules_check_status=RuleCheckStatus.OK,
+            capability_check_status=RuleCheckStatus.OK,
+            resolved_segments=(),
+            selected_fact_references=(),
+            issues=(),
+        )
+        for iid in ids
+    )
+    cutoff = request.knowledge_as_of or datetime(2026, 8, 1, tzinfo=timezone.utc)
+    request_start = request.requested_window.start_date
+    segments = tuple(
+        InstrumentRuleSnapshotSegment(
+            instrument_id=iid,
+            effective_from=request_start,
+            effective_to=None,
+            normal_fact_reference=_VR(
+                key="etf_rule_fact", version=1
+            ),
+            exception_fact_reference=None,
+            normalized_values={},
+            capability_declarations={},
+            provenance={"normal_fact": {"fact_key": "etf_rule_fact"}},
+            resolution_hash="c" * 64,
+        )
+        for iid in ids
+    )
+    bundle = RunRuleSnapshotBundle(
+        rule_package_reference=request.rule_package,
+        rule_package_semantic_hash="a" * 64,
+        parser_revision="rule-package-resolver@2",
+        exception_set_reference=request.rule_exception_set,
+        exception_set_hash="b" * 64 if request.rule_exception_set else None,
+        data_cutoff=cutoff,
+        instrument_segments=segments,
+    )
+    return RulePreflightReport(
+        status=ResolutionStatus.READY,
+        rule_package_reference=request.rule_package,
+        rule_package_semantic_hash="a" * 64,
+        exception_set_reference=request.rule_exception_set,
+        exception_set_hash="b" * 64 if request.rule_exception_set else None,
+        data_cutoff=cutoff,
+        start_date=request.requested_window.start_date,
+        end_date=request.requested_window.end_date,
+        checked_instruments=results,
+        issues=(),
+        snapshot_bundle=bundle,
+        snapshot_hash=bundle.snapshot_hash,
+    )
+
+
 def _session_point(day: date) -> SessionPoint:
     return SessionPoint(
         session_date=day,
@@ -298,6 +376,7 @@ def _frozen_data_request() -> DataRequest:
         admission_calendar_session_signature="b" * 64,
         admission_preflight_status=PreflightStatus.READY,
         admission_preflight_hash="c" * 64,
+        resolved_rule_snapshot_hash="d" * 64,
     )
 
 
@@ -674,6 +753,7 @@ class TestDataRequestFreezing(unittest.TestCase):
                 admission_preflight_status=PreflightStatus.READY,
                 admission_preflight_hash="c" * 64,
                 accepted_degraded_preflight_hash="c" * 64,
+                resolved_rule_snapshot_hash="d" * 64,
             )
             DataRequest(**_request_defaults(), **values)
 
@@ -684,6 +764,7 @@ class TestDataRequestFreezing(unittest.TestCase):
             admission_calendar_session_signature="b" * 64,
             admission_preflight_status=PreflightStatus.DEGRADED,
             admission_preflight_hash="c" * 64,
+            resolved_rule_snapshot_hash="d" * 64,
         )
         DataRequest(**_request_defaults(), **base, accepted_degraded_preflight_hash="c" * 64)
         with self.assertRaises(DataPreflightConfirmationMismatchError):
@@ -701,6 +782,7 @@ class TestDataRequestFreezing(unittest.TestCase):
                 admission_calendar_session_signature="b" * 64,
                 admission_preflight_status=PreflightStatus.BLOCKED,
                 admission_preflight_hash="c" * 64,
+                resolved_rule_snapshot_hash="d" * 64,
             )
             DataRequest(**_request_defaults(), **values)
 
@@ -712,6 +794,7 @@ class TestDataRequestFreezing(unittest.TestCase):
                 admission_calendar_session_signature="b" * 64,
                 admission_preflight_status=PreflightStatus.READY,
                 admission_preflight_hash="c" * 64,
+                resolved_rule_snapshot_hash="d" * 64,
             )
             DataRequest(**_request_defaults(), **values)
 
@@ -1068,7 +1151,9 @@ class TestAdmissionBinding(unittest.TestCase):
     def test_from_admission_freezes_ready_report(self):
         request = _preflight_request()
         report = _report_for(request)
-        frozen = DataRequest.from_admission(request, report)
+        frozen = DataRequest.from_admission(
+            request, report, rule_preflight_report=_rule_report_for(request)
+        )
         self.assertEqual(frozen.resolved_calendar_ids, ("SSE",))
         self.assertEqual(frozen.resolved_timezone, "Asia/Shanghai")
         self.assertEqual(frozen.admission_preflight_hash, report.report_hash)
@@ -1089,12 +1174,16 @@ class TestAdmissionBinding(unittest.TestCase):
         # another intent and must never be admitted against this request.
         with self.assertRaises(InvalidDataRequestError):
             DataRequest.from_admission(
-                request, _report_for(request, frequency="1m")
+                request,
+                _report_for(request, frequency="1m"),
+                rule_preflight_report=_rule_report_for(request),
             )
         other_scope = MarketScope(exchanges=("SZSE",))
         with self.assertRaises(InvalidDataRequestError):
             DataRequest.from_admission(
-                request, _report_for(request, market_scope=other_scope)
+                request,
+                _report_for(request, market_scope=other_scope),
+                rule_preflight_report=_rule_report_for(request),
             )
         drifted = DataPreflightRequest(**{
             **_request_defaults(),
@@ -1102,7 +1191,9 @@ class TestAdmissionBinding(unittest.TestCase):
         })
         with self.assertRaises(InvalidDataRequestError):
             # A drifted request cannot reuse the original report's hash.
-            DataRequest.from_admission(drifted, _report_for(request))
+            DataRequest.from_admission(
+                drifted, _report_for(request), rule_preflight_report=_rule_report_for(request)
+            )
 
     def test_from_admission_enforces_degraded_confirmation(self):
         request = _preflight_request()
@@ -1112,16 +1203,26 @@ class TestAdmissionBinding(unittest.TestCase):
             resolved_sessions=(),
         )
         with self.assertRaises(DataPreflightConfirmationMismatchError):
-            DataRequest.from_admission(request, degraded)
+            DataRequest.from_admission(
+                request, degraded, rule_preflight_report=_rule_report_for(request)
+            )
         confirmed = DataRequest.from_admission(
-            request, degraded, accepted_degraded=True
+            request,
+            degraded,
+            accepted_degraded=True,
+            rule_preflight_report=_rule_report_for(request),
         )
         self.assertEqual(
             confirmed.accepted_degraded_preflight_hash, degraded.report_hash
         )
         ready = _report_for(request)
         with self.assertRaises(Exception):
-            DataRequest.from_admission(request, ready, accepted_degraded=True)
+            DataRequest.from_admission(
+            request,
+            ready,
+            accepted_degraded=True,
+            rule_preflight_report=_rule_report_for(request),
+        )
 
     def test_from_admission_rejects_blocked_report(self):
         request = _preflight_request()
@@ -1131,7 +1232,9 @@ class TestAdmissionBinding(unittest.TestCase):
             resolved_sessions=(),
         )
         with self.assertRaises(DataPreflightBlockedError):
-            DataRequest.from_admission(request, blocked)
+            DataRequest.from_admission(
+                request, blocked, rule_preflight_report=_rule_report_for(request)
+            )
 
     def test_blocked_report_may_express_unresolved_calendar(self):
         # P1: a run whose calendars never resolve must still be expressible
@@ -1175,6 +1278,7 @@ class TestAdmissionBinding(unittest.TestCase):
                 admission_calendar_session_signature="b" * 64,
                 admission_preflight_status=PreflightStatus.READY,
                 admission_preflight_hash="c" * 64,
+                resolved_rule_snapshot_hash="d" * 64,
             )
             DataRequest(**_request_defaults(), **values)
 

@@ -10,6 +10,15 @@ from app.data_ingestion.models import (
     TradingCalendarDay,
 )
 from app.instruments.models import Instrument, InstrumentCodeMappingRecord
+from app.instruments.rule_exceptions_models import (
+    InstrumentRuleExceptionEntryRecord,
+    InstrumentRuleExceptionSetRecord,
+)
+from app.instruments.rule_facts_models import InstrumentRuleFactRecord
+from app.instruments.rule_snapshots_models import (
+    BacktestRunInstrumentRuleSnapshotRecord,
+    BacktestRunRuleSnapshotRecord,
+)
 from app.scheduling.models import ScheduledTask, TaskRun
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.backtesting.models import BacktestAccountProfileRecord
@@ -40,6 +49,8 @@ __all__ = [
     "BacktestOrderResultRecord",
     "BacktestOrderUpdateRecord",
     "BacktestPositionResultRecord",
+    "BacktestRunInstrumentRuleSnapshotRecord",
+    "BacktestRunRuleSnapshotRecord",
     "BacktestStepRecord",
     "RESULT_TABLE_NAMES",
     "EtfCode",
@@ -47,6 +58,9 @@ __all__ = [
     "EtfEntity",
     "Instrument",
     "InstrumentCodeMappingRecord",
+    "InstrumentRuleExceptionEntryRecord",
+    "InstrumentRuleExceptionSetRecord",
+    "InstrumentRuleFactRecord",
     "EtfAdjustmentFactor",
     "EtfDailyBar",
     "ScheduledTask",

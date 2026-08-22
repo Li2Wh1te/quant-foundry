@@ -116,6 +116,90 @@ def reference_display(reference: VersionedReference | None) -> str | None:
     return f"{reference.key}@{reference.version}"
 
 
+def rule_fact_content_hash(
+    *,
+    fact_reference: VersionedReference,
+    instrument_id: UUID,
+    package_reference: VersionedReference,
+    exception_fact_ref: VersionedReference | None,
+    valid_from: date | None,
+    valid_to: date | None,
+    fields: Mapping[str, Any],
+    source: str,
+    source_revision: str | None,
+    known_at: datetime,
+    observed_at: datetime,
+    quality_status: FactQualityStatus,
+    fixture_only: bool,
+) -> str:
+    """Return the stable content hash of one instrument rule fact.
+
+    The hash covers every semantically meaningful column of an
+    ``instrument_rule_facts`` row (identity, validity, raw fields, source
+    evidence, knowledge times, quality and fixture flags).  It lets a
+    later reader detect that the row behind ``fact_key + fact_version``
+    drifted even though versions are append-only by contract.
+    """
+
+    payload = {
+        "kind": "instrument_rule_fact",
+        "fact_reference": fact_reference,
+        "instrument_id": instrument_id,
+        "package_reference": package_reference,
+        "exception_fact_ref": exception_fact_ref,
+        "valid_from": valid_from,
+        "valid_to": valid_to,
+        "fields": dict(fields),
+        "source": source,
+        "source_revision": source_revision,
+        "known_at": known_at,
+        "observed_at": observed_at,
+        "quality_status": quality_status,
+        "fixture_only": fixture_only,
+    }
+    return stable_hash(canonical_payload(payload))
+
+
+def exception_set_content_hash(
+    definition: "RuleExceptionSetDefinition",
+) -> str:
+    """Return the order-independent content hash of an exception set.
+
+    The canonical payload lists entries sorted by their full identity, so
+    the caller's insertion order can never change the hash.  Entries carry
+    only references and validity intervals — production values have no
+    place in an exception set and therefore not in its hash.
+    """
+
+    entries = [
+        {
+            "instrument_id": entry.instrument_id,
+            "exception_fact_reference": entry.exception_fact_ref,
+            "valid_from": entry.valid_from,
+            "valid_to": entry.valid_to,
+        }
+        for entry in definition.entries
+    ]
+    entries.sort(
+        key=lambda item: (
+            str(item["instrument_id"]),
+            item["exception_fact_reference"].key,
+            item["exception_fact_reference"].version,
+            item["valid_from"].isoformat(),
+            (
+                "" if item["valid_to"] is None else item["valid_to"].isoformat()
+            ),
+        )
+    )
+    payload = {
+        "kind": "rule_exception_set",
+        "set_reference": definition.reference,
+        "rule_package_reference": definition.package_reference,
+        "entries": entries,
+    }
+    return stable_hash(canonical_payload(payload))
+
+
 def deep_freeze(value: Any) -> Any:
     """Recursively convert a structure into immutable equivalents.
 
@@ -213,11 +297,19 @@ class RulePackageIssueCode(StrEnum):
     RULE_EXCEPTION_FACT_MISSING = "RULE_EXCEPTION_FACT_MISSING"
     RULE_EXCEPTION_TARGET_MISMATCH = "RULE_EXCEPTION_TARGET_MISMATCH"
     RULE_EXCEPTION_INTERVAL_CONFLICT = "RULE_EXCEPTION_INTERVAL_CONFLICT"
+    RULE_EXCEPTION_SET_MISSING = "RULE_EXCEPTION_SET_MISSING"
     RULE_CAPABILITY_DECLARATION_MISSING = "RULE_CAPABILITY_DECLARATION_MISSING"
+    RULE_CAPABILITY_FACT_MISSING = "RULE_CAPABILITY_FACT_MISSING"
     RULE_SETTLEMENT_UNKNOWN = "RULE_SETTLEMENT_UNKNOWN"
     RULE_SETTLEMENT_UNSUPPORTED = "RULE_SETTLEMENT_UNSUPPORTED"
     RULE_FIXTURE_SOURCE_FORBIDDEN = "RULE_FIXTURE_SOURCE_FORBIDDEN"
     RULE_FACT_NOT_COMPLETE = "RULE_FACT_NOT_COMPLETE"
+    # Codes introduced with versioned fact persistence and fixed-instrument
+    # preflight; the resolver itself keeps its original codes.
+    RULE_FACT_MISSING = "RULE_FACT_MISSING"
+    RULE_FACT_EXPIRED = "RULE_FACT_EXPIRED"
+    RULE_FACT_CONFLICT = "RULE_FACT_CONFLICT"
+    RULE_SNAPSHOT_INCOMPLETE = "RULE_SNAPSHOT_INCOMPLETE"
 
 
 # ---------------------------------------------------------------------------
@@ -546,13 +638,17 @@ class RuleExceptionSetDefinition:
 class RuleFactCandidate:
     """One read-only candidate fact supplied by a replaceable provider.
 
-    This is *not* a database model: a future ``instrument_rule_facts``
-    table task will adapt rows into these immutable candidates.  Raw field
+    This is *not* a database model: it is the immutable projection of one
+    ``instrument_rule_facts`` row (or an in-memory Phase 1 fixture) into
+    resolver input.  ``fact_reference`` mirrors the persisted
+    ``fact_key + fact_version`` pair one-to-one, and ``content_hash`` is
+    the stable hash of the row content recorded at append time.  Raw field
     values stay uninterpreted here; the resolver owns all validation so
     that missing or invalid facts become structured blocks instead of
     constructor exceptions.
     """
 
+    fact_reference: VersionedReference
     instrument_id: UUID
     package_reference: VersionedReference
     source: str
@@ -561,12 +657,22 @@ class RuleFactCandidate:
     observed_at: datetime
     quality_status: FactQualityStatus
     fixture_only: bool
+    content_hash: str
     fields: Mapping[str, Any]
     exception_fact_ref: VersionedReference | None = None
     valid_from: date | None = None
     valid_to: date | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.fact_reference, VersionedReference):
+            raise DomainValidationError(
+                "fact_reference must be a VersionedReference"
+            )
+        if not isinstance(self.content_hash, str) or not self.content_hash.strip():
+            raise DomainValidationError("content_hash must be non-blank text")
+        object.__setattr__(
+            self, "content_hash", self.content_hash.strip()
+        )
         if not isinstance(self.instrument_id, UUID):
             raise DomainValidationError(
                 "instrument_id must be a UUID (stable instrument identity)"
@@ -624,8 +730,13 @@ class RuleFactCandidate:
         """Return the stable provenance summary used in resolutions."""
 
         return ResolvedFactSummary(
+            fact_reference=self.fact_reference,
             source=self.source,
             source_revision=self.source_revision,
+            known_at=self.known_at,
+            observed_at=self.observed_at,
+            quality_status=self.quality_status,
+            fixture_only=self.fixture_only,
             exception_fact_ref=self.exception_fact_ref,
             valid_from=self.valid_from,
             valid_to=self.valid_to,
@@ -642,17 +753,46 @@ class RuleFactCandidate:
 class ResolvedFactSummary:
     """Stable provenance record of one contributing fact candidate.
 
-    ``exception_set_reference`` records *which versioned exception set*
-    routed to this fact, so two exception-set versions pointing at the
-    same fact reference remain distinguishable in audits and hashes.
+    ``fact_reference`` keeps the exact persisted ``fact_key +
+    fact_version`` identity so summaries never degrade into "a fact from
+    source X": audits and run snapshots must be able to re-fetch the very
+    row that produced the resolution.  ``known_at`` participates in the
+    semantic hash; ``observed_at`` is audit/display only.
     """
 
+    fact_reference: VersionedReference
     source: str
     source_revision: str | None
-    exception_fact_ref: VersionedReference | None
+    known_at: datetime
+    observed_at: datetime
+    quality_status: FactQualityStatus
+    fixture_only: bool
     valid_from: date | None
     valid_to: date | None
+    exception_fact_ref: VersionedReference | None = None
     exception_set_reference: VersionedReference | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fact_reference, VersionedReference):
+            raise DomainValidationError(
+                "fact_reference must be a VersionedReference"
+            )
+        object.__setattr__(self, "source", _required_label(self.source, "source"))
+        _validate_interval(self.valid_from, self.valid_to, prefix="")
+        # Visibility filtering compares these against data_cutoff, so naive
+        # timestamps would silently change what a query is allowed to see.
+        object.__setattr__(
+            self, "known_at", _aware_datetime(self.known_at, "known_at")
+        )
+        object.__setattr__(
+            self, "observed_at", _aware_datetime(self.observed_at, "observed_at")
+        )
+        if not isinstance(self.quality_status, FactQualityStatus):
+            raise DomainValidationError(
+                "quality_status must be a FactQualityStatus"
+            )
+        if not isinstance(self.fixture_only, bool):
+            raise DomainValidationError("fixture_only must be a boolean")
 
 
 @dataclass(frozen=True, slots=True)

@@ -23,6 +23,8 @@ from app.instruments.rules.contracts import (
     StrategyRuleDeclaration,
     TradingStatusRequirement,
     canonical_decimal_string,
+    exception_set_content_hash,
+    rule_fact_content_hash,
     stable_hash,
 )
 from app.instruments.rules.registry import (
@@ -30,7 +32,11 @@ from app.instruments.rules.registry import (
     RulePackageRegistrationError,
     RulePackageRegistry,
 )
-from app.instruments.rules.resolver import PARSER_REVISION, RulePackageResolver
+from app.instruments.rules.resolver import (
+    PARSER_REVISION,
+    RulePackageResolver,
+    restore_normalized_values,
+)
 from app.instruments.rules.etf_china import (
     FORMAL_SETTLEMENT_RULE_CLASSES,
     KNOWN_SETTLEMENT_RULE_CLASSES,
@@ -71,6 +77,9 @@ __all__ = [
     "TradingStatusRequirement",
     "build_definition",
     "canonical_decimal_string",
+    "exception_set_content_hash",
     "register_china_listed_etf_rules",
+    "restore_normalized_values",
+    "rule_fact_content_hash",
     "stable_hash",
 ]
