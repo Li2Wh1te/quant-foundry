@@ -41,7 +41,7 @@ from app.backtesting.domain import (
     _optional_price,
     _positive,
 )
-from app.backtesting.instrument_specs import InstrumentSpec, InstrumentSpecProvider
+from app.instruments.domain import InstrumentDisplay, InstrumentDisplayProvider
 
 
 ZERO = Decimal("0")
@@ -203,14 +203,14 @@ class InstrumentDisplaySnapshot:
         )
 
     @classmethod
-    def from_spec(cls, spec: InstrumentSpec) -> "InstrumentDisplaySnapshot":
-        """Freeze the display fields of a query-time-valid spec."""
+    def from_display(cls, display: InstrumentDisplay) -> "InstrumentDisplaySnapshot":
+        """Freeze the display fields of a point-in-time-valid display object."""
 
         return cls(
-            instrument_id=spec.instrument_id,
-            event_trading_code=spec.trading_code,
-            event_name=spec.name,
-            event_display_name=spec.display_name,
+            instrument_id=display.instrument_id,
+            event_trading_code=display.trading_code,
+            event_name=display.name,
+            event_display_name=display.display_name,
         )
 
     def require_matching_instrument(self, instrument_id: UUID, field_name: str) -> None:
@@ -223,26 +223,36 @@ class InstrumentDisplaySnapshot:
 
 
 def resolve_display_snapshot(
-    provider: InstrumentSpecProvider,
+    provider: InstrumentDisplayProvider,
     instrument_id: UUID,
     *,
-    as_of: datetime,
+    effective_at: datetime,
+    data_cutoff: datetime,
 ) -> InstrumentDisplaySnapshot:
-    """Resolve display fields from a provider at the event time.
+    """Resolve display fields from a provider for one market instant.
 
-    A missing spec is not an error: asset protocols may not expose display
-    fields, so the snapshot simply stays empty while ``instrument_id`` keeps
-    carrying the identity.  Result repositories depend on the caller (or
-    this helper) rather than on any concrete market-data client.
+    ``effective_at`` selects the market instant the display info must be
+    valid at; ``data_cutoff`` limits the knowledge the provider may use.
+    The two timestamps are intentionally separate parameters — never merge
+    them back into one ambiguous ``as_of``.  A missing display is not an
+    error: asset protocols may not expose display fields, so the snapshot
+    simply stays empty while ``instrument_id`` keeps carrying the identity.
+    Result repositories depend on the caller (or this helper) rather than
+    on any concrete market-data client.
     """
 
-    _aware_datetime(as_of, "as_of")
-    spec = provider.resolve(_uuid(instrument_id, "instrument_id"), as_of=as_of)
-    if spec is None:
+    _aware_datetime(effective_at, "effective_at")
+    _aware_datetime(data_cutoff, "data_cutoff")
+    display = provider.resolve_display(
+        _uuid(instrument_id, "instrument_id"),
+        effective_at=effective_at,
+        data_cutoff=data_cutoff,
+    )
+    if display is None:
         return InstrumentDisplaySnapshot(instrument_id=instrument_id)
-    if spec.instrument_id != instrument_id:
+    if display.instrument_id != instrument_id:
         raise DomainValidationError("provider returned a mismatched instrument_id")
-    return InstrumentDisplaySnapshot.from_spec(spec)
+    return InstrumentDisplaySnapshot.from_display(display)
 
 
 # ---------------------------------------------------------------------------

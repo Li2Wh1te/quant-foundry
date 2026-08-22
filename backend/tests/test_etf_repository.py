@@ -7,8 +7,10 @@ from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
 
+from app.data_ingestion.models.etf import EtfCode, EtfEntity
 from app.data_ingestion.repositories.etf import EtfCodeRepository
 from app.data_ingestion.schemas.etf import EtfInstrumentInput
+from app.instruments.models import Instrument
 
 
 def make_instrument(ts_code: str = "159526.SZ") -> EtfInstrumentInput:
@@ -59,6 +61,7 @@ class EtfCodeRepositoryTestCase(unittest.TestCase):
         session.execute.side_effect = [
             Mock(all=Mock(return_value=[])),
             Mock(),
+            Mock(),
             Mock(all=Mock(return_value=[("159526.SZ",)])),
             Mock(),
         ]
@@ -69,7 +72,12 @@ class EtfCodeRepositoryTestCase(unittest.TestCase):
             observed_at=datetime(2026, 8, 16, 10, 0, tzinfo=UTC),
         )
 
-        insert_entity_statement = session.execute.call_args_list[1].args[0]
+        # The generic instrument identity must be provisioned before the
+        # ETF-specific entity because etf_entities.id references it.
+        insert_instrument_statement = session.execute.call_args_list[1].args[0]
+        self.assertIn("INSERT INTO instruments", str(insert_instrument_statement))
+        self.assertIn("asset_class", str(insert_instrument_statement))
+        insert_entity_statement = session.execute.call_args_list[2].args[0]
         self.assertIn("INSERT INTO etf_entities", str(insert_entity_statement))
 
     def test_rejects_duplicate_codes_before_executing_sql(self) -> None:
@@ -105,3 +113,17 @@ class EtfCodeRepositoryTestCase(unittest.TestCase):
         self.assertEqual(audit.old_etf_id, old_entity_id)
         self.assertEqual(audit.new_etf_id, target_entity_id)
         self.assertEqual(audit.mapping_source, "exchange_announcement")
+
+
+class EtfIdentityMetadataTestCase(unittest.TestCase):
+    def test_etf_entity_primary_key_references_instruments(self) -> None:
+        # ORM metadata must mirror the deployed schema (migration
+        # 20260822_03): etf_entities.id is also a foreign key into the
+        # generic instruments table, so create_all() and future Alembic
+        # autogenerate runs reproduce the constraint instead of dropping it.
+        foreign_keys = {
+            fk.target_fullname for fk in EtfEntity.__table__.foreign_keys
+        }
+        self.assertIn("instruments.id", foreign_keys)
+        self.assertIn("instruments", EtfEntity.__table__.metadata.tables)
+        self.assertIs(EtfEntity.__table__.c.id.primary_key, True)

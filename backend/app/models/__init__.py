@@ -9,6 +9,7 @@ from app.data_ingestion.models import (
     EtfDailyBar,
     TradingCalendarDay,
 )
+from app.instruments.models import Instrument, InstrumentCodeMappingRecord
 from app.scheduling.models import ScheduledTask, TaskRun
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.backtesting.models import BacktestAccountProfileRecord
@@ -44,6 +45,8 @@ __all__ = [
     "EtfCode",
     "EtfCodeMappingAudit",
     "EtfEntity",
+    "Instrument",
+    "InstrumentCodeMappingRecord",
     "EtfAdjustmentFactor",
     "EtfDailyBar",
     "ScheduledTask",
