@@ -290,7 +290,31 @@ svg {
 .account-profiles__detail dl div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 11px; }
 .account-profiles__detail dt { color: var(--text-faint); }
 .account-profiles__detail dd { margin: 0; color: var(--text); }
-.account-profile-modal textarea { min-height: 130px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; line-height: 1.5; }
+.account-profile-modal .prototype-modal__dialog { width: min(100%, 780px); max-height: calc(100vh - 40px); overflow-y: auto; }
+.account-profile-modal__intro { margin: -4px 0 18px !important; padding: 10px 12px; border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border)); border-radius: 6px; color: var(--text-muted) !important; background: var(--accent-subtle); font-size: 11px !important; line-height: 1.55 !important; }
+.account-profile-modal textarea { min-height: 100px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; line-height: 1.5; }
+.field-help { display: block; margin-top: 4px; color: var(--text-faint); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.fee-rules-editor { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--surface-subtle) 45%, var(--surface)); }
+.fee-rules-editor__heading, .fee-rule-editor__heading, .fee-rule-editor__conditions-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.fee-rules-editor__heading h4 { margin: 0; color: var(--text); font-size: 14px; }
+.fee-rules-editor__heading p { margin: 4px 0 0; color: var(--text-muted); font-size: 10px; font-weight: 500; line-height: 1.45; }
+.fee-rules-editor__add, .fee-rule-editor__conditions-heading .secondary-button { height: 31px; padding: 0 9px; flex: 0 0 auto; font-size: 10px; }
+.fee-rule-editor { margin-top: 12px; padding: 13px; border: 1px solid var(--border-strong); border-radius: 6px; background: var(--surface); }
+.fee-rule-editor__heading { align-items: center; margin-bottom: 2px; }
+.fee-rule-editor__heading span { color: var(--accent); font-size: 9px; font-weight: 760; letter-spacing: .08em; }
+.fee-rule-editor__heading h5 { margin: 3px 0 0; color: var(--text); font-size: 12px; }
+.fee-rule-editor__remove { width: 30px; height: 30px; color: var(--danger); }
+.fee-rule-editor__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
+.fee-rule-editor__grid label { margin-bottom: 10px; }
+.fee-rule-editor__conditions { margin-top: 2px; padding-top: 11px; border-top: 1px solid var(--border); }
+.fee-rule-editor__conditions-heading { align-items: center; }
+.fee-rule-editor__conditions-heading strong { display: block; color: var(--text); font-size: 11px; }
+.fee-rule-editor__conditions-heading small { display: block; margin-top: 4px; color: var(--text-faint); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.fee-rule-editor__conditions-empty { margin: 10px 0 0 !important; color: var(--text-faint) !important; font-size: 10px !important; }
+.fee-rule-editor__condition { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) 30px; gap: 7px; align-items: center; margin-top: 9px; }
+.fee-rule-editor__condition input { margin-top: 0; }
+.fee-rule-editor__condition span { color: var(--text-faint); font-size: 12px; }
+.fee-rule-editor__condition .icon-button { width: 30px; height: 30px; }
 
 @media (max-width: 800px) {
   .account-profiles-page { padding: 16px; }
@@ -298,6 +322,8 @@ svg {
   .account-profiles__detail { order: -1; }
   .account-profile-selector { width: 100%; margin-left: 0; }
   .account-profile-selector select { flex: 1; }
+  .fee-rule-editor__grid { grid-template-columns: 1fr; }
+  .fee-rule-editor__condition { grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 30px; }
 }
 
 .version-mismatch-screen {
