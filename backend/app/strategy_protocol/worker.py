@@ -52,15 +52,44 @@ STRATEGY_MODULE_NAME = "published_strategy"
 """Filename recorded for compiled strategy source, used for line lookups."""
 
 
-def load_published_module(source_code: str) -> ModuleType:
-    """Compile and execute published strategy source in this worker process.
+STRATEGY_MODULE_PATH = "app.strategy_protocol.worker"
+"""Dotted import path of this module, used for the worker-role check.
 
-    This is the only source-loading path in the codebase: the adapter takes
-    an already-loaded module, so no API or Runner caller can accidentally
-    execute private code.  Callers must redirect stdout first so module-level
-    ``print`` output cannot mix into the JSON result document.
+When run via ``python -m``, this file executes as ``__main__`` and its
+``__spec__.name`` records this dotted path.
+"""
+
+
+def _require_worker_process() -> None:
+    """Refuse to run unless this process is the isolated contract-check worker.
+
+    Two independent signals must hold: the process must have been started as
+    ``python -m app.strategy_protocol.worker`` (its ``__main__`` spec matches
+    :data:`STRATEGY_MODULE_PATH`), and the parent checker must have set the
+    worker marker environment variable.  Importing this module from an API,
+    Runner, or test process does not satisfy either condition.
     """
 
+    main_spec = getattr(sys.modules.get("__main__"), "__spec__", None)
+    started_as_worker = (
+        main_spec is not None and main_spec.name == STRATEGY_MODULE_PATH
+    )
+    marked_by_parent = os.environ.get("QF_CONTRACT_CHECK_WORKER") == "1"
+    if not (started_as_worker and marked_by_parent):
+        raise RuntimeError(
+            "策略源码只能在隔离的回测契约检查子进程中编译执行。"
+        )
+
+
+def _load_published_module(source_code: str) -> ModuleType:
+    """Compile and execute published strategy source inside this worker.
+
+    Private on purpose: this is the only ``exec`` path in the codebase and it
+    is unreachable unless :func:`_require_worker_process` passes, so no API
+    or Runner process can load user source through an importable helper.
+    """
+
+    _require_worker_process()
     module = ModuleType(STRATEGY_MODULE_NAME)
     compiled = compile(source_code, STRATEGY_MODULE_NAME, "exec")
     exec(compiled, module.__dict__)  # noqa: S102 - isolated subprocess only
@@ -144,7 +173,7 @@ def perform_contract_check(request: dict) -> dict:
     sys.stdout = _BoundedStderrWriter(sys.stderr, MAX_STRATEGY_OUTPUT_BYTES)
     try:
         adapter = FunctionStrategyAdapter(
-            load_published_module(request["source_code"]),
+            _load_published_module(request["source_code"]),
             parameters=request.get("default_parameters", {}),
         )
         decision = adapter.on_step(context)

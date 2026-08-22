@@ -265,6 +265,9 @@ def _worker_environment(memory_limit_mb: int | None) -> dict[str, str]:
     environment = dict(os.environ)
     environment["PYTHONNOUSERSITE"] = "1"
     environment["PYTHONHASHSEED"] = "0"
+    # Marks the child as a real contract-check worker; the worker refuses to
+    # compile strategy source without this marker plus its __main__ role.
+    environment["QF_CONTRACT_CHECK_WORKER"] = "1"
     if memory_limit_mb is not None:
         environment["QF_CONTRACT_CHECK_MEM_MB"] = str(memory_limit_mb)
     return environment

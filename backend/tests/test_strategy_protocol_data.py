@@ -390,6 +390,26 @@ class PitStitchingTestCase(unittest.TestCase):
                 read_segment=reader,
             )
 
+    def test_extra_bars_on_mapped_but_unrequested_days_are_rejected(self) -> None:
+        # Session 2026-08-19 is inside the old segment's mapped range but was
+        # not requested; the reader must not smuggle it into the result.
+        def reader(code, start, end):
+            return [
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=day,
+                    values={"close": Decimal("1")},
+                )
+                for day in (date(2026, 8, 18), date(2026, 8, 19))
+            ]
+
+        with self.assertRaises(IncompleteHistoryError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 18)],
+                read_segment=reader,
+            )
+
     def test_duplicate_or_unsorted_session_input_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             stitch_segmented_history(
@@ -455,6 +475,22 @@ class UniverseQueryTestCase(unittest.TestCase):
             row.metadata["x"] = "y"
         # Filtering by another exchange returns nothing.
         self.assertEqual(facade.query(exchanges=["SZSE"]), ())
+
+    def test_candidate_identity_fields_are_validated(self) -> None:
+        base = dict(
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            asset_class="etf",
+            exchange="SSE",
+        )
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(instrument_id="not-a-uuid", **base)
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(instrument_id=None, **base)
+        for blank_field in ("trading_code", "name", "display_name", "asset_class", "exchange"):
+            with self.assertRaises(ValueError, msg=blank_field):
+                InstrumentCandidateDTO(instrument_id=uuid4(), **{**base, blank_field: "  "})
 
     def test_universe_provider_results_are_validated_and_sorted(self) -> None:
         first_id = uuid4()

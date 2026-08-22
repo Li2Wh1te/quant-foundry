@@ -222,13 +222,23 @@ class PreviousStepDTO:
     order_statuses: tuple[str, ...] = field(default_factory=tuple)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "orders", tuple(self.orders))
-        object.__setattr__(self, "fills", tuple(self.fills))
+        orders = tuple(self.orders)
+        fills = tuple(self.fills)
+        if any(not isinstance(order, OrderSummaryDTO) for order in orders):
+            raise InvalidDecisionPayloadError(
+                "orders must contain OrderSummaryDTO instances only"
+            )
+        if any(not isinstance(fill, FillSummaryDTO) for fill in fills):
+            raise InvalidDecisionPayloadError(
+                "fills must contain FillSummaryDTO instances only"
+            )
         statuses = tuple(self.order_statuses)
         if any(not isinstance(status, str) for status in statuses):
             raise InvalidDecisionPayloadError(
                 "order_statuses must contain strings"
             )
+        object.__setattr__(self, "orders", orders)
+        object.__setattr__(self, "fills", fills)
         object.__setattr__(self, "order_statuses", statuses)
 
 

@@ -3,6 +3,7 @@
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from types import ModuleType
 from uuid import uuid4
 
 from app.strategy_protocol.adapter import (
@@ -19,17 +20,20 @@ from app.strategy_protocol.synthetic import (
     ContractCheckParameters,
     build_synthetic_context,
 )
-from app.strategy_protocol.worker import load_published_module
 
 AWARE_TIME = datetime(2026, 8, 21, 15, 0, 0, tzinfo=timezone(timedelta(hours=8)))
 
 
 def load(source: str, parameters: dict | None = None) -> FunctionStrategyAdapter:
-    """Load a strategy through the same path the isolated worker uses."""
+    """Build an adapter over a compiled module, as only the worker may do.
 
-    return FunctionStrategyAdapter(
-        load_published_module(source), parameters=parameters or {}
-    )
+    The tests own this tiny compile step because source loading itself is
+    private to the worker process; the adapter only ever sees a module.
+    """
+
+    module = ModuleType("published_strategy")
+    exec(compile(source, "published_strategy", "exec"), module.__dict__)  # noqa: S102 - test fixture only
+    return FunctionStrategyAdapter(module, parameters=parameters or {})
 
 
 def _context(static_id=None):

@@ -256,6 +256,14 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
         result = run_strategy_contract_check(_request(source))
         self.assertTrue(result.ok, result.message)
 
+    def test_source_compilation_is_refused_outside_the_worker(self) -> None:
+        # Regression: importing the worker from an ordinary process (this
+        # test process) must not expose a callable user-source loader.
+        from app.strategy_protocol.worker import _load_published_module
+
+        with self.assertRaises(RuntimeError):
+            _load_published_module("value = 7\n")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,8 @@ from app.strategy_protocol.contract import (
 from app.strategy_protocol.context import (
     DecisionContext,
     DeterministicClockDTO,
+    FillSummaryDTO,
+    OrderSummaryDTO,
     PortfolioDTO,
     PositionDTO,
     PreviousStepDTO,
@@ -334,6 +336,25 @@ class ContextDtoTestCase(unittest.TestCase):
         self.assertEqual(context.clock.today(), context.session_date)
         with self.assertRaises(FrozenInstanceError):
             context.step_sequence = 99
+
+    def test_previous_step_sequences_are_frozen_tuples(self) -> None:
+        previous = PreviousStepDTO(step_sequence=1, order_statuses=["pending"])
+        with self.assertRaises((AttributeError, TypeError)):
+            previous.order_statuses.append("filled")
+        self.assertEqual(previous.order_statuses, ("pending",))
+        # Mutable stand-ins for orders/fills are rejected outright.
+        with self.assertRaises(InvalidDecisionPayloadError):
+            PreviousStepDTO(step_sequence=1, orders=[{"x": []}])
+        with self.assertRaises(InvalidDecisionPayloadError):
+            PreviousStepDTO(step_sequence=1, fills=[object()])
+        valid = PreviousStepDTO(
+            step_sequence=1,
+            orders=[OrderSummaryDTO(instrument_id=uuid4(), side="buy",
+                                    quantity=Decimal("1"), status="filled")],
+            fills=[FillSummaryDTO(instrument_id=uuid4(), side="buy",
+                                  quantity=Decimal("1"), price=Decimal("10"))],
+        )
+        self.assertIsInstance(valid.orders, tuple)
 
     def test_context_rejects_mismatched_or_naive_clock_fields(self) -> None:
         clock = DeterministicClockDTO(

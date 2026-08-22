@@ -121,8 +121,9 @@ class AdjustedSeriesPointDTO:
 class InstrumentCandidateDTO:
     """Read-only candidate with its point-in-time display identity.
 
-    Trading code, name, and display name are for display and research only.
-    Strategies always submit targets using the stable ``instrument_id``.
+    ``instrument_id`` must be a real UUID (the stable identity strategies
+    submit targets with); trading code, name, and display name are non-blank
+    display-only strings.
     """
 
     instrument_id: UUID
@@ -134,6 +135,18 @@ class InstrumentCandidateDTO:
     metadata: Mapping[str, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise ValueError("instrument_id must be a UUID")
+        for field_name in (
+            "trading_code",
+            "name",
+            "display_name",
+            "asset_class",
+            "exchange",
+        ):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"{field_name} must be a non-blank string")
         object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
 
 
@@ -611,23 +624,25 @@ def stitch_segmented_history(
         if not expected:
             continue
         rows = tuple(read_segment(segment.trading_code, expected[0], expected[-1]))
-        # Each segment must return exactly one bar per expected session: no
-        # duplicates, no out-of-range dates, no short windows.
+        # Each segment must return exactly the requested sessions: no
+        # duplicates, no out-of-range or non-session dates, and no short
+        # windows.
+        expected_set = set(expected)
         seen_dates: set[date] = set()
         for row in rows:
+            if row.trade_date not in expected_set:
+                raise IncompleteHistoryError(
+                    f"segment {segment.trading_code} returned a bar outside "
+                    f"the requested sessions on {row.trade_date}"
+                )
             if row.trade_date in seen_dates:
                 raise IncompleteHistoryError(
                     f"segment {segment.trading_code} returned duplicate bars "
                     f"for session {row.trade_date}"
                 )
             seen_dates.add(row.trade_date)
-            if not segment.covers(row.trade_date):
-                raise IncompleteHistoryError(
-                    f"segment {segment.trading_code} returned a bar outside "
-                    f"its mapped range on {row.trade_date}"
-                )
-        missing = [day for day in expected if day not in seen_dates]
-        if missing:
+        if len(rows) != len(expected):
+            missing = [day for day in expected if day not in seen_dates]
             raise IncompleteHistoryError(
                 f"history bars are missing for {len(missing)} sessions, "
                 f"first missing {missing[0]}"

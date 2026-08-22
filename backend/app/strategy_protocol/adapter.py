@@ -33,9 +33,11 @@ class StrategyLoadError(StrategyProtocolError):
 def _freeze_parameters(value: object) -> object:
     """Recursively convert parameters into immutable containers.
 
-    The strategy receives a read-only object: mappings become mapping proxies
-    and sequences become tuples at every nesting level, so a mutated parameter
-    can never leak into later steps of the same run.
+    Parameters originate from the revision's JSONB storage, so mapping, list,
+    tuple, and scalar values are the supported inputs; mappings become
+    mapping proxies and sequences become tuples at every nesting level, so a
+    mutated parameter can never leak into later steps of the same run.
+    Arbitrary custom mutable Python objects are outside this JSON contract.
     """
 
     if isinstance(value, Mapping):
