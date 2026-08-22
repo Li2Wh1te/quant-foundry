@@ -236,6 +236,26 @@ def evaluate_execution_facts(
     for fact in status_facts:
         if not isinstance(fact, TradingStatus):
             raise ValueError("status_facts entries must be TradingStatus")
+        if fact.instrument_id != instrument_id:
+            # Facts belonging to another instrument must never leak into
+            # this session's gating: a complete foreign fact would wrongly
+            # release or wrongly expire orders.
+            issues.append(
+                ExecutionFactIssue(
+                    code="trading_status_fact_instrument_mismatch",
+                    dimension=str(fact.attributes.get("dimension")),
+                    message=(
+                        "交易状态事实属于其他标的，不能用于当前标的的"
+                        "会话事实门禁，正式运行阻断"
+                    ),
+                    details={
+                        "instrument_id": str(instrument_id),
+                        "fact_instrument_id": str(fact.instrument_id),
+                        "session_date": session_date.isoformat(),
+                    },
+                )
+            )
+            continue
         if not _covers_session(fact, session_date):
             continue
         known_at = fact.evidence.known_at
@@ -486,12 +506,17 @@ def market_state_from_execution_facts(
 
     Every boolean field is set from the typed fact states — the dataclass
     fixture defaults are never relied upon — and the full evidence is
-    carried in ``facts_basis`` for run snapshots.  A ``not_applicable``
-    dimension records its explicit declaration instead of pretending to
-    be a positive or negative market fact.  The opening price is passed
-    through unchanged: when it is ``None`` despite an available opening
-    state, matching expires the order as ``open_unavailable`` rather than
-    falling back to any other price source.
+    carried in ``facts_basis`` for run snapshots.
+
+    "Not applicable" is the opposite of "not tradable": a dimension the
+    frozen capability declaration marks ``not_applicable`` imposes no
+    gate at all, so it maps to the permissive boolean while its
+    applicability stays visible in ``facts_basis``.  Only an explicit
+    negative fact (suspended / unavailable / direction denied) closes a
+    gate.  The opening price is passed through unchanged: when it is
+    ``None`` despite an available opening state, matching expires the
+    order as ``open_unavailable`` rather than falling back to any other
+    price source.
     """
 
     from app.backtesting.execution import MarketState, PriceLimitStatus
@@ -503,6 +528,7 @@ def market_state_from_execution_facts(
         PriceLimitState.NONE: PriceLimitStatus.NONE,
         PriceLimitState.UP: PriceLimitStatus.UP,
         PriceLimitState.DOWN: PriceLimitStatus.DOWN,
+        # No declared gate means no price-limit status to report either.
         PriceLimitState.NOT_APPLICABLE: PriceLimitStatus.NONE,
     }[facts.price_limit_status]
 
@@ -512,9 +538,10 @@ def market_state_from_execution_facts(
         open_price=open_price,
         price_tick=price_tick,
         is_suspended=facts.suspension_state is SuspensionState.SUSPENDED,
-        open_available=facts.opening_state is OpeningState.AVAILABLE,
-        buy_allowed=facts.buy_allowed is DirectionalAvailability.YES,
-        sell_allowed=facts.sell_allowed is DirectionalAvailability.YES,
+        # UNAVAILABLE is the only closing state; NOT_APPLICABLE never blocks.
+        open_available=facts.opening_state is not OpeningState.UNAVAILABLE,
+        buy_allowed=facts.buy_allowed is not DirectionalAvailability.NO,
+        sell_allowed=facts.sell_allowed is not DirectionalAvailability.NO,
         price_limit_status=price_limit_status,
         status_reason=None,
         facts_basis=facts.evidence,

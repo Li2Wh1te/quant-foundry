@@ -191,6 +191,30 @@ class ResolutionTestCase(unittest.TestCase):
                 data_cutoff=CUTOFF,
             )
 
+    def test_hidden_mapping_outside_request_window_does_not_block(self) -> None:
+        # A mapping learned after the cutoff that does not affect the
+        # requested sessions must never block the query by its presence.
+        early = make_mapping("OLD.CODE", date(2026, 8, 17), date(2026, 8, 20))
+        hidden_future = make_mapping(
+            "FUTURE.CODE",
+            date(2027, 1, 1),
+            None,
+            known_at=datetime(2027, 2, 1, tzinfo=UTC),
+        )
+
+        resolution = resolve_pit_mappings(
+            INSTRUMENT_ID,
+            source=SOURCE,
+            sessions=[date(2026, 8, 18), date(2026, 8, 19)],
+            mappings=[early, hidden_future],
+            data_cutoff=CUTOFF,
+        )
+
+        self.assertEqual(
+            resolution.session_bindings,
+            {date(2026, 8, 18): "OLD.CODE", date(2026, 8, 19): "OLD.CODE"},
+        )
+
     def test_blank_evidence_blocks(self) -> None:
         # Construct through __new__ to simulate a corrupted provider row.
         mapping = object.__new__(InstrumentCodeMapping)

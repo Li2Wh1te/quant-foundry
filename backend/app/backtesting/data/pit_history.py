@@ -148,8 +148,10 @@ def resolve_pit_mappings(
     ``known_at <= data_cutoff`` is re-checked here so a caller bug can
     never leak post-cutoff knowledge into a formal run.  Every requested
     session must hit exactly one surviving half-open segment; gaps,
-    overlaps, empty evidence, and invisible mappings are stable blocking
-    errors raised before any market data is read.
+    overlaps, and empty evidence among the *visible* rows are stable
+    blocking errors raised before any market data is read.  Mappings
+    learned after the cutoff are excluded silently: they do not exist
+    for this query and never block by their mere presence.
     """
 
     _aware_datetime(data_cutoff, "data_cutoff")
@@ -162,7 +164,6 @@ def resolve_pit_mappings(
     # Knowledge-time visibility is enforced here as the last line of
     # defense: rows learned after the cutoff do not exist for this query.
     visible: list[InstrumentCodeMapping] = []
-    hidden_dates: list[str] = []
     for mapping in mappings:
         if not isinstance(mapping, InstrumentCodeMapping):
             raise IdentityMappingIncompleteError(
@@ -178,16 +179,13 @@ def resolve_pit_mappings(
                 },
             )
         if mapping.known_at > data_cutoff:
-            hidden_dates.append(
-                f"{mapping.source_code}[{mapping.valid_from}..{mapping.valid_to}]"
-            )
+            # Knowledge-time filtering: rows learned after the cutoff do
+            # not exist for this query, wherever they sit.  Whether the
+            # remaining visible rows cover every requested session is the
+            # only completeness question; a hidden mapping never blocks
+            # by its mere presence.
             continue
         visible.append(mapping)
-    if hidden_dates:
-        raise IdentityMappingIncompleteError(
-            "instrument code mappings become visible only after data_cutoff",
-            details={"hidden_mappings": sorted(hidden_dates)},
-        )
 
     bindings: dict[date, InstrumentCodeMapping] = {}
     for day in ordered_sessions:

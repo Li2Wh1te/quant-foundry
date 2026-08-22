@@ -251,6 +251,35 @@ class NormalizationGateTestCase(unittest.TestCase):
             "something_else",
         )
 
+    def test_foreign_instrument_facts_block_with_stable_code(self) -> None:
+        # A complete suspension fact belonging to another instrument must
+        # never gate this instrument's session.
+        stranger = uuid4()
+        foreign = TradingStatus(
+            instrument_id=stranger,
+            status="tradable",
+            valid_from=date(2026, 1, 1),
+            evidence=FactEvidence(
+                source="exchange_status_feed",
+                observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+                quality_status=QualityStatus.COMPLETE,
+                known_at=datetime(2025, 12, 1, tzinfo=UTC),
+            ),
+            attributes={"dimension": SUSPENSION},
+        )
+
+        resolved, issues = self.evaluate(facts=[foreign])
+        self.assertIsNone(resolved)
+        matching = [
+            i for i in issues
+            if i.code == "trading_status_fact_instrument_mismatch"
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(
+            matching[0].details["fact_instrument_id"], str(stranger)
+        )
+        self.assertEqual(matching[0].details["instrument_id"], str(INSTRUMENT_ID))
+
     def test_price_limit_fact_without_direction_flags_block(self) -> None:
         facts = [
             make_status(SUSPENSION, "tradable"),
@@ -303,6 +332,95 @@ class NotApplicableTestCase(unittest.TestCase):
             limit_evidence["rule_package_reference"],
             "china_listed_etf_rules@1",
         )
+
+    def test_declared_not_applicable_allows_both_sides_to_match(self) -> None:
+        # "Not applicable" is not "not tradable": with the limit dimension
+        # declared away, buy and sell orders must both keep matching, and
+        # no directional expiry reason may appear.
+        applicability = {SUSPENSION: "required", OPENING: "required", LIMIT: "not_applicable"}
+        facts = [
+            make_status(SUSPENSION, "tradable"),
+            make_status(OPENING, "available"),
+        ]
+        resolved, issues = evaluate_execution_facts(
+            INSTRUMENT_ID,
+            calendar_id=CALENDAR_ID,
+            session_date=SESSION,
+            applicability=applicability,
+            status_facts=facts,
+            data_cutoff=CUTOFF,
+            rule_package_reference="china_listed_etf_rules@1",
+        )
+        self.assertEqual(issues, ())
+
+        state = market_state_from_execution_facts(
+            resolved,
+            open_price="10",
+            price_tick="0.01",
+            timestamp=OPEN_TS,
+        )
+
+        # The permissive mapping is explicit, never a silent default.
+        self.assertTrue(state.buy_allowed)
+        self.assertTrue(state.sell_allowed)
+        self.assertFalse(state.is_suspended)
+        self.assertTrue(state.open_available)
+        self.assertIs(state.price_limit_status, PriceLimitStatus.NONE)
+        # The declaration stays auditable in the provenance record.
+        self.assertEqual(state.facts_basis[LIMIT]["applicability"], "not_applicable")
+
+        from app.backtesting.fees import FeeCalculator, FeeSchedule
+        from app.backtesting.slippage import BpsSlippageModel
+
+        model = BarMarketExecutionModel(
+            slippage_model=BpsSlippageModel(slippage_bps="0", price_tick="0.01"),
+            fee_calculator=FeeCalculator(schedule=FeeSchedule(key="test", fee_rules=())),
+        )
+        context = MatchContext(currency="CNY", available_cash="100000")
+        buy = Order(
+            order_id=uuid4(), intent_id=uuid4(), instrument_id=INSTRUMENT_ID,
+            side="buy", quantity="100", submitted_at=OPEN_TS,
+        )
+        sell = Order(
+            order_id=uuid4(), intent_id=uuid4(), instrument_id=INSTRUMENT_ID,
+            side="sell", quantity="100", submitted_at=OPEN_TS,
+        )
+        context.available_quantities[INSTRUMENT_ID] = Decimal("100")
+
+        result = model.match([buy, sell], {INSTRUMENT_ID: state}, context)
+
+        self.assertEqual(len(result.fills), 2)
+        for order in (buy, sell):
+            self.assertEqual(order.status, OrderStatus.FILLED)
+
+    def test_declared_opening_not_applicable_does_not_expire_orders(self) -> None:
+        applicability = {SUSPENSION: "required", OPENING: "not_applicable", LIMIT: "required"}
+        facts = [
+            make_status(SUSPENSION, "tradable"),
+            make_status(LIMIT, "none", **{
+                "attributes": {"buy_allowed": True, "sell_allowed": True}
+            }),
+        ]
+        resolved, issues = evaluate_execution_facts(
+            INSTRUMENT_ID,
+            calendar_id=CALENDAR_ID,
+            session_date=SESSION,
+            applicability=applicability,
+            status_facts=facts,
+            data_cutoff=CUTOFF,
+        )
+        self.assertEqual(issues, ())
+        self.assertEqual(resolved.opening_state.value, "not_applicable")
+
+        state = market_state_from_execution_facts(
+            resolved,
+            open_price="10",
+            price_tick="0.01",
+            timestamp=OPEN_TS,
+        )
+
+        self.assertTrue(state.open_available)
+        self.assertEqual(state.facts_basis[OPENING]["applicability"], "not_applicable")
 
 
 class FormalMarketStateTestCase(unittest.TestCase):

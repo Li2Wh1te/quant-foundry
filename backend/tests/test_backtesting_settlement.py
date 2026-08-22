@@ -308,6 +308,96 @@ class SettlementLifecycleTestCase(unittest.TestCase):
             Decimal("0"),
         )
 
+    def test_foreign_calendar_batch_is_never_released_by_wrong_calendar(self) -> None:
+        # A batch bound to SZSE must not be releasable through an SSE call,
+        # even on the same calendar date.
+        szse_plan = DeferredSettlementPlan(
+            calendar_id="SZSE",
+            trade_session=date(2026, 8, 21),
+            settlement_session=date(2026, 8, 24),
+        )
+        portfolio = make_portfolio()
+        policy = AccountingPolicy()
+        policy.apply_fill(portfolio, make_buy(), settlement_plan=szse_plan)
+
+        released = policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SSE", session_date=date(2026, 8, 24)
+        )
+
+        self.assertEqual(released, ())
+        self.assertEqual(
+            portfolio.positions[INSTRUMENT_ID].available_quantity,
+            Decimal("0"),
+        )
+        self.assertEqual(len(policy.pending_batches()), 1)
+
+        # The batch still releases normally under its own calendar.
+        released = policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SZSE", session_date=date(2026, 8, 24)
+        )
+        self.assertEqual(released, (INSTRUMENT_ID,))
+
+    def test_multi_batch_release_is_atomic_on_failure(self) -> None:
+        # Two due batches; the second refers to a position that vanished.
+        # The failure must leave the first position and both batches
+        # untouched so a retry cannot double-release.
+        other = uuid4()
+        portfolio = make_portfolio()
+        policy = AccountingPolicy()
+        plan_a = DeferredSettlementPlan(
+            calendar_id="SSE",
+            trade_session=date(2026, 8, 21),
+            settlement_session=date(2026, 8, 24),
+        )
+        fill_a = Fill(
+            fill_id=uuid4(),
+            order_id=uuid4(),
+            instrument_id=INSTRUMENT_ID,
+            timestamp=datetime(2026, 8, 21, 7, 0, tzinfo=timezone.utc),
+            side=OrderSide.BUY,
+            price="10",
+            quantity="400",
+            fees="0",
+        )
+        policy.apply_fill(portfolio, fill_a, settlement_plan=plan_a)
+
+        later_ts = datetime(2026, 8, 21, 8, 0, tzinfo=timezone.utc)
+        plan_b = DeferredSettlementPlan(
+            calendar_id="SSE",
+            trade_session=date(2026, 8, 21),
+            settlement_session=date(2026, 8, 24),
+        )
+        fill_b = Fill(
+            fill_id=uuid4(),
+            order_id=uuid4(),
+            instrument_id=other,
+            timestamp=later_ts,
+            side=OrderSide.BUY,
+            price="10",
+            quantity="600",
+            fees="0",
+        )
+        portfolio.as_of = later_ts
+        policy.apply_fill(portfolio, fill_b, settlement_plan=plan_b)
+        # Simulate the loss of the second position after both batches are
+        # pending but before the release call.
+        del portfolio.positions[other]
+
+        from app.backtesting.accounting import AccountingError
+
+        with self.assertRaises(AccountingError):
+            policy.settle_pending_before_open_match(
+                portfolio, calendar_id="SSE", session_date=date(2026, 8, 24)
+            )
+
+        # Atomic rollback: the first position is unchanged and both
+        # batches remain pending exactly once.
+        self.assertEqual(
+            portfolio.positions[INSTRUMENT_ID].available_quantity,
+            Decimal("0"),
+        )
+        self.assertEqual(len(policy.pending_batches()), 2)
+
 
 if __name__ == "__main__":
     unittest.main()

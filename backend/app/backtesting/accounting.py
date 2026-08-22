@@ -37,6 +37,15 @@ from app.backtesting.fees import FeeBreakdown
 class AccountingError(DomainValidationError):
     """Raised when a fill cannot be applied under the active policy."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details: Mapping[str, object] = MappingProxyType(dict(details or {}))
+
 
 class InsufficientCashError(AccountingError):
     """Raised when a buy fill would exceed the account's available cash."""
@@ -337,7 +346,11 @@ class AccountingPolicy:
 
         Under a deferred settlement policy every buy fill must carry the
         calendar-resolved :class:`DeferredSettlementPlan`; batches without
-        one cannot be scheduled and are rejected instead of guessed.
+        one cannot be scheduled and are rejected instead of guessed.  The
+        plan's ``trade_session`` is authoritative: it comes from the
+        trading calendar, and a fill timestamp in a different time zone
+        never falls back to ``timestamp.date()`` inference here (session
+        binding against market-state time is owned by the session loop).
         """
 
         if fill.fill_id in self._processed_fill_ids:
@@ -348,23 +361,13 @@ class AccountingPolicy:
                     "deferred settlement requires a calendar-resolved "
                     "settlement plan for every buy fill"
                 )
+            # Re-validate through the domain constructor; the plan — not
+            # the fill timestamp — is the single source of trade_session.
             _ = DeferredSettlementPlan(
                 calendar_id=settlement_plan.calendar_id,
                 trade_session=settlement_plan.trade_session,
                 settlement_session=settlement_plan.settlement_session,
             )
-            trade_session = fill.timestamp.date()
-            if settlement_plan.trade_session != trade_session:
-                raise SettlementError(
-                    "the settlement plan trade_session must match the fill "
-                    "date",
-                    details={
-                        "plan_trade_session": (
-                            settlement_plan.trade_session.isoformat()
-                        ),
-                        "fill_date": trade_session.isoformat(),
-                    },
-                )
         if fill.currency != self.currency:
             raise AccountingError(
                 f"fill currency {fill.currency!r} does not match policy currency "
@@ -417,13 +420,22 @@ class AccountingPolicy:
         """Release exactly the batches due before this session's open match.
 
         The call is bound to the current ``calendar_id + session_date``.
-        Batches whose settlement session is *earlier* than
+        Only batches bound to the *same* calendar participate: a batch
+        settled on another calendar follows that calendar's timeline and
+        can never be released by this call, even when dates coincide.
+
+        Same-calendar batches whose settlement session is *earlier* than
         ``session_date`` mean the runner skipped an official settlement
         boundary: releasing them now would change historical matching
         results, so :class:`SettlementBoundaryMissedError` is raised and
         nothing is released.  Batches settling later stay untouched, and a
         suspended instrument never shifts its own settlement date — the
         sell order simply expires later in execution.
+
+        The release is atomic: every due batch is validated (position
+        exists, availability stays consistent) before any state changes,
+        so a failure leaves both positions and pending batches exactly as
+        before and a retry cannot double-release.
         """
 
         if not self._uses_deferred_settlement:
@@ -432,9 +444,17 @@ class AccountingPolicy:
         if not isinstance(session_date, date) or isinstance(session_date, datetime):
             raise SettlementError("session_date must be a calendar date")
 
-        overdue = [
+        # Calendar isolation first: foreign-calendar batches are invisible
+        # to this call regardless of their settlement dates.
+        own = [
             batch
             for batch in self._pending_settlement
+            if batch.calendar_id == calendar_id
+        ]
+
+        overdue = [
+            batch
+            for batch in own
             if batch.settlement_session < session_date
         ]
         if overdue:
@@ -455,19 +475,33 @@ class AccountingPolicy:
                 },
             )
 
-        released: list[UUID] = []
-        remaining: list[PendingSettlement] = []
-        for batch in self._pending_settlement:
-            if batch.settlement_session != session_date:
-                remaining.append(batch)
-                continue
+        due = [
+            batch for batch in own if batch.settlement_session == session_date
+        ]
+
+        # Validation phase — no mutation before every due batch is known
+        # to be releasable.
+        planned: list[tuple[PositionState, Decimal]] = []
+        for batch in due:
             position = portfolio.positions.get(batch.instrument_id)
             if position is None:
                 raise AccountingError(
-                    "pending settlement refers to a missing position"
+                    "pending settlement refers to a missing position",
+                    details={
+                        "instrument_id": str(batch.instrument_id),
+                        "source_fill_id": str(batch.source_fill_id),
+                    },
                 )
             new_available = position.available_quantity + batch.quantity
             _validate_available_quantity(position.quantity, new_available)
+            planned.append((position, new_available))
+
+        # Commit phase — apply all planned releases at once.
+        released: list[UUID] = []
+        remaining = [
+            batch for batch in self._pending_settlement if batch not in due
+        ]
+        for batch, (position, new_available) in zip(due, planned):
             position.available_quantity = new_available
             released.append(batch.instrument_id)
             self._settled_batches += (batch,)
