@@ -111,6 +111,42 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             # An upgrade must never replace operator-provided secrets.
             self.assertIn(f"QF_CURSOR_SIGNING_KEY={'e' * 64}", content)
 
+    def test_upgrade_generates_missing_cursor_signing_key(self) -> None:
+        """An old .env without the cursor key must be upgraded in place.
+
+        Running `make selfhost-migrate` on a pre-existing installation loads
+        the application settings; a missing required secret there would abort
+        Alembic before any migration runs.
+        """
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            template = root / ".env.example"
+            env = root / ".env"
+            template.write_text(
+                f"QF_API_TOKEN=\nQF_DATABASE_PASSWORD=\nQF_CURSOR_SIGNING_KEY=\n",
+                encoding="utf-8",
+            )
+            env.write_text(
+                f"QF_API_TOKEN={'d' * 64}\n"
+                "QF_DATABASE_PASSWORD=strong-password\n",
+                encoding="utf-8",
+            )
+
+            generated = ensure_selfhost_environment(env, template)
+
+            content = env.read_text(encoding="utf-8")
+            self.assertEqual(generated, {CURSOR_SIGNING_KEY})
+            self.assertIn("QF_DATABASE_PASSWORD=strong-password", content)
+            self.assertIn(f"QF_API_TOKEN={'d' * 64}", content)
+            self.assertIn("QF_CURSOR_SIGNING_KEY=", content)
+            key_line = next(
+                line
+                for line in content.splitlines()
+                if line.startswith("QF_CURSOR_SIGNING_KEY=")
+            )
+            self.assertGreaterEqual(len(key_line.split("=", 1)[1]), 64)
+
     def test_appends_new_template_keys_to_an_existing_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

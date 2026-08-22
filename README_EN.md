@@ -125,7 +125,7 @@ curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
 <summary><strong>What happens during the first deployment?</strong></summary>
 
 1. Create the root `.env` from `backend/.env.example`, add the web port, and set `0600` permissions;
-2. Generate a random 256-bit PostgreSQL password and API token with Python `secrets`;
+2. Generate a random 256-bit PostgreSQL password, API token, and cursor signing key with Python `secrets`;
 3. Build separate Backend and Frontend images;
 4. Create persistent volumes and start PostgreSQL;
 5. Apply all Alembic migrations;
@@ -258,8 +258,10 @@ cd quant-foundry
 cp backend/.env.example backend/.env
 ```
 
-Edit `.env`, set real values for `QF_API_TOKEN` and `QF_DATABASE_PASSWORD`, and make sure the
-configured PostgreSQL user and database exist. The API token must contain at least 32 characters.
+Edit `.env`, set real values for `QF_API_TOKEN`, `QF_CURSOR_SIGNING_KEY`, and
+`QF_DATABASE_PASSWORD`, and make sure the configured PostgreSQL user and database exist.
+Both the API token and the cursor signing key must contain at least 32 characters; the
+cursor signing key is server-only and must never be shared with any client.
 Then run:
 
 ```bash
@@ -300,6 +302,7 @@ creates the root `.env` from [`backend/.env.example`](./backend/.env.example) an
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | Backend container bind address and port; use `0.0.0.0` in containers |
 | `QF_WEB_HOST` / `QF_WEB_PORT` | Host address and port published for the web console; use `0.0.0.0` for LAN access |
 | `QF_API_TOKEN` | Shared Bearer Token used to authenticate API requests |
+| `QF_CURSOR_SIGNING_KEY` | Server-only secret (at least 32 characters) used to HMAC-sign backtest result cursors; never share it with clients |
 | `QF_DATABASE_*` | PostgreSQL host, port, user, password, and database name |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | Log directory and minimum log level |
 | `QF_LOG_RETENTION_DAYS` | Retention period for rotated logs |
