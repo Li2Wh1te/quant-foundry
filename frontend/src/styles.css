@@ -315,6 +315,21 @@ svg {
 .fee-rule-editor__condition input { margin-top: 0; }
 .fee-rule-editor__condition span { color: var(--text-faint); font-size: 12px; }
 .fee-rule-editor__condition .icon-button { width: 30px; height: 30px; }
+.account-metadata-editor { margin: 18px 0; padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: color-mix(in srgb, var(--surface-subtle) 45%, var(--surface)); }
+.account-metadata-editor__heading h4 { margin: 0; color: var(--text); font-size: 14px; }
+.account-metadata-editor__heading p { margin: 4px 0 0; color: var(--text-muted); font-size: 10px; font-weight: 500; line-height: 1.45; }
+.account-metadata-editor__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
+.account-metadata-editor__grid label { margin-bottom: 10px; }
+.account-metadata-editor__custom { margin-top: 2px; padding-top: 11px; border-top: 1px solid var(--border); }
+.account-metadata-editor__custom-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.account-metadata-editor__custom-heading strong { display: block; color: var(--text); font-size: 11px; }
+.account-metadata-editor__custom-heading small { display: block; margin-top: 4px; color: var(--text-faint); font-size: 10px; font-weight: 500; line-height: 1.4; }
+.account-metadata-editor__custom-heading .secondary-button { height: 31px; padding: 0 9px; flex: 0 0 auto; font-size: 10px; }
+.account-metadata-editor__empty { margin: 10px 0 0; color: var(--text-faint); font-size: 10px; }
+.account-metadata-editor__row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) 30px; gap: 7px; align-items: center; margin-top: 9px; }
+.account-metadata-editor__row input { margin-top: 0; }
+.account-metadata-editor__row span { color: var(--text-faint); font-size: 12px; }
+.account-metadata-editor__row .icon-button { width: 30px; height: 30px; }
 
 @media (max-width: 800px) {
   .account-profiles-page { padding: 16px; }
@@ -324,6 +339,8 @@ svg {
   .account-profile-selector select { flex: 1; }
   .fee-rule-editor__grid { grid-template-columns: 1fr; }
   .fee-rule-editor__condition { grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 30px; }
+  .account-metadata-editor__grid { grid-template-columns: 1fr; }
+  .account-metadata-editor__row { grid-template-columns: minmax(0, 1fr) 16px minmax(0, 1fr) 30px; }
 }
 
 .version-mismatch-screen {
