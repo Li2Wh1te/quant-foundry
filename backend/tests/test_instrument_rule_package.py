@@ -396,6 +396,70 @@ class NamedExceptionTestCase(unittest.TestCase):
             RulePackageIssueCode.RULE_EXCEPTION_INTERVAL_CONFLICT.value,
             issue_codes(resolution),
         )
+        # No single set was selected, but every participating set version
+        # is recorded in stable order for audit.
+        self.assertIsNone(resolution.exception_reference)
+        self.assertIsNone(resolution.exception_set_reference)
+        self.assertEqual(
+            resolution.exception_set_references, (EXCEPTION_SET_REF,)
+        )
+
+    def test_cross_set_interval_conflict_records_and_hashes_participants(
+        self,
+    ) -> None:
+        # Two distinct exception sets whose intervals overlap on the
+        # effective date: all participants must be recorded, and two
+        # conflicts involving different set versions must hash
+        # differently.
+        def entry(ref: VersionedReference) -> RuleExceptionEntry:
+            return RuleExceptionEntry(
+                instrument_id=INSTRUMENT_ID,
+                exception_fact_ref=ref,
+                valid_from=date(2025, 1, 1),
+                valid_to=None,
+            )
+
+        def pair(first_version: int, second_version: int):
+            first = RuleExceptionSetDefinition(
+                reference=VersionedReference(
+                    key="etf_named_exceptions", version=first_version
+                ),
+                package_reference=PACKAGE_REF,
+                entries=(entry(EXCEPTION_FACT_REF),),
+            )
+            second = RuleExceptionSetDefinition(
+                reference=VersionedReference(
+                    key="etf_named_exceptions", version=second_version
+                ),
+                package_reference=PACKAGE_REF,
+                entries=(entry(EXCEPTION_FACT_REF),),
+            )
+            return [first, second]
+
+        combo_a = resolve(
+            [make_fact(), make_exception_fact()],
+            exception_sets=pair(1, 2),
+        )
+        combo_b = resolve(
+            [make_fact(), make_exception_fact()],
+            exception_sets=pair(3, 4),
+        )
+        for resolution in (combo_a, combo_b):
+            self.assertIs(resolution.status, ResolutionStatus.BLOCKED)
+            self.assertIn(
+                RulePackageIssueCode.RULE_EXCEPTION_INTERVAL_CONFLICT.value,
+                issue_codes(resolution),
+                resolution.issues,
+            )
+            self.assertIsNone(resolution.exception_set_reference)
+        self.assertEqual(len(combo_a.exception_set_references), 2)
+        self.assertEqual(
+            [ref.version for ref in combo_a.exception_set_references], [1, 2]
+        )
+        self.assertEqual(
+            [ref.version for ref in combo_b.exception_set_references], [3, 4]
+        )
+        self.assertNotEqual(combo_a.semantic_hash, combo_b.semantic_hash)
 
     def test_exception_set_bound_to_other_package_is_target_mismatch(self) -> None:
         mismatched = RuleExceptionSetDefinition(
@@ -418,6 +482,11 @@ class NamedExceptionTestCase(unittest.TestCase):
         self.assertIn(
             RulePackageIssueCode.RULE_EXCEPTION_TARGET_MISMATCH.value,
             issue_codes(resolution),
+        )
+        # Even a package-mismatched set with a covering entry participates
+        # in the recorded exception-set versions.
+        self.assertEqual(
+            resolution.exception_set_references, (EXCEPTION_SET_REF,)
         )
 
     def test_exception_interval_half_open_semantics(self) -> None:

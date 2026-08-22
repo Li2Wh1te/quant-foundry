@@ -138,6 +138,7 @@ class RulePackageResolver:
                 capability={},
                 exception_reference=None,
                 exception_set_reference=None,
+                exception_set_references=(),
             )
 
         relevant = [
@@ -212,6 +213,10 @@ class RulePackageResolver:
 
         # Steps 5-6: named-exception lookup and exception-fact selection.
         matched: list[tuple[RuleExceptionSetDefinition, Any]] = []
+        # Every set with a covering entry participates in the audit trail,
+        # including mismatched-package sets that only produce an issue:
+        # blocked runs must show which exception-set versions took part.
+        participating_sets: dict[tuple[str, int], VersionedReference] = {}
         for exception_set in exception_sets:
             covering = [
                 entry
@@ -221,6 +226,9 @@ class RulePackageResolver:
             ]
             if not covering:
                 continue
+            participating_sets[
+                (exception_set.reference.key, exception_set.reference.version)
+            ] = exception_set.reference
             if exception_set.package_reference != reference:
                 issues.append(
                     self._issue(
@@ -248,6 +256,14 @@ class RulePackageResolver:
 
         exception_reference: VersionedReference | None = None
         exception_set_reference: VersionedReference | None = None
+        # Stable order (key, version): the audit trail must not depend on
+        # the caller's exception-set iteration order.
+        exception_set_references = tuple(
+            sorted(
+                participating_sets.values(),
+                key=lambda ref: (ref.key, ref.version),
+            )
+        )
         exception_fact: RuleFactCandidate | None = None
         if len(matched) > 1:
             issues.append(
@@ -481,6 +497,7 @@ class RulePackageResolver:
                 capability={},
                 exception_reference=exception_reference,
                 exception_set_reference=exception_set_reference,
+                exception_set_references=exception_set_references,
             )
         capability = dict(normalized["trading_status_applicability"])
         return self._finalize(
@@ -492,6 +509,7 @@ class RulePackageResolver:
             capability=capability,
             exception_reference=exception_reference,
             exception_set_reference=exception_set_reference,
+            exception_set_references=exception_set_references,
         )
 
     # ------------------------------------------------------------------
@@ -509,6 +527,7 @@ class RulePackageResolver:
         capability: Mapping[str, str],
         exception_reference: VersionedReference | None,
         exception_set_reference: VersionedReference | None,
+        exception_set_references: tuple[VersionedReference, ...],
     ) -> RulePackageResolution:
         """Build the immutable resolution and its stable semantic hash.
 
@@ -537,6 +556,7 @@ class RulePackageResolver:
                 "package_reference": definition.reference,
                 "exception_reference": exception_reference,
                 "exception_set_reference": exception_set_reference,
+                "exception_set_references": exception_set_references,
                 "parse_order": definition.parse_order,
                 "normalized_values": dict(normalized),
                 "capability_declarations": dict(capability),
@@ -553,6 +573,7 @@ class RulePackageResolver:
                 "package_reference": definition.reference,
                 "exception_reference": exception_reference,
                 "exception_set_reference": exception_set_reference,
+                "exception_set_references": exception_set_references,
                 "parse_order": definition.parse_order,
                 "selected_facts": fact_provenance,
                 "issue_identities": sorted(
@@ -564,6 +585,7 @@ class RulePackageResolver:
             package_reference=definition.reference,
             exception_reference=exception_reference,
             exception_set_reference=exception_set_reference,
+            exception_set_references=exception_set_references,
             selected_facts=tuple(summaries),
             normalized_values=dict(normalized),
             capability_declarations={

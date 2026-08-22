@@ -692,6 +692,12 @@ class RulePackageResolution:
     is the only status downstream engines may consume.  A ``blocked``
     resolution never exposes half-finished rule objects: its normalized
     values are empty and its issues carry machine-readable codes.
+
+    ``exception_set_reference`` is the single exception-set version that
+    routed the resolution (exactly one match); ``exception_set_references``
+    lists, in stable order, every exception-set version that produced a
+    covering entry for the instrument — including all participants of an
+    interval conflict — so blocked runs remain auditable.
     """
 
     status: ResolutionStatus
@@ -701,6 +707,7 @@ class RulePackageResolution:
     semantic_hash: str
     exception_reference: VersionedReference | None = None
     exception_set_reference: VersionedReference | None = None
+    exception_set_references: tuple[VersionedReference, ...] = ()
     selected_facts: tuple[ResolvedFactSummary, ...] = ()
     normalized_values: Mapping[str, Any] = MappingProxyType({})
     capability_declarations: Mapping[str, str] = MappingProxyType({})
