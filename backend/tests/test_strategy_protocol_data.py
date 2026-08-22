@@ -400,6 +400,17 @@ class PitStitchingTestCase(unittest.TestCase):
             )
         self.assertEqual(reads, [])
 
+    def test_segment_readers_must_return_real_bar_dtos(self) -> None:
+        class _FakeBar:
+            trade_date = date(2026, 8, 18)
+
+        with self.assertRaises(InvalidProviderResultError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 18)],
+                read_segment=lambda code, start, end: [_FakeBar()],
+            )
+
     def test_duplicate_bars_within_one_segment_are_rejected(self) -> None:
         def reader(code, start, end):
             return [
@@ -541,7 +552,7 @@ class UniverseQueryTestCase(unittest.TestCase):
             with self.assertRaises(ValueError, msg=blank_field):
                 InstrumentCandidateDTO(instrument_id=uuid4(), **{**base, blank_field: "  "})
 
-    def test_candidate_metadata_is_deep_frozen(self) -> None:
+    def test_candidate_metadata_is_deep_frozen_and_json_only(self) -> None:
         candidate = InstrumentCandidateDTO(
             instrument_id=uuid4(),
             trading_code="SYN.A",
@@ -555,6 +566,24 @@ class UniverseQueryTestCase(unittest.TestCase):
             candidate.metadata["tags"].append("c")  # type: ignore[attr-defined]
         with self.assertRaises((TypeError, AttributeError)):
             candidate.metadata["meta"]["k"].append(3)  # type: ignore[index]
+
+        base = dict(
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            asset_class="etf",
+            exchange="SSE",
+        )
+        # Non-JSON values such as sets are rejected outright.
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(
+                instrument_id=uuid4(), **base, metadata={"tags": {"a"}}
+            )
+        # Non-string keys are rejected instead of silently stringified.
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(
+                instrument_id=uuid4(), **base, metadata={1: "one"}
+            )
 
     def test_universe_provider_results_are_validated_and_sorted(self) -> None:
         first_id = uuid4()

@@ -5,6 +5,7 @@ protocol failures, timeout, cancellation, synthetic identity injection, and
 determinism of the check evidence.
 """
 
+import os
 import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
@@ -36,6 +37,12 @@ def _request(source: str, **overrides) -> ContractCheckRequest:
 
 
 HOLD_STRATEGY = "def run(context, parameters):\n    return {'mode': 'hold'}\n"
+
+
+def _open_fd_count() -> int:
+    """Count open fds on POSIX; used by the leak regression test."""
+
+    return len(os.listdir("/dev/fd")) if os.path.isdir("/dev/fd") else -1
 
 
 class ContractCheckPayloadTestCase(unittest.TestCase):
@@ -251,6 +258,54 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
         result = run_strategy_contract_check(_request(source))
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "ContractCheckOutputLimit")
+
+    def test_stdout_flood_cannot_block_or_fail_the_check(self) -> None:
+        # Worker stdout goes to DEVNULL: a strategy dumping megabytes to fd 1
+        # can neither block on a full pipe nor affect the verdict.
+        source = (
+            "def run(context, parameters):\n"
+            "    import os\n"
+            "    os.write(1, b'x' * 1000000)\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertTrue(result.ok, result.message)
+
+    def test_repeated_terminal_checks_do_not_leak_file_descriptors(self) -> None:
+        # Regression: timeout, cancel, and overflow exits used to leak the
+        # result-channel fd; repeated runs must not grow the open-fd count.
+        baseline = _open_fd_count()
+        if baseline < 0:  # pragma: no cover - non-POSIX platform
+            self.skipTest("no /dev/fd on this platform")
+        sleeper = (
+            "def run(context, parameters):\n"
+            "    import time\n"
+            "    time.sleep(60)\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        for _ in range(3):
+            result = run_strategy_contract_check(
+                _request(sleeper), timeout_seconds=0.2
+            )
+            self.assertEqual(result.error_type, "ContractCheckTimeout")
+        for _ in range(3):
+            result = run_strategy_contract_check(
+                _request(sleeper), should_cancel=lambda: True
+            )
+            self.assertEqual(result.error_type, "ContractCheckCancelled")
+        flooder = (
+            "def run(context, parameters):\n"
+            "    import sys\n"
+            "    noise = 'x' * 65536\n"
+            "    for _ in range(8):\n"
+            "        sys.stderr.write(noise)\n"
+            "    sys.stderr.flush()\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        for _ in range(3):
+            result = run_strategy_contract_check(_request(flooder))
+            self.assertEqual(result.error_type, "ContractCheckOutputLimit")
+        self.assertLessEqual(_open_fd_count(), baseline + 1)
 
     def test_timeout_kills_the_whole_process_tree(self) -> None:
         # Regression: a strategy that spawns its own child used to keep the

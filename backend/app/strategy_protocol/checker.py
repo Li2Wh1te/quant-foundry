@@ -157,23 +157,31 @@ def run_strategy_contract_check(
     payload = build_worker_payload(request)
     # The worker returns its result on a dedicated descriptor that is not the
     # strategy-visible stdout, so stray writes to fd 1 cannot forge results.
+    # Worker stdout itself carries nothing the parent needs (the strategy's
+    # prints are forwarded to stderr by the bounded redirect), so it goes to
+    # DEVNULL: an unwritten pipe can never block a noisy strategy.
     result_read_fd, result_write_fd = os.pipe()
     environment = _worker_environment(memory_limit_mb)
     environment["QF_CONTRACT_CHECK_RESULT_FD"] = str(result_write_fd)
-    process = subprocess.Popen(
-        [
-            python_executable or sys.executable,
-            "-m",
-            "app.strategy_protocol.worker",
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        pass_fds=(result_write_fd,),
-        env=environment,
-        cwd=_backend_root(),
-        start_new_session=(os.name == "posix"),
-    )
+    try:
+        process = subprocess.Popen(
+            [
+                python_executable or sys.executable,
+                "-m",
+                "app.strategy_protocol.worker",
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            pass_fds=(result_write_fd,),
+            env=environment,
+            cwd=_backend_root(),
+            start_new_session=(os.name == "posix"),
+        )
+    except BaseException:
+        os.close(result_read_fd)
+        os.close(result_write_fd)
+        raise
     os.close(result_write_fd)
     return _supervise_worker(
         process,
@@ -205,9 +213,7 @@ def _supervise_worker(
 
     deadline = time.monotonic() + timeout_seconds
     os.set_blocking(result_read_fd, False)
-    assert process.stdout is not None
     assert process.stderr is not None
-    os.set_blocking(process.stdout.fileno(), False)
     os.set_blocking(process.stderr.fileno(), False)
 
     result_chunks: list[bytes] = []
@@ -269,6 +275,14 @@ def _supervise_worker(
                 break
     finally:
         exit_code = _terminate_process_tree(process)
+        # The result channel must close on every exit path; EOF-driven
+        # closing only happens when the loop drains it to the end, so early
+        # exits (timeout, cancel, overflow) would otherwise leak the fd.
+        if result_open:
+            try:
+                os.close(result_read_fd)
+            except OSError:
+                pass
 
     stderr_tail = _stderr_tail(b"".join(stderr_chunks))
 

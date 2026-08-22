@@ -147,27 +147,37 @@ class InstrumentCandidateDTO:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-blank string")
-        # Deep-freeze metadata so nested lists/dicts inside the mapping can
-        # never hand a mutable object to strategy code.
-        object.__setattr__(
-            self,
-            "metadata",
-            MappingProxyType(
-                {str(key): _freeze_meta(value) for key, value in self.metadata.items()}
-            ),
-        )
+        # Metadata accepts JSON values only: mappings and sequences are
+        # deep-frozen, scalars are kept, and non-JSON objects (sets, custom
+        # classes) are rejected so nothing mutable can reach strategy code.
+        if not isinstance(self.metadata, Mapping):
+            raise ValueError("metadata must be a mapping")
+        frozen: dict[str, object] = {}
+        for key, value in self.metadata.items():
+            if not isinstance(key, str):
+                # Silent str() conversion could collide distinct keys.
+                raise ValueError("metadata keys must be strings")
+            frozen[key] = _freeze_meta(value)
+        object.__setattr__(self, "metadata", MappingProxyType(frozen))
 
 
 def _freeze_meta(value: object) -> object:
-    """Recursively freeze one metadata value."""
+    """Recursively freeze one metadata value, rejecting non-JSON objects."""
 
     if isinstance(value, Mapping):
+        for key in value:
+            if not isinstance(key, str):
+                raise ValueError("metadata keys must be strings")
         return MappingProxyType(
-            {str(key): _freeze_meta(item) for key, item in value.items()}
+            {key: _freeze_meta(item) for key, item in value.items()}
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_meta(item) for item in value)
-    return value
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    raise ValueError(
+        "metadata values must be JSON scalars, mappings, or sequences"
+    )
 
 
 @runtime_checkable
@@ -651,6 +661,14 @@ def stitch_segmented_history(
         if not expected:
             continue
         rows = tuple(read_segment(segment.trading_code, expected[0], expected[-1]))
+        # Every segment row must be a real immutable BarDTO, mirroring the
+        # provider validation on the direct facade path.
+        for row in rows:
+            if not isinstance(row, BarDTO):
+                raise InvalidProviderResultError(
+                    f"segment reader for {segment.trading_code} returned a "
+                    "non-BarDTO row; only immutable bar DTOs are accepted"
+                )
         # Each segment must return exactly the requested sessions: no
         # duplicates, no out-of-range or non-session dates, and no short
         # windows.
