@@ -838,6 +838,16 @@ class ResolutionDtoBoundaryTestCase(unittest.TestCase):
             with self.assertRaises(DomainValidationError):
                 self.build(exception_set_references=bad)
 
+    def test_bogus_dunder_iter_container_is_rejected(self) -> None:
+        # A class whose __iter__ attribute exists but is not callable
+        # passes a hasattr probe yet cannot be iterated; the contract
+        # still requires a domain error instead of a bare TypeError.
+        class Broken:
+            __iter__ = None
+
+        with self.assertRaises(DomainValidationError):
+            self.build(exception_set_references=Broken())
+
     def test_non_mapping_normalized_values_are_rejected(self) -> None:
         with self.assertRaises(DomainValidationError):
             self.build(normalized_values=["bad"])

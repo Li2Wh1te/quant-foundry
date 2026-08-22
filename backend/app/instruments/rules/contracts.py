@@ -729,19 +729,25 @@ class RulePackageResolution:
         object.__setattr__(self, "issues", issues)
 
         # Validate and canonicalize the exception-set participants before
-        # freezing: the container itself must be iterable, every element
-        # must be a VersionedReference, and the tuple is deduplicated and
-        # sorted by (key, version) so the audit trail cannot depend on
-        # caller-supplied order.
-        if isinstance(self.exception_set_references, (str, bytes)) or not hasattr(
-            self.exception_set_references, "__iter__"
-        ):
+        # freezing: the container itself must truly be iterable (probed
+        # with iter(), since a bogus __iter__ attribute would pass a
+        # hasattr check), every element must be a VersionedReference, and
+        # the tuple is deduplicated and sorted by (key, version) so the
+        # audit trail cannot depend on caller-supplied order.
+        if isinstance(self.exception_set_references, (str, bytes)):
             raise DomainValidationError(
                 "exception_set_references must be an iterable of "
                 "VersionedReference instances"
             )
+        try:
+            candidate_references = tuple(self.exception_set_references)
+        except TypeError as exc:
+            raise DomainValidationError(
+                "exception_set_references must be an iterable of "
+                "VersionedReference instances"
+            ) from exc
         seen_exception_sets: dict[tuple[str, int], VersionedReference] = {}
-        for reference in self.exception_set_references:
+        for reference in candidate_references:
             if not isinstance(reference, VersionedReference):
                 raise DomainValidationError(
                     "exception_set_references must contain "
