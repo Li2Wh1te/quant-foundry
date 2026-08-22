@@ -336,14 +336,18 @@ class TimeChunk:
         if not self.steps:
             raise DomainValidationError("steps must contain at least one TimeStep")
         # Copy to tuple so a caller-supplied mutable list can never be
-        # changed after construction, and verify the slice is a
-        # contiguous run of the official timeline: consecutive sequence
-        # numbers with no gaps and no reordering.
+        # changed after construction.  Element types are validated in a
+        # full first pass before any attribute access, so a malformed
+        # entry fails as a domain error instead of an AttributeError.
         normalized = tuple(self.steps)
-        first_sequence = normalized[0].sequence
-        for index, step in enumerate(normalized):
+        for step in normalized:
             if not isinstance(step, TimeStep):
                 raise DomainValidationError("steps entries must be TimeStep")
+        # Then verify the slice is a contiguous run of the official
+        # timeline: consecutive sequence numbers with no gaps and no
+        # reordering.
+        first_sequence = normalized[0].sequence
+        for index, step in enumerate(normalized):
             if step.sequence != first_sequence + index:
                 raise DomainValidationError(
                     "steps must be a contiguous slice of the official "

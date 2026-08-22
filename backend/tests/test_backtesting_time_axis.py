@@ -420,6 +420,14 @@ class FixedTradingSessionsV1Tests(unittest.TestCase):
         steps.append(make_step(sequence=2))
         self.assertEqual(len(chunk.steps), 2)
 
+    def test_time_chunk_rejects_non_step_entries_before_sequence_access(self) -> None:
+        # A malformed first entry must fail as a domain error, not an
+        # AttributeError from reading .sequence on it.
+        with self.assertRaises(DomainValidationError):
+            TimeChunk(chunk_sequence=0, steps=[None])  # type: ignore[list-item]
+        with self.assertRaises(DomainValidationError):
+            TimeChunk(chunk_sequence=0, steps=[make_step(), None])  # type: ignore[list-item]
+
     def test_time_chunk_rejects_non_contiguous_sequences(self) -> None:
         with self.assertRaises(DomainValidationError):
             TimeChunk(
