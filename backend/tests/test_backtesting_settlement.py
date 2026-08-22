@@ -230,6 +230,27 @@ class SettlementLifecycleTestCase(unittest.TestCase):
         self.assertEqual(batches[0].source_fill_id, fill_a.fill_id)
         self.assertEqual(batches[1].source_fill_id, fill_b.fill_id)
 
+    def test_same_instrument_batches_due_same_day_accumulate(self) -> None:
+        # Two batches of one instrument (400 + 600) settling on the same
+        # session must release the accumulated 1000, not the last batch.
+        portfolio = make_portfolio()
+        policy = AccountingPolicy()
+        fill_a = make_buy(quantity=Decimal("400"))
+        fill_b = make_buy(quantity=Decimal("600"))
+        policy.apply_fill(portfolio, fill_a, settlement_plan=self.PLAN)
+        policy.apply_fill(portfolio, fill_b, settlement_plan=self.PLAN)
+
+        released = policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SSE", session_date=date(2026, 8, 24)
+        )
+
+        self.assertEqual(released, (INSTRUMENT_ID,))
+        position = portfolio.positions[INSTRUMENT_ID]
+        self.assertEqual(position.quantity, Decimal("1000"))
+        self.assertEqual(position.available_quantity, Decimal("1000"))
+        self.assertEqual(policy.pending_batches(), ())
+        self.assertEqual(len(policy.settled_batches()), 2)
+
     def test_batches_from_different_sessions_stay_separate(self) -> None:
         portfolio = make_portfolio()
         policy = AccountingPolicy()

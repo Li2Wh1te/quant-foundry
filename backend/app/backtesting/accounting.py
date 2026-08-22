@@ -480,8 +480,12 @@ class AccountingPolicy:
         ]
 
         # Validation phase — no mutation before every due batch is known
-        # to be releasable.
-        planned: list[tuple[PositionState, Decimal]] = []
+        # to be releasable.  Multiple batches of one instrument settling
+        # the same day accumulate onto a single projected availability
+        # value, which is written back exactly once per position.
+        projected: dict[UUID, Decimal] = {}
+        positions: dict[UUID, PositionState] = {}
+        released_instruments: list[UUID] = []
         for batch in due:
             position = portfolio.positions.get(batch.instrument_id)
             if position is None:
@@ -492,21 +496,26 @@ class AccountingPolicy:
                         "source_fill_id": str(batch.source_fill_id),
                     },
                 )
-            new_available = position.available_quantity + batch.quantity
+            base = projected.get(
+                batch.instrument_id, position.available_quantity
+            )
+            new_available = base + batch.quantity
             _validate_available_quantity(position.quantity, new_available)
-            planned.append((position, new_available))
+            projected[batch.instrument_id] = new_available
+            positions[batch.instrument_id] = position
+            if batch.instrument_id not in released_instruments:
+                released_instruments.append(batch.instrument_id)
 
-        # Commit phase — apply all planned releases at once.
-        released: list[UUID] = []
+        # Commit phase — apply one accumulated write per position.
         remaining = [
             batch for batch in self._pending_settlement if batch not in due
         ]
-        for batch, (position, new_available) in zip(due, planned):
-            position.available_quantity = new_available
-            released.append(batch.instrument_id)
+        for instrument_id, new_available in projected.items():
+            positions[instrument_id].available_quantity = new_available
+        for batch in due:
             self._settled_batches += (batch,)
         self._pending_settlement = remaining
-        return tuple(sorted(released, key=str))
+        return tuple(sorted(released_instruments, key=str))
 
     def value(
         self,
