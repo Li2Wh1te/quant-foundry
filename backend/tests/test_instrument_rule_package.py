@@ -23,6 +23,7 @@ from app.instruments.rules import (
     RulePackageNotRegisteredError,
     RulePackageRegistrationError,
     RulePackageRegistry,
+    RulePackageResolution,
     RulePackageResolver,
     build_definition,
     canonical_decimal_string,
@@ -796,6 +797,69 @@ class SemanticHashTestCase(unittest.TestCase):
             [issue.code for issue in first.issues],
             [issue.code for issue in second.issues],
         )
+
+
+class ResolutionDtoBoundaryTestCase(unittest.TestCase):
+    """Direct DTO construction must enforce the immutability contract."""
+
+    def build(self, **overrides: Any) -> RulePackageResolution:
+        kwargs: dict[str, Any] = dict(
+            status=ResolutionStatus.READY,
+            package_reference=PACKAGE_REF,
+            parse_order=("step_one", "step_two"),
+            parser_revision="rule-package-resolver@1",
+            semantic_hash="a" * 64,
+            exception_set_references=[EXCEPTION_SET_REF],
+            normalized_values={"lot_size": Decimal("100")},
+            capability_declarations={"suspension": "required"},
+        )
+        kwargs.update(overrides)
+        return RulePackageResolution(**kwargs)
+
+    def test_exception_set_references_are_sorted_deduped_and_frozen(self) -> None:
+        set_v1 = VersionedReference(key="etf_named_exceptions", version=1)
+        set_v2 = VersionedReference(key="etf_named_exceptions", version=2)
+        resolution = self.build(
+            exception_set_references=[set_v2, set_v1, set_v2]
+        )
+        self.assertEqual(
+            resolution.exception_set_references, (set_v1, set_v2)
+        )
+        with self.assertRaises(AttributeError):
+            resolution.exception_set_references.append(set_v1)
+
+    def test_non_reference_exception_set_element_is_rejected(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            self.build(exception_set_references=["etf_named_exceptions@1"])
+
+    def test_non_mapping_normalized_values_are_rejected(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            self.build(normalized_values=["bad"])
+        with self.assertRaises(DomainValidationError):
+            self.build(normalized_values=None)
+
+    def test_non_mapping_capability_declarations_are_rejected(self) -> None:
+        # Previously this crashed with AttributeError instead of a
+        # structured domain validation error.
+        with self.assertRaises(DomainValidationError):
+            self.build(capability_declarations=["suspension=required"])
+        with self.assertRaises(DomainValidationError):
+            self.build(capability_declarations=None)
+
+    def test_valid_mapping_construction_freezes_nested_values(self) -> None:
+        resolution = self.build(
+            normalized_values={
+                "trading_status_applicability": {"suspension": "required"}
+            }
+        )
+        self.assertEqual(
+            resolution.normalized_values["trading_status_applicability"],
+            {"suspension": "required"},
+        )
+        with self.assertRaises(TypeError):
+            resolution.normalized_values["trading_status_applicability"][
+                "suspension"
+            ] = "not_applicable"
 
 
 class DeepImmutabilityTestCase(unittest.TestCase):

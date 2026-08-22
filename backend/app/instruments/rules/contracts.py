@@ -727,6 +727,39 @@ class RulePackageResolution:
                     "issues must contain RulePackageIssue instances"
                 )
         object.__setattr__(self, "issues", issues)
+
+        # Validate and canonicalize the exception-set participants before
+        # freezing: every element must be a VersionedReference, and the
+        # tuple is deduplicated and sorted by (key, version) so the audit
+        # trail cannot depend on caller-supplied order.
+        seen_exception_sets: dict[tuple[str, int], VersionedReference] = {}
+        for reference in self.exception_set_references:
+            if not isinstance(reference, VersionedReference):
+                raise DomainValidationError(
+                    "exception_set_references must contain "
+                    "VersionedReference instances"
+                )
+            seen_exception_sets[(reference.key, reference.version)] = reference
+        object.__setattr__(
+            self,
+            "exception_set_references",
+            tuple(
+                sorted(
+                    seen_exception_sets.values(),
+                    key=lambda item: (item.key, item.version),
+                )
+            ),
+        )
+
+        # Reject non-mapping structures with a domain error instead of an
+        # accidental AttributeError (or a silently frozen wrong type) from
+        # deep_freeze downstream.
+        if not isinstance(self.normalized_values, Mapping):
+            raise DomainValidationError("normalized_values must be a mapping")
+        if not isinstance(self.capability_declarations, Mapping):
+            raise DomainValidationError(
+                "capability_declarations must be a mapping"
+            )
         # Deep-freeze the value-bearing structures: a nested dict mutated
         # after hashing would silently invalidate the semantic hash.
         object.__setattr__(
@@ -735,11 +768,7 @@ class RulePackageResolution:
         object.__setattr__(
             self,
             "capability_declarations",
-            deep_freeze(
-                {str(key): str(value) for key, value in (
-                    self.capability_declarations.items()
-                )}
-            ),
+            deep_freeze(self.capability_declarations),
         )
         if self.status is ResolutionStatus.BLOCKED:
             if self.normalized_values or self.capability_declarations:
