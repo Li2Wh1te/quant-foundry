@@ -377,15 +377,22 @@ def _drain_fd(
 def _terminate_process_tree(process: subprocess.Popen) -> int | None:
     """Kill the worker and any inherited-descriptor grandchildren, then reap.
 
-    The worker runs in its own POSIX session, so killing the process group
-    takes down grandchildren that would otherwise keep the pipes open.  The
-    reaping phase itself is bounded so cleanup can never block the caller.
+    The worker runs in its own POSIX session whose group id equals the
+    worker's pid, captured at spawn time.  Killing that fixed group also
+    takes down grandchildren even when the worker itself already exited and
+    was reaped by ``poll()`` — the cleanup must never depend on querying the
+    (possibly gone) group leader.  Reaping is bounded so cleanup can never
+    block the caller.
     """
 
     if os.name == "posix":
         try:
-            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+            # start_new_session=True makes the worker the group leader, so
+            # its pid is the group id for the whole (possibly surviving)
+            # tree.
+            os.killpg(process.pid, signal.SIGKILL)
         except (ProcessLookupError, PermissionError):
+            # Whole tree already gone; make sure the leader itself is reaped.
             process.kill()
     else:  # pragma: no cover - Windows path
         process.kill()

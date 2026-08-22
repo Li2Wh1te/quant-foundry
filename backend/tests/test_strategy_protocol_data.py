@@ -584,6 +584,17 @@ class UniverseQueryTestCase(unittest.TestCase):
             InstrumentCandidateDTO(
                 instrument_id=uuid4(), **base, metadata={1: "one"}
             )
+        # Non-finite floats are not valid JSON numbers.
+        for bad_float in (float("nan"), float("inf"), float("-inf")):
+            with self.assertRaises(ValueError, msg=repr(bad_float)):
+                InstrumentCandidateDTO(
+                    instrument_id=uuid4(), **base, metadata={"weight": bad_float}
+                )
+        # Finite floats stay accepted.
+        ok = InstrumentCandidateDTO(
+            instrument_id=uuid4(), **base, metadata={"weight": 0.5}
+        )
+        self.assertEqual(ok.metadata["weight"], 0.5)
 
     def test_universe_provider_results_are_validated_and_sorted(self) -> None:
         first_id = uuid4()

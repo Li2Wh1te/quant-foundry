@@ -17,6 +17,7 @@ rules that every implementation shares:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -162,7 +163,11 @@ class InstrumentCandidateDTO:
 
 
 def _freeze_meta(value: object) -> object:
-    """Recursively freeze one metadata value, rejecting non-JSON objects."""
+    """Recursively freeze one metadata value, rejecting non-JSON objects.
+
+    Floats must be finite: NaN and infinities are not standard JSON numbers
+    and would break deterministic comparison and strict serialization.
+    """
 
     if isinstance(value, Mapping):
         for key in value:
@@ -173,7 +178,14 @@ def _freeze_meta(value: object) -> object:
         )
     if isinstance(value, (list, tuple)):
         return tuple(_freeze_meta(item) for item in value)
-    if isinstance(value, (str, int, float, bool)) or value is None:
+    if value is None or isinstance(value, (str, bool)):
+        return value
+    if isinstance(value, int):
+        # bool is checked above so it never lands here as an int alias.
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("metadata float values must be finite")
         return value
     raise ValueError(
         "metadata values must be JSON scalars, mappings, or sequences"

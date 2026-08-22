@@ -307,6 +307,54 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
             self.assertEqual(result.error_type, "ContractCheckOutputLimit")
         self.assertLessEqual(_open_fd_count(), baseline + 1)
 
+    def test_grandchild_dies_when_worker_exits_normally(self) -> None:
+        # Regression: a strategy that spawns a child and returns a valid
+        # decision immediately must not leave the grandchild running after
+        # the check reports success.  poll() reaps the worker before cleanup,
+        # so the kill must target the fixed process group, not query the
+        # already-reaped group leader.
+        import os as _os
+        import tempfile
+
+        handle = tempfile.NamedTemporaryFile(
+            mode="w", suffix=".pid", delete=False
+        )
+        handle.close()
+        pid_file = handle.name
+        self.addCleanup(lambda: _os.unlink(pid_file))
+        source = (
+            "def run(context, parameters):\n"
+            "    import subprocess, sys\n"
+            "    child = subprocess.Popen(\n"
+            "        [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+            "        stdout=subprocess.DEVNULL,\n"
+            "        stderr=subprocess.DEVNULL,\n"
+            "    )\n"
+            "    with open(parameters['pid_file'], 'w') as sink:\n"
+            "        sink.write(str(child.pid))\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(
+            _request(source, default_parameters={"pid_file": pid_file})
+        )
+        self.assertTrue(result.ok, result.message)
+        with open(pid_file) as source_file:
+            child_pid = int(source_file.read())
+
+        import signal as signal_module
+        deadline = time.monotonic() + 5.0
+        while time.monotonic() < deadline:
+            try:
+                _os.kill(child_pid, 0)
+            except ProcessLookupError:
+                break  # tree kill reached the orphaned grandchild
+            except PermissionError:
+                break  # reaped and reused; no longer ours
+            time.sleep(0.05)
+        else:
+            self.fail("grandchild survived the contract check")
+        del signal_module
+
     def test_timeout_kills_the_whole_process_tree(self) -> None:
         # Regression: a strategy that spawns its own child used to keep the
         # pipes open after the worker was killed, blocking the parent until
