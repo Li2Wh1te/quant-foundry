@@ -832,11 +832,29 @@ class ResolutionDtoBoundaryTestCase(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             self.build(exception_set_references=["etf_named_exceptions@1"])
 
+    def test_non_iterable_exception_set_container_is_rejected(self) -> None:
+        # Previously None/ints crashed with a bare TypeError at iteration.
+        for bad in (None, 1, 1.5):
+            with self.assertRaises(DomainValidationError):
+                self.build(exception_set_references=bad)
+
     def test_non_mapping_normalized_values_are_rejected(self) -> None:
         with self.assertRaises(DomainValidationError):
             self.build(normalized_values=["bad"])
         with self.assertRaises(DomainValidationError):
             self.build(normalized_values=None)
+
+    def test_normalized_values_keys_must_be_field_name_strings(self) -> None:
+        # A non-string key would still deep-freeze fine but could collide
+        # in the canonical hash payload with a stringified variant.
+        with self.assertRaises(DomainValidationError):
+            self.build(normalized_values={1: "value"})
+
+    def test_capability_declarations_must_map_strings_to_strings(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            self.build(capability_declarations={"suspension": 1})
+        with self.assertRaises(DomainValidationError):
+            self.build(capability_declarations={1: "required"})
 
     def test_non_mapping_capability_declarations_are_rejected(self) -> None:
         # Previously this crashed with AttributeError instead of a

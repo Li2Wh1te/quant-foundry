@@ -729,9 +729,17 @@ class RulePackageResolution:
         object.__setattr__(self, "issues", issues)
 
         # Validate and canonicalize the exception-set participants before
-        # freezing: every element must be a VersionedReference, and the
-        # tuple is deduplicated and sorted by (key, version) so the audit
-        # trail cannot depend on caller-supplied order.
+        # freezing: the container itself must be iterable, every element
+        # must be a VersionedReference, and the tuple is deduplicated and
+        # sorted by (key, version) so the audit trail cannot depend on
+        # caller-supplied order.
+        if isinstance(self.exception_set_references, (str, bytes)) or not hasattr(
+            self.exception_set_references, "__iter__"
+        ):
+            raise DomainValidationError(
+                "exception_set_references must be an iterable of "
+                "VersionedReference instances"
+            )
         seen_exception_sets: dict[tuple[str, int], VersionedReference] = {}
         for reference in self.exception_set_references:
             if not isinstance(reference, VersionedReference):
@@ -756,10 +764,21 @@ class RulePackageResolution:
         # deep_freeze downstream.
         if not isinstance(self.normalized_values, Mapping):
             raise DomainValidationError("normalized_values must be a mapping")
+        for key in self.normalized_values:
+            if not isinstance(key, str) or not key.strip():
+                raise DomainValidationError(
+                    "normalized_values keys must be non-blank field-name strings"
+                )
         if not isinstance(self.capability_declarations, Mapping):
             raise DomainValidationError(
                 "capability_declarations must be a mapping"
             )
+        for key, value in self.capability_declarations.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                raise DomainValidationError(
+                    "capability_declarations must map dimension strings "
+                    "to requirement strings"
+                )
         # Deep-freeze the value-bearing structures: a nested dict mutated
         # after hashing would silently invalidate the semantic hash.
         object.__setattr__(
