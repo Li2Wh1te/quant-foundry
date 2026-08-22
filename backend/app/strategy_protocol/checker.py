@@ -4,9 +4,14 @@ This module spawns ``python -m app.strategy_protocol.worker`` as a separate
 process, feeds it one JSON request, and enforces the run protections the
 design approved for this phase:
 
-* wall-clock timeout with kill;
-* a cancel signal hook;
-* a bounded result document (stdout is capped, oversized output fails);
+* wall-clock timeout that kills the whole worker process tree (the worker
+  starts in its own POSIX session so grandchildren die with it);
+* a cancel signal hook with the same tree-kill guarantee;
+* streaming byte caps on the result document and stderr, so neither the
+  strategy nor a noisy child can grow the parent's memory without bound;
+* a dedicated result file descriptor separate from the strategy-visible
+  stdout/stderr pipes, plus strict validation of the complete result
+  protocol and the worker exit code;
 * an optional platform-supported address-space cap passed to the worker.
 
 The checker never executes strategy source inside the caller's process.  A
@@ -19,6 +24,8 @@ from __future__ import annotations
 
 import json
 import os
+import select
+import signal
 import subprocess
 import sys
 import time
@@ -29,11 +36,15 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from .contract import FAILURE_PHASE_STRATEGY_CONTRACT_CHECK
+from .contract import STRATEGY_CONTRACT_VERSION, FAILURE_PHASE_STRATEGY_CONTRACT_CHECK
 
 DEFAULT_CONTRACT_CHECK_TIMEOUT_SECONDS = 10.0
 DEFAULT_MAX_RESULT_BYTES = 1_048_576
+MAX_STDERR_BYTES = 262_144
+"""Streaming cap on captured worker stderr before the check is failed."""
 _CANCEL_POLL_INTERVAL_SECONDS = 0.05
+_CLEANUP_JOIN_SECONDS = 2.0
+"""Wall-clock budget for reaping a killed process tree during cleanup."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,13 +149,17 @@ def run_strategy_contract_check(
 ) -> ContractCheckResult:
     """Run the isolated worker once and return its structured outcome.
 
-    Timeout, cancellation, output overflow, and worker crashes all map to a
-    failed :class:`ContractCheckResult` carrying the
+    Timeout, cancellation, output overflow, protocol violations, and worker
+    crashes all map to a failed :class:`ContractCheckResult` carrying the
     ``strategy_contract_check`` phase; none of them raise into the caller.
     """
 
     payload = build_worker_payload(request)
-    environment = dict(_worker_environment(memory_limit_mb))
+    # The worker returns its result on a dedicated descriptor that is not the
+    # strategy-visible stdout, so stray writes to fd 1 cannot forge results.
+    result_read_fd, result_write_fd = os.pipe()
+    environment = _worker_environment(memory_limit_mb)
+    environment["QF_CONTRACT_CHECK_RESULT_FD"] = str(result_write_fd)
     process = subprocess.Popen(
         [
             python_executable or sys.executable,
@@ -154,42 +169,108 @@ def run_strategy_contract_check(
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
+        pass_fds=(result_write_fd,),
         env=environment,
         cwd=_backend_root(),
+        start_new_session=(os.name == "posix"),
     )
+    os.close(result_write_fd)
+    return _supervise_worker(
+        process,
+        request_payload=payload,
+        result_read_fd=result_read_fd,
+        environment=environment,
+        timeout_seconds=timeout_seconds,
+        max_result_bytes=max_result_bytes,
+        should_cancel=should_cancel,
+    )
+
+
+def _supervise_worker(
+    process: subprocess.Popen,
+    *,
+    request_payload: bytes,
+    result_read_fd: int,
+    environment: dict[str, str],
+    timeout_seconds: float,
+    max_result_bytes: int,
+    should_cancel: Callable[[], bool] | None,
+) -> ContractCheckResult:
+    """Stream the worker's pipes under byte caps until a terminal condition.
+
+    All reads are non-blocking and size-capped, so neither the strategy nor a
+    grandchild process holding the inherited descriptors can block the parent
+    indefinitely or grow its memory without bound.
+    """
+
     deadline = time.monotonic() + timeout_seconds
-    stdout_bytes: bytes = b""
-    stderr_bytes: bytes = b""
+    os.set_blocking(result_read_fd, False)
+    assert process.stdout is not None
+    assert process.stderr is not None
+    os.set_blocking(process.stdout.fileno(), False)
+    os.set_blocking(process.stderr.fileno(), False)
+
+    result_chunks: list[bytes] = []
+    stderr_chunks: list[bytes] = []
+    result_bytes = 0
+    stderr_bytes = 0
+    stdin_written = False
     timed_out = False
     cancelled = False
-    input_sent = False
+    result_overflow = False
+    stderr_overflow = False
+    result_open = True
+    stderr_open = True
     try:
         while True:
             if should_cancel is not None and should_cancel():
                 cancelled = True
-                process.kill()
                 break
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = True
-                process.kill()
                 break
-            try:
-                # stdin is written by the first communicate call only; retries
-                # after a poll-level timeout must not resend the payload.
-                stdout_bytes, stderr_bytes = process.communicate(
-                    input=payload if not input_sent else None,
-                    timeout=min(_CANCEL_POLL_INTERVAL_SECONDS, remaining),
-                )
-                input_sent = True
+            if not stdin_written:
+                try:
+                    process.stdin.write(request_payload)  # type: ignore[union-attr]
+                    process.stdin.close()  # type: ignore[union-attr]
+                    stdin_written = True
+                except BrokenPipeError:
+                    # Worker died before reading stdin; the exit-code check
+                    # below reports the crash.
+                    stdin_written = True
+            watch_fds: list[int] = []
+            if result_open and not result_overflow:
+                watch_fds.append(result_read_fd)
+            if stderr_open and not stderr_overflow:
+                watch_fds.append(process.stderr.fileno())  # type: ignore[union-attr]
+            if process.poll() is not None and not watch_fds:
                 break
-            except subprocess.TimeoutExpired:
-                input_sent = True
-                continue
+            readable, _, _ = select.select(
+                watch_fds, [], [], min(_CANCEL_POLL_INTERVAL_SECONDS, remaining)
+            )
+            for readable_fd in readable:
+                if readable_fd == result_read_fd:
+                    result_bytes, result_overflow, result_open = _drain_fd(
+                        readable_fd, result_chunks, result_bytes, max_result_bytes, result_open
+                    )
+                else:
+                    stderr_bytes, stderr_overflow, stderr_open = _drain_fd(
+                        readable_fd, stderr_chunks, stderr_bytes, MAX_STDERR_BYTES, stderr_open
+                    )
+            if result_overflow or stderr_overflow:
+                break
+            if (
+                process.poll() is not None
+                and stdin_written
+                and not result_open
+                and not stderr_open
+            ):
+                break
     finally:
-        if process.poll() is None:  # defensive: never leak the worker
-            process.kill()
-            process.communicate()
+        exit_code = _terminate_process_tree(process)
+
+    stderr_tail = _stderr_tail(b"".join(stderr_chunks))
 
     if cancelled:
         return ContractCheckResult(
@@ -197,6 +278,7 @@ def run_strategy_contract_check(
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckCancelled",
             message="运行契约检查已被取消。",
+            technical=stderr_tail,
         )
     if timed_out:
         return ContractCheckResult(
@@ -204,38 +286,171 @@ def run_strategy_contract_check(
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckTimeout",
             message=f"运行契约检查超过 {timeout_seconds} 秒超时限制，已终止。",
-            technical=_stderr_tail(stderr_bytes),
+            technical=stderr_tail,
         )
-
-    if len(stdout_bytes) > max_result_bytes:
+    if result_overflow:
         return ContractCheckResult(
             ok=False,
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckOutputLimit",
-            message="运行契约检查输出超过上限，已终止。",
-            technical=_stderr_tail(stderr_bytes),
+            message="运行契约检查结果超过上限，已终止。",
+            technical=stderr_tail,
         )
-    try:
-        decoded = json.loads(stdout_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    if stderr_overflow:
+        return ContractCheckResult(
+            ok=False,
+            failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
+            error_type="ContractCheckOutputLimit",
+            message="运行契约检查 stderr 超过上限，已终止。",
+            technical=stderr_tail,
+        )
+
+    # A worker that exits nonzero never produced a trustworthy result, even
+    # if a partial document arrived on the result channel.
+    if exit_code != 0:
         return ContractCheckResult(
             ok=False,
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckCrashed",
             message="运行契约检查进程异常退出。",
-            technical=_stderr_tail(stderr_bytes),
+            technical=stderr_tail,
         )
-    if decoded.get("ok") is True:
-        evidence = decoded.get("evidence", {})
-        return ContractCheckResult(ok=True, evidence=evidence)
-    failure = decoded.get("failure", {})
+    try:
+        decoded = json.loads(b"".join(result_chunks).decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return ContractCheckResult(
+            ok=False,
+            failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
+            error_type="ContractCheckCrashed",
+            message="运行契约检查未返回有效的结果文档。",
+            technical=stderr_tail,
+        )
+    return _validate_result_document(decoded, stderr_tail)
+
+
+def _drain_fd(
+    fd: int, chunks: list[bytes], total: int, cap: int, is_open: bool
+) -> tuple[int, bool, bool]:
+    """Read whatever is available from one non-blocking fd under a cap.
+
+    Returns the running byte total, whether the cap was exceeded, and whether
+    the descriptor is still open (EOF marks it closed so the supervisor never
+    busy-loops on an exhausted pipe).
+    """
+
+    if not is_open:
+        return total, False, False
+    while True:
+        try:
+            chunk = os.read(fd, 65_536)
+        except (BlockingIOError, InterruptedError):
+            return total, False, True
+        except OSError:
+            return total, False, False
+        if not chunk:
+            # EOF: the writer closed its end.
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+            return total, False, False
+        total += len(chunk)
+        if total > cap:
+            return total, True, True
+        chunks.append(chunk)
+
+
+def _terminate_process_tree(process: subprocess.Popen) -> int | None:
+    """Kill the worker and any inherited-descriptor grandchildren, then reap.
+
+    The worker runs in its own POSIX session, so killing the process group
+    takes down grandchildren that would otherwise keep the pipes open.  The
+    reaping phase itself is bounded so cleanup can never block the caller.
+    """
+
+    if os.name == "posix":
+        try:
+            os.killpg(os.getpgid(process.pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            process.kill()
+    else:  # pragma: no cover - Windows path
+        process.kill()
+    try:
+        return process.wait(timeout=_CLEANUP_JOIN_SECONDS)
+    except subprocess.TimeoutExpired:  # pragma: no cover - defensive
+        process.kill()
+        try:
+            return process.wait(timeout=_CLEANUP_JOIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            return None
+    finally:
+        for stream in (process.stdin, process.stdout, process.stderr):
+            try:
+                if stream is not None and not stream.closed:
+                    stream.close()
+            except (OSError, ValueError):
+                pass
+
+
+def _validate_result_document(
+    decoded: object, stderr_tail: str | None
+) -> ContractCheckResult:
+    """Enforce the complete worker result protocol before trusting it.
+
+    A success verdict is only accepted from a fully shaped document with the
+    required evidence fields; anything else is treated as a crashed check.
+    """
+
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("ok"), bool):
+        return _protocol_violation(stderr_tail)
+    if decoded["ok"] is False:
+        failure = decoded.get("failure")
+        if not isinstance(failure, dict) or not isinstance(
+            failure.get("error_type"), str
+        ):
+            return _protocol_violation(stderr_tail)
+        return ContractCheckResult(
+            ok=False,
+            failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
+            error_type=failure.get("error_type"),
+            message=failure.get("message"),
+            line=failure.get("line"),
+            technical=failure.get("traceback") or stderr_tail,
+        )
+
+    evidence = decoded.get("evidence")
+    if not isinstance(evidence, dict):
+        return _protocol_violation(stderr_tail)
+    if evidence.get("contract_version") != STRATEGY_CONTRACT_VERSION:
+        return _protocol_violation(stderr_tail)
+    if not isinstance(evidence.get("mode"), str) or not evidence["mode"]:
+        return _protocol_violation(stderr_tail)
+    target_count = evidence.get("target_count")
+    if isinstance(target_count, bool) or not isinstance(target_count, int) or target_count < 0:
+        return _protocol_violation(stderr_tail)
+    if not isinstance(evidence.get("session_dates"), list):
+        return _protocol_violation(stderr_tail)
+    identity_rows = evidence.get("identity_rows")
+    if not isinstance(identity_rows, list):
+        return _protocol_violation(stderr_tail)
+    for row in identity_rows:
+        if not isinstance(row, dict) or not all(
+            isinstance(row.get(field_name), str)
+            for field_name in ("instrument_id", "trading_code", "name", "display_name")
+        ):
+            return _protocol_violation(stderr_tail)
+    return ContractCheckResult(ok=True, evidence=evidence)
+
+
+def _protocol_violation(stderr_tail: str | None) -> ContractCheckResult:
+    """Map a malformed result document to a failed check."""
+
     return ContractCheckResult(
         ok=False,
         failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
-        error_type=failure.get("error_type"),
-        message=failure.get("message"),
-        line=failure.get("line"),
-        technical=failure.get("traceback") or _stderr_tail(stderr_bytes),
+        error_type="ContractCheckCrashed",
+        message="运行契约检查结果协议不完整，已拒绝。",
+        technical=stderr_tail,
     )
 
 

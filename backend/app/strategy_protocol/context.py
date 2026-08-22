@@ -101,6 +101,14 @@ class PositionDTO:
     unrealized_pnl: Decimal
 
     def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise InvalidDecisionPayloadError("instrument_id must be a UUID")
+        for field_name in ("trading_code", "name", "display_name"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidDecisionPayloadError(
+                    f"{field_name} must be a non-blank string"
+                )
         try:
             object.__setattr__(self, "side", PositionSide(self.side))
         except ValueError as exc:
@@ -162,6 +170,10 @@ class PortfolioDTO:
             )
         object.__setattr__(self, "equity", _decimal(self.equity, "equity"))
         normalized_positions = tuple(self.positions)
+        if any(not isinstance(p, PositionDTO) for p in normalized_positions):
+            raise InvalidDecisionPayloadError(
+                "positions must contain PositionDTO instances only"
+            )
         ids = [position.instrument_id for position in normalized_positions]
         if len(ids) != len(set(ids)):
             raise InvalidDecisionPayloadError(
@@ -185,6 +197,14 @@ class OrderSummaryDTO:
     status: str
 
     def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise InvalidDecisionPayloadError("instrument_id must be a UUID")
+        for field_name in ("side", "status"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise InvalidDecisionPayloadError(
+                    f"{field_name} must be a non-blank string"
+                )
         object.__setattr__(
             self, "quantity", _positive(self.quantity, "order quantity")
         )
@@ -200,6 +220,10 @@ class FillSummaryDTO:
     price: Decimal
 
     def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise InvalidDecisionPayloadError("instrument_id must be a UUID")
+        if not isinstance(self.side, str) or not self.side.strip():
+            raise InvalidDecisionPayloadError("side must be a non-blank string")
         object.__setattr__(
             self, "quantity", _positive(self.quantity, "fill quantity")
         )

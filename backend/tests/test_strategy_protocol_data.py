@@ -181,6 +181,55 @@ class ReadOnlyFacadeTestCase(unittest.TestCase):
             )
         self.assertEqual(view.reads, 0)
 
+    def test_provider_rows_must_be_immutable_dtos(self) -> None:
+        cutoff_day = AWARE_CUTOFF.date()
+
+        class _FakeBar:
+            instrument_id = INSTRUMENT_ID
+            trade_date = cutoff_day
+            values = {"close": []}
+
+        class _FakeProvider(_CountingView):
+            def bars(self, instrument_id, *, start_date, end_date, lookback_sessions):
+                self.reads += 1
+                return (_FakeBar(),)
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(_FakeProvider(), data_cutoff=AWARE_CUTOFF).bars(
+                INSTRUMENT_ID
+            )
+
+        class _FakePoint:
+            instrument_id = INSTRUMENT_ID
+            trade_date = cutoff_day
+            adj_factor = 1.5
+
+        class _FakeSeriesProvider(_CountingView):
+            def adjusted_series(
+                self, instrument_id, *, start_date, end_date, lookback_sessions, basis
+            ):
+                self.reads += 1
+                return (_FakePoint(),)
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(
+                _FakeSeriesProvider(),
+                data_cutoff=AWARE_CUTOFF,
+                adjustment_gate=AdjustmentPolicyGate.active_gate(),
+            ).adjusted_series(INSTRUMENT_ID, basis="qfq")
+
+    def test_lookback_and_explicit_dates_cannot_be_combined(self) -> None:
+        view = _CountingView([_bar(AWARE_CUTOFF.date())])
+        facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
+        day = AWARE_CUTOFF.date() - timedelta(days=3)
+        with self.assertRaises(ValueError):
+            facade.bars(INSTRUMENT_ID, start_date=day, lookback_sessions=5)
+        with self.assertRaises(ValueError):
+            facade.bars(INSTRUMENT_ID, end_date=day, lookback_sessions=5)
+        # Pure lookback and pure explicit ranges both stay valid.
+        facade.bars(INSTRUMENT_ID, lookback_sessions=5)
+        facade.bars(INSTRUMENT_ID, start_date=day, end_date=AWARE_CUTOFF.date())
+
     def test_provider_rows_are_revalidated_on_the_way_out(self) -> None:
         cutoff_day = AWARE_CUTOFF.date()
 
@@ -491,6 +540,21 @@ class UniverseQueryTestCase(unittest.TestCase):
         for blank_field in ("trading_code", "name", "display_name", "asset_class", "exchange"):
             with self.assertRaises(ValueError, msg=blank_field):
                 InstrumentCandidateDTO(instrument_id=uuid4(), **{**base, blank_field: "  "})
+
+    def test_candidate_metadata_is_deep_frozen(self) -> None:
+        candidate = InstrumentCandidateDTO(
+            instrument_id=uuid4(),
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            asset_class="etf",
+            exchange="SSE",
+            metadata={"tags": ["a", "b"], "meta": {"k": [1, 2]}},
+        )
+        with self.assertRaises((TypeError, AttributeError)):
+            candidate.metadata["tags"].append("c")  # type: ignore[attr-defined]
+        with self.assertRaises((TypeError, AttributeError)):
+            candidate.metadata["meta"]["k"].append(3)  # type: ignore[index]
 
     def test_universe_provider_results_are_validated_and_sorted(self) -> None:
         first_id = uuid4()

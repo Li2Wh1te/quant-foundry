@@ -5,6 +5,7 @@ protocol failures, timeout, cancellation, synthetic identity injection, and
 determinism of the check evidence.
 """
 
+import time
 import unittest
 from datetime import date, datetime, timedelta, timezone
 from uuid import uuid4
@@ -211,21 +212,72 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
         self.assertIn("ValueError", result.technical or "")
         self.assertIn("boom at runtime", result.message)
 
-    def test_timeout_kills_the_worker(self) -> None:
+    def test_forged_stdout_result_cannot_produce_success(self) -> None:
+        # Regression: writing a fake JSON verdict to fd 1 and exiting must
+        # not pass the check; the parent only trusts its dedicated result
+        # descriptor and validates the full protocol.
         source = (
             "def run(context, parameters):\n"
+            "    import os\n"
+            "    os.write(1, b'{\"ok\": true}')\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(result.evidence["mode"], "hold")
+
+        source = (
+            "def run(context, parameters):\n"
+            "    import os\n"
+            "    os.write(1, b'{\"ok\": true}')\n"
+            "    os._exit(0)\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertFalse(result.ok)
+        self.assertEqual(
+            result.failure_phase, FAILURE_PHASE_STRATEGY_CONTRACT_CHECK
+        )
+
+    def test_stderr_flood_is_capped_and_fails_the_check(self) -> None:
+        source = (
+            "def run(context, parameters):\n"
+            "    import sys\n"
+            "    noise = 'x' * 65536\n"
+            "    for _ in range(64):\n"
+            "        sys.stderr.write(noise)\n"
+            "    sys.stderr.flush()\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "ContractCheckOutputLimit")
+
+    def test_timeout_kills_the_whole_process_tree(self) -> None:
+        # Regression: a strategy that spawns its own child used to keep the
+        # pipes open after the worker was killed, blocking the parent until
+        # the grandchild exited.
+        source = (
+            "def run(context, parameters):\n"
+            "    import subprocess, sys\n"
+            "    subprocess.Popen(\n"
+            "        [sys.executable, '-c', 'import time; time.sleep(30)'],\n"
+            "    )\n"
             "    import time\n"
             "    time.sleep(60)\n"
             "    return {'mode': 'hold'}\n"
         )
+        started = time.monotonic()
         result = run_strategy_contract_check(
-            _request(source), timeout_seconds=1.5
+            _request(source), timeout_seconds=0.3
         )
+        elapsed = time.monotonic() - started
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "ContractCheckTimeout")
         self.assertEqual(
             result.failure_phase, FAILURE_PHASE_STRATEGY_CONTRACT_CHECK
         )
+        # The tree-kill must not wait for the 30-second grandchild.
+        self.assertLess(elapsed, 5.0, f"tree kill took {elapsed:.2f}s")
 
     def test_cancel_signal_terminates_the_worker(self) -> None:
         source = (

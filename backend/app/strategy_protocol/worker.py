@@ -198,19 +198,24 @@ def perform_contract_check(request: dict) -> dict:
 
 
 def main() -> int:
-    """Read one request from stdin and emit exactly one result line."""
+    """Read one request from stdin and emit exactly one result document.
+
+    The result goes to the dedicated descriptor the parent passed via
+    ``QF_CONTRACT_CHECK_RESULT_FD``, never to the strategy-visible stdout.
+    """
 
     try:
         request = _parse_request(sys.stdin.buffer.read())
     except Exception as exc:  # noqa: BLE001 - reported as structured failure
-        _emit({"ok": False, "failure": _failure_payload(exc)})
+        _emit_result({"ok": False, "failure": _failure_payload(exc)})
         return 0
     try:
-        _emit(perform_contract_check(request))
+        _emit_result(perform_contract_check(request))
     except Exception as exc:  # noqa: BLE001 - every failure must be locatable
-        _emit({"ok": False, "failure": _failure_payload(exc)})
+        _emit_result({"ok": False, "failure": _failure_payload(exc)})
     finally:
         sys.stdout.flush()
+        sys.stderr.flush()
     return 0
 
 
@@ -255,9 +260,22 @@ def _bounded_traceback(exc: Exception) -> str:
     return rendered
 
 
-def _emit(result: dict) -> None:
-    sys.stdout.write(json.dumps(result, ensure_ascii=False))
-    sys.stdout.write("\n")
+def _emit_result(result: dict) -> None:
+    """Write the result document to the dedicated parent-only descriptor."""
+
+    document = json.dumps(result, ensure_ascii=False).encode("utf-8") + b"\n"
+    fd_name = os.environ.get("QF_CONTRACT_CHECK_RESULT_FD")
+    if fd_name is None:
+        # Manual/debug invocation without a parent checker: fall back to
+        # stdout, which real checks never parse.
+        sys.stdout.buffer.write(document)
+        sys.stdout.buffer.flush()
+        return
+    fd = int(fd_name)
+    written = 0
+    while written < len(document):
+        written += os.write(fd, document[written:])
+    os.close(fd)
 
 
 if __name__ == "__main__":

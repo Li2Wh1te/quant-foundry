@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -147,7 +147,27 @@ class InstrumentCandidateDTO:
             value = getattr(self, field_name)
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"{field_name} must be a non-blank string")
-        object.__setattr__(self, "metadata", MappingProxyType(dict(self.metadata)))
+        # Deep-freeze metadata so nested lists/dicts inside the mapping can
+        # never hand a mutable object to strategy code.
+        object.__setattr__(
+            self,
+            "metadata",
+            MappingProxyType(
+                {str(key): _freeze_meta(value) for key, value in self.metadata.items()}
+            ),
+        )
+
+
+def _freeze_meta(value: object) -> object:
+    """Recursively freeze one metadata value."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_meta(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_meta(item) for item in value)
+    return value
 
 
 @runtime_checkable
@@ -390,6 +410,11 @@ class StrategyDataDTO(_ReadOnlyFacade):
         cutoff_date = self.__data_cutoff.date()
         previous: date | None = None
         for bar in result:
+            if not isinstance(bar, BarDTO):
+                raise InvalidProviderResultError(
+                    "provider returned a non-BarDTO row; only immutable bar "
+                    "DTOs may reach strategy code"
+                )
             if bar.instrument_id != requested_id:
                 raise InvalidProviderResultError(
                     f"provider returned instrument_id {bar.instrument_id} "
@@ -415,6 +440,11 @@ class StrategyDataDTO(_ReadOnlyFacade):
         cutoff_date = self.__data_cutoff.date()
         previous: date | None = None
         for point in result:
+            if not isinstance(point, AdjustedSeriesPointDTO):
+                raise InvalidProviderResultError(
+                    "provider returned a non-AdjustedSeriesPointDTO row; only "
+                    "immutable series DTOs may reach strategy code"
+                )
             if point.instrument_id != requested_id:
                 raise InvalidProviderResultError(
                     f"provider returned instrument_id {point.instrument_id} "
@@ -474,18 +504,15 @@ class StrategyDataDTO(_ReadOnlyFacade):
             raise DataCutoffViolationError(start_date, cutoff_date)
         if start_date is not None and end_date is not None and start_date > end_date:
             raise ValueError("start_date cannot be after end_date")
-        if lookback_sessions is not None:
-            # A lookback window counts back from the cutoff unless an explicit
-            # end is given.  An explicit start that conflicts with the lookback
-            # window is a caller error, never silently widened into a longer
-            # full-range read.
-            anchor = end_date if end_date is not None else cutoff_date
-            implied_start = anchor - timedelta(days=lookback_sessions - 1)
-            if start_date is not None and implied_start < start_date:
-                raise ValueError(
-                    "lookback_sessions conflicts with the explicit start_date; "
-                    "pass either a lookback window or an explicit range"
-                )
+        if lookback_sessions is not None and (start_date is not None or end_date is not None):
+            # Lookback windows are resolved by the trading calendar against
+            # the cutoff alone.  Mixing them with an explicit date range
+            # would let different providers interpret the combination
+            # differently, so the combination is a caller error, always.
+            raise ValueError(
+                "pass either lookback_sessions or an explicit date range, "
+                "never both"
+            )
         return _ResolvedWindow(
             start_date=start_date,
             end_date=end_date,

@@ -356,6 +356,56 @@ class ContextDtoTestCase(unittest.TestCase):
         )
         self.assertIsInstance(valid.orders, tuple)
 
+    def test_position_rejects_invalid_identity_and_display_fields(self) -> None:
+        base = dict(
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            side="long",
+            quantity=Decimal("100"),
+            available_quantity=Decimal("100"),
+            average_price=Decimal("10"),
+            mark_price=Decimal("11"),
+            realized_pnl=Decimal("0"),
+            unrealized_pnl=Decimal("100"),
+        )
+        with self.assertRaises(InvalidDecisionPayloadError):
+            PositionDTO(instrument_id="not-a-uuid", **base)
+        with self.assertRaises(InvalidDecisionPayloadError):
+            PositionDTO(instrument_id=uuid4(), **{**base, "trading_code": ""})
+
+    def test_order_and_fill_summaries_validate_identity_and_strings(self) -> None:
+        with self.assertRaises(InvalidDecisionPayloadError):
+            OrderSummaryDTO(
+                instrument_id="not-a-uuid", side="buy",
+                quantity=Decimal("1"), status="filled",
+            )
+        with self.assertRaises(InvalidDecisionPayloadError):
+            OrderSummaryDTO(
+                instrument_id=uuid4(), side="  ",
+                quantity=Decimal("1"), status="filled",
+            )
+        with self.assertRaises(InvalidDecisionPayloadError):
+            FillSummaryDTO(
+                instrument_id=None, side="buy",
+                quantity=Decimal("1"), price=Decimal("10"),
+            )
+
+    def test_portfolio_rejects_non_position_elements(self) -> None:
+        class _FakePosition:
+            instrument_id = uuid4()
+
+        with self.assertRaises(InvalidDecisionPayloadError):
+            PortfolioDTO(
+                cash_balances={},
+                available_cash=Decimal("0"),
+                frozen_cash=Decimal("0"),
+                margin_used=Decimal("0"),
+                margin_available=Decimal("0"),
+                equity=Decimal("0"),
+                positions=(_FakePosition(),),
+            )
+
     def test_context_rejects_mismatched_or_naive_clock_fields(self) -> None:
         clock = DeterministicClockDTO(
             decision_time=AWARE_TIME, session_date=date(1999, 1, 1)
