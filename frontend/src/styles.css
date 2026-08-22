@@ -258,6 +258,48 @@ svg {
   text-align: center;
 }
 
+/* Backtest account catalogue: the name search is also the future run-selector contract. */
+.account-profiles-page { padding: 24px; }
+.account-profiles__actions { display: flex; align-items: center; gap: 8px; }
+.account-profiles__stats { display: grid; grid-template-columns: repeat(2, minmax(0, 220px)); gap: 10px; margin: 18px 0 12px; }
+.account-profiles__stats > div { padding: 14px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); }
+.account-profiles__stats span, .account-profiles__stats small { display: block; color: var(--text-muted); font-size: 11px; }
+.account-profiles__stats strong { display: block; margin: 6px 0 3px; color: var(--text); font-size: 20px; }
+.account-profiles__toolbar { display: flex; gap: 8px; margin-bottom: 12px; }
+.account-profiles__toolbar .search-field { flex: 1; max-width: 520px; }
+.account-profiles__toolbar select { min-width: 112px; border: 1px solid var(--border); border-radius: 5px; color: var(--text); background: var(--background); }
+.account-profile-selector { display: flex; align-items: center; gap: 7px; margin-left: auto; color: var(--text-muted); font-size: 11px; white-space: nowrap; }
+.account-profile-selector select { min-width: 170px; height: 31px; }
+.account-profiles__layout { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(280px, .8fr); gap: 12px; }
+.account-profiles__list, .account-profiles__detail { overflow: hidden; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+.account-profile-row { width: 100%; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 13px 15px; border: 0; border-bottom: 1px solid var(--border); color: var(--text); background: transparent; text-align: left; cursor: pointer; }
+.account-profile-row:last-child { border-bottom: 0; }
+.account-profile-row:hover, .account-profile-row--selected { background: var(--surface-subtle); }
+.account-profile-row > span:nth-child(2) { min-width: 0; }
+.account-profile-row strong, .account-profile-row small, .account-profile-row em { display: block; }
+.account-profile-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.account-profile-row small, .account-profile-row em { margin-top: 3px; color: var(--text-muted); font-size: 10px; font-style: normal; }
+.account-profile-row em { min-width: 78px; color: var(--text-faint); text-align: right; }
+.account-profile-row__dot { width: 7px; height: 7px; border-radius: 50%; background: var(--text-faint); }
+.account-profile-row__dot--active { background: var(--accent); }
+.account-profile-row__dot--inactive { background: #f2bd67; }
+.account-profiles__detail { padding: 18px; }
+.account-profiles__detail h3 { margin: 5px 0 8px; font-size: 16px; }
+.account-profiles__detail p { margin: 0; color: var(--text-muted); font-size: 12px; line-height: 1.6; }
+.account-profiles__detail dl { margin: 18px 0 0; }
+.account-profiles__detail dl div { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-top: 1px solid var(--border); font-size: 11px; }
+.account-profiles__detail dt { color: var(--text-faint); }
+.account-profiles__detail dd { margin: 0; color: var(--text); }
+.account-profile-modal textarea { min-height: 130px; resize: vertical; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 11px; line-height: 1.5; }
+
+@media (max-width: 800px) {
+  .account-profiles-page { padding: 16px; }
+  .account-profiles__layout { grid-template-columns: 1fr; }
+  .account-profiles__detail { order: -1; }
+  .account-profile-selector { width: 100%; margin-left: 0; }
+  .account-profile-selector select { flex: 1; }
+}
+
 .version-mismatch-screen {
   min-height: 100vh;
   display: grid;

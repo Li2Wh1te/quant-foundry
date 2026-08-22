@@ -11,6 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
+from app.backtesting.router import router as backtesting_router
 from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session
 from app.logging.router import router as log_router
@@ -59,6 +60,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(scheduling_router)
     protected_router.include_router(data_ingestion_router)
     protected_router.include_router(strategies_router)
+    protected_router.include_router(backtesting_router)
 
     @protected_router.get(
         "/api/auth/verify",

@@ -4,6 +4,7 @@ import { LoadingScreen } from "./components/LoadingScreen";
 import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
+import { AccountProfilesPage } from "./pages/AccountProfilesPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
@@ -80,6 +81,10 @@ export function App() {
       <Route
         path="/admin/strategies"
         element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
+      />
+      <Route
+        path="/admin/backtest-accounts"
+        element={<RequireAuth><AdminPage><AccountProfilesPage /></AdminPage></RequireAuth>}
       />
       <Route
         path="/admin/strategies/:strategyId"
