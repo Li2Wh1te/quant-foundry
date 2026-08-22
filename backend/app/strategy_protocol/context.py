@@ -210,14 +210,26 @@ class FillSummaryDTO:
 class PreviousStepDTO:
     """Read-only digest of the previous step's order and fill outcomes.
 
-    The DTO intentionally offers no method to resubmit orders or rewrite
-    history; it exists purely so a strategy can observe what happened.
+    Sequences are normalized to tuples at construction so mutable lists can
+    never leak into the strategy-facing snapshot.  The DTO intentionally
+    offers no method to resubmit orders or rewrite history; it exists purely
+    so a strategy can observe what happened.
     """
 
     step_sequence: int
     orders: tuple[OrderSummaryDTO, ...] = field(default_factory=tuple)
     fills: tuple[FillSummaryDTO, ...] = field(default_factory=tuple)
     order_statuses: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "orders", tuple(self.orders))
+        object.__setattr__(self, "fills", tuple(self.fills))
+        statuses = tuple(self.order_statuses)
+        if any(not isinstance(status, str) for status in statuses):
+            raise InvalidDecisionPayloadError(
+                "order_statuses must contain strings"
+            )
+        object.__setattr__(self, "order_statuses", statuses)
 
 
 @dataclass(frozen=True, slots=True)

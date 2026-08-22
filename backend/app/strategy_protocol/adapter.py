@@ -1,13 +1,16 @@
-"""Adapter that connects a page ``run(context, parameters)`` function.
+"""Adapter that wraps an already-loaded page strategy module.
 
-The adapter implements the engine-internal lifecycle protocol: it loads the
-published strategy module exactly once per run, provides default no-op
-lifecycle callbacks, and converts each raw ``run`` return value into an
-immutable :class:`StrategyDecision` through the decision-mode registry.
+The adapter implements the engine-internal lifecycle protocol: it wraps a
+module holding the published strategy's ``run(context, parameters)`` entry
+point, provides default no-op lifecycle callbacks, and converts each raw
+``run`` return value into an immutable :class:`StrategyDecision` through the
+decision-mode registry.
 
-Loading and executing strategy source only ever happens inside the isolated
-backtest subprocess (or its contract-check sibling); the API process never
-imports user code.
+This module deliberately has no source-loading capability: compiling and
+executing strategy source only ever happens in the worker module that backs
+the isolated backtest subprocess.  Callers pass an already-loaded module
+object here, so the API process cannot accidentally execute private code
+through this adapter.
 """
 
 from __future__ import annotations
@@ -24,43 +27,37 @@ from .decisions import DecisionModeRegistry, StrategyDecision, build_default_reg
 
 
 class StrategyLoadError(StrategyProtocolError):
-    """Raised when the published source cannot provide the required entry."""
-
-
-ISOLATED_SUBPROCESS_SCOPE = "isolated_subprocess"
-"""Execution-scope acknowledgment required before user source is executed.
-
-Loading and running strategy source is only ever legitimate inside the
-isolated backtest subprocess (or its contract-check sibling).  Callers must
-pass this exact scope to :meth:`FunctionStrategyAdapter.from_source` so the
-API or any future Runner process cannot accidentally execute private code.
-"""
+    """Raised when a strategy module cannot provide the required entry."""
 
 
 def _freeze_parameters(value: object) -> object:
     """Recursively convert parameters into immutable containers.
 
     The strategy receives a read-only object: mappings become mapping proxies
-    and lists become tuples at every nesting level, so a mutated parameter can
-    never leak into later steps of the same run.
+    and sequences become tuples at every nesting level, so a mutated parameter
+    can never leak into later steps of the same run.
     """
 
     if isinstance(value, Mapping):
         return MappingProxyType(
             {str(key): _freeze_parameters(item) for key, item in value.items()}
         )
-    if isinstance(value, list):
+    if isinstance(value, (list, tuple)):
         return tuple(_freeze_parameters(item) for item in value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
     return value
 
 
 class FunctionStrategyAdapter:
-    """Wrap one module-level ``run(context, parameters)`` function.
+    """Wrap one already-loaded module-level ``run(context, parameters)`` function.
 
     The adapter satisfies the internal :class:`StrategyProgram` protocol:
     ``on_step`` performs the decision while the remaining callbacks default to
     no-ops so page functions never need to implement them.
     """
+
+    __slots__ = ("_registry", "_parameters", "_run")
 
     def __init__(
         self,
@@ -69,39 +66,14 @@ class FunctionStrategyAdapter:
         parameters: Mapping[str, Any],
         registry: DecisionModeRegistry | None = None,
     ) -> None:
-        self._registry = registry or build_default_registry()
+        object.__setattr__(self, "_registry", registry or build_default_registry())
         # Parameters come from the published revision (validated against its
         # schema) and are fixed, deeply read-only for the whole run.
-        self._parameters = _freeze_parameters(dict(parameters))
-        self._run = self._require_entry_point(module)
+        object.__setattr__(self, "_parameters", _freeze_parameters(dict(parameters)))
+        object.__setattr__(self, "_run", self._require_entry_point(module))
 
-    @classmethod
-    def from_source(
-        cls,
-        source_code: str,
-        *,
-        parameters: Mapping[str, Any],
-        execution_scope: str,
-        module_name: str = "published_strategy",
-        registry: DecisionModeRegistry | None = None,
-    ) -> "FunctionStrategyAdapter":
-        """Load a published revision's source into a fresh module namespace.
-
-        ``execution_scope`` must be exactly
-        :data:`ISOLATED_SUBPROCESS_SCOPE`.  Requiring the explicit
-        acknowledgment keeps ``exec`` out of reach of accidental callers such
-        as API request handlers; only the isolated worker passes it.
-        """
-
-        if execution_scope != ISOLATED_SUBPROCESS_SCOPE:
-            raise StrategyLoadError(
-                "strategy source may only be loaded inside the isolated "
-                "backtest subprocess"
-            )
-        module = ModuleType(module_name)
-        compiled = compile(source_code, module_name, "exec")
-        exec(compiled, module.__dict__)  # noqa: S102 - isolated subprocess only
-        return cls(module, parameters=parameters, registry=registry)
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("the strategy adapter is read-only once constructed")
 
     @staticmethod
     def _require_entry_point(module: ModuleType):

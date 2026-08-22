@@ -179,16 +179,25 @@ class UniverseQuery(Protocol):
 
 
 class AdjustmentPolicyGate:
-    """Boolean gate backed by a named, versioned adjustment-facts policy.
+    """Immutable boolean gate backed by a named, versioned policy fact.
 
     Adjusted series may only be served after the native adjustment-factor
-    source has passed real-source verification and been marked active.
+    source has passed real-source verification and been marked active.  The
+    gate rejects all attribute writes so strategy code cannot flip it open.
     """
 
     POLICY_KEY = "tushare_adj_factor_native@1"
 
+    __slots__ = ("_AdjustmentPolicyGate__active",)
+
     def __init__(self, active: bool) -> None:
-        self._active = active
+        object.__setattr__(self, "_AdjustmentPolicyGate__active", bool(active))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("the adjustment policy gate is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("the adjustment policy gate is read-only")
 
     @classmethod
     def from_policy_key(cls, policy_key: str | None) -> "AdjustmentPolicyGate":
@@ -209,7 +218,7 @@ class AdjustmentPolicyGate:
         return cls(active=False)
 
     def is_active(self) -> bool:
-        return self._active
+        return self._AdjustmentPolicyGate__active
 
 
 @dataclass(frozen=True, slots=True)
@@ -248,12 +257,22 @@ class StrategyDataDTO(_ReadOnlyFacade):
     requests can never reach a partial read.  Provider results are validated
     again on the way out (identity, cutoff, ordering, decimal types), so a
     broken provider cannot leak future rows or mutable floats to strategies.
-    The injected view and cutoff are fixed at construction; strategies cannot
-    widen them.  qfq/hfq requests are additionally gated on the adjustment
-    policy being active.
+    The injected view and cutoff are fixed at construction; the underlying
+    provider objects are stored under name-mangled attributes so they are not
+    part of the strategy-facing surface.  qfq/hfq requests are additionally
+    gated on the adjustment policy being active.
+
+    Note: this is the non-adversarial read-only boundary approved for this
+    phase.  CPython cannot hide objects from deliberate in-process
+    introspection; hostile-code isolation remains the subprocess boundary.
     """
 
-    __slots__ = ("_view", "_data_cutoff", "_max_lookback_sessions", "_adjustment_gate")
+    __slots__ = (
+        "__view",
+        "__data_cutoff",
+        "__max_lookback_sessions",
+        "__adjustment_gate",
+    )
 
     def __init__(
         self,
@@ -263,14 +282,27 @@ class StrategyDataDTO(_ReadOnlyFacade):
         max_lookback_sessions: int = MAX_LOOKBACK_SESSIONS,
         adjustment_gate: AdjustmentPolicyGate | None = None,
     ) -> None:
-        object.__setattr__(self, "_view", view)
-        object.__setattr__(self, "_data_cutoff", data_cutoff)
-        object.__setattr__(self, "_max_lookback_sessions", max_lookback_sessions)
+        if (
+            isinstance(max_lookback_sessions, bool)
+            or not isinstance(max_lookback_sessions, int)
+            or not 1 <= max_lookback_sessions <= MAX_LOOKBACK_SESSIONS
+        ):
+            # The protocol limit itself can never be raised by configuration;
+            # callers may only lower it.
+            raise ValueError(
+                "max_lookback_sessions must be between 1 and "
+                f"{MAX_LOOKBACK_SESSIONS}"
+            )
+        object.__setattr__(self, "_StrategyDataDTO__view", view)
+        object.__setattr__(self, "_StrategyDataDTO__data_cutoff", data_cutoff)
+        object.__setattr__(
+            self, "_StrategyDataDTO__max_lookback_sessions", max_lookback_sessions
+        )
         # Conservative default: without an explicit active gate, adjusted
         # series stay blocked so unverified factors can never be served.
         object.__setattr__(
             self,
-            "_adjustment_gate",
+            "_StrategyDataDTO__adjustment_gate",
             adjustment_gate or AdjustmentPolicyGate.inactive_gate(),
         )
 
@@ -291,7 +323,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
             lookback_sessions=lookback_sessions,
         )
         result = tuple(
-            self._view.bars(
+            self.__view.bars(
                 resolved_id,
                 start_date=window.start_date,
                 end_date=window.end_date,
@@ -315,7 +347,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
             resolved_basis = AdjustmentBasis(basis)
         except ValueError as exc:
             raise ValueError(f"unknown adjustment basis {basis!r}") from exc
-        if resolved_basis is not AdjustmentBasis.RAW and not self._adjustment_gate.is_active():
+        if resolved_basis is not AdjustmentBasis.RAW and not self.__adjustment_gate.is_active():
             raise AdjustmentNotActiveError(
                 "qfq/hfq series require tushare_adj_factor_native@1 to be "
                 "verified and active"
@@ -327,7 +359,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
             lookback_sessions=lookback_sessions,
         )
         result = tuple(
-            self._view.adjusted_series(
+            self.__view.adjusted_series(
                 resolved_id,
                 start_date=window.start_date,
                 end_date=window.end_date,
@@ -342,7 +374,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
     ) -> tuple[BarDTO, ...]:
         """Reject provider rows that violate the identity or cutoff contract."""
 
-        cutoff_date = self._data_cutoff.date()
+        cutoff_date = self.__data_cutoff.date()
         previous: date | None = None
         for bar in result:
             if bar.instrument_id != requested_id:
@@ -367,7 +399,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
     ) -> tuple[AdjustedSeriesPointDTO, ...]:
         """Apply the same outbound checks to adjustment series."""
 
-        cutoff_date = self._data_cutoff.date()
+        cutoff_date = self.__data_cutoff.date()
         previous: date | None = None
         for point in result:
             if point.instrument_id != requested_id:
@@ -417,12 +449,12 @@ class StrategyDataDTO(_ReadOnlyFacade):
                 or lookback_sessions <= 0
             ):
                 raise ValueError("lookback_sessions must be a positive integer")
-            if lookback_sessions > self._max_lookback_sessions:
+            if lookback_sessions > self.__max_lookback_sessions:
                 # Fail before touching any data source.
                 raise LookbackLimitExceededError(
-                    lookback_sessions, self._max_lookback_sessions
+                    lookback_sessions, self.__max_lookback_sessions
                 )
-        cutoff_date = self._data_cutoff.date()
+        cutoff_date = self.__data_cutoff.date()
         if end_date is not None and end_date > cutoff_date:
             raise DataCutoffViolationError(end_date, cutoff_date)
         if start_date is not None and start_date > cutoff_date:
@@ -449,12 +481,17 @@ class StrategyDataDTO(_ReadOnlyFacade):
 
 
 class UniverseQueryDTO(_ReadOnlyFacade):
-    """Strategy-facing candidate-set facade returning immutable results."""
+    """Strategy-facing candidate-set facade returning validated results.
 
-    __slots__ = ("_query",)
+    Provider output is re-checked on the way out (type, duplicate identity)
+    and returned in stable ``instrument_id`` order as an immutable tuple, so
+    strategies can never receive mutable or duplicated candidates.
+    """
+
+    __slots__ = ("__query",)
 
     def __init__(self, query: UniverseQuery) -> None:
-        object.__setattr__(self, "_query", query)
+        object.__setattr__(self, "_UniverseQueryDTO__query", query)
 
     def query(
         self,
@@ -462,11 +499,25 @@ class UniverseQueryDTO(_ReadOnlyFacade):
         exchanges: Iterable[str] | None = None,
         asset_classes: Iterable[str] | None = None,
     ) -> tuple[InstrumentCandidateDTO, ...]:
-        """Return PIT-eligible candidates as an immutable tuple."""
+        """Return PIT-eligible candidates as an immutable sorted tuple."""
 
-        return tuple(
-            self._query.query(exchanges=exchanges, asset_classes=asset_classes)
+        result = self._UniverseQueryDTO__query.query(
+            exchanges=exchanges, asset_classes=asset_classes
         )
+        candidates = tuple(result)
+        seen: set[UUID] = set()
+        for candidate in candidates:
+            if not isinstance(candidate, InstrumentCandidateDTO):
+                raise InvalidProviderResultError(
+                    "universe provider returned a non-candidate row"
+                )
+            if candidate.instrument_id in seen:
+                raise InvalidProviderResultError(
+                    f"universe provider returned duplicate instrument_id "
+                    f"{candidate.instrument_id}"
+                )
+            seen.add(candidate.instrument_id)
+        return tuple(sorted(candidates, key=lambda c: str(c.instrument_id)))
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,18 +586,9 @@ def stitch_segmented_history(
     if not ordered_sessions:
         return ()
 
-    collected: list[BarDTO] = []
-    for segment in segments:
-        lower, upper = segment.clamp_window(ordered_sessions[0], ordered_sessions[-1])
-        if lower > upper:
-            continue
-        segment_sessions = [day for day in ordered_sessions if segment.covers(day)]
-        if not segment_sessions:
-            continue
-        collected.extend(
-            read_segment(segment.trading_code, segment_sessions[0], segment_sessions[-1])
-        )
-
+    # Coverage is verified before any provider read so overlapping segments
+    # can never be queried twice, and gaps never trigger partial reads.
+    coverage: dict[date, list[PitSegment]] = {}
     for day in ordered_sessions:
         covering = [segment for segment in segments if segment.covers(day)]
         if not covering:
@@ -558,13 +600,39 @@ def stitch_segmented_history(
                 f"PIT identity mappings overlap on session {day}: "
                 f"{sorted(segment.trading_code for segment in covering)}"
             )
-    seen_dates = {bar.trade_date for bar in collected}
-    missing = [day for day in ordered_sessions if day not in seen_dates]
-    if missing:
-        raise IncompleteHistoryError(
-            f"history bars are missing for {len(missing)} sessions, "
-            f"first missing {missing[0]}"
-        )
+        coverage[day] = covering
+
+    collected: list[BarDTO] = []
+    for segment in segments:
+        lower, upper = segment.clamp_window(ordered_sessions[0], ordered_sessions[-1])
+        if lower > upper:
+            continue
+        expected = [day for day in ordered_sessions if segment.covers(day)]
+        if not expected:
+            continue
+        rows = tuple(read_segment(segment.trading_code, expected[0], expected[-1]))
+        # Each segment must return exactly one bar per expected session: no
+        # duplicates, no out-of-range dates, no short windows.
+        seen_dates: set[date] = set()
+        for row in rows:
+            if row.trade_date in seen_dates:
+                raise IncompleteHistoryError(
+                    f"segment {segment.trading_code} returned duplicate bars "
+                    f"for session {row.trade_date}"
+                )
+            seen_dates.add(row.trade_date)
+            if not segment.covers(row.trade_date):
+                raise IncompleteHistoryError(
+                    f"segment {segment.trading_code} returned a bar outside "
+                    f"its mapped range on {row.trade_date}"
+                )
+        missing = [day for day in expected if day not in seen_dates]
+        if missing:
+            raise IncompleteHistoryError(
+                f"history bars are missing for {len(missing)} sessions, "
+                f"first missing {missing[0]}"
+            )
+        collected.extend(rows)
     return tuple(sorted(collected, key=lambda bar: bar.trade_date))
 
 

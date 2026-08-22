@@ -119,18 +119,42 @@ class ReadOnlyFacadeTestCase(unittest.TestCase):
     def _facade(self) -> StrategyDataDTO:
         return StrategyDataDTO(_CountingView(), data_cutoff=AWARE_CUTOFF)
 
-    def test_data_facade_attributes_are_read_only(self) -> None:
+    def test_provider_objects_are_not_part_of_the_public_surface(self) -> None:
         facade = self._facade()
-        for name, value in (
-            ("_data_cutoff", AWARE_CUTOFF.replace(year=2999)),
-            ("_max_lookback_sessions", 100_000),
-            ("_view", _CountingView()),
-            ("_adjustment_gate", AdjustmentPolicyGate.active_gate()),
-        ):
-            with self.assertRaises(AttributeError, msg=name):
-                setattr(facade, name, value)
+        # Plain attribute names are gone entirely; only the name-mangled
+        # engine-internal slots remain, and writes stay blocked.
+        for name in ("_view", "_data_cutoff", "_max_lookback_sessions",
+                     "_adjustment_gate"):
+            self.assertFalse(hasattr(facade, name), name)
             with self.assertRaises(AttributeError):
-                delattr(facade, name)
+                getattr(facade, name)
+        with self.assertRaises(AttributeError):
+            setattr(facade, "_StrategyDataDTO__view", _CountingView())
+
+    def test_adjustment_gate_is_read_only(self) -> None:
+        gate = AdjustmentPolicyGate.inactive_gate()
+        with self.assertRaises(AttributeError):
+            gate._active = True
+        with self.assertRaises(AttributeError):
+            delattr(gate, "_AdjustmentPolicyGate__active")
+        self.assertFalse(gate.is_active())
+
+    def test_lookback_cap_cannot_be_raised_by_configuration(self) -> None:
+        view = _CountingView()
+        with self.assertRaises(ValueError):
+            StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF,
+                            max_lookback_sessions=10_000)
+        with self.assertRaises(ValueError):
+            StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF,
+                            max_lookback_sessions=MAX_LOOKBACK_SESSIONS + 1)
+        with self.assertRaises(ValueError):
+            StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF,
+                            max_lookback_sessions=0)
+        # Lowering the cap is the only configuration allowed.
+        lowered = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF,
+                                  max_lookback_sessions=8)
+        with self.assertRaises(LookbackLimitExceededError):
+            lowered.bars(INSTRUMENT_ID, lookback_sessions=9)
 
     def test_universe_facade_attributes_are_read_only(self) -> None:
         class _Universe:
@@ -141,7 +165,7 @@ class ReadOnlyFacadeTestCase(unittest.TestCase):
         with self.assertRaises(AttributeError):
             facade._query = lambda **kwargs: ()
         with self.assertRaises(AttributeError):
-            delattr(facade, "_query")
+            delattr(facade, "_UniverseQueryDTO__query")
 
     def test_conflicting_lookback_and_start_date_is_rejected(self) -> None:
         view = _CountingView([_bar(day) for day in (
@@ -307,7 +331,8 @@ class PitStitchingTestCase(unittest.TestCase):
             )
 
     def test_overlapping_segments_block_instead_of_duplicating_bars(self) -> None:
-        # Both segments claim 2026-08-19; exactly-one coverage must fail.
+        # Both segments claim 2026-08-19; exactly-one coverage must fail
+        # before any provider read happens.
         segments = (
             PitSegment("OLD.CODE", date(2026, 8, 17), date(2026, 8, 19)),
             PitSegment("MID.CODE", date(2026, 8, 18), date(2026, 8, 20)),
@@ -316,19 +341,52 @@ class PitStitchingTestCase(unittest.TestCase):
 
         def reader(code, start, end):
             reads.append(code)
-            return [
-                BarDTO(
-                    instrument_id=INSTRUMENT_ID,
-                    trade_date=day,
-                    values={"close": Decimal("1")},
-                )
-                for day in (start, end)
-            ]
+            return []
 
         with self.assertRaises(IdentityMappingMissingError):
             stitch_segmented_history(
                 segments,
                 sessions=[date(2026, 8, 18), date(2026, 8, 19)],
+                read_segment=reader,
+            )
+        self.assertEqual(reads, [])
+
+    def test_duplicate_bars_within_one_segment_are_rejected(self) -> None:
+        def reader(code, start, end):
+            return [
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=date(2026, 8, 18),
+                    values={"close": Decimal("1")},
+                ),
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=date(2026, 8, 18),
+                    values={"close": Decimal("2")},
+                ),
+            ]
+
+        with self.assertRaises(IncompleteHistoryError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 18)],
+                read_segment=reader,
+            )
+
+    def test_out_of_range_segment_bars_are_rejected(self) -> None:
+        def reader(code, start, end):
+            return [
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=date(2026, 8, 21),
+                    values={"close": Decimal("1")},
+                ),
+            ]
+
+        with self.assertRaises(IncompleteHistoryError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 18)],
                 read_segment=reader,
             )
 
@@ -397,6 +455,52 @@ class UniverseQueryTestCase(unittest.TestCase):
             row.metadata["x"] = "y"
         # Filtering by another exchange returns nothing.
         self.assertEqual(facade.query(exchanges=["SZSE"]), ())
+
+    def test_universe_provider_results_are_validated_and_sorted(self) -> None:
+        first_id = uuid4()
+        second_id = uuid4()
+        rows = [
+            (second_id, "SYN.B"),
+            (first_id, "SYN.A"),
+        ]
+
+        def make_provider(candidate_rows):
+            class _Universe:
+                def query(self, *, exchanges=None, asset_classes=None):
+                    return tuple(
+                        InstrumentCandidateDTO(
+                            instrument_id=instrument_id,
+                            trading_code=code,
+                            name=code,
+                            display_name=code,
+                            asset_class="etf",
+                            exchange="SSE",
+                        )
+                        for instrument_id, code in candidate_rows
+                    )
+
+            return _Universe()
+
+        # Results come back in stable instrument_id order regardless of the
+        # provider's ordering.
+        result = UniverseQueryDTO(make_provider(rows)).query()
+        expected_order = [
+            code for _, code in sorted(rows, key=lambda row: str(row[0]))
+        ]
+        self.assertEqual(
+            [row.trading_code for row in result], expected_order
+        )
+
+        # Duplicate identities are rejected instead of handed to strategies.
+        with self.assertRaises(InvalidProviderResultError):
+            UniverseQueryDTO(make_provider([(first_id, "A"), (first_id, "B")])).query()
+
+        class _BrokenUniverse:
+            def query(self, *, exchanges=None, asset_classes=None):
+                return ("not-a-candidate",)
+
+        with self.assertRaises(InvalidProviderResultError):
+            UniverseQueryDTO(_BrokenUniverse()).query()
 
 
 if __name__ == "__main__":

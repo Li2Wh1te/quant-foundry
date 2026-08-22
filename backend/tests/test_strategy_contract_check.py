@@ -184,8 +184,10 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
 
     def test_strategy_stdout_cannot_pollute_the_result_document(self) -> None:
         # Regression: strategy prints are redirected to stderr so stdout only
-        # ever carries the one machine-readable JSON result.
+        # ever carries the one machine-readable JSON result.  Module-level
+        # code runs before run() and must be covered by the redirect too.
         source = (
+            'print("top-level noise")\n'
             "def run(context, parameters):\n"
             "    print('debug')\n"
             "    print('more noise', 123)\n"

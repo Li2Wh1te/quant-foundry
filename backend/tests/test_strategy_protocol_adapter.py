@@ -6,7 +6,6 @@ from decimal import Decimal
 from uuid import uuid4
 
 from app.strategy_protocol.adapter import (
-    ISOLATED_SUBPROCESS_SCOPE,
     FunctionStrategyAdapter,
     known_instrument_ids,
 )
@@ -20,17 +19,16 @@ from app.strategy_protocol.synthetic import (
     ContractCheckParameters,
     build_synthetic_context,
 )
+from app.strategy_protocol.worker import load_published_module
 
 AWARE_TIME = datetime(2026, 8, 21, 15, 0, 0, tzinfo=timezone(timedelta(hours=8)))
 
 
 def load(source: str, parameters: dict | None = None) -> FunctionStrategyAdapter:
-    """Load a strategy the way only the isolated worker is allowed to."""
+    """Load a strategy through the same path the isolated worker uses."""
 
-    return FunctionStrategyAdapter.from_source(
-        source,
-        parameters=parameters or {},
-        execution_scope=ISOLATED_SUBPROCESS_SCOPE,
+    return FunctionStrategyAdapter(
+        load_published_module(source), parameters=parameters or {}
     )
 
 
@@ -47,16 +45,15 @@ def _context(static_id=None):
 
 
 class ExecutionScopeTestCase(unittest.TestCase):
-    """Cover the guard that keeps user-source execution subprocess-only."""
+    """The adapter must not expose any source-loading entry point."""
 
-    def test_from_source_requires_the_isolated_subprocess_scope(self) -> None:
-        for wrong_scope in (None, "", "api_process", ISOLATED_SUBPROCESS_SCOPE + "x"):
-            with self.assertRaises(StrategyProtocolError):
-                FunctionStrategyAdapter.from_source(
-                    "def run(context, parameters):\n    return {'mode': 'hold'}\n",
-                    parameters={},
-                    execution_scope=wrong_scope,
-                )
+    def test_adapter_has_no_source_loading_capability(self) -> None:
+        # Source compilation lives only in the worker module, so an API or
+        # Runner caller cannot execute private code through the adapter.
+        self.assertFalse(hasattr(FunctionStrategyAdapter, "from_source"))
+        self.assertNotIn(
+            "exec", FunctionStrategyAdapter.__init__.__code__.co_names
+        )
 
 
 class FunctionStrategyAdapterTestCase(unittest.TestCase):

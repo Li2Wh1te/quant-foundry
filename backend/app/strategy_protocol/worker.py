@@ -29,10 +29,9 @@ if os.name == "posix" and os.environ.get("QF_CONTRACT_CHECK_MEM_MB"):
     _limit_bytes = int(os.environ["QF_CONTRACT_CHECK_MEM_MB"]) * 1024 * 1024
     resource.setrlimit(resource.RLIMIT_AS, (_limit_bytes, _limit_bytes))
 
-from app.strategy_protocol.adapter import (  # noqa: E402
-    ISOLATED_SUBPROCESS_SCOPE,
-    FunctionStrategyAdapter,
-)
+from types import ModuleType
+
+from app.strategy_protocol.adapter import FunctionStrategyAdapter  # noqa: E402
 from app.strategy_protocol.contract import (  # noqa: E402
     STRATEGY_CONTRACT_VERSION,
 )
@@ -51,6 +50,21 @@ MAX_TRACEBACK_CHARS = 4_000
 
 STRATEGY_MODULE_NAME = "published_strategy"
 """Filename recorded for compiled strategy source, used for line lookups."""
+
+
+def load_published_module(source_code: str) -> ModuleType:
+    """Compile and execute published strategy source in this worker process.
+
+    This is the only source-loading path in the codebase: the adapter takes
+    an already-loaded module, so no API or Runner caller can accidentally
+    execute private code.  Callers must redirect stdout first so module-level
+    ``print`` output cannot mix into the JSON result document.
+    """
+
+    module = ModuleType(STRATEGY_MODULE_NAME)
+    compiled = compile(source_code, STRATEGY_MODULE_NAME, "exec")
+    exec(compiled, module.__dict__)  # noqa: S102 - isolated subprocess only
+    return module
 
 
 class _BoundedStderrWriter:
@@ -122,18 +136,17 @@ def perform_contract_check(request: dict) -> dict:
         parameters=request.get("default_parameters", {}),
     )
     context, identity_rows = build_synthetic_context(parameters)
-    adapter = FunctionStrategyAdapter.from_source(
-        request["source_code"],
-        parameters=request.get("default_parameters", {}),
-        execution_scope=ISOLATED_SUBPROCESS_SCOPE,
-        module_name=STRATEGY_MODULE_NAME,
-    )
 
     real_stdout = sys.stdout
-    # stdout stays reserved for the one JSON result; strategy prints go to
-    # stderr under a bounded budget.
+    # stdout stays reserved for the one JSON result for the entire strategy
+    # lifetime: module-level code, compilation, and the run() call all write
+    # to the bounded stderr forwarder instead.
     sys.stdout = _BoundedStderrWriter(sys.stderr, MAX_STRATEGY_OUTPUT_BYTES)
     try:
+        adapter = FunctionStrategyAdapter(
+            load_published_module(request["source_code"]),
+            parameters=request.get("default_parameters", {}),
+        )
         decision = adapter.on_step(context)
     finally:
         sys.stdout = real_stdout
