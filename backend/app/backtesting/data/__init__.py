@@ -9,115 +9,155 @@ database adapter, no chunking algorithm, and no token issuance.
 Dependency direction (nothing points back up):
 
 ``errors`` -> ``requests`` -> ``facts`` -> ``reports`` -> ``protocols``
+
+Public names are exported lazily (PEP 562): importing a single submodule
+such as ``app.backtesting.data.errors`` must not drag the whole package in,
+because parent-package initialization otherwise closes an import cycle
+with ``app.instruments.domain`` (see ``app/instruments/references.py``).
 """
 
 from __future__ import annotations
 
-from app.backtesting.data.errors import (
-    ERROR_CODES,
-    ConsistencyCoverageIncompleteError,
-    ConsistencyNotValidatedError,
-    ConsistencyTokenExpiredError,
-    ConsistencyTokenInvalidError,
-    DataContractError,
-    DataCutoffExceededError,
-    DataPreflightBlockedError,
-    DataPreflightConfirmationMismatchError,
-    DataSessionClosedError,
-    HistoryIncompleteError,
-    IdentityMappingIncompleteError,
-    InvalidDataRequestError,
-    LookbackSessionsLimitExceededError,
-    ProviderContractViolationError,
-    UnsupportedCapabilityError,
-    freeze_json,
-)
-from app.backtesting.data.facts import (
-    AdjustedSeriesPoint,
-    Bar,
-    CorporateAction,
-    DataPoint,
-    FactEvidence,
-    InstrumentCodeMapping,
-    InstrumentDisplay,
-    InstrumentSpec,
-    Tick,
-    TradingRule,
-    TradingStatus,
-)
-from app.backtesting.data.protocols import (
-    ConsistencyTokenStatus,
-    DataCapabilityManifest,
-    DataChunkSession,
-    DataConsistencyContext,
-    DataConsistencyEvidence,
-    DataProvider,
-    DataSession,
-)
-from app.backtesting.data.reports import (
-    DataCoverageReport,
-    DataPreflightReport,
-    PreflightIssue,
-    canonical_hash,
-    canonical_json,
-)
-from app.backtesting.data.requests import (
-    CALENDAR_AXIS_POLICY,
-    CHUNK_POLICY,
-    DATA_CONTRACT_VERSION,
-    MAX_LOOKBACK_SESSIONS,
-    AdjustedSeriesQuery,
-    BarQuery,
-    ConsistencyMode,
-    ConsistencyValidation,
-    ContractRef,
-    CorporateActionQuery,
-    CoverageQuery,
-    DataCapability,
-    DataChunkQuery,
-    DataPreflightRequest,
-    DataRequest,
-    DataValueQuery,
-    DateRange,
-    EffectiveDateRange,
-    InstrumentMappingQuery,
-    InstrumentQuery,
-    InstrumentScopeMode,
-    IssueSeverity,
-    LookbackWindow,
-    MarketScope,
-    PitSupport,
-    PreflightStatus,
-    PriceBasis,
-    QualityMode,
-    QualityStatus,
-    QueryBoundary,
-    TickQuery,
-    TradingRuleQuery,
-    TradingStatusQuery,
-    UniverseQuery,
-    UniverseQueryPolicy,
+import importlib
+from typing import Any
+
+_SUBMODULE_EXPORTS: dict[str, str] = {
+    # errors
+    "ERROR_CODES": "errors",
+    "DataContractError": "errors",
+    "InvalidDataRequestError": "errors",
+    "UnsupportedCapabilityError": "errors",
+    "DataPreflightBlockedError": "errors",
+    "DataPreflightConfirmationMismatchError": "errors",
+    "DataSessionClosedError": "errors",
+    "DataCutoffExceededError": "errors",
+    "LookbackSessionsLimitExceededError": "errors",
+    "IdentityMappingIncompleteError": "errors",
+    "HistoryIncompleteError": "errors",
+    "ConsistencyNotValidatedError": "errors",
+    "ConsistencyTokenInvalidError": "errors",
+    "ConsistencyTokenExpiredError": "errors",
+    "ConsistencyCoverageIncompleteError": "errors",
+    "ProviderContractViolationError": "errors",
+    "UniverseCalendarNotPreflightedError": "errors",
+    "freeze_json": "errors",
+    # reports
+    "PreflightIssue": "reports",
+    "DataCoverageReport": "reports",
+    "DataPreflightReport": "reports",
+    "canonical_json": "reports",
+    "canonical_hash": "reports",
+    # protocols
+    "DataCapabilityManifest": "protocols",
+    "DataConsistencyContext": "protocols",
+    "DataConsistencyEvidence": "protocols",
+    "ConsistencyTokenStatus": "protocols",
+    "CoverageEnvelope": "protocols",
+    "DataProvider": "protocols",
+    "DataSession": "protocols",
+    "DataChunkSession": "protocols",
+    # facts
+    "FactEvidence": "facts",
+    "InstrumentSpec": "facts",
+    "InstrumentCodeMapping": "facts",
+    "InstrumentDisplay": "facts",
+    "TradingRule": "facts",
+    "TradingStatus": "facts",
+    "Bar": "facts",
+    "Tick": "facts",
+    "DataPoint": "facts",
+    "AdjustedSeriesPoint": "facts",
+    "CorporateAction": "facts",
+    # sessions + warmup (task 02-02)
+    "AuthoritativeDataSession": "sessions",
+    "DataSessionState": "sessions",
+    "NO_FORMAL_SESSIONS": "warmup",
+    "WARMUP_CALENDAR_INCOMPATIBLE": "warmup",
+    "WARMUP_COVERAGE_INSUFFICIENT": "warmup",
+    "WARMUP_DEFINITION_MISSING": "warmup",
+    "WARMUP_FACT_MISSING": "warmup",
+    "WARMUP_HISTORY_UNRESOLVED": "warmup",
+    "WARMUP_SESSION_UNRESOLVED": "warmup",
+    "CoverageBoundedWarmupSessionResolver": "warmup",
+    "WarmupCoverageStatus": "warmup",
+    "WarmupResolution": "warmup",
+    "WarmupSessionResolver": "warmup",
+    "WarmupStatus": "warmup",
+    "resolve_warmup_sessions": "warmup",
+}
+
+_EAGER_EXPORTS = (
+    # constants live in requests but requests also defines query DTOs;
+    # both are resolved lazily through the same table below.
 )
 
-from app.backtesting.data.sessions import (
-    AuthoritativeDataSession,
-    DataSessionState,
+_SUBMODULE_EXPORTS.update(
+    {
+        name: "requests"
+        for name in (
+            # constants
+            "CALENDAR_AXIS_POLICY",
+            "CHUNK_POLICY",
+            "DATA_CONTRACT_VERSION",
+            "MAX_LOOKBACK_SESSIONS",
+            # shared helpers / value objects
+            "ContractRef",
+            "DateRange",
+            "EffectiveDateRange",
+            "LookbackWindow",
+            "QueryBoundary",
+            "MarketScope",
+            "UniverseQueryPolicy",
+            # enums
+            "QualityStatus",
+            "IssueSeverity",
+            "InstrumentScopeMode",
+            "PriceBasis",
+            "ConsistencyMode",
+            "ConsistencyValidation",
+            "PitSupport",
+            "PreflightStatus",
+            "DataCapability",
+            "QualityMode",
+            # requests
+            "DataPreflightRequest",
+            "DataRequest",
+            # queries
+            "InstrumentQuery",
+            "InstrumentMappingQuery",
+            "TradingRuleQuery",
+            "TradingStatusQuery",
+            "UniverseQuery",
+            "BarQuery",
+            "TickQuery",
+            "DataValueQuery",
+            "AdjustedSeriesQuery",
+            "CorporateActionQuery",
+            "CoverageQuery",
+            "DataChunkQuery",
+        )
+    }
 )
-from app.backtesting.data.warmup import (
-    NO_FORMAL_SESSIONS,
-    WARMUP_CALENDAR_INCOMPATIBLE,
-    WARMUP_COVERAGE_INSUFFICIENT,
-    WARMUP_DEFINITION_MISSING,
-    WARMUP_FACT_MISSING,
-    WARMUP_HISTORY_UNRESOLVED,
-    WARMUP_SESSION_UNRESOLVED,
-    CoverageBoundedWarmupSessionResolver,
-    WarmupCoverageStatus,
-    WarmupResolution,
-    WarmupSessionResolver,
-    WarmupStatus,
-    resolve_warmup_sessions,
-)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve one public export lazily from its home submodule."""
+
+    module_name = _SUBMODULE_EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(
+            f"module {__name__!r} has no attribute {name!r}"
+        )
+    module = importlib.import_module(f"{__name__}.{module_name}")
+    value = getattr(module, name)
+    # Cache so later lookups are plain attribute accesses.
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_SUBMODULE_EXPORTS))
+
 
 __all__ = [
     # constants
@@ -142,6 +182,7 @@ __all__ = [
     "ConsistencyTokenExpiredError",
     "ConsistencyCoverageIncompleteError",
     "ProviderContractViolationError",
+    "UniverseCalendarNotPreflightedError",
     # shared helpers / value objects
     "freeze_json",
     "canonical_json",
@@ -202,6 +243,7 @@ __all__ = [
     "DataConsistencyContext",
     "DataConsistencyEvidence",
     "ConsistencyTokenStatus",
+    "CoverageEnvelope",
     "DataProvider",
     "DataSession",
     "DataChunkSession",

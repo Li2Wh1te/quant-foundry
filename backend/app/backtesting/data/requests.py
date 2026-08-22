@@ -30,7 +30,10 @@ from app.backtesting.data.errors import (
     LookbackSessionsLimitExceededError,
 )
 from app.backtesting.domain import _aware_datetime
-from app.instruments.domain import VersionedReference
+# Imported from the dependency-free references module, not
+# app.instruments.domain: this edge is what breaks the instruments <->
+# backtesting import cycle (see app/instruments/references.py).
+from app.instruments.references import VersionedReference
 
 __all__ = [
     "CALENDAR_AXIS_POLICY",
@@ -1323,10 +1326,10 @@ class DataChunkQuery:
         object.__setattr__(self, "chunk_index", index)
         first = _non_blank_text(self.first_session_id, "first_session_id")
         last = _non_blank_text(self.last_session_id, "last_session_id")
-        if first > last:
-            raise InvalidDataRequestError(
-                "first_session_id must not be later than last_session_id"
-            )
+        # Session ids are opaque stable labels; lexicographic order is not
+        # chronological order, so the pair is only checked for well-formed
+        # text.  Real boundary correctness is enforced where the query is
+        # matched against the frozen official sessions.
         object.__setattr__(self, "first_session_id", first)
         object.__setattr__(self, "last_session_id", last)
         object.__setattr__(

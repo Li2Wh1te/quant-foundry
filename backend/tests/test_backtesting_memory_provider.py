@@ -396,7 +396,9 @@ def chunk_query(session, index: int) -> DataChunkQuery:
         chunk_index=index,
         first_session_id=sessions[start].session_id,
         last_session_id=sessions[end - 1].session_id,
-        fact_types=(DataCapability.BARS,),
+        # The fixture exercises both servable fact types: bar reads and
+        # coverage accounting over those bars.
+        fact_types=(DataCapability.BARS, DataCapability.COVERAGE),
     )
 
 
@@ -428,7 +430,11 @@ class TestProviderBasics(unittest.TestCase):
         self.assertEqual(manifest.supported_frequencies, ("1d",))
         self.assertEqual(manifest.supported_price_bases, (PriceBasis.RAW,))
         self.assertEqual(
-            manifest.consistency_modes, (ConsistencyMode.CHUNKED_LOGICAL_TOKEN,)
+            manifest.consistency_modes,
+            (
+                ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
+                ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+            ),
         )
 
     def test_external_mutation_does_not_affect_dataset(self) -> None:

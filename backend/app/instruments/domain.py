@@ -124,25 +124,12 @@ def _is_representable(amount: Decimal, precision: int) -> bool:
 # Versioned reference
 # ---------------------------------------------------------------------------
 
-
-@dataclass(frozen=True, slots=True)
-class VersionedReference:
-    """An immutable pointer to a versioned definition owned by another domain.
-
-    Instrument specs reference trading-session templates this way instead of
-    embedding concrete session times: the actual intraday sessions are later
-    resolved per day from calendar definitions and session facts.
-    """
-
-    key: str
-    version: int
-
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "key", _required_label(self.key, "key"))
-        if isinstance(self.version, bool) or not isinstance(self.version, int):
-            raise DomainValidationError("version must be an integer")
-        if self.version < 1:
-            raise DomainValidationError("version must be a positive integer")
+# The canonical definition lives in the dependency-light ``references``
+# module so that the backtesting data contract can import it without
+# closing an instruments <-> backtesting import cycle.  It is re-exported
+# here because every instrument-domain consumer historically imports it
+# from this module.
+from app.instruments.references import VersionedReference  # noqa: E402
 
 
 # ---------------------------------------------------------------------------

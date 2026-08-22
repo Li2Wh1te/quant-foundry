@@ -55,6 +55,7 @@ from app.backtesting.data.errors import (
 from app.backtesting.data.facts import Bar, InstrumentSpec
 from app.backtesting.data.protocols import (
     ConsistencyTokenStatus,
+    CoverageEnvelope,
     DataCapabilityManifest,
     DataConsistencyContext,
     DataConsistencyEvidence,
@@ -142,8 +143,16 @@ ISSUE_INSTRUMENT_NOT_FOUND = "instrument_not_found"
 ISSUE_CALENDAR_AXIS_INCOMPATIBLE = "data_preflight_blocked"
 ISSUE_MANDATORY_BAR_COVERAGE_MISSING = "mandatory_bar_coverage_missing"
 
-_SERVABLE_CHUNK_FACT_TYPES = frozenset({DataCapability.BARS})
-"""Fact types one chunk can actually serve in the first version."""
+_SERVABLE_CHUNK_FACT_TYPES = frozenset(
+    {DataCapability.BARS, DataCapability.COVERAGE}
+)
+"""Fact types one chunk can actually serve in the first version.
+
+``CALENDARS`` is deliberately absent even though the manifest declares it:
+calendar facts are consumed during session resolution and warmup
+resolution, not through chunk business queries, so a chunk query cannot
+serve them and must fail closed instead of accepting an uncovered token.
+"""
 
 
 def _non_blank_text(value: object, field_name: str) -> str:
@@ -431,7 +440,10 @@ class MemoryDataProvider:
             pit_support_by_capability={
                 capability: PitSupport.STRICT for capability in served
             },
-            consistency_modes=(ConsistencyMode.CHUNKED_LOGICAL_TOKEN,),
+            consistency_modes=(
+                ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
+                ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+            ),
             consistency_token_contracts=(CHUNK_TOKEN_CONTRACT,),
             supported_chunk_policies=(CHUNK_POLICY,),
             capabilities=served,
@@ -540,6 +552,21 @@ class MemoryDataProvider:
                     severity=IssueSeverity.ERROR,
                     scope="consistency",
                     message="请求的一致性 token 契约不受内存 Provider 支持",
+                    field="consistency_token_contract",
+                )
+            )
+        if (
+            request.consistency_mode is ConsistencyMode.TRANSITIONAL_REPEATABLE_READ
+            and request.consistency_token_contract is not None
+        ):
+            # The transitional mode issues no logical tokens at all, so a
+            # configured token contract can never be honored.
+            issues.append(
+                PreflightIssue(
+                    code=ISSUE_UNSUPPORTED_TOKEN_CONTRACT,
+                    severity=IssueSeverity.ERROR,
+                    scope="consistency",
+                    message="过渡一致性模式不签发逻辑 token，不能配置 token 契约",
                     field="consistency_token_contract",
                 )
             )
@@ -756,7 +783,10 @@ class MemoryDataProvider:
             knowledge_as_of=request.knowledge_as_of,
             non_strict_pit_capabilities=(),
             consistency_mode=request.consistency_mode,
-            consistency_token_capability=bool(request.consistency_token_contract),
+            consistency_token_capability=(
+                request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN
+                and request.consistency_token_contract is not None
+            ),
             consistency_token_contract=(
                 request.consistency_token_contract
                 if request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN
@@ -883,6 +913,30 @@ class MemoryDataProvider:
         ]
         return min(floors) if floors else None
 
+    def _revision_snapshot(self) -> tuple[object, ...]:
+        """The current repeatable-read revision vector as one comparable tuple.
+
+        Transitional runs capture this snapshot when a chunk opens and
+        require it to stay unchanged for the chunk's whole lifetime.
+        """
+
+        return (
+            self._dataset.fixture_revision,
+            self._revision,
+            self._coverage_envelope(),
+        )
+
+    def _covers_fact_type(self, capability: DataCapability) -> bool:
+        """Whether the dataset actually backs one declared fact type."""
+
+        if capability is DataCapability.BARS:
+            return bool(self._dataset.bars)
+        if capability is DataCapability.CALENDARS:
+            return bool(self._dataset.calendar_facts)
+        if capability is DataCapability.COVERAGE:
+            return True
+        return False
+
     def _token_digest(
         self,
         *,
@@ -953,6 +1007,11 @@ class MemoryDataSession:
         self._report: DataPreflightReport | None = None
         self._resolved_sessions: tuple[SessionPoint, ...] | None = None
         self._warmup_sessions: tuple[SessionPoint, ...] | None = None
+        # Pinned once when the preflight completes: under the transitional
+        # repeatable-read mode every chunk of this run must validate against
+        # this ONE snapshot, so a revision between chunks fails the next
+        # chunk instead of silently starting a new read window.
+        self._revision_snapshot: tuple[object, ...] | None = None
 
     def __enter__(self) -> "MemoryDataSession":
         return self
@@ -1074,6 +1133,10 @@ class MemoryDataSession:
             if report.status is PreflightStatus.BLOCKED
             else DataSessionState.READY
         )
+        # Freeze the repeatable-read revision vector exactly once, before
+        # the run starts: all chunks of this session share it.
+        if self._state is DataSessionState.READY:
+            self._revision_snapshot = self._provider._revision_snapshot()
         return report
 
     @property
@@ -1164,15 +1227,37 @@ class MemoryDataSession:
                 },
             )
         chunk_sessions = self._resolved_sessions[start:end]
+        warmup = self._warmup_sessions or ()
+        envelope = CoverageEnvelope(
+            chunk_first_session_date=chunk_sessions[0].session_date,
+            chunk_last_session_date=chunk_sessions[-1].session_date,
+            fact_types=query.fact_types,
+            warmup_first_session_date=(
+                warmup[0].session_date if warmup else None
+            ),
+            warmup_session_count=len(warmup),
+            lookback_envelope_sessions=self._request.max_lookback_sessions,
+        )
         digest_spec = {
             "formal_session_ids": [point.session_id for point in self._resolved_sessions],
-            "warmup_session_ids": [point.session_id for point in self._warmup_sessions or ()],
+            "warmup_session_ids": [point.session_id for point in warmup],
             "chunk_index": query.chunk_index,
             "first_session_id": expected_first,
             "last_session_id": expected_last,
             "fact_types": query.fact_types,
         }
-        issued_digest = self._provider._token_digest(**digest_spec)
+        mode = self._request.consistency_mode
+        if mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN:
+            issued_digest = self._provider._token_digest(**digest_spec)
+            revision_snapshot: tuple[object, ...] | None = None
+        else:
+            # transitional_repeatable_read issues no logical token; every
+            # chunk validates against the snapshot pinned once for the
+            # whole session, so a mid-run revision expires all remaining
+            # chunks before any strategy call.
+            assert self._revision_snapshot is not None
+            issued_digest = None
+            revision_snapshot = self._revision_snapshot
         return MemoryDataChunkSession(
             provider=self._provider,
             session=self,
@@ -1180,7 +1265,9 @@ class MemoryDataSession:
             formal_end_index=end,
             sessions=chunk_sessions,
             fact_types=query.fact_types,
+            coverage_envelope=envelope,
             issued_digest=issued_digest,
+            revision_snapshot=revision_snapshot,
             digest_spec=digest_spec,
         )
 
@@ -1209,7 +1296,9 @@ class MemoryDataChunkSession:
         formal_end_index: int,
         sessions: tuple[SessionPoint, ...],
         fact_types: tuple[DataCapability, ...],
-        issued_digest: str,
+        coverage_envelope: CoverageEnvelope,
+        issued_digest: str | None,
+        revision_snapshot: tuple[object, ...] | None = None,
         digest_spec: dict[str, object],
     ) -> None:
         self._provider = provider
@@ -1220,21 +1309,34 @@ class MemoryDataChunkSession:
         self._formal_end_index = formal_end_index
         self._sessions = sessions
         self._fact_types = fact_types
+        self._coverage_envelope = coverage_envelope
         self._issued_digest = issued_digest
+        self._revision_snapshot = revision_snapshot
         self._digest_spec = digest_spec
         self._validation: ConsistencyTokenStatus | None = None
         self._closed = False
+        mode = session._request.consistency_mode
+        summary: dict[str, object] = {
+            "chunk_session_count": len(sessions),
+            "formal_session_count": len(session.resolved_sessions),
+            "consistency_mode": mode.value,
+            **dict(coverage_envelope.to_summary()),
+        }
+        if mode is ConsistencyMode.TRANSITIONAL_REPEATABLE_READ:
+            # Result detail must mark the transitional mode and its resource
+            # risk explicitly instead of presenting it as token consistency.
+            summary["transitional_resource_risk"] = (
+                "过渡模式在整个会话生命周期内保持可重复读，"
+                "块级资源在会话关闭前不会释放"
+            )
         self._evidence = DataConsistencyEvidence(
             chunk_index=chunk_index,
             first_session_id=sessions[0].session_id,
             last_session_id=sessions[-1].session_id,
-            mode=session._request.consistency_mode,
+            mode=mode,
             validation_status=ConsistencyValidation.NOT_VALIDATED,
             fact_types=fact_types,
-            coverage_summary={
-                "chunk_session_count": len(sessions),
-                "formal_session_count": len(session.resolved_sessions),
-            },
+            coverage_summary=summary,
             token_digest=issued_digest,
             failure_reason="consistency validation has not run yet",
         )
@@ -1274,26 +1376,50 @@ class MemoryDataChunkSession:
         """Validate the chunk token; must precede any business query."""
 
         self._assert_open()
-        current_digest = self._provider._token_digest(**self._digest_spec)
         clock = self._provider.dataset.clock
-        if current_digest != self._issued_digest:
-            status = ConsistencyValidation.EXPIRED
-            reason = (
-                "the fixture revision vector advanced after this chunk was "
-                "opened; the chunk token expired"
-            )
-        elif (
-            DataCapability.BARS in self._fact_types
-            and not self._provider.dataset.bars
+        if self._session._request.consistency_mode is (
+            ConsistencyMode.CHUNKED_LOGICAL_TOKEN
         ):
-            status = ConsistencyValidation.COVERAGE_INCOMPLETE
-            reason = (
-                "the chunk token declares bars but the dataset holds no bar "
-                "facts to cover them"
-            )
+            current_digest = self._provider._token_digest(**self._digest_spec)
+            if current_digest != self._issued_digest:
+                status = ConsistencyValidation.EXPIRED
+                reason = (
+                    "the fixture revision vector advanced after this chunk "
+                    "was opened; the chunk token expired"
+                )
+            else:
+                status = ConsistencyValidation.VALID
+                reason = None
         else:
-            status = ConsistencyValidation.VALID
-            reason = None
+            # transitional_repeatable_read: the pinned revision vector must
+            # still match; no logical token exists to re-hash.
+            assert self._revision_snapshot is not None
+            if self._provider._revision_snapshot() != self._revision_snapshot:
+                status = ConsistencyValidation.EXPIRED
+                reason = (
+                    "the fixture revision vector advanced after this chunk "
+                    "was opened; the transitional repeatable-read snapshot "
+                    "expired"
+                )
+            else:
+                status = ConsistencyValidation.VALID
+                reason = None
+        if status is ConsistencyValidation.VALID:
+            # A valid token must actually cover every declared fact type:
+            # a declared capability without backing facts is a coverage
+            # gap, never an empty result set.
+            uncovered = [
+                capability
+                for capability in self._fact_types
+                if not self._provider._covers_fact_type(capability)
+            ]
+            if uncovered:
+                status = ConsistencyValidation.COVERAGE_INCOMPLETE
+                reason = (
+                    "the chunk token does not cover the declared fact "
+                    "types with backing facts: "
+                    + ", ".join(capability.value for capability in uncovered)
+                )
         token_status = ConsistencyTokenStatus(
             status=status,
             validated_at=clock,
@@ -1305,6 +1431,11 @@ class MemoryDataChunkSession:
             ),
             failure_reason=reason,
         )
+        summary = dict(self._evidence.coverage_summary)
+        if status is not ConsistencyValidation.VALID:
+            # Persistable evidence must attribute the block to the data
+            # consistency phase so result records never blame a later one.
+            summary["failure_phase"] = "data_consistency"
         self._validation = token_status
         self._evidence = DataConsistencyEvidence(
             chunk_index=self._chunk_index,
@@ -1313,7 +1444,7 @@ class MemoryDataChunkSession:
             mode=self._session._request.consistency_mode,
             validation_status=status,
             fact_types=self._fact_types,
-            coverage_summary=dict(self._evidence.coverage_summary),
+            coverage_summary=summary,
             token_digest=self._issued_digest,
             validated_at=clock,
             failure_reason=reason,
@@ -1352,6 +1483,30 @@ class MemoryDataChunkSession:
                     "unauthorized_instrument_ids": [
                         str(instrument_id) for instrument_id in strangers
                     ],
+                },
+            )
+
+    def _require_declared_fact_type(
+        self, capability: DataCapability, operation: str
+    ) -> None:
+        """Reject queries reaching beyond this chunk's declared fact types.
+
+        ``open_chunk`` freezes the fact types the token was issued for;
+        letting a later business query serve an undeclared type would both
+        bypass the per-type serving rules and make the persisted
+        consistency evidence overstate what the token actually covered.
+        """
+
+        if capability not in self._fact_types:
+            raise InvalidDataRequestError(
+                f"{operation} requested fact type {capability.value} which "
+                "this chunk did not declare when it was opened",
+                details={
+                    "chunk_index": self._chunk_index,
+                    "declared_fact_types": [
+                        item.value for item in self._fact_types
+                    ],
+                    "requested_fact_type": capability.value,
                 },
             )
 
@@ -1443,6 +1598,7 @@ class MemoryDataChunkSession:
         self._guard_business_query("bars")
         if not isinstance(query, BarQuery):
             raise InvalidDataRequestError("query must be a BarQuery")
+        self._require_declared_fact_type(DataCapability.BARS, "bars")
         self._require_authorized_instruments(query.instrument_ids, "bars")
         boundary = query.boundary
         chunk_last_day = self._sessions[-1].session_date
@@ -1591,6 +1747,11 @@ class MemoryDataChunkSession:
         """
 
         self._guard_business_query("coverage")
+        self._require_declared_fact_type(DataCapability.COVERAGE, "coverage")
+        # The audited capability must itself be declared: a coverage report
+        # about a fact type the token never declared would fabricate
+        # evidence about facts this chunk cannot serve.
+        self._require_declared_fact_type(query.capability, "coverage")
         self._require_authorized_instruments(query.instrument_ids, "coverage")
         if query.capability not in self._provider._manifest.capabilities:
             raise UnsupportedCapabilityError(
