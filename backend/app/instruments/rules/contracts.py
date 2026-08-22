@@ -116,6 +116,29 @@ def reference_display(reference: VersionedReference | None) -> str | None:
     return f"{reference.key}@{reference.version}"
 
 
+def deep_freeze(value: Any) -> Any:
+    """Recursively convert a structure into immutable equivalents.
+
+    ``MappingProxyType`` only freezes the outer mapping, so nested dicts
+    and lists inside fields, normalized values, and issue details would
+    stay mutable and could be edited after the semantic hash was
+    computed.  This helper freezes every level: mappings become proxies,
+    lists/tuples become tuples, and sets become frozensets.  Domain
+    objects (``Decimal``, ``VersionedReference``, frozen dataclasses) are
+    already immutable and pass through unchanged.
+    """
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {key: deep_freeze(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(deep_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(deep_freeze(item) for item in value)
+    return value
+
+
 # ---------------------------------------------------------------------------
 # Enums and small vocabularies
 # ---------------------------------------------------------------------------
@@ -568,9 +591,9 @@ class RuleFactCandidate:
             raise DomainValidationError("fixture_only must be a boolean")
         if not isinstance(self.fields, Mapping):
             raise DomainValidationError("fields must be a mapping")
-        object.__setattr__(
-            self, "fields", MappingProxyType(dict(self.fields))
-        )
+        # Raw values may contain nested dicts/lists; freeze every level so
+        # candidates cannot be edited after construction.
+        object.__setattr__(self, "fields", deep_freeze(self.fields))
         # Visibility filtering compares these against data_cutoff, so naive
         # timestamps would silently change what a query is allowed to see.
         object.__setattr__(
@@ -593,7 +616,11 @@ class RuleFactCandidate:
             return False
         return True
 
-    def summary(self) -> "ResolvedFactSummary":
+    def summary(
+        self,
+        *,
+        exception_set_reference: VersionedReference | None = None,
+    ) -> "ResolvedFactSummary":
         """Return the stable provenance summary used in resolutions."""
 
         return ResolvedFactSummary(
@@ -602,6 +629,7 @@ class RuleFactCandidate:
             exception_fact_ref=self.exception_fact_ref,
             valid_from=self.valid_from,
             valid_to=self.valid_to,
+            exception_set_reference=exception_set_reference,
         )
 
 
@@ -612,13 +640,19 @@ class RuleFactCandidate:
 
 @dataclass(frozen=True, slots=True)
 class ResolvedFactSummary:
-    """Stable provenance record of one contributing fact candidate."""
+    """Stable provenance record of one contributing fact candidate.
+
+    ``exception_set_reference`` records *which versioned exception set*
+    routed to this fact, so two exception-set versions pointing at the
+    same fact reference remain distinguishable in audits and hashes.
+    """
 
     source: str
     source_revision: str | None
     exception_fact_ref: VersionedReference | None
     valid_from: date | None
     valid_to: date | None
+    exception_set_reference: VersionedReference | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -645,11 +679,9 @@ class RulePackageIssue:
             if not isinstance(self.details, Mapping):
                 raise DomainValidationError("details must be a mapping")
             # Fail fast on non-serializable details instead of breaking the
-            # log/query pipeline later.
+            # log/query pipeline later, then freeze every nesting level.
             canonical_payload(self.details)
-            object.__setattr__(
-                self, "details", MappingProxyType(dict(self.details))
-            )
+            object.__setattr__(self, "details", deep_freeze(self.details))
 
 
 @dataclass(frozen=True, slots=True)
@@ -668,6 +700,7 @@ class RulePackageResolution:
     parser_revision: str
     semantic_hash: str
     exception_reference: VersionedReference | None = None
+    exception_set_reference: VersionedReference | None = None
     selected_facts: tuple[ResolvedFactSummary, ...] = ()
     normalized_values: Mapping[str, Any] = MappingProxyType({})
     capability_declarations: Mapping[str, str] = MappingProxyType({})
@@ -687,13 +720,19 @@ class RulePackageResolution:
                     "issues must contain RulePackageIssue instances"
                 )
         object.__setattr__(self, "issues", issues)
+        # Deep-freeze the value-bearing structures: a nested dict mutated
+        # after hashing would silently invalidate the semantic hash.
         object.__setattr__(
-            self, "normalized_values", MappingProxyType(dict(self.normalized_values))
+            self, "normalized_values", deep_freeze(self.normalized_values)
         )
         object.__setattr__(
             self,
             "capability_declarations",
-            MappingProxyType(dict(self.capability_declarations)),
+            deep_freeze(
+                {str(key): str(value) for key, value in (
+                    self.capability_declarations.items()
+                )}
+            ),
         )
         if self.status is ResolutionStatus.BLOCKED:
             if self.normalized_values or self.capability_declarations:

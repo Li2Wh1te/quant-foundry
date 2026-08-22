@@ -337,17 +337,27 @@ class NamedExceptionTestCase(unittest.TestCase):
         )
         self.assertIs(resolution.status, ResolutionStatus.READY)
         self.assertEqual(resolution.exception_reference, EXCEPTION_FACT_REF)
+        self.assertEqual(resolution.exception_set_reference, EXCEPTION_SET_REF)
         self.assertEqual(resolution.normalized_values["lot_size"], Decimal("1"))
         self.assertEqual(
             resolution.normalized_values["price_tick"], Decimal("0.0001")
         )
         self.assertEqual(len(resolution.selected_facts), 2)
+        # The summary records which exception-set version routed here.
+        self.assertEqual(
+            resolution.selected_facts[0].exception_set_reference, None
+        )
+        self.assertEqual(
+            resolution.selected_facts[1].exception_set_reference,
+            EXCEPTION_SET_REF,
+        )
 
     def test_unmatched_exception_falls_back_to_ordinary_fact(self) -> None:
         exception_set = make_exception_set(instrument_id=OTHER_INSTRUMENT_ID)
         resolution = resolve([make_fact()], exception_sets=[exception_set])
         self.assertIs(resolution.status, ResolutionStatus.READY)
         self.assertIsNone(resolution.exception_reference)
+        self.assertIsNone(resolution.exception_set_reference)
         self.assertEqual(resolution.normalized_values["lot_size"], Decimal("100"))
 
     def test_exception_fact_missing_returns_structured_block(self) -> None:
@@ -655,6 +665,58 @@ class SemanticHashTestCase(unittest.TestCase):
         )
         self.assertNotEqual(plain.semantic_hash, with_exception.semantic_hash)
 
+    def test_exception_set_version_participates_in_hash(self) -> None:
+        # Two exception-set versions pointing at the SAME fact reference
+        # must still produce distinguishable resolutions and hashes.
+        entries = (
+            RuleExceptionEntry(
+                instrument_id=INSTRUMENT_ID,
+                exception_fact_ref=EXCEPTION_FACT_REF,
+                valid_from=date(2025, 1, 1),
+                valid_to=None,
+            ),
+        )
+        set_v1 = RuleExceptionSetDefinition(
+            reference=VersionedReference(key="etf_named_exceptions", version=1),
+            package_reference=PACKAGE_REF,
+            entries=entries,
+        )
+        set_v2 = RuleExceptionSetDefinition(
+            reference=VersionedReference(key="etf_named_exceptions", version=2),
+            package_reference=PACKAGE_REF,
+            entries=entries,
+        )
+        first = resolve(
+            [make_fact(), make_exception_fact()], exception_sets=[set_v1]
+        )
+        second = resolve(
+            [make_fact(), make_exception_fact()], exception_sets=[set_v2]
+        )
+        self.assertEqual(first.exception_reference, EXCEPTION_FACT_REF)
+        self.assertEqual(second.exception_reference, EXCEPTION_FACT_REF)
+        self.assertNotEqual(
+            first.exception_set_reference, second.exception_set_reference
+        )
+        self.assertNotEqual(first.semantic_hash, second.semantic_hash)
+
+    def test_blocked_hash_distinguishes_fact_revisions(self) -> None:
+        # Same blocking reason (missing price_tick), different fact
+        # revisions: the blocked hash must keep the provenance distinct
+        # while continuing to exclude Chinese issue messages.
+        missing_tick = complete_fields()
+        del missing_tick["price_tick"]
+        first = resolve([make_fact(fields=dict(missing_tick))])
+        second = resolve(
+            [make_fact(fields=dict(missing_tick), source_revision="rev-9")]
+        )
+        self.assertIs(first.status, ResolutionStatus.BLOCKED)
+        self.assertIs(second.status, ResolutionStatus.BLOCKED)
+        self.assertEqual(
+            [issue.code for issue in first.issues],
+            [issue.code for issue in second.issues],
+        )
+        self.assertNotEqual(first.semantic_hash, second.semantic_hash)
+
     def test_blocked_hash_is_deterministic_and_message_free(self) -> None:
         fields = complete_fields()
         del fields["price_tick"]
@@ -665,6 +727,44 @@ class SemanticHashTestCase(unittest.TestCase):
             [issue.code for issue in first.issues],
             [issue.code for issue in second.issues],
         )
+
+
+class DeepImmutabilityTestCase(unittest.TestCase):
+    """Nested structures inside DTOs must be frozen at every level."""
+
+    def test_fact_fields_are_deeply_immutable(self) -> None:
+        fact = make_fact()
+        with self.assertRaises(TypeError):
+            fact.fields["lot_size"] = "200"
+        with self.assertRaises(TypeError):
+            fact.fields["trading_status_applicability"]["suspension"] = (
+                "not_applicable"
+            )
+
+    def test_resolution_normalized_values_are_deeply_immutable(self) -> None:
+        resolution = resolve([make_fact()])
+        with self.assertRaises(TypeError):
+            resolution.normalized_values["lot_size"] = Decimal("200")
+        with self.assertRaises(TypeError):
+            resolution.normalized_values["trading_status_applicability"][
+                "suspension"
+            ] = "not_applicable"
+
+    def test_issue_details_are_deeply_immutable(self) -> None:
+        from app.instruments.rules.contracts import RulePackageIssue
+
+        issue = RulePackageIssue(
+            code=RulePackageIssueCode.RULE_FIELD_INVALID,
+            message="字段 lot_size 非法",
+            field="lot_size",
+            details={"nested": {"members": ["a", "b"]}},
+        )
+        with self.assertRaises(TypeError):
+            issue.details["nested"] = {}
+        # Lists are frozen into tuples, so mutation methods do not even
+        # exist; both outcomes prove immutability.
+        with self.assertRaises((TypeError, AttributeError)):
+            issue.details["nested"]["members"].append("c")
 
 
 if __name__ == "__main__":

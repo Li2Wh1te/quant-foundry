@@ -137,6 +137,7 @@ class RulePackageResolver:
                 normalized={},
                 capability={},
                 exception_reference=None,
+                exception_set_reference=None,
             )
 
         relevant = [
@@ -246,6 +247,7 @@ class RulePackageResolver:
             matched.extend((exception_set, entry) for entry in covering)
 
         exception_reference: VersionedReference | None = None
+        exception_set_reference: VersionedReference | None = None
         exception_fact: RuleFactCandidate | None = None
         if len(matched) > 1:
             issues.append(
@@ -264,8 +266,12 @@ class RulePackageResolver:
                 )
             )
         elif len(matched) == 1:
-            _, entry = matched[0]
+            matched_set, entry = matched[0]
             exception_reference = entry.exception_fact_ref
+            # The versioned exception-set identity is recorded alongside
+            # the fact reference so audits can tell which set version was
+            # actually used even when two versions share a fact reference.
+            exception_set_reference = matched_set.reference
             pool = [
                 candidate
                 for candidate in relevant
@@ -329,7 +335,11 @@ class RulePackageResolver:
                 )
             else:
                 exception_fact = usable[0]
-                summaries.append(exception_fact.summary())
+                summaries.append(
+                    exception_fact.summary(
+                        exception_set_reference=exception_set_reference
+                    )
+                )
 
         # Step 7: overlay exception fields onto ordinary fields.
         merged: dict[str, Any] = {}
@@ -470,6 +480,7 @@ class RulePackageResolver:
                 normalized={},
                 capability={},
                 exception_reference=exception_reference,
+                exception_set_reference=exception_set_reference,
             )
         capability = dict(normalized["trading_status_applicability"])
         return self._finalize(
@@ -480,6 +491,7 @@ class RulePackageResolver:
             normalized=normalized,
             capability=capability,
             exception_reference=exception_reference,
+            exception_set_reference=exception_set_reference,
         )
 
     # ------------------------------------------------------------------
@@ -496,39 +508,53 @@ class RulePackageResolver:
         normalized: Mapping[str, Any],
         capability: Mapping[str, str],
         exception_reference: VersionedReference | None,
+        exception_set_reference: VersionedReference | None,
     ) -> RulePackageResolution:
-        """Build the immutable resolution and its stable semantic hash."""
+        """Build the immutable resolution and its stable semantic hash.
 
-        if status is ResolutionStatus.READY:
-            payload = {
-                "kind": "rule_package_resolution",
-                "parser_revision": PARSER_REVISION,
-                "package_reference": definition.reference,
-                "exception_reference": exception_reference,
-                "parse_order": definition.parse_order,
-                "normalized_values": dict(normalized),
-                "capability_declarations": dict(capability),
-                "selected_facts": [
-                    {
-                        "source": summary.source,
-                        "source_revision": summary.source_revision,
-                        "exception_fact_ref": summary.exception_fact_ref,
-                        "valid_from": summary.valid_from,
-                        "valid_to": summary.valid_to,
-                    }
-                    for summary in summaries
-                ],
+        Both statuses hash the same provenance core (package, exception
+        fact and set references, parse order, contributing fact summaries)
+        so run snapshots remain auditable even when resolution blocks.
+        Issue messages never participate in the hash.
+        """
+
+        fact_provenance = [
+            {
+                "source": summary.source,
+                "source_revision": summary.source_revision,
+                "exception_fact_ref": summary.exception_fact_ref,
+                "exception_set_reference": summary.exception_set_reference,
+                "valid_from": summary.valid_from,
+                "valid_to": summary.valid_to,
             }
-        else:
-            # Issue messages stay out of the hash; codes and fields are
-            # stable machine values and may participate.
+            for summary in summaries
+        ]
+        if status is ResolutionStatus.READY:
             payload = {
                 "kind": "rule_package_resolution",
                 "status": status,
                 "parser_revision": PARSER_REVISION,
                 "package_reference": definition.reference,
                 "exception_reference": exception_reference,
+                "exception_set_reference": exception_set_reference,
                 "parse_order": definition.parse_order,
+                "normalized_values": dict(normalized),
+                "capability_declarations": dict(capability),
+                "selected_facts": fact_provenance,
+            }
+        else:
+            # Blocked resolutions keep their full fact provenance in the
+            # hash: two fact revisions triggering the same issue codes
+            # must stay distinguishable for preflight/run audits.
+            payload = {
+                "kind": "rule_package_resolution",
+                "status": status,
+                "parser_revision": PARSER_REVISION,
+                "package_reference": definition.reference,
+                "exception_reference": exception_reference,
+                "exception_set_reference": exception_set_reference,
+                "parse_order": definition.parse_order,
+                "selected_facts": fact_provenance,
                 "issue_identities": sorted(
                     (issue.code, issue.field) for issue in issues
                 ),
@@ -537,6 +563,7 @@ class RulePackageResolver:
             status=status,
             package_reference=definition.reference,
             exception_reference=exception_reference,
+            exception_set_reference=exception_set_reference,
             selected_facts=tuple(summaries),
             normalized_values=dict(normalized),
             capability_declarations={
