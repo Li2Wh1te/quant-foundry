@@ -56,19 +56,21 @@ def _page_or_error(page: CursorPage) -> dict[str, object]:
 
 
 def _cursor_signing_key(request: Request) -> str:
-    """Resolve the cursor HMAC secret from the serving app instance.
+    """Resolve the server-only cursor HMAC secret for this app instance.
 
-    Reading ``request.app.state.settings`` (instead of the cached global
-    settings) keeps cursors signed with exactly the token of the deployment
-    that created them, including ``create_app(settings=...)`` and test
-    injections.
+    The signing key is a dedicated secret (``QF_CURSOR_SIGNING_KEY``) that
+    clients never hold; deriving it from the API token would let any
+    authenticated caller forge validly signed cursors.  Reading
+    ``request.app.state.settings`` keeps cursors signed with exactly the
+    configuration of the serving deployment, including
+    ``create_app(settings=...)`` and test injections.
     """
 
     settings = getattr(request.app.state, "settings", None)
-    api_token = getattr(settings, "api_token", None)
-    if api_token is None:
+    signing_key = getattr(settings, "cursor_signing_key", None)
+    if signing_key is None:
         raise RuntimeError("application settings are not attached to app.state")
-    return api_token.get_secret_value()
+    return signing_key.get_secret_value()
 
 
 CursorSigningKey = Annotated[str, Depends(_cursor_signing_key)]

@@ -38,6 +38,12 @@ SerializedDecimal = Annotated[
     PlainSerializer(_decimal_as_string, return_type=Optional[str]),
 ]
 
+# Same wire format, but the field itself is mandatory and non-null.
+RequiredDecimal = Annotated[
+    Decimal,
+    PlainSerializer(_decimal_as_string, return_type=str),
+]
+
 
 class _ResultItem(BaseModel):
     """Common read-only shape for every result row projection."""
@@ -133,7 +139,8 @@ class BacktestEquityCurveItem(_ResultItem):
     as_of: datetime
     valuation_status: str
     valuation_reason: str | None = None
-    cash: SerializedDecimal = None
+    # The DTO contract requires cash at every valuation point, blocked or not.
+    cash: RequiredDecimal
     market_value: SerializedDecimal = None
     equity: SerializedDecimal = None
     period_return: SerializedDecimal = None
@@ -201,6 +208,7 @@ __all__ = [
     "BacktestOrderUpdateItem",
     "BacktestPositionItem",
     "BacktestStepItem",
+    "RequiredDecimal",
     "ResultCursorPage",
     "SerializedDecimal",
 ]

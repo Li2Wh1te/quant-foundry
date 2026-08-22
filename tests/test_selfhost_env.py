@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from scripts.selfhost_env import (
     API_TOKEN_KEY,
+    CURSOR_SIGNING_KEY,
     DATABASE_PASSWORD_KEY,
     ensure_selfhost_environment,
 )
@@ -18,23 +19,30 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             template = root / ".env.example"
             env = root / ".env"
             template.write_text(
-                "QF_APP_NAME=Test\nQF_API_TOKEN=\nQF_DATABASE_PASSWORD=\n",
+                "QF_APP_NAME=Test\n"
+                "QF_API_TOKEN=\n"
+                "QF_DATABASE_PASSWORD=\n"
+                "QF_CURSOR_SIGNING_KEY=\n",
                 encoding="utf-8",
             )
 
             with patch(
                 "scripts.selfhost_env.secrets.token_hex",
-                side_effect=("a" * 64, "b" * 64),
+                side_effect=("a" * 64, "b" * 64, "c" * 64),
             ):
                 generated = ensure_selfhost_environment(env, template)
             first_content = env.read_text(encoding="utf-8")
             generated_again = ensure_selfhost_environment(env, template)
 
-            self.assertEqual(generated, {DATABASE_PASSWORD_KEY, API_TOKEN_KEY})
+            self.assertEqual(
+                generated,
+                {DATABASE_PASSWORD_KEY, API_TOKEN_KEY, CURSOR_SIGNING_KEY},
+            )
             self.assertEqual(generated_again, set())
             self.assertEqual(first_content, env.read_text(encoding="utf-8"))
             self.assertIn(f"QF_DATABASE_PASSWORD={'a' * 64}", first_content)
             self.assertIn(f"QF_API_TOKEN={'b' * 64}", first_content)
+            self.assertIn(f"QF_CURSOR_SIGNING_KEY={'c' * 64}", first_content)
             self.assertIn("QF_SERVER_HOST=0.0.0.0", first_content)
             self.assertIn("QF_SERVER_PORT=8000", first_content)
             self.assertIn("QF_WEB_HOST=127.0.0.1", first_content)
@@ -51,6 +59,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
                 "QF_DATABASE_URL=postgresql+psycopg://postgres:postgres@db/test\n"
                 "QF_DATABASE_PASSWORD=postgres\n"
                 "QF_API_TOKEN=short-token\n"
+                "QF_CURSOR_SIGNING_KEY=change-me\n"
                 "QF_SERVER_HOST=127.0.0.1\n"
                 "QF_SERVER_PORT=19000\n"
                 "QF_WEB_HOST=0.0.0.0\n"
@@ -60,21 +69,25 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
 
             with patch(
                 "scripts.selfhost_env.secrets.token_hex",
-                side_effect=("b" * 64, "c" * 64),
+                side_effect=("b" * 64, "c" * 64, "d" * 64),
             ):
                 generated = ensure_selfhost_environment(env, template)
             content = env.read_text(encoding="utf-8")
 
-            self.assertEqual(generated, {DATABASE_PASSWORD_KEY, API_TOKEN_KEY})
+            self.assertEqual(
+                generated,
+                {DATABASE_PASSWORD_KEY, API_TOKEN_KEY, CURSOR_SIGNING_KEY},
+            )
             self.assertNotIn("QF_DATABASE_URL", content)
             self.assertIn(f"QF_DATABASE_PASSWORD={'b' * 64}", content)
             self.assertIn(f"QF_API_TOKEN={'c' * 64}", content)
+            self.assertIn(f"QF_CURSOR_SIGNING_KEY={'d' * 64}", content)
             self.assertIn("QF_SERVER_HOST=0.0.0.0", content)
             self.assertIn("QF_SERVER_PORT=19000", content)
             self.assertIn("QF_WEB_HOST=0.0.0.0", content)
             self.assertIn("QF_WEB_PORT=9090", content)
 
-    def test_preserves_custom_server_host(self) -> None:
+    def test_preserves_existing_strong_secrets_on_upgrade(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             template = root / ".env.example"
@@ -83,13 +96,20 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             env.write_text(
                 "QF_SERVER_HOST=10.8.0.5\n"
                 "QF_DATABASE_PASSWORD=strong-password\n"
-                f"QF_API_TOKEN={'d' * 64}\n",
+                f"QF_API_TOKEN={'d' * 64}\n"
+                f"QF_CURSOR_SIGNING_KEY={'e' * 64}\n",
                 encoding="utf-8",
             )
 
-            ensure_selfhost_environment(env, template)
+            generated = ensure_selfhost_environment(env, template)
 
-            self.assertIn("QF_SERVER_HOST=10.8.0.5", env.read_text(encoding="utf-8"))
+            content = env.read_text(encoding="utf-8")
+            self.assertEqual(generated, set())
+            self.assertIn("QF_SERVER_HOST=10.8.0.5", content)
+            self.assertIn("QF_DATABASE_PASSWORD=strong-password", content)
+            self.assertIn(f"QF_API_TOKEN={'d' * 64}", content)
+            # An upgrade must never replace operator-provided secrets.
+            self.assertIn(f"QF_CURSOR_SIGNING_KEY={'e' * 64}", content)
 
     def test_appends_new_template_keys_to_an_existing_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

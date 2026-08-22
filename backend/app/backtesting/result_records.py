@@ -591,10 +591,10 @@ class BacktestEquityCurveRecord(_RunBoundRecord):
         nullable=True,
         comment="Reason attached to degraded or blocked valuations.",
     )
-    cash: Mapped[Decimal | None] = mapped_column(
+    cash: Mapped[Decimal] = mapped_column(
         Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
-        nullable=True,
-        comment="Cash balance; null only for blocked points.",
+        nullable=False,
+        comment="Cash balance; carried even by blocked valuation points.",
     )
     market_value: Mapped[Decimal | None] = mapped_column(
         Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),

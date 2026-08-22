@@ -494,7 +494,7 @@ def upgrade() -> None:
             nullable=True,
             comment="Reason attached to degraded or blocked valuations.",
         ),
-        _amount_column("cash", "Cash balance; null only for blocked points.", True),
+        _amount_column("cash", "Cash balance; carried even by blocked valuation points."),
         _amount_column(
             "market_value", "Marked market value; null for blocked points.", True
         ),

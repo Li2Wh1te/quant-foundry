@@ -25,9 +25,12 @@ SERVER_HOST_KEY = "QF_SERVER_HOST"
 LEGACY_SERVER_HOST = "127.0.0.1"
 DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
+CURSOR_SIGNING_KEY = "QF_CURSOR_SIGNING_KEY"
+SECRET_KEYS = (DATABASE_PASSWORD_KEY, API_TOKEN_KEY, CURSOR_SIGNING_KEY)
 LEGACY_URL_KEY = "QF_DATABASE_URL"
 WEAK_DATABASE_PASSWORDS = {"", "change-me", "postgres"}
 WEAK_API_TOKENS = {"", "change-me"}
+WEAK_CURSOR_SIGNING_KEYS = {"", "change-me"}
 ENV_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
@@ -56,6 +59,13 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         generated_keys,
         minimum_length=32,
     )
+    cursor_signing_key = _ensure_secret(
+        values,
+        CURSOR_SIGNING_KEY,
+        WEAK_CURSOR_SIGNING_KEYS,
+        generated_keys,
+        minimum_length=32,
+    )
     # Existing self-hosted installations retain their .env across deployments.
     # Seed only keys absent from that file with template defaults so new
     # configuration (for example, a newly added data provider) becomes visible
@@ -71,6 +81,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         **DATABASE_DEFAULTS,
         DATABASE_PASSWORD_KEY: database_password,
         API_TOKEN_KEY: api_token,
+        CURSOR_SIGNING_KEY: cursor_signing_key,
     }
 
     updated_lines: list[str] = []
@@ -87,7 +98,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         if key in desired:
             value = (
                 desired[key]
-                if key in {DATABASE_PASSWORD_KEY, API_TOKEN_KEY} or not values.get(key)
+                if key in SECRET_KEYS or not values.get(key)
                 else values[key]
             )
             updated_lines.append(f"{key}={value}\n")
@@ -159,6 +170,7 @@ def main() -> None:
     secrets_to_report = (
         (DATABASE_PASSWORD_KEY, "PostgreSQL password"),
         (API_TOKEN_KEY, "API token"),
+        (CURSOR_SIGNING_KEY, "cursor signing key"),
     )
     for key, label in secrets_to_report:
         action = "Generated a random" if key in generated_keys else "Using the existing"

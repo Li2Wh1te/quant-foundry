@@ -269,6 +269,13 @@ class CursorRejectionTestCase(unittest.TestCase):
                 query_upper_bound={"c": Decimal("1.5")},
             )
 
+    def test_non_ascii_tokens_map_to_malformed_cursor(self) -> None:
+        # Non-ASCII content must surface as CursorError (HTTP 400), never as
+        # an underlying UnicodeEncodeError leaking through as HTTP 422.
+        for bad in ("é.00", "abc.é", "日本語.test", "café"):
+            with self.assertRaises(MalformedCursorError):
+                parse(bad)
+
     def test_blank_signing_keys_are_refused(self) -> None:
         for bad in ("", "   ", None):
             with self.assertRaises(ValueError):

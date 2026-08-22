@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 from base64 import urlsafe_b64decode, urlsafe_b64encode
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -262,6 +263,12 @@ def sign_token(payload: dict[str, Any], signing_key: str) -> str:
     return f"{encoded}.{mac}"
 
 
+# Tokens are base64url payloads plus a hex signature joined by a dot; any
+# other character (including non-ASCII) is malformed and must map to
+# MalformedCursorError instead of leaking codec errors to clients.
+_TOKEN_CHARSET = re.compile(r"[A-Za-z0-9_\-.]+")
+
+
 def _split_signed_token(token: str) -> tuple[str, str]:
     """Split a token into its raw (payload-b64, signature) parts.
 
@@ -271,6 +278,8 @@ def _split_signed_token(token: str) -> tuple[str, str]:
 
     if not isinstance(token, str) or not token or len(token) > 8192:
         raise MalformedCursorError("cursor must be a non-empty short token")
+    if _TOKEN_CHARSET.fullmatch(token) is None:
+        raise MalformedCursorError("cursor contains unsupported characters")
     parts = token.split(".")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise MalformedCursorError("cursor is missing its signature")

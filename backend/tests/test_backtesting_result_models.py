@@ -301,6 +301,22 @@ class GeneralityContractTestCase(unittest.TestCase):
                 f"{table_name} is invisible to Alembic autogenerate",
             )
 
+    def test_equity_cash_column_is_not_nullable(self) -> None:
+        from sqlalchemy.dialects import postgresql
+        from sqlalchemy.schema import CreateTable
+
+        from app.backtesting.result_records import BacktestEquityCurveRecord
+
+        ddl = str(
+            CreateTable(BacktestEquityCurveRecord.__table__).compile(
+                dialect=postgresql.dialect()
+            )
+        )
+        self.assertRegex(
+            ddl,
+            r"cash NUMERIC\(38, 18\) NOT NULL",
+        )
+
     def test_fictional_asset_uses_the_same_dtos(self) -> None:
         fictional = InstrumentDisplaySnapshot(
             instrument_id=uuid4(),
