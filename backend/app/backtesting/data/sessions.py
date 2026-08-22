@@ -123,6 +123,7 @@ class AuthoritativeDataSession:
         self._warmup_resolution: WarmupResolution | None = None
         self._report: DataPreflightReport | None = None
         self._closed_resources = False
+        self._preflight_done = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -156,29 +157,35 @@ class AuthoritativeDataSession:
     # Frozen results
     # ------------------------------------------------------------------
 
+    def _frozen_sessions(self, field_name: str) -> tuple[SessionPoint, ...]:
+        """Read a frozen session tuple with stable state-boundary errors."""
+
+        if self._state is DataSessionState.CREATED:
+            raise InvalidDataRequestError(
+                f"{field_name} are not available before a completed "
+                "preflight"
+            )
+        if self._state is DataSessionState.CLOSED and not self._preflight_done:
+            raise DataSessionClosedError(
+                "the data session was closed before its preflight completed; "
+                f"no frozen {field_name} exist",
+                details={"session_state": self._state.value},
+            )
+        sessions = getattr(self, f"_{field_name}")
+        assert sessions is not None
+        return sessions
+
     @property
     def resolved_sessions(self) -> tuple[SessionPoint, ...]:
         """Formal sessions; empty when blocked, forbidden before preflight."""
 
-        if self._state is DataSessionState.CREATED:
-            raise InvalidDataRequestError(
-                "resolved_sessions are not available before a completed "
-                "preflight"
-            )
-        assert self._resolved_sessions is not None
-        return self._resolved_sessions
+        return self._frozen_sessions("resolved_sessions")
 
     @property
     def warmup_sessions(self) -> tuple[SessionPoint, ...]:
         """Warmup sessions; empty when blocked, forbidden before preflight."""
 
-        if self._state is DataSessionState.CREATED:
-            raise InvalidDataRequestError(
-                "warmup_sessions are not available before a completed "
-                "preflight"
-            )
-        assert self._warmup_sessions is not None
-        return self._warmup_sessions
+        return self._frozen_sessions("warmup_sessions")
 
     @property
     def warmup_resolution(self) -> WarmupResolution | None:
@@ -236,10 +243,16 @@ class AuthoritativeDataSession:
                 "preflight must run exactly once from the created state; "
                 f"current state is {self._state.value}"
             )
-        if request is not None and request != self._request:
-            raise InvalidDataRequestError(
-                "the preflight request must match the frozen session request"
-            )
+        if request is not None:
+            if not isinstance(request, DataPreflightRequest):
+                raise InvalidDataRequestError(
+                    "request must be a DataPreflightRequest instance"
+                )
+            if not self._matches_frozen_intent(request):
+                raise InvalidDataRequestError(
+                    "the preflight request must match the frozen session "
+                    "request on every shared business field"
+                )
         frozen_request = self._request
         issues: list[PreflightIssue] = []
 
@@ -377,11 +390,17 @@ class AuthoritativeDataSession:
                 else None
             ),
             calendar_axis_differences=axis.differences,
+            warmup_axis_differences=(
+                warmup_resolution.axis_differences
+                if warmup_resolution is not None
+                else ()
+            ),
         )
         self._resolved_sessions = formal_sessions
         self._warmup_sessions = warmup_sessions
         self._warmup_resolution = warmup_resolution
         self._report = report
+        self._preflight_done = True
         self._state = (
             DataSessionState.BLOCKED if blocked else DataSessionState.READY
         )
@@ -411,6 +430,23 @@ class AuthoritativeDataSession:
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _matches_frozen_intent(self, request: DataPreflightRequest) -> bool:
+        """Compare the original intent with the frozen request by business.
+
+        A session opened from a frozen ``DataRequest`` may legitimately
+        receive the original unresolved :class:`DataPreflightRequest` for
+        its authoritative re-check; the admission-only fields that preflight
+        itself added (resolved calendars, time zone, hashes) are not part
+        of the comparison.
+        """
+
+        for field_name in DataPreflightRequest.__dataclass_fields__:
+            if getattr(request, field_name) != getattr(
+                self._request, field_name
+            ):
+                return False
+        return True
 
     def _resolved_definitions(
         self, calendar_ids: tuple[str, ...]

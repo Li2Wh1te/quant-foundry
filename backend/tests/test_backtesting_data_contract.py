@@ -242,12 +242,16 @@ def _report(status: PreflightStatus = PreflightStatus.READY, **overrides):
 def _ready_warmup_resolution(sessions) -> "WarmupResolution":
     """Build a ready warmup resolution for one anchor and session tuple."""
 
+    sessions = tuple(sessions)
     return WarmupResolution(
-        requested_sessions=len(tuple(sessions)),
+        requested_sessions=len(sessions),
         first_formal_session=date(2026, 1, 6),
         status=WarmupStatus.READY,
         coverage_status=WarmupCoverageStatus.PROVEN,
-        resolved_sessions=tuple(sessions),
+        resolved_sessions=sessions,
+        history_window=DateRange(
+            start_date=date(2025, 12, 29), end_date=date(2026, 1, 5)
+        ),
     )
 
 

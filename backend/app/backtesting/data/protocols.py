@@ -469,7 +469,14 @@ class DataSession(Protocol):
         ...
 
     def preflight(self, request: DataPreflightRequest) -> DataPreflightReport:
-        """Authoritative in-subprocess preflight re-check."""
+        """Authoritative in-subprocess preflight re-check.
+
+        ``request`` is the original unresolved run intent; implementations
+        must verify that it matches the frozen request the session was
+        opened with on every shared business field (the admission-only
+        fields preflight itself added are not compared) and fail closed on
+        any mismatch.
+        """
         ...
 
     def open_chunk(self, query: DataChunkQuery) -> "DataChunkSession":

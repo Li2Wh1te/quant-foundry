@@ -27,12 +27,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from enum import StrEnum
-from typing import Mapping, Protocol, Sequence
+from typing import Iterable, Mapping, Protocol, Sequence
 
 from app.backtesting.calendar_axis import (
     POLICY_KEY_STRICT_COMPATIBLE,
     POLICY_VERSION_STRICT_COMPATIBLE,
     CalendarAxisDataProvider,
+    CalendarAxisDifference,
     CalendarAxisDifferenceField,
     CalendarAxisStatus,
     SessionPoint,
@@ -41,6 +42,7 @@ from app.backtesting.calendar_axis import (
 from app.backtesting.data.errors import InvalidDataRequestError
 from app.backtesting.data.reports import (
     PreflightIssue,
+    _sorted_issues,
     _validated_session_tuple,
     canonical_hash,
 )
@@ -141,6 +143,10 @@ class WarmupResolution:
     resolved_sessions: tuple[SessionPoint, ...] = ()
     history_window: DateRange | None = None
     issues: tuple[PreflightIssue, ...] = ()
+    # Locatable calendar-axis differences found inside the history window
+    # (empty unless resolution hit an incompatibility).  They are machine
+    # audit evidence and participate in the signature.
+    axis_differences: tuple[CalendarAxisDifference, ...] = ()
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     resolution_signature: str = ""
 
@@ -169,13 +175,28 @@ class WarmupResolution:
             self.history_window, DateRange
         ):
             raise InvalidDataRequestError("history_window must be a DateRange")
-        for issue in self.issues:
-            if not isinstance(issue, PreflightIssue):
+        if self.history_window is not None:
+            # The audit window itself must lie strictly before the anchor
+            # and must contain every resolved session.
+            if self.history_window.end_date >= self.first_formal_session:
                 raise InvalidDataRequestError(
-                    "issues entries must be PreflightIssue instances"
+                    "history_window must end before first_formal_session"
                 )
+            for point in sessions:
+                if not (
+                    self.history_window.start_date
+                    <= point.session_date
+                    <= self.history_window.end_date
+                ):
+                    raise InvalidDataRequestError(
+                        "resolved_sessions must lie inside history_window"
+                    )
+        # Copy, type-check, sort, and freeze the issues so later mutation of
+        # the caller's sequence can never desynchronize content from the
+        # resolution signature.
+        issues = _sorted_issues(self.issues)
         errors = [
-            issue for issue in self.issues
+            issue for issue in issues
             if issue.severity is IssueSeverity.ERROR
         ]
         if self.status is WarmupStatus.READY:
@@ -187,6 +208,11 @@ class WarmupResolution:
                 raise InvalidDataRequestError(
                     "ready warmup resolutions must carry exactly "
                     "requested_sessions sessions"
+                )
+            if requested > 0 and self.history_window is None:
+                raise InvalidDataRequestError(
+                    "ready warmup resolutions with requested sessions "
+                    "require a proven history_window"
                 )
             if any(
                 point.session_date >= self.first_formal_session
@@ -221,6 +247,25 @@ class WarmupResolution:
                     "coverage"
                 )
         object.__setattr__(self, "resolved_sessions", sessions)
+        object.__setattr__(self, "issues", issues)
+        differences = tuple(self.axis_differences)
+        for difference in differences:
+            if not isinstance(difference, CalendarAxisDifference):
+                raise InvalidDataRequestError(
+                    "axis_differences entries must be CalendarAxisDifference "
+                    "instances"
+                )
+        if differences and self.status is WarmupStatus.READY:
+            # Difference evidence only exists for a blocked resolution; a
+            # ready one proved the axis compatible inside its window.
+            raise InvalidDataRequestError(
+                "ready warmup resolutions must not carry axis differences"
+            )
+        object.__setattr__(
+            self,
+            "axis_differences",
+            tuple(sorted(differences, key=lambda item: item.sort_key)),
+        )
         object.__setattr__(
             self, "resolution_signature", self._compute_signature()
         )
@@ -256,6 +301,16 @@ class WarmupResolution:
                     ],
                 }
                 for point in self.resolved_sessions
+            ],
+            "axis_differences": [
+                {
+                    "date": difference.date,
+                    "calendar_id": difference.calendar_id,
+                    "field": difference.field,
+                    "actual_value": difference.actual_value,
+                    "expected_value": difference.expected_value,
+                }
+                for difference in self.axis_differences
             ],
             "issues": [issue.machine_fields() for issue in self.issues],
         }
@@ -374,7 +429,20 @@ def resolve_warmup_sessions(
     if requested < 0:
         raise InvalidDataRequestError("requested_sessions must not be negative")
     anchor = _plain_date(first_formal_session, "first_formal_session")
-    ids = tuple(sorted(set(str(calendar_id) for calendar_id in calendar_ids)))
+    if isinstance(calendar_ids, (str, bytes)) or not isinstance(
+        calendar_ids, Iterable
+    ):
+        raise InvalidDataRequestError(
+            "calendar_ids must be an iterable of non-blank strings"
+        )
+    collected: list[str] = []
+    for calendar_id in calendar_ids:
+        if not isinstance(calendar_id, str) or not calendar_id.strip():
+            raise InvalidDataRequestError(
+                "calendar_ids entries must be non-blank strings"
+            )
+        collected.append(calendar_id)
+    ids = tuple(sorted(set(collected)))
     if not ids:
         raise InvalidDataRequestError("calendar_ids must not be empty")
 
@@ -413,6 +481,40 @@ def resolve_warmup_sessions(
                 ),
             ),
         )
+    if not isinstance(window, DateRange) or window.end_date >= anchor:
+        # A resolver window touching or crossing the anchor is invalid:
+        # resolution would read days at or after the first formal session.
+        details = (
+            {
+                "history_start_date": window.start_date.isoformat(),
+                "history_end_date": window.end_date.isoformat(),
+                "first_formal_session": anchor.isoformat(),
+            }
+            if isinstance(window, DateRange)
+            else None
+        )
+        return WarmupResolution(
+            requested_sessions=requested,
+            first_formal_session=anchor,
+            status=WarmupStatus.BLOCKED,
+            coverage_status=WarmupCoverageStatus.UNRESOLVED,
+            # The invalid window is recorded in the issue details only; it
+            # must not become part of the auditable resolution window.
+            issues=(
+                PreflightIssue(
+                    code=WARMUP_HISTORY_UNRESOLVED,
+                    severity=IssueSeverity.ERROR,
+                    scope=SCOPE_WARMUP,
+                    message=(
+                        f"warmup 历史窗口上界非法：必须早于首个正式会话 "
+                        f"{anchor.isoformat()}，已阻断请求数量 {requested} 的 "
+                        "warmup 解析"
+                    ),
+                    field="history_window",
+                    details=details,
+                ),
+            ),
+        )
 
     axis = resolve_calendar_axis(
         provider,
@@ -431,7 +533,9 @@ def resolve_warmup_sessions(
             first_formal_session=anchor,
             status=WarmupStatus.BLOCKED,
             coverage_status=coverage,
+            resolved_sessions=(),
             history_window=window,
+            axis_differences=tuple(axis.differences),
             issues=tuple(issues),
         )
 
@@ -467,7 +571,7 @@ def resolve_warmup_sessions(
                             f"warmup 历史窗口 {window.start_date.isoformat()}.."
                             f"{window.end_date.isoformat()} 内存在 "
                             f"{len(matching)} 处{difference_field.value}问题，"
-                            f"无法确认共同交易会话"
+                            f"请求数量 {requested}，实际无法确认任何共同交易会话"
                         ),
                         field=difference_field.value,
                         details={

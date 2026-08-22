@@ -205,8 +205,13 @@ class PreflightIssue:
             object.__setattr__(self, "details", frozen)
 
     @property
-    def sort_key(self) -> tuple[str, str, str, str, str]:
-        """Stable ordering key built from machine fields only."""
+    def sort_key(self) -> tuple[str, str, str, str, str, str]:
+        """Stable ordering key built from all machine fields.
+
+        ``details`` participates through its canonical JSON form so that
+        two issues differing only in details never tie: ties would keep
+        input order under stable sorting and make hashes depend on it.
+        """
 
         return (
             self.code,
@@ -214,6 +219,11 @@ class PreflightIssue:
             self.scope,
             str(self.instrument_id) if self.instrument_id else "",
             self.field or "",
+            (
+                canonical_json(dict(self.details))
+                if self.details is not None
+                else ""
+            ),
         )
 
     def machine_fields(self) -> dict[str, object]:
@@ -470,6 +480,7 @@ class DataPreflightReport:
     warmup_resolution: "WarmupResolution | None" = None
     warmup_resolution_signature: str | None = None
     calendar_axis_differences: tuple[CalendarAxisDifference, ...] = ()
+    warmup_axis_differences: tuple[CalendarAxisDifference, ...] = ()
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     report_hash: str = ""
 
@@ -615,6 +626,21 @@ class DataPreflightReport:
             raise InvalidDataRequestError(
                 "warmup_sessions must be empty when no warmup was requested"
             )
+        # Copy, type-check, sort, and freeze the warmup difference evidence
+        # before anything compares it against the mounted resolution.
+        warmup_differences = tuple(self.warmup_axis_differences)
+        for difference in warmup_differences:
+            if not isinstance(difference, CalendarAxisDifference):
+                raise InvalidDataRequestError(
+                    "warmup_axis_differences entries must be "
+                    "CalendarAxisDifference instances"
+                )
+        warmup_differences = tuple(
+            sorted(warmup_differences, key=lambda item: item.sort_key)
+        )
+        object.__setattr__(
+            self, "warmup_axis_differences", warmup_differences
+        )
         if self.warmup_resolution is not None:
             from app.backtesting.data.warmup import WarmupResolution, WarmupStatus
 
@@ -633,12 +659,27 @@ class DataPreflightReport:
                     "warmup_resolution requested count must equal "
                     "warmup_sessions_count"
                 )
-            if resolution.status is WarmupStatus.READY and len(warmup) != len(
-                resolution.resolved_sessions
+            if resolution.status is WarmupStatus.READY and (
+                len(warmup) != len(resolution.resolved_sessions)
+                or warmup != resolution.resolved_sessions
             ):
                 raise InvalidDataRequestError(
                     "a ready warmup resolution requires the report to carry "
-                    "the resolved warmup sessions"
+                    "exactly the resolved warmup sessions"
+                )
+            if (
+                resolution.status is WarmupStatus.READY
+                and sessions
+                and resolution.first_formal_session != sessions[0].session_date
+            ):
+                raise InvalidDataRequestError(
+                    "the mounted warmup anchor must equal the first formal "
+                    "session of this report"
+                )
+            if warmup_differences != tuple(resolution.axis_differences):
+                raise InvalidDataRequestError(
+                    "warmup_axis_differences must equal the axis "
+                    "differences of the mounted warmup resolution"
                 )
             if (
                 self.status is PreflightStatus.BLOCKED
@@ -658,6 +699,12 @@ class DataPreflightReport:
             raise InvalidDataRequestError(
                 "warmup_resolution_signature requires a mounted "
                 "warmup_resolution"
+            )
+        elif warmup_differences:
+            # Difference evidence only exists as part of a mounted warmup
+            # resolution; it can never be fabricated standalone.
+            raise InvalidDataRequestError(
+                "warmup_axis_differences require a mounted warmup_resolution"
             )
         if (
             self.status is PreflightStatus.READY
@@ -987,6 +1034,16 @@ class DataPreflightReport:
                     "expected_value": difference.expected_value,
                 }
                 for difference in self.calendar_axis_differences
+            ],
+            "warmup_axis_differences": [
+                {
+                    "date": difference.date,
+                    "calendar_id": difference.calendar_id,
+                    "field": difference.field,
+                    "actual_value": difference.actual_value,
+                    "expected_value": difference.expected_value,
+                }
+                for difference in self.warmup_axis_differences
             ],
             "max_lookback_sessions": self.max_lookback_sessions,
             "knowledge_as_of": self.knowledge_as_of,
