@@ -20,7 +20,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -653,11 +653,20 @@ def stitch_segmented_history(
     if not ordered_sessions:
         return ()
 
+    # Interval semantics are unified to half-open [from, to) everywhere:
+    # the public closed PitSegment bounds are converted explicitly here so
+    # exactly one interval convention enters the query path.  Sessions are
+    # discrete dates, so the conversion is lossless.
+    def _covers(segment: PitSegment, day: date) -> bool:
+        return segment.effective_from <= day < segment.effective_to + timedelta(
+            days=1
+        )
+
     # Coverage is verified before any provider read so overlapping segments
     # can never be queried twice, and gaps never trigger partial reads.
     coverage: dict[date, list[PitSegment]] = {}
     for day in ordered_sessions:
-        covering = [segment for segment in segments if segment.covers(day)]
+        covering = [segment for segment in segments if _covers(segment, day)]
         if not covering:
             raise IdentityMappingMissingError(
                 f"no PIT identity mapping covers session {day}"
@@ -674,7 +683,7 @@ def stitch_segmented_history(
         lower, upper = segment.clamp_window(ordered_sessions[0], ordered_sessions[-1])
         if lower > upper:
             continue
-        expected = [day for day in ordered_sessions if segment.covers(day)]
+        expected = [day for day in ordered_sessions if _covers(segment, day)]
         if not expected:
             continue
         rows = tuple(read_segment(segment.trading_code, expected[0], expected[-1]))

@@ -31,11 +31,17 @@ __all__ = [
     "DataPreflightBlockedError",
     "DataPreflightConfirmationMismatchError",
     "DataSessionClosedError",
+    "HistoryBarInstrumentMismatchError",
+    "HistoryBarsDuplicateError",
+    "HistoryBarsIncompleteError",
     "HistoryIncompleteError",
+    "IdentityMappingConflictError",
+    "IdentityMappingEvidenceMissingError",
     "IdentityMappingIncompleteError",
     "InvalidDataRequestError",
     "LookbackSessionsLimitExceededError",
     "ProviderContractViolationError",
+    "UniverseCalendarNotPreflightedError",
     "UnsupportedCapabilityError",
     "freeze_json",
 ]
@@ -133,6 +139,36 @@ class IdentityMappingIncompleteError(DataContractError):
     code = "identity_mapping_incomplete"
 
 
+class IdentityMappingConflictError(DataContractError):
+    """Two or more PIT mappings claim the same requested session."""
+
+    code = "identity_mapping_conflict"
+
+
+class IdentityMappingEvidenceMissingError(DataContractError):
+    """A covering PIT mapping carries no usable evidence."""
+
+    code = "identity_mapping_evidence_missing"
+
+
+class HistoryBarsIncompleteError(DataContractError):
+    """One identity segment did not return a bar for every requested session."""
+
+    code = "history_bars_incomplete"
+
+
+class HistoryBarsDuplicateError(DataContractError):
+    """One identity segment returned more than one bar for a session."""
+
+    code = "history_bars_duplicate"
+
+
+class HistoryBarInstrumentMismatchError(DataContractError):
+    """A returned bar is keyed by an instrument other than the queried one."""
+
+    code = "history_bar_instrument_mismatch"
+
+
 class HistoryIncompleteError(DataContractError):
     """Required history facts are missing; gaps are never repaired."""
 
@@ -169,6 +205,15 @@ class ProviderContractViolationError(DataContractError):
     code = "provider_contract_violation"
 
 
+class UniverseCalendarNotPreflightedError(DataContractError):
+    """A dynamic candidate set carries a calendar never preflighted this run.
+
+    The candidate is blocked instead of widening the run's frozen time axis.
+    """
+
+    code = "universe_calendar_not_preflighted"
+
+
 class DataSessionClosedError(DataContractError):
     """A data session was closed; no new chunks or business queries may run."""
 
@@ -185,13 +230,19 @@ ERROR_CODES: frozenset[str] = frozenset(
         DataCutoffExceededError,
         LookbackSessionsLimitExceededError,
         IdentityMappingIncompleteError,
+        IdentityMappingConflictError,
+        IdentityMappingEvidenceMissingError,
         HistoryIncompleteError,
+        HistoryBarsIncompleteError,
+        HistoryBarsDuplicateError,
+        HistoryBarInstrumentMismatchError,
         ConsistencyNotValidatedError,
         ConsistencyTokenInvalidError,
         ConsistencyTokenExpiredError,
         ConsistencyCoverageIncompleteError,
         ProviderContractViolationError,
         DataSessionClosedError,
+        UniverseCalendarNotPreflightedError,
     )
 )
 """Every stable error code defined by data-contract version 1."""

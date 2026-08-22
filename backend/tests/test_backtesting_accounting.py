@@ -1,12 +1,13 @@
 """Tests for fill application, settlement, and daily mark-to-market rules."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
 from uuid import uuid4
 
 from app.backtesting.accounting import (
     AccountingPolicy,
+    DeferredSettlementPlan,
     Fill,
     InsufficientCashError,
     OrderSide,
@@ -22,6 +23,14 @@ from app.backtesting.domain import (
 START = datetime(2026, 8, 21, 15, 0, tzinfo=timezone.utc)
 OPEN = datetime(2026, 8, 22, 1, 30, tzinfo=timezone.utc)
 NEXT_OPEN = datetime(2026, 8, 23, 1, 30, tzinfo=timezone.utc)
+
+TRADE_SESSION = date(2026, 8, 22)
+SETTLEMENT_SESSION = date(2026, 8, 24)
+PLAN = DeferredSettlementPlan(
+    calendar_id="SSE",
+    trade_session=TRADE_SESSION,
+    settlement_session=SETTLEMENT_SESSION,
+)
 
 
 def make_portfolio() -> PortfolioState:
@@ -66,7 +75,7 @@ class AccountingPolicyTestCase(unittest.TestCase):
         portfolio = make_portfolio()
         policy = AccountingPolicy()
 
-        result = policy.apply_fill(portfolio, make_buy())
+        result = policy.apply_fill(portfolio, make_buy(), settlement_plan=PLAN)
 
         self.assertTrue(result.applied)
         self.assertEqual(result.cash_delta, Decimal("-29410"))
@@ -80,14 +89,21 @@ class AccountingPolicyTestCase(unittest.TestCase):
             Decimal("29410") / Decimal("1400"),
         )
 
-        self.assertEqual(policy.settle_pending(portfolio), (INSTRUMENT_ID,))
+        released = policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SSE", session_date=SETTLEMENT_SESSION
+        )
+        self.assertEqual(released, (INSTRUMENT_ID,))
         self.assertEqual(position.available_quantity, Decimal("1400"))
+        self.assertEqual(policy.pending_batches(), ())
+        self.assertEqual(len(policy.settled_batches()), 1)
 
     def test_sell_updates_cash_and_realized_pnl_then_removes_zero_position(self) -> None:
         portfolio = make_portfolio()
         policy = AccountingPolicy()
-        policy.apply_fill(portfolio, make_buy())
-        policy.settle_pending(portfolio)
+        policy.apply_fill(portfolio, make_buy(), settlement_plan=PLAN)
+        policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SSE", session_date=SETTLEMENT_SESSION
+        )
 
         result = policy.apply_fill(
             portfolio,
@@ -135,6 +151,7 @@ class AccountingPolicyTestCase(unittest.TestCase):
             policy.apply_fill(
                 portfolio,
                 make_buy(price="25", quantity="4001", fees="1"),
+                settlement_plan=PLAN,
             )
 
         after = portfolio.snapshot()
@@ -158,7 +175,7 @@ class AccountingPolicyTestCase(unittest.TestCase):
     def test_sell_before_t_plus_one_settlement_is_rejected(self) -> None:
         portfolio = make_portfolio()
         policy = AccountingPolicy()
-        policy.apply_fill(portfolio, make_buy())
+        policy.apply_fill(portfolio, make_buy(), settlement_plan=PLAN)
 
         with self.assertRaisesRegex(ValueError, "available_quantity"):
             policy.apply_fill(
@@ -177,7 +194,7 @@ class AccountingPolicyTestCase(unittest.TestCase):
     def test_valuation_uses_marks_and_blocks_missing_data_without_zero_price(self) -> None:
         portfolio = make_portfolio()
         policy = AccountingPolicy()
-        policy.apply_fill(portfolio, make_buy())
+        policy.apply_fill(portfolio, make_buy(), settlement_plan=PLAN)
 
         complete = policy.value(portfolio, {INSTRUMENT_ID: "22"}, as_of=NEXT_OPEN)
 

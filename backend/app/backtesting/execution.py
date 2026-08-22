@@ -14,10 +14,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Mapping, Protocol, Sequence
 from uuid import UUID, uuid5
 
 from app.backtesting.accounting import Fill, OrderSide
+from app.backtesting.data.errors import freeze_json
 from app.backtesting.domain import (
     ZERO,
     DomainValidationError,
@@ -173,7 +175,13 @@ class Order:
 
 @dataclass(frozen=True, slots=True)
 class MarketState:
-    """PIT market facts required before an opening match may proceed."""
+    """PIT market facts required before an opening match may proceed.
+
+    The boolean fields keep their historical fixture defaults; the formal
+    path never relies on them: :func:`market_state_from_execution_facts`
+    sets every field explicitly from normalized session facts and records
+    that provenance in ``facts_basis``.
+    """
 
     instrument_id: UUID
     timestamp: datetime
@@ -185,6 +193,9 @@ class MarketState:
     sell_allowed: bool = True
     price_limit_status: PriceLimitStatus | str = PriceLimitStatus.NONE
     status_reason: str | None = None
+    # Deep-frozen provenance of a formal construction: per-dimension fact
+    # states, applicability, and evidence.  ``None`` marks fixture use.
+    facts_basis: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         _aware_datetime(self.timestamp, "timestamp")
@@ -199,6 +210,12 @@ class MarketState:
             )
         except ValueError as exc:
             raise ExecutionError("price_limit_status is unsupported") from exc
+        if self.facts_basis is not None:
+            if not isinstance(self.facts_basis, Mapping):
+                raise ExecutionError("facts_basis must be a mapping when provided")
+            frozen = freeze_json(dict(self.facts_basis), "facts_basis")
+            assert isinstance(frozen, Mapping)
+            object.__setattr__(self, "facts_basis", frozen)
 
 
 @dataclass(slots=True)

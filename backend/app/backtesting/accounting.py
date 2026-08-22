@@ -10,7 +10,7 @@ accounting boundary.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -63,12 +63,120 @@ class SettlementPolicy(StrEnum):
     T_PLUS_ONE = "t_plus_1"
 
 
+class SettlementError(DomainValidationError):
+    """Base class of stable settlement-accounting failures.
+
+    ``code`` is a stable machine identifier; ``details`` carries
+    structured context (instrument, sessions, calendar) without parsing
+    exception text.
+    """
+
+    code = "settlement_error"
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details: Mapping[str, object] = MappingProxyType(dict(details or {}))
+
+
+class SettlementBoundaryMissedError(SettlementError):
+    """The runner skipped a session where pending units should have been
+    released; late catch-up would rewrite historical matching results."""
+
+    code = "settlement_boundary_missed"
+
+
+@dataclass(frozen=True, slots=True)
+class DeferredSettlementPlan:
+    """Immutable per-fill settlement schedule bound to one calendar.
+
+    Computed once from the trading calendar at fill time (see
+    ``app.backtesting.settlement``) so accounting never has to guess
+    dates later.  ``settlement_session`` must be strictly after
+    ``trade_session``: a same-session release is by definition not
+    T+1-before-open-match.
+    """
+
+    calendar_id: str
+    trade_session: date
+    settlement_session: date
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calendar_id, str) or not self.calendar_id.strip():
+            raise SettlementError("calendar_id must be non-blank text")
+        for name, value in (
+            ("trade_session", self.trade_session),
+            ("settlement_session", self.settlement_session),
+        ):
+            if not isinstance(value, date) or isinstance(value, datetime):
+                raise SettlementError(f"{name} must be a calendar date")
+        if self.settlement_session <= self.trade_session:
+            raise SettlementError(
+                "settlement_session must be strictly after trade_session "
+                "(T+1 releases happen before the next open-session match)"
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class PendingSettlement:
+    """One immutable batch of bought units awaiting its T+1 release.
+
+    Batches are never merged across different trade sessions: doing so
+    would lose the settlement date and the auditable source fill.  Batches
+    from the same trade session stay separate too, so every fill keeps its
+    own ``source_fill_id`` trail.
+    """
+
+    instrument_id: UUID
+    quantity: Decimal
+    trade_session: date
+    settlement_session: date
+    calendar_id: str
+    source_fill_id: UUID
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise SettlementError("instrument_id must be a UUID")
+        if isinstance(self.quantity, bool) or not isinstance(
+            self.quantity, Decimal
+        ):
+            raise SettlementError("quantity must be a Decimal")
+        if self.quantity <= ZERO:
+            raise SettlementError("quantity must be positive")
+        for name, value in (
+            ("trade_session", self.trade_session),
+            ("settlement_session", self.settlement_session),
+        ):
+            if not isinstance(value, date) or isinstance(value, datetime):
+                raise SettlementError(f"{name} must be a calendar date")
+        if self.settlement_session <= self.trade_session:
+            raise SettlementError(
+                "settlement_session must be strictly after trade_session"
+            )
+        if not isinstance(self.calendar_id, str) or not self.calendar_id.strip():
+            raise SettlementError("calendar_id must be non-blank text")
+        if not isinstance(self.source_fill_id, UUID):
+            raise SettlementError("source_fill_id must be a UUID")
+
+
 def _currency(value: str) -> str:
     """Normalize a currency code while keeping the policy single-currency."""
 
     if not isinstance(value, str) or not value.strip():
         raise DomainValidationError("currency must be non-blank text")
     return value.strip().upper()
+
+
+def _require_non_blank_calendar(calendar_id: str) -> str:
+    """Require a non-blank calendar identifier on settlement calls."""
+
+    if not isinstance(calendar_id, str) or not calendar_id.strip():
+        raise SettlementError("calendar_id must be non-blank text")
+    return calendar_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,7 +299,8 @@ class AccountingPolicy:
     currency: str = "CNY"
     settlement_policy: SettlementPolicy = SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
     _processed_fill_ids: set[UUID] = field(default_factory=set, init=False)
-    _pending_settlement: dict[UUID, Decimal] = field(default_factory=dict, init=False)
+    _pending_settlement: list[PendingSettlement] = field(default_factory=list, init=False)
+    _settled_batches: tuple[PendingSettlement, ...] = field(default=(), init=False)
 
     def __post_init__(self) -> None:
         """Normalize policy inputs before the first fill is processed."""
@@ -213,16 +322,49 @@ class AccountingPolicy:
             SettlementPolicy.T_PLUS_ONE,
         }
 
-    def apply_fill(self, portfolio: PortfolioState, fill: Fill) -> FillApplication:
+    def apply_fill(
+        self,
+        portfolio: PortfolioState,
+        fill: Fill,
+        *,
+        settlement_plan: DeferredSettlementPlan | None = None,
+    ) -> FillApplication:
         """Apply a fill atomically, or raise without changing portfolio state.
 
         A duplicate fill id is an idempotent no-op.  For buys, the available
         cash check includes fees and rejects the whole fill when it fails.  The
         method never creates partial fills and never silently clips a quantity.
+
+        Under a deferred settlement policy every buy fill must carry the
+        calendar-resolved :class:`DeferredSettlementPlan`; batches without
+        one cannot be scheduled and are rejected instead of guessed.
         """
 
         if fill.fill_id in self._processed_fill_ids:
             return FillApplication(fill.fill_id, False, ZERO, ZERO)
+        if self._uses_deferred_settlement and fill.side is OrderSide.BUY:
+            if settlement_plan is None:
+                raise SettlementError(
+                    "deferred settlement requires a calendar-resolved "
+                    "settlement plan for every buy fill"
+                )
+            _ = DeferredSettlementPlan(
+                calendar_id=settlement_plan.calendar_id,
+                trade_session=settlement_plan.trade_session,
+                settlement_session=settlement_plan.settlement_session,
+            )
+            trade_session = fill.timestamp.date()
+            if settlement_plan.trade_session != trade_session:
+                raise SettlementError(
+                    "the settlement plan trade_session must match the fill "
+                    "date",
+                    details={
+                        "plan_trade_session": (
+                            settlement_plan.trade_session.isoformat()
+                        ),
+                        "fill_date": trade_session.isoformat(),
+                    },
+                )
         if fill.currency != self.currency:
             raise AccountingError(
                 f"fill currency {fill.currency!r} does not match policy currency "
@@ -250,33 +392,87 @@ class AccountingPolicy:
             )
 
         if fill.side is OrderSide.BUY:
-            return self._apply_buy(portfolio, fill, existing, current_cash)
+            return self._apply_buy(
+                portfolio, fill, existing, current_cash, settlement_plan
+            )
         return self._apply_sell(portfolio, fill, existing, current_cash)
 
-    def settle_pending(self, portfolio: PortfolioState) -> tuple[UUID, ...]:
-        """Release all pending purchases at the next settlement boundary.
+    def pending_batches(self) -> tuple[PendingSettlement, ...]:
+        """Batches awaiting release, in fill order (audit view)."""
 
-        The trading calendar owns the exact next-session date.  The runner
-        calls this method at that boundary, so the policy does not guess over
-        weekends or exchange holidays.
+        return tuple(self._pending_settlement)
+
+    def settled_batches(self) -> tuple[PendingSettlement, ...]:
+        """Batches already released, in release order (audit view)."""
+
+        return self._settled_batches
+
+    def settle_pending_before_open_match(
+        self,
+        portfolio: PortfolioState,
+        *,
+        calendar_id: str,
+        session_date: date,
+    ) -> tuple[UUID, ...]:
+        """Release exactly the batches due before this session's open match.
+
+        The call is bound to the current ``calendar_id + session_date``.
+        Batches whose settlement session is *earlier* than
+        ``session_date`` mean the runner skipped an official settlement
+        boundary: releasing them now would change historical matching
+        results, so :class:`SettlementBoundaryMissedError` is raised and
+        nothing is released.  Batches settling later stay untouched, and a
+        suspended instrument never shifts its own settlement date — the
+        sell order simply expires later in execution.
         """
 
         if not self._uses_deferred_settlement:
             return ()
+        _require_non_blank_calendar(calendar_id)
+        if not isinstance(session_date, date) or isinstance(session_date, datetime):
+            raise SettlementError("session_date must be a calendar date")
 
-        settled: list[UUID] = []
-        for instrument_id, quantity in tuple(self._pending_settlement.items()):
-            position = portfolio.positions.get(instrument_id)
+        overdue = [
+            batch
+            for batch in self._pending_settlement
+            if batch.settlement_session < session_date
+        ]
+        if overdue:
+            first = min(overdue, key=lambda b: b.settlement_session)
+            raise SettlementBoundaryMissedError(
+                "a settlement boundary was skipped: batches bought on "
+                f"{first.trade_session.isoformat()} should have been "
+                f"released on {first.settlement_session.isoformat()}, but "
+                f"the runner first called settle at {session_date.isoformat()}; "
+                "late catch-up would rewrite historical matching results",
+                details={
+                    "calendar_id": calendar_id,
+                    "session_date": session_date.isoformat(),
+                    "missed_settlement_session": (
+                        first.settlement_session.isoformat()
+                    ),
+                    "instrument_id": str(first.instrument_id),
+                },
+            )
+
+        released: list[UUID] = []
+        remaining: list[PendingSettlement] = []
+        for batch in self._pending_settlement:
+            if batch.settlement_session != session_date:
+                remaining.append(batch)
+                continue
+            position = portfolio.positions.get(batch.instrument_id)
             if position is None:
                 raise AccountingError(
                     "pending settlement refers to a missing position"
                 )
-            new_available = position.available_quantity + quantity
+            new_available = position.available_quantity + batch.quantity
             _validate_available_quantity(position.quantity, new_available)
             position.available_quantity = new_available
-            settled.append(instrument_id)
-            del self._pending_settlement[instrument_id]
-        return tuple(sorted(settled, key=str))
+            released.append(batch.instrument_id)
+            self._settled_batches += (batch,)
+        self._pending_settlement = remaining
+        return tuple(sorted(released, key=str))
 
     def value(
         self,
@@ -334,6 +530,7 @@ class AccountingPolicy:
         fill: Fill,
         existing: PositionState | None,
         current_cash: Decimal,
+        settlement_plan: DeferredSettlementPlan | None = None,
     ) -> FillApplication:
         """Prepare and commit one complete long buy."""
 
@@ -389,9 +586,16 @@ class AccountingPolicy:
         account.cash_balances[self.currency] = current_cash - cash_required
         account.available_cash -= cash_required
         portfolio.positions[fill.instrument_id] = new_position
-        if self._uses_deferred_settlement:
-            self._pending_settlement[fill.instrument_id] = (
-                self._pending_settlement.get(fill.instrument_id, ZERO) + fill.quantity
+        if self._uses_deferred_settlement and settlement_plan is not None:
+            self._pending_settlement.append(
+                PendingSettlement(
+                    instrument_id=fill.instrument_id,
+                    quantity=fill.quantity,
+                    trade_session=settlement_plan.trade_session,
+                    settlement_session=settlement_plan.settlement_session,
+                    calendar_id=settlement_plan.calendar_id,
+                    source_fill_id=fill.fill_id,
+                )
             )
         self._processed_fill_ids.add(fill.fill_id)
         portfolio.as_of = fill.timestamp

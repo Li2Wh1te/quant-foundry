@@ -1,6 +1,6 @@
 """Tests for slippage, fee calculation, and opening-bar execution."""
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 import unittest
 from uuid import uuid4
@@ -8,6 +8,7 @@ from uuid import uuid4
 from app.backtesting.accounting import (
     AccountingPolicy,
     AccountState,
+    DeferredSettlementPlan,
     OrderSide,
     PortfolioState,
     SettlementPolicy,
@@ -259,7 +260,15 @@ class BarMarketExecutionTestCase(unittest.TestCase):
             {INSTRUMENT_ID: instrument_state},
             MatchContext.from_portfolio(portfolio),
         )
-        policy.apply_fill(portfolio, buy_result.fills[0])
+        policy.apply_fill(
+            portfolio,
+            buy_result.fills[0],
+            settlement_plan=DeferredSettlementPlan(
+                calendar_id="SSE",
+                trade_session=OPEN.date(),
+                settlement_session=date(2026, 8, 24),
+            ),
+        )
         self.assertEqual(portfolio.positions[INSTRUMENT_ID].available_quantity, Decimal("0"))
 
         same_day_sell = order(side=OrderSide.SELL, quantity="100")
@@ -276,7 +285,9 @@ class BarMarketExecutionTestCase(unittest.TestCase):
 
         # The runner performs this release at the next session's pre-match
         # boundary, before it builds the next match context.
-        policy.settle_pending(portfolio)
+        policy.settle_pending_before_open_match(
+            portfolio, calendar_id="SSE", session_date=date(2026, 8, 24)
+        )
         next_open = MarketState(
             instrument_id=INSTRUMENT_ID,
             timestamp=datetime(2026, 8, 23, 1, 30, tzinfo=timezone.utc),
