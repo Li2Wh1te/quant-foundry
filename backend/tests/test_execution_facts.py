@@ -223,6 +223,58 @@ class NormalizationGateTestCase(unittest.TestCase):
             SUSPENSION,
         )
 
+    def test_directional_disagreement_with_same_limit_blocks(self) -> None:
+        # Same limit status ("none") but different directional availability:
+        # the whole (status, buy, sell) triple must conflict, regardless of
+        # input order — no first-write-wins.
+        fact_a = make_status(LIMIT, "none", attributes={
+            "buy_allowed": False, "sell_allowed": True,
+        })
+        fact_b = make_status(
+            LIMIT, "none", valid_from=date(2026, 8, 25),
+            attributes={"buy_allowed": True, "sell_allowed": True},
+        )
+
+        for facts in ([fact_a, fact_b], [fact_b, fact_a]):
+            resolved, issues = self.evaluate(facts=facts)
+            self.assertIsNone(resolved)
+            matching = [
+                i for i in issues
+                if i.code == "trading_status_fact_conflict"
+                and i.dimension == LIMIT
+            ]
+            self.assertEqual(len(matching), 1, [i.code for i in issues])
+
+    def test_declared_not_applicable_with_present_facts_blocks(self) -> None:
+        # A dimension declared away must never be silently overridden by
+        # facts that arrived anyway: the disagreement fails closed.
+        applicability = {SUSPENSION: "required", OPENING: "required", LIMIT: "not_applicable"}
+        facts = [
+            make_status(SUSPENSION, "tradable"),
+            make_status(OPENING, "available"),
+            make_status(LIMIT, "up", attributes={
+                "buy_allowed": False, "sell_allowed": True,
+            }),
+        ]
+
+        resolved, issues = evaluate_execution_facts(
+            INSTRUMENT_ID,
+            calendar_id=CALENDAR_ID,
+            session_date=SESSION,
+            applicability=applicability,
+            status_facts=facts,
+            data_cutoff=CUTOFF,
+            rule_package_reference="china_listed_etf_rules@1",
+        )
+
+        self.assertIsNone(resolved)
+        matching = [
+            i for i in issues
+            if i.code == "trading_status_fact_conflict" and i.dimension == LIMIT
+        ]
+        self.assertEqual(len(matching), 1)
+        self.assertEqual(matching[0].details["applicability"], "not_applicable")
+
     def test_unknown_status_value_blocks(self) -> None:
         facts = [
             make_status(SUSPENSION, "halted_maybe"),
@@ -481,11 +533,15 @@ class FormalMarketStateTestCase(unittest.TestCase):
         self.assertTrue(state.buy_allowed)
         self.assertTrue(state.sell_allowed)
         self.assertIs(state.price_limit_status, PriceLimitStatus.NONE)
-        # Provenance travels into the market state for run snapshots.
+        # Provenance travels into the market state for run snapshots and
+        # leads with the locating identity.
         self.assertIn(SUSPENSION, state.facts_basis)
         self.assertEqual(
             state.facts_basis[SUSPENSION]["source"], "exchange_status_feed"
         )
+        self.assertEqual(state.facts_basis["instrument_id"], str(INSTRUMENT_ID))
+        self.assertEqual(state.facts_basis["calendar_id"], CALENDAR_ID)
+        self.assertEqual(state.facts_basis["session_date"], SESSION.isoformat())
 
     def test_suspended_session_expires_orders_with_stable_reason(self) -> None:
         state = market_state_from_execution_facts(

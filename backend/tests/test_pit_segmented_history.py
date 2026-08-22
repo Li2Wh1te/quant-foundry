@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 
 from app.backtesting.data.errors import (
     DataContractError,
+    DataCutoffExceededError,
     HistoryBarInstrumentMismatchError,
     HistoryBarsDuplicateError,
     HistoryBarsIncompleteError,
@@ -215,6 +216,22 @@ class ResolutionTestCase(unittest.TestCase):
             {date(2026, 8, 18): "OLD.CODE", date(2026, 8, 19): "OLD.CODE"},
         )
 
+    def test_sessions_past_data_cutoff_are_rejected(self) -> None:
+        mapping = make_mapping("OLD.CODE", date(2026, 1, 1))
+
+        with self.assertRaises(DataCutoffExceededError) as ctx:
+            resolve_pit_mappings(
+                INSTRUMENT_ID,
+                source=SOURCE,
+                sessions=[date(2026, 8, 22), date(2026, 8, 25)],
+                mappings=[mapping],
+                data_cutoff=CUTOFF,
+            )
+        self.assertEqual(ctx.exception.code, "data_cutoff_exceeded")
+        self.assertEqual(
+            ctx.exception.details["first_session_past_cutoff"], "2026-08-25"
+        )
+
     def test_blank_evidence_blocks(self) -> None:
         # Construct through __new__ to simulate a corrupted provider row.
         mapping = object.__new__(InstrumentCodeMapping)
@@ -332,6 +349,72 @@ class SegmentedReadTestCase(unittest.TestCase):
 
         with self.assertRaises(HistoryBarsIncompleteError):
             read_segmented_history(self._resolution(), JunkReader())
+
+    def test_partial_quality_bar_blocks(self) -> None:
+        from app.backtesting.data.facts import FactEvidence
+        from app.backtesting.data.requests import QualityStatus
+
+        partial = Bar(
+            instrument_id=INSTRUMENT_ID,
+            trade_date=date(2026, 8, 20),
+            frequency="1d",
+            open="0",
+            high="0",
+            low="0",
+            close="0",
+            volume="0",
+            amount="0",
+            price_basis=PriceBasis.RAW,
+            evidence=FactEvidence(
+                source="tushare",
+                observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+                quality_status=QualityStatus.PARTIAL,
+                known_at=datetime(2026, 8, 21, tzinfo=UTC),
+            ),
+        )
+        self.bars[("NEW.CODE", date(2026, 8, 20))] = partial
+
+        with self.assertRaises(HistoryBarsIncompleteError) as ctx:
+            read_segmented_history(self._resolution(), FakeReader(self.bars))
+        self.assertEqual(
+            ctx.exception.details["quality_status"], "partial"
+        )
+
+    def test_bar_without_knowledge_time_evidence_blocks(self) -> None:
+        from app.backtesting.data.facts import FactEvidence
+
+        no_known_at = make_bar(date(2026, 8, 20))
+        object.__setattr__(
+            no_known_at,
+            "evidence",
+            FactEvidence(
+                source="tushare",
+                observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+                quality_status=QualityStatus.COMPLETE,
+                known_at=None,
+            ),
+        )
+        self.bars[("NEW.CODE", date(2026, 8, 20))] = no_known_at
+
+        with self.assertRaises(HistoryBarsIncompleteError):
+            read_segmented_history(self._resolution(), FakeReader(self.bars))
+
+    def test_bar_learned_after_cutoff_blocks(self) -> None:
+        late_bar = make_bar(date(2026, 8, 20))
+        object.__setattr__(
+            late_bar,
+            "evidence",
+            FactEvidence(
+                source="tushare",
+                observed_at=datetime(2026, 8, 25, tzinfo=UTC),
+                quality_status=QualityStatus.COMPLETE,
+                known_at=datetime(2026, 8, 25, tzinfo=UTC),
+            ),
+        )
+        self.bars[("NEW.CODE", date(2026, 8, 20))] = late_bar
+
+        with self.assertRaises(HistoryBarsIncompleteError):
+            read_segmented_history(self._resolution(), FakeReader(self.bars))
 
 
 class LookbackTestCase(unittest.TestCase):

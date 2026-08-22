@@ -338,6 +338,29 @@ def evaluate_execution_facts(
                 }
             continue
 
+        if declared == "not_applicable":
+            # A declared-not-applicable dimension must not be silently
+            # overridden by facts that arrived anyway: the inputs disagree
+            # with the frozen declaration, which fails closed.
+            issues.append(
+                ExecutionFactIssue(
+                    code="trading_status_fact_conflict",
+                    dimension=dimension,
+                    message=(
+                        f"能力维度 {_DIMENSION_LABELS_ZH[dimension]}"
+                        f"（{dimension}）已声明为 not_applicable，"
+                        "但输入中仍携带该维度的事实，正式运行阻断"
+                    ),
+                    details={
+                        "instrument_id": str(instrument_id),
+                        "session_date": session_date.isoformat(),
+                        "applicability": declared,
+                        "statuses": sorted(fact.status for fact in facts),
+                    },
+                )
+            )
+            continue
+
         parsed = [
             _parse_fact_value(dimension, fact, issues) for fact in facts
         ]
@@ -363,7 +386,6 @@ def evaluate_execution_facts(
         if not distinct:
             continue  # parse-level issues already recorded above
         chosen = next(iter(distinct))
-        states[dimension] = chosen
         source_fact = facts[0]
         record: dict[str, object] = {
             "applicability": "required",
@@ -381,17 +403,17 @@ def evaluate_execution_facts(
         }
         evidence[dimension] = record
         if dimension == CAPABILITY_DIMENSION_PRICE_LIMIT_TRADABILITY:
-            # The directional booleans ride on the same winning fact so
-            # they can never disagree with the reported limit state.
-            attributes = source_fact.attributes
-            buy_flag = bool(attributes.get("buy_allowed"))
-            sell_flag = bool(attributes.get("sell_allowed"))
-            states["buy_allowed"] = (
-                DirectionalAvailability.YES if buy_flag else DirectionalAvailability.NO
-            )
-            states["sell_allowed"] = (
-                DirectionalAvailability.YES if sell_flag else DirectionalAvailability.NO
-            )
+            # The parsed value is the whole (status, buy, sell) triple, so
+            # directional disagreement between facts is a conflict above
+            # and the winning triple can never disagree internally.
+            limit_state, buy_state, sell_state = chosen
+            states[dimension] = limit_state
+            states["buy_allowed"] = buy_state
+            states["sell_allowed"] = sell_state
+            record["buy_allowed"] = buy_state.value
+            record["sell_allowed"] = sell_state.value
+        else:
+            states[dimension] = chosen
 
     if issues:
         return None, tuple(issues)
@@ -432,8 +454,8 @@ def _covers_session(fact: TradingStatus, session_date: date) -> bool:
 
 def _parse_fact_value(
     dimension: str, fact: TradingStatus, issues: list[ExecutionFactIssue]
-) -> StrEnum | None:
-    """Parse one covering fact into its normalized value, or record issues."""
+) -> object | None:
+    """Parse one covering fact into its comparable value, or record issues."""
 
     if fact.status not in _STATUS_VOCABULARY[dimension]:
         issues.append(
@@ -477,7 +499,14 @@ def _parse_fact_value(
             )
         )
         return None
-    return PriceLimitState(fact.status)
+    # The whole (status, buy, sell) triple participates in conflict
+    # detection: two facts with the same limit status but different
+    # directional availability are a conflict, not a first-write-wins.
+    return (
+        PriceLimitState(fact.status),
+        DirectionalAvailability.YES if attributes["buy_allowed"] else DirectionalAvailability.NO,
+        DirectionalAvailability.YES if attributes["sell_allowed"] else DirectionalAvailability.NO,
+    )
 
 
 def _apply_not_applicable(dimension: str, states: dict[str, object]) -> None:
@@ -532,6 +561,15 @@ def market_state_from_execution_facts(
         PriceLimitState.NOT_APPLICABLE: PriceLimitStatus.NONE,
     }[facts.price_limit_status]
 
+    # The provenance record leads with the locating identity so a
+    # persisted MarketState is auditable on its own.
+    facts_basis: dict[str, object] = {
+        "instrument_id": str(facts.instrument_id),
+        "calendar_id": facts.calendar_id,
+        "session_date": facts.session_date.isoformat(),
+    }
+    facts_basis.update(dict(facts.evidence))
+
     return MarketState(
         instrument_id=facts.instrument_id,
         timestamp=timestamp,
@@ -544,5 +582,5 @@ def market_state_from_execution_facts(
         sell_allowed=facts.sell_allowed is not DirectionalAvailability.NO,
         price_limit_status=price_limit_status,
         status_reason=None,
-        facts_basis=facts.evidence,
+        facts_basis=facts_basis,
     )

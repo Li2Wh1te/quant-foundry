@@ -34,6 +34,7 @@ from typing import Mapping, Protocol, Sequence
 from uuid import UUID
 
 from app.backtesting.data.errors import (
+    DataCutoffExceededError,
     HistoryBarsDuplicateError,
     HistoryBarInstrumentMismatchError,
     HistoryBarsIncompleteError,
@@ -43,6 +44,7 @@ from app.backtesting.data.errors import (
     freeze_json,
 )
 from app.backtesting.data.facts import Bar
+from app.backtesting.data.requests import QualityStatus
 from app.backtesting.domain import _aware_datetime
 from app.instruments.domain import InstrumentCodeMapping
 
@@ -158,6 +160,18 @@ def resolve_pit_mappings(
     if not isinstance(instrument_id, UUID):
         raise IdentityMappingIncompleteError("instrument_id must be a UUID")
     ordered_sessions = _validate_sessions(sessions)
+    # A session after the cutoff cannot have visible history: asking for
+    # one is a caller contract breach, blocked before any resolution.
+    cutoff_date = data_cutoff.date()
+    future = [day for day in ordered_sessions if day > cutoff_date]
+    if future:
+        raise DataCutoffExceededError(
+            "requested sessions extend past the data cutoff",
+            details={
+                "data_cutoff": data_cutoff.isoformat(),
+                "first_session_past_cutoff": future[0].isoformat(),
+            },
+        )
     if not isinstance(source, str) or not source.strip():
         raise IdentityMappingIncompleteError("source must be non-blank text")
 
@@ -325,6 +339,7 @@ def read_segmented_history(
     """
 
     collected: dict[date, Bar] = {}
+    cutoff_date = resolution.data_cutoff.date()
     for segment in resolution.segments:
         expected = segment.requested_sessions
         expected_set = set(expected)
@@ -352,6 +367,36 @@ def read_segmented_history(
                         "expected_instrument_id": str(resolution.instrument_id),
                         "returned_instrument_id": str(row.instrument_id),
                         "trade_date": row.trade_date.isoformat(),
+                    },
+                )
+            # Formal reads re-check fact quality and knowledge time even
+            # though upstream boundaries should already enforce them: a
+            # leaky or partial row must block instead of stitching in.
+            if row.evidence.known_at is None or row.evidence.known_at > (
+                resolution.data_cutoff
+            ):
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned a bar without strict "
+                    "knowledge-time evidence inside the data cutoff",
+                    details={
+                        "source_code": segment.source_code,
+                        "trade_date": row.trade_date.isoformat(),
+                        "known_at": (
+                            row.evidence.known_at.isoformat()
+                            if row.evidence.known_at is not None
+                            else None
+                        ),
+                        "data_cutoff": resolution.data_cutoff.isoformat(),
+                    },
+                )
+            if row.evidence.quality_status is not QualityStatus.COMPLETE:
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned a bar that is not complete "
+                    "quality",
+                    details={
+                        "source_code": segment.source_code,
+                        "trade_date": row.trade_date.isoformat(),
+                        "quality_status": row.evidence.quality_status.value,
                     },
                 )
             if row.trade_date not in expected_set:

@@ -145,6 +145,60 @@ class NextOpenSessionTestCase(unittest.TestCase):
             )
         self.assertEqual(ctx.exception.code, "settlement_calendar_unresolved")
 
+    def test_foreign_or_inconsistent_fact_blocks_as_unresolved(self) -> None:
+        # A broken provider returning facts for another calendar, another
+        # date, or an unregistered definition version can never turn into
+        # a settlement day.
+        class LyingProvider(InMemoryCalendarAxisDataProvider):
+            def __init__(self, inner):
+                self._inner = inner
+
+            def definitions(self, calendar_id):
+                return self._inner.definitions(calendar_id)
+
+            def fact(self, calendar_id, day):
+                real = self._inner.fact(calendar_id, day)
+                if calendar_id == "SZSE" and day == date(2026, 8, 22):
+                    # Wrong calendar on the returned fact.
+                    return CalendarSessionFact(
+                        calendar_id="SSE",
+                        session_date=day,
+                        is_open=True,
+                        definition_version=CALENDAR_VERSION,
+                        source="test",
+                    )
+                if calendar_id == "SSE" and day == date(2026, 8, 22):
+                    # Right calendar, wrong date.
+                    return CalendarSessionFact(
+                        calendar_id="SSE",
+                        session_date=date(2026, 1, 1),
+                        is_open=True,
+                        definition_version=CALENDAR_VERSION,
+                        source="test",
+                    )
+                if calendar_id == "SSE" and day == date(2026, 8, 23):
+                    # Unknown definition version.
+                    return CalendarSessionFact(
+                        calendar_id="SSE",
+                        session_date=day,
+                        is_open=True,
+                        definition_version="ghost@9",
+                        source="test",
+                    )
+                return real
+
+        provider = calendar_provider({date(2026, 8, 21)})
+        for queried_calendar, after in (
+            ("SZSE", date(2026, 8, 21)),
+            ("SSE", date(2026, 8, 21)),
+            ("SSE", date(2026, 8, 22)),
+        ):
+            gateway = CalendarAxisSettlementGateway(
+                LyingProvider(calendar_provider({date(2026, 8, 21)}))
+            )
+            with self.assertRaises(SettlementCalendarUnresolvedError):
+                gateway.next_open_session(queried_calendar, after)
+
     def test_no_open_session_within_horizon_blocks(self) -> None:
         gateway = CalendarAxisSettlementGateway(
             calendar_provider(set(), fact_to=date(2027, 12, 31))
@@ -173,6 +227,14 @@ class FormalSettlementGateTestCase(unittest.TestCase):
     def test_legacy_t_plus_one_is_blocked(self) -> None:
         with self.assertRaises(UnsupportedSettlementRuleError):
             require_formal_settlement_policy(SettlementPolicy.T_PLUS_ONE)
+
+    def test_unknown_raw_class_is_blocked_not_broken(self) -> None:
+        # A raw unknown string must produce the stable blocking error,
+        # never AttributeError from attribute access.
+        with self.assertRaises(UnsupportedSettlementRuleError) as ctx:
+            require_formal_settlement_policy("weekly")
+        self.assertEqual(ctx.exception.code, "settlement_rule_unsupported")
+        self.assertEqual(ctx.exception.details["requested_policy"], "weekly")
 
     def test_rule_class_mapping_rejects_unknown_classes(self) -> None:
         self.assertEqual(

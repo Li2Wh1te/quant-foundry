@@ -76,7 +76,7 @@ from tests.test_backtesting_settlement import calendar_provider
 INSTRUMENT_ID = uuid4()
 SOURCE = "tushare"
 CALENDAR_ID = "SSE"
-CUTOFF = datetime(2026, 8, 22, tzinfo=UTC)
+CUTOFF = datetime(2026, 8, 25, tzinfo=UTC)
 KNOWN_AT = datetime(2025, 12, 1, tzinfo=UTC)
 
 CODE_CHANGE_DAY = date(2026, 8, 20)

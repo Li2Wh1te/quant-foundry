@@ -124,6 +124,13 @@ class CalendarAxisSettlementGateway:
         horizon_end = after_session + timedelta(
             days=_MAX_NEXT_SESSION_LOOKAHEAD_DAYS
         )
+        # Anomalous providers must not turn foreign-calendar or
+        # wrong-date facts into settlement days: every returned fact is
+        # checked for identity, date, and a registered definition version.
+        known_versions = {
+            definition.definition_version
+            for definition in self._provider.definitions(calendar_id)
+        }
         day = after_session + timedelta(days=1)
         while day <= horizon_end:
             fact = self._provider.fact(calendar_id, day)
@@ -135,6 +142,24 @@ class CalendarAxisSettlementGateway:
                     details={
                         "calendar_id": calendar_id,
                         "missing_fact_date": day.isoformat(),
+                    },
+                )
+            if (
+                fact.calendar_id != calendar_id
+                or fact.session_date != day
+                or fact.definition_version not in known_versions
+            ):
+                raise SettlementCalendarUnresolvedError(
+                    "the calendar provider returned an inconsistent "
+                    "session fact; the next settlement session cannot be "
+                    "resolved",
+                    details={
+                        "calendar_id": calendar_id,
+                        "requested_fact_date": day.isoformat(),
+                        "fact_calendar_id": fact.calendar_id,
+                        "fact_session_date": fact.session_date.isoformat(),
+                        "fact_definition_version": fact.definition_version,
+                        "known_definition_versions": sorted(known_versions),
                     },
                 )
             if fact.is_open:
@@ -203,16 +228,22 @@ def require_formal_settlement_policy(policy: SettlementPolicy) -> None:
 
     The legacy ``t_plus_1`` member stays constructible for old in-memory
     fixtures but can never pass this gate, and neither can ``same_day``
-    or any future category.
+    or any future category.  Raw strings and unknown values are rejected
+    with the same stable error instead of leaking ``AttributeError``.
     """
 
-    if policy is not SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH:
+    try:
+        resolved = SettlementPolicy(getattr(policy, "value", policy))
+    except ValueError:
+        resolved = None
+    if resolved is not SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH:
+        requested = getattr(policy, "value", policy)
         raise UnsupportedSettlementRuleError(
             f"formal runs accept only "
             f"'{FORMAL_SETTLEMENT_RULE_CLASS.value}' settlement, got "
-            f"'{policy.value}'",
+            f"'{requested}'",
             details={
                 "formal_rule_class": FORMAL_SETTLEMENT_RULE_CLASS.value,
-                "requested_policy": policy.value,
+                "requested_policy": str(requested),
             },
         )
