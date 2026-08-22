@@ -262,15 +262,22 @@ def sign_token(payload: dict[str, Any], signing_key: str) -> str:
     return f"{encoded}.{mac}"
 
 
-def _split_signed_token(token: str) -> tuple[str, dict[str, Any], str]:
-    """Split a token into (payload-b64, decoded-payload, signature)."""
+def _split_signed_token(token: str) -> tuple[str, str]:
+    """Split a token into its raw (payload-b64, signature) parts.
+
+    No decoding happens here: the caller must verify the MAC over the raw
+    payload bytes before interpreting any content.
+    """
 
     if not isinstance(token, str) or not token or len(token) > 8192:
         raise MalformedCursorError("cursor must be a non-empty short token")
     parts = token.split(".")
     if len(parts) != 2 or not parts[0] or not parts[1]:
         raise MalformedCursorError("cursor is missing its signature")
-    encoded_payload, signature = parts
+    return parts[0], parts[1]
+
+
+def _decode_signed_payload(encoded_payload: str) -> dict[str, Any]:
     padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
     try:
         raw = urlsafe_b64decode(padded.encode("ascii"))
@@ -279,7 +286,7 @@ def _split_signed_token(token: str) -> tuple[str, dict[str, Any], str]:
         raise MalformedCursorError("cursor is not valid base64url JSON") from exc
     if not isinstance(payload, dict):
         raise MalformedCursorError("cursor payload must be a JSON object")
-    return encoded_payload, payload, signature
+    return payload
 
 
 def parse_cursor(
@@ -292,20 +299,24 @@ def parse_cursor(
 ) -> ParsedCursor:
     """Decode and fully validate a cursor token.
 
-    The server-side MAC is verified first; tokens without a valid signature
-    are rejected before their content is interpreted.  ``key_kinds`` declares
-    the positional sort-key kinds of the result type;
-    ``upper_bound_columns`` declares the expected upper-bound columns and
-    their kinds.  When provided, structural mismatches are rejected.
+    The server-side MAC is verified over the raw payload bytes BEFORE the
+    content is decoded or interpreted; tokens without a valid signature are
+    rejected outright.  ``key_kinds`` declares the positional sort-key kinds
+    of the result type; ``upper_bound_columns`` declares the expected
+    upper-bound columns and their kinds.  When provided, structural
+    mismatches are rejected.
     """
 
     key = _require_signing_key(signing_key)
-    encoded_payload, payload, signature = _split_signed_token(token)
+    encoded_payload, signature = _split_signed_token(token)
     recomputed = hmac.new(
         key.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256
     ).hexdigest()
     if not hmac_compare(signature, recomputed):
         raise MalformedCursorError("cursor signature verification failed")
+
+    # The signature is valid; only now is the content decoded and trusted.
+    payload = _decode_signed_payload(encoded_payload)
 
     version = payload.get("version")
     if version != CURSOR_VERSION:

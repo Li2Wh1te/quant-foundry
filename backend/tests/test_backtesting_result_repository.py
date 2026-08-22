@@ -16,7 +16,10 @@ from sqlalchemy.orm import Session
 
 from app.backtesting.accounting import OrderSide
 from app.backtesting.domain import PositionSide, ValuationStatus
-from app.backtesting.pagination import CursorQueryMismatchError
+from app.backtesting.pagination import (
+    CursorQueryMismatchError,
+    parse_cursor,
+)
 from app.backtesting.result_models import (
     BacktestDataChunkRecord,
     BacktestDataPreflightRecord,
@@ -381,6 +384,66 @@ class PaginationContractTestCase(ResultRepositoryTestCase):
             self.repo.read_page(
                 "orders", run_id=uuid4(), limit=10, cursor=page.next_cursor
             )
+
+    def test_multi_column_bound_is_the_true_lexicographic_maximum(self) -> None:
+        """Per-column maxima must not be spliced into a synthetic bound.
+
+        Rows: R1=(t1, high-id), R2=(t2, low-id).  The lexicographically
+        largest key is (t2, low-id) because time dominates; independently
+        maximized columns would instead fabricate (t2, high-id), which would
+        wrongly admit a later row inserted between the two ids.
+        """
+
+        t1 = ts(9)
+        t2 = ts(10)
+        high_id = UUID(int=0xDEADBEEF)
+        low_id = UUID(int=0x10000000)
+        mid_id = UUID(int=(0xDEADBEEF + 0x10000000) // 2)
+        assert low_id < mid_id < high_id
+
+        r1 = make_order(self.run_id, submitted_at=t1, order_id=high_id)
+        r2 = make_order(self.run_id, submitted_at=t2, order_id=low_id)
+        self.repo.append("orders", r1, r2)
+
+        first_page = self.repo.read_page("orders", run_id=self.run_id, limit=1)
+        self.assertEqual([row.order_id for row in first_page.items], [high_id])
+        self.assertTrue(first_page.has_more)
+
+        # The cursor's bound must be exactly (t2, low-id) — the top row.
+        parsed = parse_cursor(
+            first_page.next_cursor,
+            signing_key=SIGNING_KEY,
+            expected_query_digest=None,
+            key_kinds=("ts", "uuid"),
+            upper_bound_columns={"submitted_at": "ts", "order_id": "uuid"},
+        )
+        bound_time = parsed.query_upper_bound["submitted_at"]
+        if bound_time.tzinfo is None:
+            bound_time = bound_time.replace(tzinfo=UTC)
+        self.assertEqual(
+            (bound_time, parsed.query_upper_bound["order_id"]),
+            (t2.astimezone(timezone.utc), low_id),
+        )
+
+        # A row inserted after pagination began with (t2, mid_id): it sorts
+        # above the correct bound (t2, low-id) and must stay invisible to
+        # this cursor walk.  A fabricated per-column bound (t2, high-id)
+        # would have admitted it.
+        late = make_order(self.run_id, submitted_at=t2, order_id=mid_id)
+        self.repo.append("orders", late)
+
+        collected = list(first_page.items)
+        cursor = first_page.next_cursor
+        while cursor is not None:
+            # The limit participates in the query digest, so the walk must
+            # keep the original page size.
+            page = self.repo.read_page(
+                "orders", run_id=self.run_id, limit=1, cursor=cursor
+            )
+            collected.extend(page.items)
+            cursor = page.next_cursor
+        seen_ids = {row.order_id for row in collected}
+        self.assertEqual(seen_ids, {high_id, low_id})
 
     def test_appended_rows_stay_outside_an_existing_cursor(self) -> None:
         original = self.seed_orders(30)

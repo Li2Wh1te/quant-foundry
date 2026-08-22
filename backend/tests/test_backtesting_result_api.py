@@ -81,7 +81,8 @@ class ResultApiTestCase(unittest.TestCase):
         return orders
 
     def serialize_orders_page(self, **kwargs) -> dict:
-        page = list_orders(run_id=self.run_id, limit=10, cursor=None, session=self.session, **kwargs)
+        page = list_orders(run_id=self.run_id, limit=10, cursor=None, session=self.session,
+            signing_key=SIGNING_KEY, **kwargs)
         model = ResultCursorPage[BacktestOrderItem].model_validate(page)
         return model.model_dump(mode="json")
 
@@ -100,13 +101,22 @@ class ResultApiTestCase(unittest.TestCase):
 
     def test_orders_multi_page_cursor_flow(self) -> None:
         orders = self.seed_orders(12)
-        first = list_orders(run_id=self.run_id, limit=5, cursor=None, session=self.session)
+        first = list_orders(run_id=self.run_id, limit=5, cursor=None, session=self.session,
+            signing_key=SIGNING_KEY)
         self.assertTrue(first["has_more"])
         second = list_orders(
-            run_id=self.run_id, limit=5, cursor=first["next_cursor"], session=self.session
+            run_id=self.run_id,
+            limit=5,
+            cursor=first["next_cursor"],
+            session=self.session,
+            signing_key=SIGNING_KEY,
         )
         third = list_orders(
-            run_id=self.run_id, limit=5, cursor=second["next_cursor"], session=self.session
+            run_id=self.run_id,
+            limit=5,
+            cursor=second["next_cursor"],
+            session=self.session,
+            signing_key=SIGNING_KEY,
         )
         collected = [row.order_id for row in (*first["items"], *second["items"], *third["items"])]
         self.assertEqual(collected, [order.order_id for order in orders])
@@ -118,17 +128,23 @@ class ResultApiTestCase(unittest.TestCase):
 
         for bad in (0, 501):
             with self.assertRaises(HTTPException) as caught:
-                list_orders(run_id=self.run_id, limit=bad, cursor=None, session=self.session)
+                list_orders(run_id=self.run_id, limit=bad, cursor=None, session=self.session,
+            signing_key=SIGNING_KEY)
             self.assertEqual(caught.exception.status_code, 422)
 
     def test_mismatched_cursor_maps_to_400(self) -> None:
         from fastapi import HTTPException
 
         self.seed_orders(12)
-        page = list_orders(run_id=self.run_id, limit=10, cursor=None, session=self.session)
+        page = list_orders(run_id=self.run_id, limit=10, cursor=None, session=self.session,
+            signing_key=SIGNING_KEY)
         with self.assertRaises(HTTPException) as caught:
             list_orders(
-                run_id=self.run_id, limit=5, cursor=page["next_cursor"], session=self.session
+                run_id=self.run_id,
+                limit=5,
+                cursor=page["next_cursor"],
+                session=self.session,
+                signing_key=SIGNING_KEY,
             )
         self.assertEqual(caught.exception.status_code, 400)
 
@@ -142,6 +158,7 @@ class ResultApiTestCase(unittest.TestCase):
                 limit=10,
                 cursor=None,
                 session=self.session,
+            signing_key=SIGNING_KEY,
                 start_time=datetime(2026, 6, 1, 9, 0),
             )
         self.assertEqual(caught.exception.status_code, 422)
@@ -169,6 +186,7 @@ class ResultApiTestCase(unittest.TestCase):
             limit=10,
             cursor=None,
             session=self.session,
+            signing_key=SIGNING_KEY,
             instrument_id=instrument,
         )
         self.assertEqual(len(page["items"]), 2)
@@ -186,7 +204,8 @@ class ResultApiTestCase(unittest.TestCase):
                 unavailable_reason="无有效估值点",
             ),
         )
-        page = list_metrics(run_id=self.run_id, limit=10, cursor=None, session=self.session)
+        page = list_metrics(run_id=self.run_id, limit=10, cursor=None, session=self.session,
+            signing_key=SIGNING_KEY)
         self.assertIsNone(page["items"][0].value)
         self.assertEqual(page["items"][0].unavailable_reason, "无有效估值点")
 

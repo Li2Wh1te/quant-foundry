@@ -663,6 +663,11 @@ class BacktestEquityCurveRecord:
             "cumulative_return",
             "drawdown",
         )
+        # Normalize text BEFORE validating so blank strings cannot pose as a
+        # present reason (they normalize to None).
+        normalized_reason = _optional_text(
+            self.valuation_reason, "valuation_reason"
+        )
         if blocked:
             if any(getattr(self, name) is not None for name in derived):
                 raise DomainValidationError(
@@ -672,7 +677,7 @@ class BacktestEquityCurveRecord:
                 raise DomainValidationError(
                     "blocked valuation points must still carry the cash balance"
                 )
-            if self.valuation_reason is None:
+            if normalized_reason is None:
                 raise DomainValidationError(
                     "blocked valuation points require a valuation_reason"
                 )
@@ -682,11 +687,7 @@ class BacktestEquityCurveRecord:
                     raise DomainValidationError(
                         f"{name} is required for {self.valuation_status.value} valuations"
                     )
-        object.__setattr__(
-            self,
-            "valuation_reason",
-            _optional_text(self.valuation_reason, "valuation_reason"),
-        )
+        object.__setattr__(self, "valuation_reason", normalized_reason)
 
     @property
     def cursor_sort_key(self) -> tuple[datetime, int]:

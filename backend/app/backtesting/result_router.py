@@ -12,7 +12,7 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
 from sqlalchemy.orm import Session
 
 from app.backtesting.pagination import (
@@ -38,7 +38,6 @@ from app.backtesting.result_schemas import (
     BacktestStepItem,
     ResultCursorPage,
 )
-from app.core.config import get_settings
 from app.db.session import get_db_session
 
 
@@ -56,12 +55,40 @@ def _page_or_error(page: CursorPage) -> dict[str, object]:
     }
 
 
-def _read_page(kind: str, *, run_id: UUID, limit: int, cursor: str | None, session: Session, **filters: object) -> dict[str, object]:
+def _cursor_signing_key(request: Request) -> str:
+    """Resolve the cursor HMAC secret from the serving app instance.
+
+    Reading ``request.app.state.settings`` (instead of the cached global
+    settings) keeps cursors signed with exactly the token of the deployment
+    that created them, including ``create_app(settings=...)`` and test
+    injections.
+    """
+
+    settings = getattr(request.app.state, "settings", None)
+    api_token = getattr(settings, "api_token", None)
+    if api_token is None:
+        raise RuntimeError("application settings are not attached to app.state")
+    return api_token.get_secret_value()
+
+
+CursorSigningKey = Annotated[str, Depends(_cursor_signing_key)]
+
+
+def _read_page(
+    kind: str,
+    *,
+    run_id: UUID,
+    limit: int,
+    cursor: str | None,
+    session: Session,
+    signing_key: str,
+    **filters: object,
+) -> dict[str, object]:
     repository = BacktestResultRepository(
         session,
         # Reuse the deployment's API token as the cursor HMAC secret so no
         # extra configuration key is required for the first version.
-        cursor_signing_key=get_settings().api_token.get_secret_value(),
+        cursor_signing_key=signing_key,
     )
     try:
         page = repository.read_page(
@@ -87,6 +114,7 @@ def _read_page(kind: str, *, run_id: UUID, limit: int, cursor: str | None, sessi
 @router.get("/steps", response_model=ResultCursorPage[BacktestStepItem])
 def list_steps(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     phase: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
@@ -95,13 +123,14 @@ def list_steps(
     """List time steps in stable step-sequence order."""
 
     return _read_page(
-        "steps", run_id=run_id, limit=limit, cursor=cursor, session=session, phase=phase
+        "steps", run_id=run_id, limit=limit, cursor=cursor, session=session, signing_key=signing_key, phase=phase
     )
 
 
 @router.get("/decisions", response_model=ResultCursorPage[BacktestDecisionItem])
 def list_decisions(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     mode: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
@@ -117,6 +146,7 @@ def list_decisions(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         mode=mode,
         start_time=start_time,
         end_time=end_time,
@@ -126,6 +156,7 @@ def list_decisions(
 @router.get("/orders", response_model=ResultCursorPage[BacktestOrderItem])
 def list_orders(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     instrument_id: Annotated[UUID | None, Query()] = None,
@@ -143,6 +174,7 @@ def list_orders(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         instrument_id=instrument_id,
         status=status,
         side=side,
@@ -154,6 +186,7 @@ def list_orders(
 @router.get("/order-updates", response_model=ResultCursorPage[BacktestOrderUpdateItem])
 def list_order_updates(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     status: Annotated[str | None, Query(min_length=1, max_length=24)] = None,
@@ -169,6 +202,7 @@ def list_order_updates(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         status=status,
         start_time=start_time,
         end_time=end_time,
@@ -178,6 +212,7 @@ def list_order_updates(
 @router.get("/fills", response_model=ResultCursorPage[BacktestFillItem])
 def list_fills(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     instrument_id: Annotated[UUID | None, Query()] = None,
@@ -194,6 +229,7 @@ def list_fills(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         instrument_id=instrument_id,
         side=side,
         start_time=start_time,
@@ -204,6 +240,7 @@ def list_fills(
 @router.get("/positions", response_model=ResultCursorPage[BacktestPositionItem])
 def list_positions(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     instrument_id: Annotated[UUID | None, Query()] = None,
@@ -220,6 +257,7 @@ def list_positions(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         instrument_id=instrument_id,
         side=side,
         start_time=start_time,
@@ -230,6 +268,7 @@ def list_positions(
 @router.get("/equity-curve", response_model=ResultCursorPage[BacktestEquityCurveItem])
 def list_equity_curve(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     start_time: Annotated[datetime | None, Query()] = None,
@@ -244,6 +283,7 @@ def list_equity_curve(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         start_time=start_time,
         end_time=end_time,
     )
@@ -252,18 +292,27 @@ def list_equity_curve(
 @router.get("/metrics", response_model=ResultCursorPage[BacktestMetricItem])
 def list_metrics(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     session: Session = Depends(get_db_session),
 ) -> dict[str, object]:
     """List metric values; unavailable metrics expose their reason."""
 
-    return _read_page("metrics", run_id=run_id, limit=limit, cursor=cursor, session=session)
+    return _read_page(
+        "metrics",
+        run_id=run_id,
+        limit=limit,
+        cursor=cursor,
+        session=session,
+        signing_key=signing_key,
+    )
 
 
 @router.get("/data-preflight", response_model=ResultCursorPage[BacktestDataPreflightItem])
 def list_data_preflight(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     session: Session = Depends(get_db_session),
@@ -271,13 +320,19 @@ def list_data_preflight(
     """List run-level data preflight reports by phase."""
 
     return _read_page(
-        "data_preflight", run_id=run_id, limit=limit, cursor=cursor, session=session
+        "data_preflight",
+        run_id=run_id,
+        limit=limit,
+        cursor=cursor,
+        session=session,
+        signing_key=signing_key,
     )
 
 
 @router.get("/data-chunks", response_model=ResultCursorPage[BacktestDataChunkItem])
 def list_data_chunks(
     run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     phase: Annotated[str | None, Query(min_length=1, max_length=16)] = None,
@@ -291,5 +346,6 @@ def list_data_chunks(
         limit=limit,
         cursor=cursor,
         session=session,
+        signing_key=signing_key,
         phase=phase,
     )

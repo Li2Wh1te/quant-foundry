@@ -234,6 +234,18 @@ class EquityAndMetricContractTestCase(unittest.TestCase):
                 drawdown=None,
                 valuation_reason=None,
             )
+        # Blank text normalizes to None and must not pose as a reason.
+        with self.assertRaises(DomainValidationError):
+            self.complete_equity(
+                valuation_status=ValuationStatus.BLOCKED,
+                market_value=None,
+                equity=None,
+                period_return=None,
+                total_pnl=None,
+                cumulative_return=None,
+                drawdown=None,
+                valuation_reason="   ",
+            )
 
     def test_valid_points_require_all_valuation_fields(self) -> None:
         for missing in (

@@ -713,6 +713,14 @@ class BacktestResultRepository:
         conditions.extend(
             self._filter_condition(spec, name, value) for name, value in filters.items()
         )
+        # All first_value calls MUST share one window ordered by the FULL
+        # sort-key tuple.  Ordering each column independently would pick the
+        # maximum of every column from different rows, producing a bound no
+        # real row ever had.
+        window_order = [
+            getattr(record_cls, column_name).desc()
+            for column_name in spec.sort_columns
+        ]
         window_columns = []
         for position, column_name in enumerate(spec.sort_columns):
             column = getattr(record_cls, column_name)
@@ -720,7 +728,7 @@ class BacktestResultRepository:
             # dialect's result processor still converts raw DB values.
             first_value = func.first_value(column, type_=column.type)
             window_columns.append(
-                first_value.over(order_by=column.desc()).label(
+                first_value.over(order_by=window_order).label(
                     f"__upper_bound_{position}"
                 )
             )
