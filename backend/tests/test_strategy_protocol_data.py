@@ -595,6 +595,26 @@ class UniverseQueryTestCase(unittest.TestCase):
             instrument_id=uuid4(), **base, metadata={"weight": 0.5}
         )
         self.assertEqual(ok.metadata["weight"], 0.5)
+        # Regression: scalar subclasses can carry mutable attributes, so only
+        # exact JSON scalar types pass through.
+        class _MutableInt(int):
+            pass
+
+        smuggled = _MutableInt(1)
+        object.__setattr__(smuggled, "payload", [])
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(
+                instrument_id=uuid4(), **base, metadata={"x": smuggled}
+            )
+
+        class _MutableStr(str):
+            pass
+
+        with self.assertRaises(ValueError):
+            InstrumentCandidateDTO(
+                instrument_id=uuid4(),
+                **{**base, "name": _MutableStr("别名")},
+            )
 
     def test_universe_provider_results_are_validated_and_sorted(self) -> None:
         first_id = uuid4()

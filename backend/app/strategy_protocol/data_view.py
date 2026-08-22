@@ -124,7 +124,7 @@ class InstrumentCandidateDTO:
 
     ``instrument_id`` must be a real UUID (the stable identity strategies
     submit targets with); trading code, name, and display name are non-blank
-    display-only strings.
+    display-only strings.  ``metadata`` holds deep-frozen JSON values.
     """
 
     instrument_id: UUID
@@ -133,7 +133,7 @@ class InstrumentCandidateDTO:
     display_name: str
     asset_class: str
     exchange: str
-    metadata: Mapping[str, str] = MappingProxyType({})
+    metadata: Mapping[str, object] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -146,7 +146,9 @@ class InstrumentCandidateDTO:
             "exchange",
         ):
             value = getattr(self, field_name)
-            if not isinstance(value, str) or not value.strip():
+            # Exact str only: a str subclass could smuggle mutable attributes
+            # from the provider into strategy-visible objects.
+            if type(value) is not str or not value.strip():
                 raise ValueError(f"{field_name} must be a non-blank string")
         # Metadata accepts JSON values only: mappings and sequences are
         # deep-frozen, scalars are kept, and non-JSON objects (sets, custom
@@ -155,41 +157,44 @@ class InstrumentCandidateDTO:
             raise ValueError("metadata must be a mapping")
         frozen: dict[str, object] = {}
         for key, value in self.metadata.items():
-            if not isinstance(key, str):
-                # Silent str() conversion could collide distinct keys.
-                raise ValueError("metadata keys must be strings")
-            frozen[key] = _freeze_meta(value)
+            frozen[_freeze_key(key)] = _freeze_meta(value)
         object.__setattr__(self, "metadata", MappingProxyType(frozen))
 
 
 def _freeze_meta(value: object) -> object:
     """Recursively freeze one metadata value, rejecting non-JSON objects.
 
-    Floats must be finite: NaN and infinities are not standard JSON numbers
+    Only exact JSON scalar types are accepted: subclasses of ``int``/``str``
+    etc. can carry mutable attributes and must not pass through as scalars.
+    Floats must be finite — NaN and infinities are not standard JSON numbers
     and would break deterministic comparison and strict serialization.
     """
 
-    if isinstance(value, Mapping):
-        for key in value:
-            if not isinstance(key, str):
-                raise ValueError("metadata keys must be strings")
-        return MappingProxyType(
-            {key: _freeze_meta(item) for key, item in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_meta(item) for item in value)
-    if value is None or isinstance(value, (str, bool)):
+    if value is None or type(value) in (str, bool, int):
         return value
-    if isinstance(value, int):
-        # bool is checked above so it never lands here as an int alias.
-        return value
-    if isinstance(value, float):
+    if type(value) is float:
         if not math.isfinite(value):
             raise ValueError("metadata float values must be finite")
         return value
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {_freeze_key(key): _freeze_meta(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_meta(item) for item in value)
     raise ValueError(
         "metadata values must be JSON scalars, mappings, or sequences"
     )
+
+
+def _freeze_key(key: object) -> str:
+    """Validate one metadata key, rejecting str subclasses."""
+
+    if type(key) is not str:
+        # A str subclass could smuggle mutable attributes into the frozen
+        # mapping, so only exact strings are accepted.
+        raise ValueError("metadata keys must be plain strings")
+    return key
 
 
 @runtime_checkable
