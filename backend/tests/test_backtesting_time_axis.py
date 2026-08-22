@@ -2,7 +2,7 @@
 
 import unittest
 from dataclasses import fields
-from datetime import UTC, date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone, tzinfo
 from types import MappingProxyType
 from zoneinfo import ZoneInfo
 
@@ -107,6 +107,32 @@ class TimeStepValidationTests(unittest.TestCase):
                 metadata={},
             )
 
+    def test_rejects_forged_tzinfo_claiming_iana_key(self) -> None:
+        # A custom fixed-offset tzinfo can forge a ``key`` attribute;
+        # only a real ZoneInfo instance proves the IANA rule.
+        class ForgedZone(tzinfo):
+            key = "Asia/Shanghai"
+
+            def utcoffset(self, dt):  # type: ignore[override]
+                return timedelta(hours=8)
+
+            def dst(self, dt):  # type: ignore[override]
+                return None
+
+            def tzname(self, dt):  # type: ignore[override]
+                return "Asia/Shanghai"
+
+        forged = ForgedZone()
+        with self.assertRaises(DomainValidationError):
+            TimeStep(
+                sequence=0,
+                start_time=datetime(2026, 8, 17, 9, 30, tzinfo=forged),
+                end_time=datetime(2026, 8, 17, 15, 0, tzinfo=forged),
+                session_id="2026-08-17",
+                timezone="Asia/Shanghai",
+                metadata={},
+            )
+
     def test_rejects_unresolvable_timezone_name(self) -> None:
         with self.assertRaises(DomainValidationError):
             make_step(timezone="Mars/Olympus_Mons")
@@ -137,6 +163,27 @@ class TimeStepValidationTests(unittest.TestCase):
         # Mutating the step's view itself must fail.
         with self.assertRaises(TypeError):
             step.metadata["session_date"] = "other"  # type: ignore[index]
+
+    def test_metadata_is_deep_frozen(self) -> None:
+        source: dict[str, object] = {
+            "nested": {"value": 1},
+            "windows": [["09:30", "11:30"]],
+        }
+        step = make_step(metadata=source)
+        # Mutating nested containers of the original mapping must not
+        # reach the step.
+        source["nested"]["value"] = 2
+        source["windows"][0][0] = "tampered"
+        self.assertEqual(step.metadata["nested"]["value"], 1)
+        self.assertEqual(step.metadata["windows"], (("09:30", "11:30"),))
+        nested = step.metadata["nested"]
+        self.assertIsInstance(nested, MappingProxyType)
+        with self.assertRaises(TypeError):
+            nested["value"] = 3  # type: ignore[index]
+        windows = step.metadata["windows"]
+        self.assertIsInstance(windows, tuple)
+        with self.assertRaises(TypeError):
+            windows[0][0] = "other"  # type: ignore[index]
 
 
 class TimeAxisTests(unittest.TestCase):
@@ -286,6 +333,13 @@ class FixedTradingSessionsV1Tests(unittest.TestCase):
         self.assertEqual(self.policy.sessions_per_chunk, 20)
         self.assertEqual(SESSIONS_PER_CHUNK_V1, 20)
 
+    def test_sessions_per_chunk_cannot_be_changed_at_runtime(self) -> None:
+        with self.assertRaises(AttributeError):
+            self.policy.sessions_per_chunk = 1  # type: ignore[misc]
+        # The partition size stays pinned to the version constant even
+        # after a tampering attempt.
+        self.assertEqual(len(self.policy.partition(make_steps(21))), 2)
+
     def test_empty_input_returns_empty_tuple(self) -> None:
         self.assertEqual(self.policy.partition([]), ())
 
@@ -357,6 +411,28 @@ class FixedTradingSessionsV1Tests(unittest.TestCase):
     def test_time_chunk_rejects_negative_sequence(self) -> None:
         with self.assertRaises(DomainValidationError):
             TimeChunk(chunk_sequence=-1, steps=(make_step(),))
+
+    def test_time_chunk_copies_mutable_input_to_tuple(self) -> None:
+        steps = make_steps(2)
+        chunk = TimeChunk(chunk_sequence=0, steps=steps)
+        self.assertIsInstance(chunk.steps, tuple)
+        # Mutating the caller's list afterwards must not reach the chunk.
+        steps.append(make_step(sequence=2))
+        self.assertEqual(len(chunk.steps), 2)
+
+    def test_time_chunk_rejects_non_contiguous_sequences(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            TimeChunk(
+                chunk_sequence=0,
+                steps=(make_step(0), make_step(5)),
+            )
+
+    def test_time_chunk_rejects_reordered_sequences(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            TimeChunk(
+                chunk_sequence=0,
+                steps=(make_step(1), make_step(0)),
+            )
 
 
 class AxisDataclassShapeTests(unittest.TestCase):

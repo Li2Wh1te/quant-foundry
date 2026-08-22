@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import date, datetime, time
 from types import MappingProxyType
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -75,12 +75,36 @@ def _iana_timezone(value: object, field_name: str) -> ZoneInfo:
         ) from exc
 
 
+def _frozen_value(value: object) -> object:
+    """Deep-freeze one metadata value.
+
+    Mappings become frozen mappings, lists and tuples become tuples of
+    deep-frozen items, and everything else is assumed immutable.  A
+    shallow copy alone would still let callers reach nested dicts and
+    lists inside the step.
+    """
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                key: _frozen_value(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, list):
+        return tuple(_frozen_value(item) for item in value)
+    if isinstance(value, tuple):
+        return tuple(_frozen_value(item) for item in value)
+    return value
+
+
 def _frozen_metadata(value: Mapping[str, object]) -> Mapping[str, object]:
-    """Copy a mapping and freeze it against later caller mutation.
+    """Copy a mapping and deep-freeze it against later caller mutation.
 
     The copy is important twice over: callers may mutate their original
     dictionary afterwards without affecting the step, and downstream code
-    must not be able to mutate the step's view either.
+    must not be able to mutate the step's view either -- including
+    nested containers held inside the metadata values.
     """
 
     if not isinstance(value, Mapping):
@@ -88,20 +112,20 @@ def _frozen_metadata(value: Mapping[str, object]) -> Mapping[str, object]:
     for key in value:
         if not isinstance(key, str):
             raise DomainValidationError("metadata keys must be strings")
-    return MappingProxyType(dict(value))
+    frozen = {key: _frozen_value(item) for key, item in value.items()}
+    return MappingProxyType(frozen)
 
 
 def _same_iana_zone(instant: datetime, zone: ZoneInfo, field_name: str) -> None:
     """Require the datetime's zone to be exactly the declared IANA zone.
 
-    A fixed-offset timezone cannot prove it expresses the named IANA
-    rule across DST transitions, so only the identical ``ZoneInfo``
-    instance (or an equal-key zone) is accepted.
+    Only a real :class:`ZoneInfo` instance proves it expresses the named
+    IANA rule across DST transitions: a custom fixed-offset tzinfo can
+    forge a ``key`` attribute, so key comparison alone is not enough.
     """
 
     _aware_datetime(instant, field_name)
-    instant_key = getattr(instant.tzinfo, "key", None)
-    if instant_key != zone.key:
+    if not isinstance(instant.tzinfo, ZoneInfo) or instant.tzinfo.key != zone.key:
         raise DomainValidationError(
             f"{field_name} must use the declared IANA timezone {zone.key!r}"
         )
@@ -305,11 +329,29 @@ class TimeChunk:
 
     def __post_init__(self) -> None:
         _non_negative_int(self.chunk_sequence, "chunk_sequence")
+        if isinstance(self.steps, (str, bytes)) or not isinstance(
+            self.steps, Sequence
+        ):
+            raise DomainValidationError("steps must be a sequence of TimeStep")
         if not self.steps:
             raise DomainValidationError("steps must contain at least one TimeStep")
-        for step in self.steps:
+        # Copy to tuple so a caller-supplied mutable list can never be
+        # changed after construction, and verify the slice is a
+        # contiguous run of the official timeline: consecutive sequence
+        # numbers with no gaps and no reordering.
+        normalized = tuple(self.steps)
+        first_sequence = normalized[0].sequence
+        for index, step in enumerate(normalized):
             if not isinstance(step, TimeStep):
                 raise DomainValidationError("steps entries must be TimeStep")
+            if step.sequence != first_sequence + index:
+                raise DomainValidationError(
+                    "steps must be a contiguous slice of the official "
+                    "timeline: expected sequence "
+                    f"{first_sequence + index} at position {index}, got "
+                    f"{step.sequence}"
+                )
+        object.__setattr__(self, "steps", normalized)
 
     @property
     def first_session_id(self) -> str:
@@ -336,7 +378,16 @@ class FixedTradingSessionsV1:
 
     policy_key: str = CHUNK_POLICY_KEY_FIXED_TRADING_SESSIONS
     policy_version: int = CHUNK_POLICY_VERSION_V1
-    sessions_per_chunk: int = SESSIONS_PER_CHUNK_V1
+
+    @property
+    def sessions_per_chunk(self) -> int:
+        """Fixed chunk size frozen by ``fixed_trading_sessions@1``.
+
+        Exposed as a read-only property bound to the version constant so
+        runtime code cannot shrink or grow the chunk size.
+        """
+
+        return SESSIONS_PER_CHUNK_V1
 
     def partition(
         self,
