@@ -60,6 +60,7 @@ class ContractCheckResult:
     error_type: str | None = None
     message: str | None = None
     line: int | None = None
+    technical: str | None = None
 
 
 SYNTHETIC_FALLBACK_TIMEZONE = timezone(timedelta(hours=8))
@@ -203,6 +204,7 @@ def run_strategy_contract_check(
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckTimeout",
             message=f"运行契约检查超过 {timeout_seconds} 秒超时限制，已终止。",
+            technical=_stderr_tail(stderr_bytes),
         )
 
     if len(stdout_bytes) > max_result_bytes:
@@ -211,6 +213,7 @@ def run_strategy_contract_check(
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckOutputLimit",
             message="运行契约检查输出超过上限，已终止。",
+            technical=_stderr_tail(stderr_bytes),
         )
     try:
         decoded = json.loads(stdout_bytes.decode("utf-8"))
@@ -220,6 +223,7 @@ def run_strategy_contract_check(
             failure_phase=FAILURE_PHASE_STRATEGY_CONTRACT_CHECK,
             error_type="ContractCheckCrashed",
             message="运行契约检查进程异常退出。",
+            technical=_stderr_tail(stderr_bytes),
         )
     if decoded.get("ok") is True:
         evidence = decoded.get("evidence", {})
@@ -231,7 +235,23 @@ def run_strategy_contract_check(
         error_type=failure.get("error_type"),
         message=failure.get("message"),
         line=failure.get("line"),
+        technical=failure.get("traceback") or _stderr_tail(stderr_bytes),
     )
+
+
+MAX_TECHNICAL_DETAIL_CHARS = 4_000
+"""Upper bound on stderr/traceback detail kept in a check result."""
+
+
+def _stderr_tail(stderr_bytes: bytes) -> str | None:
+    """Return a bounded worker stderr tail as expandable technical detail."""
+
+    if not stderr_bytes:
+        return None
+    rendered = stderr_bytes.decode("utf-8", errors="replace").strip()
+    if len(rendered) > MAX_TECHNICAL_DETAIL_CHARS:
+        rendered = rendered[-MAX_TECHNICAL_DETAIL_CHARS:]
+    return rendered or None
 
 
 def _worker_environment(memory_limit_mb: int | None) -> dict[str, str]:

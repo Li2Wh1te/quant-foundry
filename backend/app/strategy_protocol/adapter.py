@@ -13,8 +13,9 @@ imports user code.
 from __future__ import annotations
 
 import inspect
-from types import ModuleType
-from typing import Any, Mapping
+from collections.abc import Mapping
+from types import MappingProxyType, ModuleType
+from typing import Any
 from uuid import UUID
 
 from .contract import STRATEGY_CONTRACT_VERSION, StrategyProtocolError
@@ -24,6 +25,33 @@ from .decisions import DecisionModeRegistry, StrategyDecision, build_default_reg
 
 class StrategyLoadError(StrategyProtocolError):
     """Raised when the published source cannot provide the required entry."""
+
+
+ISOLATED_SUBPROCESS_SCOPE = "isolated_subprocess"
+"""Execution-scope acknowledgment required before user source is executed.
+
+Loading and running strategy source is only ever legitimate inside the
+isolated backtest subprocess (or its contract-check sibling).  Callers must
+pass this exact scope to :meth:`FunctionStrategyAdapter.from_source` so the
+API or any future Runner process cannot accidentally execute private code.
+"""
+
+
+def _freeze_parameters(value: object) -> object:
+    """Recursively convert parameters into immutable containers.
+
+    The strategy receives a read-only object: mappings become mapping proxies
+    and lists become tuples at every nesting level, so a mutated parameter can
+    never leak into later steps of the same run.
+    """
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_parameters(item) for key, item in value.items()}
+        )
+    if isinstance(value, list):
+        return tuple(_freeze_parameters(item) for item in value)
+    return value
 
 
 class FunctionStrategyAdapter:
@@ -43,8 +71,8 @@ class FunctionStrategyAdapter:
     ) -> None:
         self._registry = registry or build_default_registry()
         # Parameters come from the published revision (validated against its
-        # schema) and are fixed for the whole run.
-        self._parameters: Mapping[str, Any] = dict(parameters)
+        # schema) and are fixed, deeply read-only for the whole run.
+        self._parameters = _freeze_parameters(dict(parameters))
         self._run = self._require_entry_point(module)
 
     @classmethod
@@ -53,11 +81,23 @@ class FunctionStrategyAdapter:
         source_code: str,
         *,
         parameters: Mapping[str, Any],
+        execution_scope: str,
         module_name: str = "published_strategy",
         registry: DecisionModeRegistry | None = None,
     ) -> "FunctionStrategyAdapter":
-        """Load a published revision's source into a fresh module namespace."""
+        """Load a published revision's source into a fresh module namespace.
 
+        ``execution_scope`` must be exactly
+        :data:`ISOLATED_SUBPROCESS_SCOPE`.  Requiring the explicit
+        acknowledgment keeps ``exec`` out of reach of accidental callers such
+        as API request handlers; only the isolated worker passes it.
+        """
+
+        if execution_scope != ISOLATED_SUBPROCESS_SCOPE:
+            raise StrategyLoadError(
+                "strategy source may only be loaded inside the isolated "
+                "backtest subprocess"
+            )
         module = ModuleType(module_name)
         compiled = compile(source_code, module_name, "exec")
         exec(compiled, module.__dict__)  # noqa: S102 - isolated subprocess only

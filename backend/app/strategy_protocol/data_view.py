@@ -32,6 +32,7 @@ from .contract import (
     DataCutoffViolationError,
     IdentityMappingMissingError,
     IncompleteHistoryError,
+    InvalidProviderResultError,
     LookbackLimitExceededError,
 )
 
@@ -48,7 +49,8 @@ class AdjustmentBasis(StrEnum):
 class BarDTO:
     """One immutable daily bar identified by the stable instrument id.
 
-    ``values`` holds only the requested fields as ``Decimal`` values; a missing
+    ``values`` holds only the requested fields as finite ``Decimal`` values;
+    binary floats, booleans, and non-finite numbers are rejected.  A missing
     source bar stays absent instead of being forward-filled.
     """
 
@@ -59,7 +61,41 @@ class BarDTO:
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
             raise ValueError("instrument_id must be a UUID")
-        object.__setattr__(self, "values", MappingProxyType(dict(self.values)))
+        if isinstance(self.trade_date, datetime) or not isinstance(self.trade_date, date):
+            raise ValueError("trade_date must be a calendar date")
+        if not isinstance(self.values, Mapping):
+            raise ValueError("values must be a mapping")
+        normalized: dict[str, Decimal] = {}
+        for key, value in self.values.items():
+            if not isinstance(key, str):
+                raise ValueError("bar field names must be strings")
+            normalized[key] = _finite_decimal(value, f"bar values[{key!r}]")
+        object.__setattr__(self, "values", MappingProxyType(normalized))
+
+
+def _finite_decimal(value: object, field_name: str) -> Decimal:
+    """Normalize one numeric DTO value, rejecting float/bool/non-finite input."""
+
+    from decimal import Decimal as _Decimal, InvalidOperation
+
+    if isinstance(value, bool) or isinstance(value, float):
+        raise ValueError(
+            f"{field_name} must be a decimal string or Decimal; "
+            "binary floats are unsupported"
+        )
+    if isinstance(value, _Decimal):
+        if not value.is_finite():
+            raise ValueError(f"{field_name} must be finite")
+        return value
+    if not isinstance(value, (str, int)):
+        raise ValueError(f"{field_name} must be a decimal string or Decimal")
+    try:
+        normalized = _Decimal(str(value))
+    except (InvalidOperation, ValueError) as exc:
+        raise ValueError(f"{field_name} is not a valid decimal") from exc
+    if not normalized.is_finite():
+        raise ValueError(f"{field_name} must be finite")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +105,16 @@ class AdjustedSeriesPointDTO:
     instrument_id: UUID
     trade_date: date
     adj_factor: Decimal
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise ValueError("instrument_id must be a UUID")
+        if isinstance(self.trade_date, datetime) or not isinstance(self.trade_date, date):
+            raise ValueError("trade_date must be a calendar date")
+        factor = _finite_decimal(self.adj_factor, "adj_factor")
+        if factor <= 0:
+            raise ValueError("adj_factor must be positive")
+        object.__setattr__(self, "adj_factor", factor)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,14 +219,38 @@ class _ResolvedWindow:
     lookback_sessions: int | None
 
 
-class StrategyDataDTO:
+class _ReadOnlyFacade:
+    """Base that makes the strategy-facing facades fully read-only.
+
+    Strategies must not be able to widen ``data_cutoff``, lift the lookback
+    cap, or swap the underlying data provider, so every attribute write is
+    rejected regardless of name mangling or slot availability.
+    """
+
+    __slots__ = ()
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError(
+            "strategy query facades are read-only; query conditions cannot be modified"
+        )
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError(
+            "strategy query facades are read-only; query conditions cannot be deleted"
+        )
+
+
+class StrategyDataDTO(_ReadOnlyFacade):
     """Strategy-facing facade that enforces the shared query boundaries.
 
     The facade validates the window against ``data_cutoff`` and the lookback
     cap *before* delegating to the injected view, so oversized or future-facing
-    requests can never reach a partial read.  The injected view and cutoff are
-    fixed at construction; strategies cannot widen them.  qfq/hfq requests are
-    additionally gated on the adjustment policy being active.
+    requests can never reach a partial read.  Provider results are validated
+    again on the way out (identity, cutoff, ordering, decimal types), so a
+    broken provider cannot leak future rows or mutable floats to strategies.
+    The injected view and cutoff are fixed at construction; strategies cannot
+    widen them.  qfq/hfq requests are additionally gated on the adjustment
+    policy being active.
     """
 
     __slots__ = ("_view", "_data_cutoff", "_max_lookback_sessions", "_adjustment_gate")
@@ -193,12 +263,16 @@ class StrategyDataDTO:
         max_lookback_sessions: int = MAX_LOOKBACK_SESSIONS,
         adjustment_gate: AdjustmentPolicyGate | None = None,
     ) -> None:
-        self._view = view
-        self._data_cutoff = data_cutoff
-        self._max_lookback_sessions = max_lookback_sessions
+        object.__setattr__(self, "_view", view)
+        object.__setattr__(self, "_data_cutoff", data_cutoff)
+        object.__setattr__(self, "_max_lookback_sessions", max_lookback_sessions)
         # Conservative default: without an explicit active gate, adjusted
         # series stay blocked so unverified factors can never be served.
-        self._adjustment_gate = adjustment_gate or AdjustmentPolicyGate.inactive_gate()
+        object.__setattr__(
+            self,
+            "_adjustment_gate",
+            adjustment_gate or AdjustmentPolicyGate.inactive_gate(),
+        )
 
     def bars(
         self,
@@ -210,19 +284,21 @@ class StrategyDataDTO:
     ) -> tuple[BarDTO, ...]:
         """Read raw bars ending no later than ``data_cutoff``."""
 
+        resolved_id = self._require_uuid(instrument_id)
         window = self._resolve_window(
             start_date=start_date,
             end_date=end_date,
             lookback_sessions=lookback_sessions,
         )
-        return tuple(
+        result = tuple(
             self._view.bars(
-                self._require_uuid(instrument_id),
+                resolved_id,
                 start_date=window.start_date,
                 end_date=window.end_date,
                 lookback_sessions=window.lookback_sessions,
             )
         )
+        return self._validate_bars_result(resolved_id, result)
 
     def adjusted_series(
         self,
@@ -244,20 +320,72 @@ class StrategyDataDTO:
                 "qfq/hfq series require tushare_adj_factor_native@1 to be "
                 "verified and active"
             )
+        resolved_id = self._require_uuid(instrument_id)
         window = self._resolve_window(
             start_date=start_date,
             end_date=end_date,
             lookback_sessions=lookback_sessions,
         )
-        return tuple(
+        result = tuple(
             self._view.adjusted_series(
-                self._require_uuid(instrument_id),
+                resolved_id,
                 start_date=window.start_date,
                 end_date=window.end_date,
                 lookback_sessions=window.lookback_sessions,
                 basis=resolved_basis,
             )
         )
+        return self._validate_series_result(resolved_id, result)
+
+    def _validate_bars_result(
+        self, requested_id: UUID, result: tuple[BarDTO, ...]
+    ) -> tuple[BarDTO, ...]:
+        """Reject provider rows that violate the identity or cutoff contract."""
+
+        cutoff_date = self._data_cutoff.date()
+        previous: date | None = None
+        for bar in result:
+            if bar.instrument_id != requested_id:
+                raise InvalidProviderResultError(
+                    f"provider returned instrument_id {bar.instrument_id} "
+                    f"for a query on {requested_id}"
+                )
+            if bar.trade_date > cutoff_date:
+                raise InvalidProviderResultError(
+                    f"provider returned bar {bar.trade_date} later than "
+                    f"data_cutoff {cutoff_date}"
+                )
+            if previous is not None and bar.trade_date <= previous:
+                raise InvalidProviderResultError(
+                    "provider returned bars out of ascending date order"
+                )
+            previous = bar.trade_date
+        return result
+
+    def _validate_series_result(
+        self, requested_id: UUID, result: tuple[AdjustedSeriesPointDTO, ...]
+    ) -> tuple[AdjustedSeriesPointDTO, ...]:
+        """Apply the same outbound checks to adjustment series."""
+
+        cutoff_date = self._data_cutoff.date()
+        previous: date | None = None
+        for point in result:
+            if point.instrument_id != requested_id:
+                raise InvalidProviderResultError(
+                    f"provider returned instrument_id {point.instrument_id} "
+                    f"for a query on {requested_id}"
+                )
+            if point.trade_date > cutoff_date:
+                raise InvalidProviderResultError(
+                    f"provider returned series point {point.trade_date} later "
+                    f"than data_cutoff {cutoff_date}"
+                )
+            if previous is not None and point.trade_date <= previous:
+                raise InvalidProviderResultError(
+                    "provider returned series points out of ascending date order"
+                )
+            previous = point.trade_date
+        return result
 
     def _require_uuid(self, instrument_id: UUID | str) -> UUID:
         """Accept UUID or canonical string form, nothing else."""
@@ -303,11 +431,16 @@ class StrategyDataDTO:
             raise ValueError("start_date cannot be after end_date")
         if lookback_sessions is not None:
             # A lookback window counts back from the cutoff unless an explicit
-            # end is given; it never widens past an explicit start date.
+            # end is given.  An explicit start that conflicts with the lookback
+            # window is a caller error, never silently widened into a longer
+            # full-range read.
             anchor = end_date if end_date is not None else cutoff_date
             implied_start = anchor - timedelta(days=lookback_sessions - 1)
             if start_date is not None and implied_start < start_date:
-                lookback_sessions = None
+                raise ValueError(
+                    "lookback_sessions conflicts with the explicit start_date; "
+                    "pass either a lookback window or an explicit range"
+                )
         return _ResolvedWindow(
             start_date=start_date,
             end_date=end_date,
@@ -315,13 +448,13 @@ class StrategyDataDTO:
         )
 
 
-class UniverseQueryDTO:
+class UniverseQueryDTO(_ReadOnlyFacade):
     """Strategy-facing candidate-set facade returning immutable results."""
 
     __slots__ = ("_query",)
 
     def __init__(self, query: UniverseQuery) -> None:
-        self._query = query
+        object.__setattr__(self, "_query", query)
 
     def query(
         self,
@@ -382,23 +515,25 @@ def stitch_segmented_history(
     """Read per-segment windows and stitch them back into one stable series.
 
     ``sessions`` lists the tradable sessions of the requested window in
-    ascending order (resolved by the trading calendar).  Every requested
-    session must be covered by exactly one identity segment; coverage gaps
-    raise :class:`IdentityMappingMissingError` instead of silently returning a
-    shorter window.  Each segment reader must return a bar for every session
-    inside its clamped range; missing bars raise
+    ascending order without duplicates (resolved by the trading calendar);
+    unsorted or duplicated input is rejected instead of silently normalized.
+    Every requested session must be covered by exactly one identity segment:
+    coverage gaps and overlapping segments both raise
+    :class:`IdentityMappingMissingError` instead of silently returning a
+    shorter window or duplicated bars.  Each segment reader must return a bar
+    for every session inside its clamped range; missing bars raise
     :class:`IncompleteHistoryError` and are never forward-filled.  The result
     is sorted by trade date regardless of segment order.
     """
 
-    ordered_sessions = sorted(set(sessions))
+    ordered_sessions = list(sessions)
+    if any(
+        later <= earlier
+        for earlier, later in zip(ordered_sessions, ordered_sessions[1:])
+    ):
+        raise ValueError("sessions must contain distinct ascending dates")
     if not ordered_sessions:
         return ()
-    current = ordered_sessions[0]
-    for session in ordered_sessions[1:]:
-        if session <= current:
-            raise ValueError("sessions must contain distinct ascending dates")
-        current = session
 
     collected: list[BarDTO] = []
     for segment in segments:
@@ -413,9 +548,15 @@ def stitch_segmented_history(
         )
 
     for day in ordered_sessions:
-        if not any(segment.covers(day) for segment in segments):
+        covering = [segment for segment in segments if segment.covers(day)]
+        if not covering:
             raise IdentityMappingMissingError(
                 f"no PIT identity mapping covers session {day}"
+            )
+        if len(covering) > 1:
+            raise IdentityMappingMissingError(
+                f"PIT identity mappings overlap on session {day}: "
+                f"{sorted(segment.trading_code for segment in covering)}"
             )
     seen_dates = {bar.trade_date for bar in collected}
     missing = [day for day in ordered_sessions if day not in seen_dates]

@@ -12,6 +12,7 @@ from app.strategy_protocol.contract import (
     DataCutoffViolationError,
     IdentityMappingMissingError,
     IncompleteHistoryError,
+    InvalidProviderResultError,
     LookbackLimitExceededError,
 )
 from app.strategy_protocol.data_view import (
@@ -102,6 +103,121 @@ class DataBoundaryTestCase(unittest.TestCase):
         bar = _bar(AWARE_CUTOFF.date())
         with self.assertRaises(TypeError):
             bar.values["close"] = Decimal("1")
+        # Binary floats, booleans, and non-finite values are rejected.
+        for bad in (1.0, True, "NaN", "Infinity", None):
+            with self.assertRaises(ValueError, msg=repr(bad)):
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=AWARE_CUTOFF.date(),
+                    values={"close": bad},
+                )
+
+
+class ReadOnlyFacadeTestCase(unittest.TestCase):
+    """Strategies must not be able to rewrite query conditions."""
+
+    def _facade(self) -> StrategyDataDTO:
+        return StrategyDataDTO(_CountingView(), data_cutoff=AWARE_CUTOFF)
+
+    def test_data_facade_attributes_are_read_only(self) -> None:
+        facade = self._facade()
+        for name, value in (
+            ("_data_cutoff", AWARE_CUTOFF.replace(year=2999)),
+            ("_max_lookback_sessions", 100_000),
+            ("_view", _CountingView()),
+            ("_adjustment_gate", AdjustmentPolicyGate.active_gate()),
+        ):
+            with self.assertRaises(AttributeError, msg=name):
+                setattr(facade, name, value)
+            with self.assertRaises(AttributeError):
+                delattr(facade, name)
+
+    def test_universe_facade_attributes_are_read_only(self) -> None:
+        class _Universe:
+            def query(self, *, exchanges=None, asset_classes=None):
+                return ()
+
+        facade = UniverseQueryDTO(_Universe())
+        with self.assertRaises(AttributeError):
+            facade._query = lambda **kwargs: ()
+        with self.assertRaises(AttributeError):
+            delattr(facade, "_query")
+
+    def test_conflicting_lookback_and_start_date_is_rejected(self) -> None:
+        view = _CountingView([_bar(day) for day in (
+            AWARE_CUTOFF.date() - timedelta(days=offset) for offset in range(10)
+        )])
+        facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
+        start = AWARE_CUTOFF.date() - timedelta(days=2)
+        # lookback 5 implies a start before the explicit one; the conflict is
+        # a caller error instead of silently widening the read.
+        with self.assertRaises(ValueError):
+            facade.bars(
+                INSTRUMENT_ID, start_date=start, lookback_sessions=5
+            )
+        self.assertEqual(view.reads, 0)
+
+    def test_provider_rows_are_revalidated_on_the_way_out(self) -> None:
+        cutoff_day = AWARE_CUTOFF.date()
+
+        class _FutureProvider(_CountingView):
+            def bars(self, instrument_id, *, start_date, end_date, lookback_sessions):
+                self.reads += 1
+                return (_bar(cutoff_day + timedelta(days=4), "11"),)
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(_FutureProvider(), data_cutoff=AWARE_CUTOFF).bars(
+                INSTRUMENT_ID
+            )
+
+        class _ForeignIdProvider(_CountingView):
+            def bars(self, instrument_id, *, start_date, end_date, lookback_sessions):
+                self.reads += 1
+                return (
+                    BarDTO(
+                        instrument_id=uuid4(),
+                        trade_date=cutoff_day,
+                        values={"close": Decimal("1")},
+                    ),
+                )
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(_ForeignIdProvider(), data_cutoff=AWARE_CUTOFF).bars(
+                INSTRUMENT_ID
+            )
+
+        class _UnsortedProvider(_CountingView):
+            def bars(self, instrument_id, *, start_date, end_date, lookback_sessions):
+                self.reads += 1
+                return (
+                    _bar(cutoff_day),
+                    _bar(cutoff_day - timedelta(days=1)),
+                )
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(_UnsortedProvider(), data_cutoff=AWARE_CUTOFF).bars(
+                INSTRUMENT_ID
+            )
+
+        class _FutureSeriesProvider(_CountingView):
+            def adjusted_series(
+                self, instrument_id, *, start_date, end_date, lookback_sessions, basis
+            ):
+                self.reads += 1
+                return (
+                    AdjustedSeriesPointDTO(
+                        instrument_id=instrument_id,
+                        trade_date=cutoff_day + timedelta(days=1),
+                        adj_factor=Decimal("1"),
+                    ),
+                )
+
+        with self.assertRaises(InvalidProviderResultError):
+            StrategyDataDTO(
+                _FutureSeriesProvider(),
+                data_cutoff=AWARE_CUTOFF,
+                adjustment_gate=AdjustmentPolicyGate.active_gate(),
+            ).adjusted_series(INSTRUMENT_ID, basis="qfq")
 
 
 class AdjustmentPolicyTestCase(unittest.TestCase):
@@ -188,6 +304,46 @@ class PitStitchingTestCase(unittest.TestCase):
                 segments,
                 sessions=[date(2026, 8, 18), date(2026, 8, 20), date(2026, 8, 21)],
                 read_segment=reader,
+            )
+
+    def test_overlapping_segments_block_instead_of_duplicating_bars(self) -> None:
+        # Both segments claim 2026-08-19; exactly-one coverage must fail.
+        segments = (
+            PitSegment("OLD.CODE", date(2026, 8, 17), date(2026, 8, 19)),
+            PitSegment("MID.CODE", date(2026, 8, 18), date(2026, 8, 20)),
+        )
+        reads: list[str] = []
+
+        def reader(code, start, end):
+            reads.append(code)
+            return [
+                BarDTO(
+                    instrument_id=INSTRUMENT_ID,
+                    trade_date=day,
+                    values={"close": Decimal("1")},
+                )
+                for day in (start, end)
+            ]
+
+        with self.assertRaises(IdentityMappingMissingError):
+            stitch_segmented_history(
+                segments,
+                sessions=[date(2026, 8, 18), date(2026, 8, 19)],
+                read_segment=reader,
+            )
+
+    def test_duplicate_or_unsorted_session_input_is_rejected(self) -> None:
+        with self.assertRaises(ValueError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 19), date(2026, 8, 19)],
+                read_segment=lambda code, start, end: [],
+            )
+        with self.assertRaises(ValueError):
+            stitch_segmented_history(
+                self._segments(),
+                sessions=[date(2026, 8, 21), date(2026, 8, 18)],
+                read_segment=lambda code, start, end: [],
             )
 
     def test_missing_history_bars_block_instead_of_forward_fill(self) -> None:

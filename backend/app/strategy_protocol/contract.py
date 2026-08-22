@@ -101,6 +101,14 @@ class IncompleteHistoryError(DataQueryContractError):
     """
 
 
+class InvalidProviderResultError(DataQueryContractError):
+    """Raised when a data provider returns rows violating the read contract.
+
+    Examples include bars past ``data_cutoff``, rows keyed by a different
+    ``instrument_id``, out-of-order results, or mutable/float payloads.
+    """
+
+
 class AdjustmentNotActiveError(DataQueryContractError):
     """Raised when qfq/hfq series are requested while adjustment is unverified.
 

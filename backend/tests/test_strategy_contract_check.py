@@ -156,6 +156,59 @@ class ContractCheckSubprocessTestCase(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.error_type, "LookbackLimitExceededError")
 
+    def test_non_zero_initial_position_passes_end_to_end(self) -> None:
+        # Regression: position instrument ids cross the process boundary as
+        # strings and must be decoded by the worker, not fail the check.
+        source = (
+            "def run(context, parameters):\n"
+            "    positions = context.portfolio.positions\n"
+            "    assert len(positions) == 1\n"
+            f"    assert str(positions[0].instrument_id) == '{STATIC_ID}'\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(
+            _request(
+                source,
+                initial_positions=(
+                    {
+                        "instrument_id": STATIC_ID,
+                        "side": "long",
+                        "quantity": "100",
+                        "available_quantity": "100",
+                        "average_price": "10",
+                    },
+                ),
+            )
+        )
+        self.assertTrue(result.ok, result.message)
+
+    def test_strategy_stdout_cannot_pollute_the_result_document(self) -> None:
+        # Regression: strategy prints are redirected to stderr so stdout only
+        # ever carries the one machine-readable JSON result.
+        source = (
+            "def run(context, parameters):\n"
+            "    print('debug')\n"
+            "    print('more noise', 123)\n"
+            "    return {'mode': 'hold'}\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertTrue(result.ok, result.message)
+        self.assertEqual(result.evidence["mode"], "hold")
+
+    def test_runtime_failure_reports_line_and_technical_details(self) -> None:
+        source = (
+            "def run(context, parameters):\n"
+            "    marker = 1\n"
+            "    raise ValueError('boom at runtime')\n"
+        )
+        result = run_strategy_contract_check(_request(source))
+        self.assertFalse(result.ok)
+        self.assertEqual(result.error_type, "ValueError")
+        # The failing line inside the strategy module is reported.
+        self.assertEqual(result.line, 3)
+        self.assertIn("ValueError", result.technical or "")
+        self.assertIn("boom at runtime", result.message)
+
     def test_timeout_kills_the_worker(self) -> None:
         source = (
             "def run(context, parameters):\n"

@@ -279,6 +279,55 @@ class ContextDtoTestCase(unittest.TestCase):
                 positions=(_make_position(same_id), _make_position(same_id)),
             )
 
+    def test_portfolio_rejects_float_and_invalid_amounts(self) -> None:
+        base = dict(
+            cash_balances={"CNY": Decimal("1")},
+            available_cash=Decimal("1"),
+            frozen_cash=Decimal("0"),
+            margin_used=Decimal("0"),
+            margin_available=Decimal("1"),
+            equity=Decimal("1"),
+        )
+        # The engine's Decimal normalization rejects binary floats with a
+        # TypeError and invalid decimal values with a DomainValidationError.
+        numeric_error = (TypeError, ValueError)
+        for field in ("available_cash", "frozen_cash", "margin_used",
+                      "margin_available", "equity"):
+            with self.assertRaises(numeric_error, msg=field):
+                PortfolioDTO(**{**base, field: 1.5})
+        with self.assertRaises(numeric_error):
+            PortfolioDTO(**{**base, "cash_balances": {"CNY": 2.5}})
+        # Negative non-cash amounts are rejected as well.
+        with self.assertRaises(ValueError):
+            PortfolioDTO(**{**base, "frozen_cash": Decimal("-1")})
+
+    def test_position_rejects_float_and_inconsistent_quantities(self) -> None:
+        def position(**overrides):
+            values = dict(
+                instrument_id=uuid4(),
+                trading_code="SYN.A",
+                name="合成标的 A",
+                display_name="Synthetic A",
+                side="long",
+                quantity=Decimal("100"),
+                available_quantity=Decimal("100"),
+                average_price=Decimal("10"),
+                mark_price=Decimal("11"),
+                realized_pnl=Decimal("0"),
+                unrealized_pnl=Decimal("100"),
+            )
+            values.update(overrides)
+            return PositionDTO(**values)
+
+        numeric_error = (TypeError, ValueError)
+        for field in ("quantity", "average_price", "mark_price", "realized_pnl"):
+            with self.assertRaises(numeric_error, msg=field):
+                position(**{field: 1.5})
+        with self.assertRaises(ValueError):  # available above owned quantity
+            position(available_quantity=Decimal("200"))
+        with self.assertRaises(ValueError):  # zero-quantity positions rejected
+            position(quantity=Decimal("0"), average_price=None)
+
     def test_context_binds_clock_to_step_and_is_immutable(self) -> None:
         context = _make_context()
         self.assertEqual(context.clock.now(), context.decision_time)

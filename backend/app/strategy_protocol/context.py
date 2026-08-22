@@ -17,7 +17,14 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Mapping
 from uuid import UUID
 
-from app.backtesting.domain import PositionSide
+from app.backtesting.domain import (
+    PositionSide,
+    _decimal,
+    _non_negative,
+    _optional_price,
+    _positive,
+    _validate_available_quantity,
+)
 
 from .contract import InvalidDecisionPayloadError
 
@@ -26,11 +33,16 @@ if TYPE_CHECKING:  # pragma: no cover - import used only for type hints
 
 
 def _frozen_mapping(value: Mapping[str, Decimal], field_name: str) -> Mapping[str, Decimal]:
-    """Copy a mapping into a read-only proxy with validated decimals."""
+    """Copy a mapping into a read-only proxy with engine-normalized decimals."""
 
     if not isinstance(value, Mapping):
         raise InvalidDecisionPayloadError(f"{field_name} must be a mapping")
-    return MappingProxyType(dict(value))
+    return MappingProxyType(
+        {
+            str(key): _decimal(item, f"{field_name}[{key!r}]")
+            for key, item in value.items()
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,7 +81,12 @@ class DeterministicClockDTO:
 
 @dataclass(frozen=True, slots=True)
 class PositionDTO:
-    """Read-only view of one non-zero position at decision time."""
+    """Read-only view of one non-zero position at decision time.
+
+    Quantities and prices reuse the engine-wide ``Decimal`` normalization:
+    binary floats, booleans, non-finite values, negative amounts, and
+    available quantities above the owned quantity are rejected.
+    """
 
     instrument_id: UUID
     trading_code: str
@@ -88,11 +105,37 @@ class PositionDTO:
             object.__setattr__(self, "side", PositionSide(self.side))
         except ValueError as exc:
             raise InvalidDecisionPayloadError("side is not a supported position side") from exc
+        quantity = _positive(self.quantity, "quantity")
+        available_quantity = _non_negative(
+            self.available_quantity, "available_quantity"
+        )
+        _validate_available_quantity(quantity, available_quantity)
+        object.__setattr__(self, "quantity", quantity)
+        object.__setattr__(self, "available_quantity", available_quantity)
+        object.__setattr__(
+            self, "average_price", _positive(self.average_price, "average_price")
+        )
+        object.__setattr__(
+            self,
+            "mark_price",
+            _optional_price(self.mark_price, "mark_price"),
+        )
+        object.__setattr__(
+            self, "realized_pnl", _decimal(self.realized_pnl, "realized_pnl")
+        )
+        object.__setattr__(
+            self, "unrealized_pnl", _decimal(self.unrealized_pnl, "unrealized_pnl")
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PortfolioDTO:
-    """Read-only account and non-zero position snapshot."""
+    """Read-only account and non-zero position snapshot.
+
+    All monetary amounts reuse the engine-wide ``Decimal`` normalization, so
+    floats, booleans, non-finite values, and negative cash/margin fields are
+    rejected at construction.
+    """
 
     cash_balances: Mapping[str, Decimal]
     available_cash: Decimal
@@ -106,6 +149,18 @@ class PortfolioDTO:
         object.__setattr__(
             self, "cash_balances", _frozen_mapping(self.cash_balances, "cash_balances")
         )
+        for field_name in (
+            "available_cash",
+            "frozen_cash",
+            "margin_used",
+            "margin_available",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative(getattr(self, field_name), field_name),
+            )
+        object.__setattr__(self, "equity", _decimal(self.equity, "equity"))
         normalized_positions = tuple(self.positions)
         ids = [position.instrument_id for position in normalized_positions]
         if len(ids) != len(set(ids)):
@@ -129,6 +184,11 @@ class OrderSummaryDTO:
     quantity: Decimal
     status: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "quantity", _positive(self.quantity, "order quantity")
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class FillSummaryDTO:
@@ -138,6 +198,12 @@ class FillSummaryDTO:
     side: str
     quantity: Decimal
     price: Decimal
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "quantity", _positive(self.quantity, "fill quantity")
+        )
+        object.__setattr__(self, "price", _positive(self.price, "fill price"))
 
 
 @dataclass(frozen=True, slots=True)

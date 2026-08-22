@@ -8,6 +8,8 @@ exactly one JSON result line to stdout.
 
 The process is deliberately self-contained: it never touches the database,
 the network, or any mutable external state beyond what the request contains.
+Strategy output is redirected to stderr so stdout carries only the single
+machine-readable result document.
 """
 
 from __future__ import annotations
@@ -15,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import traceback
 from datetime import date, datetime, timedelta
 from uuid import UUID
 
@@ -26,7 +29,10 @@ if os.name == "posix" and os.environ.get("QF_CONTRACT_CHECK_MEM_MB"):
     _limit_bytes = int(os.environ["QF_CONTRACT_CHECK_MEM_MB"]) * 1024 * 1024
     resource.setrlimit(resource.RLIMIT_AS, (_limit_bytes, _limit_bytes))
 
-from app.strategy_protocol.adapter import FunctionStrategyAdapter  # noqa: E402
+from app.strategy_protocol.adapter import (  # noqa: E402
+    ISOLATED_SUBPROCESS_SCOPE,
+    FunctionStrategyAdapter,
+)
 from app.strategy_protocol.contract import (  # noqa: E402
     STRATEGY_CONTRACT_VERSION,
 )
@@ -37,12 +43,23 @@ from app.strategy_protocol.synthetic import (  # noqa: E402
     build_synthetic_context,
 )
 
-MAX_STRATEGY_STDOUT_BYTES = 65_536
+MAX_STRATEGY_OUTPUT_BYTES = 65_536
 """Upper bound on bytes a strategy may print during the contract check."""
 
+MAX_TRACEBACK_CHARS = 4_000
+"""Upper bound on the technical traceback tail returned with a failure."""
 
-class _BoundedWriter:
-    """stdout replacement that fails once the byte budget is exhausted."""
+STRATEGY_MODULE_NAME = "published_strategy"
+"""Filename recorded for compiled strategy source, used for line lookups."""
+
+
+class _BoundedStderrWriter:
+    """Strategy-facing stdout replacement that forwards to stderr.
+
+    Strategy ``print`` output must never mix into the JSON result document on
+    real stdout, so it is redirected to stderr under a byte budget; exceeding
+    the budget fails the check instead of growing without bound.
+    """
 
     def __init__(self, underlying, limit: int) -> None:
         self._underlying = underlying
@@ -53,7 +70,7 @@ class _BoundedWriter:
         self._written += len(text.encode("utf-8"))
         if self._written > self._limit:
             raise RuntimeError(
-                f"strategy stdout exceeded {self._limit} bytes during the "
+                f"strategy output exceeded {self._limit} bytes during the "
                 "contract check"
             )
         return self._underlying.write(text)
@@ -69,6 +86,19 @@ def _parse_request(raw: bytes) -> dict:
     return request
 
 
+def _parse_initial_positions(rows: list) -> tuple[dict, ...]:
+    """Decode position rows whose instrument ids arrive as UUID strings."""
+
+    parsed: list[dict] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise ValueError("each initial position must be a JSON object")
+        decoded = dict(row)
+        decoded["instrument_id"] = UUID(str(decoded.get("instrument_id")))
+        parsed.append(decoded)
+    return tuple(parsed)
+
+
 def _identity_row_to_evidence(row: SyntheticIdentityRow) -> dict:
     return {
         "instrument_id": str(row.instrument_id),
@@ -82,7 +112,7 @@ def perform_contract_check(request: dict) -> dict:
     """Execute the full check and return the JSON-serializable result."""
 
     static_ids = tuple(UUID(value) for value in request.get("static_instrument_ids", []))
-    initial_positions = tuple(request.get("initial_positions", []))
+    initial_positions = _parse_initial_positions(request.get("initial_positions", []))
     parameters = ContractCheckParameters(
         session_date=date.fromisoformat(request["session_date"]),
         decision_time=datetime.fromisoformat(request["decision_time"]),
@@ -95,10 +125,14 @@ def perform_contract_check(request: dict) -> dict:
     adapter = FunctionStrategyAdapter.from_source(
         request["source_code"],
         parameters=request.get("default_parameters", {}),
+        execution_scope=ISOLATED_SUBPROCESS_SCOPE,
+        module_name=STRATEGY_MODULE_NAME,
     )
 
     real_stdout = sys.stdout
-    sys.stdout = _BoundedWriter(real_stdout, MAX_STRATEGY_STDOUT_BYTES)
+    # stdout stays reserved for the one JSON result; strategy prints go to
+    # stderr under a bounded budget.
+    sys.stdout = _BoundedStderrWriter(sys.stderr, MAX_STRATEGY_OUTPUT_BYTES)
     try:
         decision = adapter.on_step(context)
     finally:
@@ -139,15 +173,44 @@ def main() -> int:
 
 
 def _failure_payload(exc: Exception) -> dict:
-    """Build a display-safe, locatable failure record."""
+    """Build a display-safe, locatable failure record.
 
+    ``line`` prefers an explicit syntax-error line number and otherwise falls
+    back to the deepest frame inside the strategy module, so runtime failures
+    stay locatable.  A bounded sanitized traceback is attached as the
+    expandable technical detail.
+    """
+
+    line = getattr(exc, "lineno", None)
+    if line is None:
+        line = _strategy_line(exc)
     return {
         "error_type": type(exc).__name__,
         "message": str(exc),
-        # Syntax errors carry a source line; runtime errors do not.
-        "line": getattr(exc, "lineno", None),
+        "line": line,
+        "traceback": _bounded_traceback(exc),
         "phase": "strategy_contract_check",
     }
+
+
+def _strategy_line(exc: Exception) -> int | None:
+    """Return the deepest strategy-source frame line, when available."""
+
+    for summary in reversed(traceback.extract_tb(exc.__traceback__)):
+        if summary.filename == STRATEGY_MODULE_NAME:
+            return summary.lineno
+    return None
+
+
+def _bounded_traceback(exc: Exception) -> str:
+    """Render the traceback tail without leaking unrelated internals."""
+
+    rendered = "".join(
+        traceback.format_exception(type(exc), exc, exc.__traceback__)
+    ).strip()
+    if len(rendered) > MAX_TRACEBACK_CHARS:
+        rendered = rendered[-MAX_TRACEBACK_CHARS:]
+    return rendered
 
 
 def _emit(result: dict) -> None:
