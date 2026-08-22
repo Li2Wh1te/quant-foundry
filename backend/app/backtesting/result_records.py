@@ -606,6 +606,16 @@ class BacktestEquityCurveRecord(_RunBoundRecord):
         nullable=True,
         comment="Account equity; null for blocked points.",
     )
+    period_return: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Period return versus the previous valid point; null for blocked points.",
+    )
+    total_pnl: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Total profit and loss versus initial equity; null for blocked points.",
+    )
     cumulative_return: Mapped[Decimal | None] = mapped_column(
         Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
         nullable=True,

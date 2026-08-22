@@ -38,6 +38,7 @@ from app.backtesting.result_schemas import (
     BacktestStepItem,
     ResultCursorPage,
 )
+from app.core.config import get_settings
 from app.db.session import get_db_session
 
 
@@ -56,8 +57,14 @@ def _page_or_error(page: CursorPage) -> dict[str, object]:
 
 
 def _read_page(kind: str, *, run_id: UUID, limit: int, cursor: str | None, session: Session, **filters: object) -> dict[str, object]:
+    repository = BacktestResultRepository(
+        session,
+        # Reuse the deployment's API token as the cursor HMAC secret so no
+        # extra configuration key is required for the first version.
+        cursor_signing_key=get_settings().api_token.get_secret_value(),
+    )
     try:
-        page = BacktestResultRepository(session).read_page(
+        page = repository.read_page(
             kind, run_id=run_id, limit=limit, cursor=cursor, **filters
         )
     except ResultFilterError as exc:

@@ -22,6 +22,7 @@ from app.backtesting.result_models import (
     ResultOrderStatus,
     StepPhase,
 )
+from app.backtesting.result_records import RESULT_TABLE_NAMES
 
 
 RUN_ID = uuid4()
@@ -195,28 +196,58 @@ class PositionContractTestCase(unittest.TestCase):
 
 
 class EquityAndMetricContractTestCase(unittest.TestCase):
+    def complete_equity(self, **overrides) -> BacktestEquityCurveRecord:
+        fields = dict(
+            run_id=RUN_ID,
+            sequence=1,
+            as_of=TS,
+            valuation_status=ValuationStatus.COMPLETE,
+            cash="100",
+            market_value="50",
+            equity="150",
+            period_return="0.05",
+            total_pnl="50",
+            cumulative_return="0.5",
+            drawdown="-0.1",
+            cumulative_fees="3",
+        )
+        fields.update(overrides)
+        return BacktestEquityCurveRecord(**fields)
+
     def test_blocked_points_cannot_carry_equity_values(self) -> None:
         with self.assertRaises(DomainValidationError):
-            BacktestEquityCurveRecord(
-                run_id=RUN_ID,
-                sequence=1,
-                as_of=TS,
+            self.complete_equity(valuation_status=ValuationStatus.BLOCKED)
+
+    def test_blocked_points_still_require_cash_and_reason(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            self.complete_equity(
+                valuation_status=ValuationStatus.BLOCKED, cash=None
+            )
+        with self.assertRaises(DomainValidationError):
+            self.complete_equity(
                 valuation_status=ValuationStatus.BLOCKED,
-                cash="100",
-                equity="100",
-                cumulative_fees="0",
+                market_value=None,
+                equity=None,
+                period_return=None,
+                total_pnl=None,
+                cumulative_return=None,
+                drawdown=None,
+                valuation_reason=None,
             )
 
-    def test_valid_points_require_equity_fields(self) -> None:
-        with self.assertRaises(DomainValidationError):
-            BacktestEquityCurveRecord(
-                run_id=RUN_ID,
-                sequence=1,
-                as_of=TS,
-                valuation_status=ValuationStatus.COMPLETE,
-                cash="100",
-                cumulative_fees="0",
-            )
+    def test_valid_points_require_all_valuation_fields(self) -> None:
+        for missing in (
+            "cash",
+            "market_value",
+            "equity",
+            "period_return",
+            "total_pnl",
+            "cumulative_return",
+            "drawdown",
+        ):
+            fields = {missing: None}
+            with self.assertRaises(DomainValidationError, msg=missing):
+                self.complete_equity(**fields)
 
     def test_metrics_need_value_xor_reason(self) -> None:
         unavailable = BacktestMetricRecord(
@@ -245,6 +276,19 @@ class EquityAndMetricContractTestCase(unittest.TestCase):
 
 
 class GeneralityContractTestCase(unittest.TestCase):
+    def test_result_tables_are_registered_in_alembic_metadata(self) -> None:
+        # Importing app.models is what the Alembic env does; autogenerate can
+        # only discover the result tables through that import chain.
+        import app.models  # noqa: F401
+        from app.db.base import Base as MetadataBase
+
+        for table_name in RESULT_TABLE_NAMES:
+            self.assertIn(
+                table_name,
+                MetadataBase.metadata.tables,
+                f"{table_name} is invisible to Alembic autogenerate",
+            )
+
     def test_fictional_asset_uses_the_same_dtos(self) -> None:
         fictional = InstrumentDisplaySnapshot(
             instrument_id=uuid4(),

@@ -24,7 +24,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -32,8 +32,11 @@ from app.backtesting.pagination import (
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,
     CursorPage,
+    CursorQueryMismatchError,
     build_cursor,
     compute_query_digest,
+    encode_sort_element,
+    hmac_compare,
     normalize_limit,
     parse_cursor,
 )
@@ -104,6 +107,18 @@ def _aware(value: datetime) -> datetime:
 
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
+    return value
+
+
+def _normalize_sort_value(kind: str, value: Any) -> Any:
+    """Coerce a raw column value into its typed, comparable sort-key form."""
+
+    if kind == "ts":
+        return _aware(value)
+    if kind == "uuid":
+        return value if isinstance(value, UUID) else UUID(str(value))
+    if kind == "dec":
+        return value if isinstance(value, Decimal) else Decimal(str(value))
     return value
 
 
@@ -216,6 +231,8 @@ def _equity_record(dto: BacktestEquityCurveDto) -> dict[str, Any]:
         "cash": dto.cash,
         "market_value": dto.market_value,
         "equity": dto.equity,
+        "period_return": dto.period_return,
+        "total_pnl": dto.total_pnl,
         "cumulative_return": dto.cumulative_return,
         "drawdown": dto.drawdown,
         "cumulative_fees": dto.cumulative_fees,
@@ -494,8 +511,13 @@ def build_query_payload(
 class BacktestResultRepository:
     """Write result facts and read them back through stable cursor pages."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, cursor_signing_key: str) -> None:
+        # Cursors are HMAC-signed server-side; without a secret they could be
+        # forged into another syntactically valid shape.
+        if not isinstance(cursor_signing_key, str) or not cursor_signing_key.strip():
+            raise ValueError("cursor_signing_key must be non-blank text")
         self.session = session
+        self._signing_key = cursor_signing_key
 
     # -- writes ------------------------------------------------------------
 
@@ -518,10 +540,14 @@ class BacktestResultRepository:
                     f"{kind} expects {spec.dto_cls.__name__}, got "
                     f"{type(dto).__name__}"
                 )
-            identity = tuple(getattr(dto, name) for name in spec.identity_fields)
+            identity = (
+                dto.run_id,
+                *(getattr(dto, name) for name in spec.identity_fields),
+            )
             if identity in seen:
                 raise ResultRecordConflictError(
-                    f"duplicate {kind} identity {identity} within the batch"
+                    f"duplicate {kind} identity {identity[1:]} within the same "
+                    "run's batch"
                 )
             seen.add(identity)
             payloads.append(spec.to_record(dto))
@@ -548,9 +574,12 @@ class BacktestResultRepository:
         """Return one stable page of results for a run.
 
         The first call captures the maximum visible sort-key tuple as the
-        query's upper bound; every later page reached through the returned
-        cursor stays inside that bound, so rows appended while a client is
-        paging never create duplicates or shift earlier pages.
+        query's upper bound inside the SAME SQL statement that reads the
+        page (window functions), so under READ COMMITTED the page and the
+        bound always come from one snapshot.  Every later page reached
+        through the returned cursor stays inside that bound, so rows
+        appended while a client is paging never create duplicates or shift
+        earlier pages.
         """
 
         spec = get_result_kind_spec(kind)
@@ -566,52 +595,159 @@ class BacktestResultRepository:
                 filters[name] = normalized
 
         payload = build_query_payload(spec, run_id=run_uuid, limit=checked_limit, filters=filters)
-        digest = compute_query_digest(payload)
 
-        statement = self._base_statement(spec, run_uuid, filters)
-        parsed = None
-        if cursor is not None:
-            parsed = self._parse_cursor(spec, cursor, digest)
-            statement = statement.where(
-                self._keyset_predicate(spec, parsed.last_sort_key, mode="after")
-            ).where(
-                self._keyset_predicate(
-                    spec,
-                    tuple(parsed.query_upper_bound[column] for column in spec.sort_columns),
-                    # Inclusive bound: the maximum row visible at snapshot time
-                    # must stay readable; appended rows sort strictly beyond it.
-                    mode="at_or_before",
-                )
-            )
+        if cursor is None:
+            return self._read_first_page(spec, payload, run_uuid, filters, checked_limit)
+        return self._read_continuation_page(
+            spec, payload, run_uuid, filters, checked_limit, cursor
+        )
 
-        rows = self._fetch_page(statement, spec, checked_limit)
-        has_more = len(rows) > checked_limit
-        items = tuple(rows[:checked_limit])
+    # -- internals ---------------------------------------------------------
+
+    def _read_first_page(
+        self,
+        spec: ResultKindSpec,
+        payload: Mapping[str, Any],
+        run_id: UUID,
+        filters: Mapping[str, str],
+        limit: int,
+    ) -> CursorPage:
+        """Read the first page and its upper bound from one statement.
+
+        ``first_value(...) OVER (ORDER BY <sort> DESC)`` exposes the maximum
+        visible sort-key columns next to every row.  Because window
+        functions are evaluated over the full filtered row set before LIMIT,
+        the page and the bound cannot come from different snapshots.
+        """
+
+        statement = self._first_page_statement(spec, run_id, filters)
+        executed = list(self.session.execute(statement.limit(limit + 1)))
+        rows = [row[0] for row in executed]
+        # Re-sort defensively so tie handling stays observable in Python.
+        rows.sort(key=lambda row: self._row_sort_key(spec, row))
+        has_more = len(rows) > limit
+        items = tuple(rows[:limit])
         if not items:
             return CursorPage(items=(), next_cursor=None, has_more=False)
 
         next_cursor: str | None = None
         if has_more:
-            last_key = self._row_sort_key(spec, items[-1])
-            if parsed is not None:
-                # Continuation pages must keep the snapshot upper bound of the
-                # original first page; recomputing it would admit rows that
-                # were appended after the walk began.
-                bound = tuple(
-                    parsed.query_upper_bound[column] for column in spec.sort_columns
-                )
-            else:
-                bound = self._upper_bound(spec, run_uuid, filters)
+            bound = self._bound_from_window_row(spec, executed[0])
+            encoded_bound = self._encode_bound(spec, dict(zip(spec.sort_columns, bound)))
+            digest = compute_query_digest({**payload, "query_upper_bound": encoded_bound})
             next_cursor = build_cursor(
+                signing_key=self._signing_key,
                 query_digest=digest,
                 key_kinds=spec.key_kinds,
-                last_sort_key=last_key,
+                last_sort_key=self._row_sort_key(spec, items[-1]),
                 upper_bound_columns=spec.upper_bound_columns,
                 query_upper_bound=dict(zip(spec.sort_columns, bound)),
             )
         return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
 
-    # -- internals ---------------------------------------------------------
+    def _read_continuation_page(
+        self,
+        spec: ResultKindSpec,
+        payload: Mapping[str, Any],
+        run_id: UUID,
+        filters: Mapping[str, str],
+        limit: int,
+        cursor: str,
+    ) -> CursorPage:
+        parsed = parse_cursor(
+            cursor,
+            signing_key=self._signing_key,
+            key_kinds=spec.key_kinds,
+            upper_bound_columns=spec.upper_bound_columns,
+        )
+        # The snapshot upper bound of the original first page is reused;
+        # recomputing it would admit rows appended after the walk began.
+        bound_values = tuple(
+            parsed.query_upper_bound[column] for column in spec.sort_columns
+        )
+        encoded_bound = self._encode_bound(
+            spec, dict(zip(spec.sort_columns, bound_values))
+        )
+        expected_digest = compute_query_digest(
+            {**payload, "query_upper_bound": encoded_bound}
+        )
+        if not hmac_compare(parsed.query_digest, expected_digest):
+            raise CursorQueryMismatchError(
+                "cursor belongs to a different query; restart from the first page"
+            )
+
+        statement = self._base_statement(spec, run_id, filters).where(
+            self._keyset_predicate(spec, parsed.last_sort_key, mode="after")
+        ).where(
+            # Inclusive bound: the maximum row visible at snapshot time must
+            # stay readable; appended rows sort strictly beyond it.
+            self._keyset_predicate(spec, bound_values, mode="at_or_before")
+        )
+        rows = list(self.session.scalars(statement.limit(limit + 1)))
+        rows.sort(key=lambda row: self._row_sort_key(spec, row))
+        has_more = len(rows) > limit
+        items = tuple(rows[:limit])
+        if not items:
+            return CursorPage(items=(), next_cursor=None, has_more=False)
+
+        next_cursor: str | None = None
+        if has_more:
+            next_cursor = build_cursor(
+                signing_key=self._signing_key,
+                query_digest=expected_digest,
+                key_kinds=spec.key_kinds,
+                last_sort_key=self._row_sort_key(spec, items[-1]),
+                upper_bound_columns=spec.upper_bound_columns,
+                query_upper_bound=dict(zip(spec.sort_columns, bound_values)),
+            )
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
+
+    def _first_page_statement(
+        self,
+        spec: ResultKindSpec,
+        run_id: UUID,
+        filters: Mapping[str, str],
+    ):
+        record_cls = spec.record_cls
+        conditions: list[Any] = [record_cls.run_id == run_id]
+        conditions.extend(
+            self._filter_condition(spec, name, value) for name, value in filters.items()
+        )
+        window_columns = []
+        for position, column_name in enumerate(spec.sort_columns):
+            column = getattr(record_cls, column_name)
+            # Carry the column type into the function expression so the
+            # dialect's result processor still converts raw DB values.
+            first_value = func.first_value(column, type_=column.type)
+            window_columns.append(
+                first_value.over(order_by=column.desc()).label(
+                    f"__upper_bound_{position}"
+                )
+            )
+        return (
+            select(record_cls, *window_columns)
+            .where(*conditions)
+            .order_by(*[getattr(record_cls, column).asc() for column in spec.sort_columns])
+        )
+
+    def _encode_bound(self, spec: ResultKindSpec, bound: Mapping[str, Any]) -> dict[str, Any]:
+        """Canonical wire form of an upper bound, feeding the query digest.
+
+        Binding the digest to the bound means a cursor can only be paired
+        with the exact query state it was issued for.
+        """
+
+        return {
+            column: encode_sort_element(spec.upper_bound_columns[column], bound[column])
+            for column in sorted(bound)
+        }
+
+    def _bound_from_window_row(self, spec: ResultKindSpec, row: Any) -> tuple[Any, ...]:
+        values: list[Any] = []
+        for position, kind in enumerate(spec.key_kinds):
+            raw = getattr(row, f"__upper_bound_{position}")
+            values.append(_normalize_sort_value(kind, raw))
+        return tuple(values)
 
     def _base_statement(
         self,
@@ -680,55 +816,12 @@ class BacktestResultRepository:
             conditions.append(and_(*conjunction))
         return or_(*conditions)
 
-    def _fetch_page(self, statement: Any, spec: ResultKindSpec, limit: int):
-        rows = list(self.session.scalars(statement.limit(limit + 1)))
-        # Re-sort defensively: SQLite stores timestamps lexicographically and
-        # multi-column ordering matches the SQL ORDER BY, but keeping the
-        # Python-side guarantee explicit makes tie handling observable.
-        rows.sort(key=lambda row: self._row_sort_key(spec, row))
-        return rows
-
     def _row_sort_key(self, spec: ResultKindSpec, row: Any) -> tuple[Any, ...]:
         """Typed, comparable sort-key tuple of one ORM row."""
 
-        key: list[Any] = []
-        for column, kind in zip(spec.sort_columns, spec.key_kinds):
-            value = getattr(row, column)
-            if kind == "ts":
-                value = _aware(value)
-            elif kind == "uuid":
-                value = value if isinstance(value, UUID) else UUID(str(value))
-            elif kind == "dec":
-                value = value if isinstance(value, Decimal) else Decimal(str(value))
-            key.append(value)
-        return tuple(key)
-
-    def _upper_bound(
-        self,
-        spec: ResultKindSpec,
-        run_id: UUID,
-        filters: Mapping[str, str],
-    ) -> tuple[Any, ...]:
-        """Maximum sort-key tuple currently visible for this exact query."""
-
-        # A fresh statement is required: appending a second order_by() would
-        # combine both orderings instead of reversing the first one.
-        statement = self._base_statement(
-            spec, run_id, filters, descending=True
-        ).limit(1)
-        top = self.session.scalar(statement)
-        if top is None:
-            return ()
-        return self._row_sort_key(spec, top)
-
-    def _parse_cursor(self, spec: ResultKindSpec, token: str, digest: str):
-        # parse_cursor raises the specific CursorError subclasses directly;
-        # the router maps them to an explicit parameter error.
-        return parse_cursor(
-            token,
-            expected_query_digest=digest,
-            key_kinds=spec.key_kinds,
-            upper_bound_columns=spec.upper_bound_columns,
+        return tuple(
+            _normalize_sort_value(kind, getattr(row, column))
+            for column, kind in zip(spec.sort_columns, spec.key_kinds)
         )
 
 

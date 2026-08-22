@@ -39,6 +39,7 @@ from app.backtesting.result_repository import (
 
 
 UTC = timezone.utc
+SIGNING_KEY = "unit-test-signing-key"
 
 
 def ts(hour: int, minute: int = 0) -> datetime:
@@ -99,7 +100,9 @@ class ResultRepositoryTestCase(unittest.TestCase):
         ]
         Base.metadata.create_all(self.engine, tables=result_tables)
         self.session = Session(self.engine)
-        self.repo = BacktestResultRepository(self.session)
+        self.repo = BacktestResultRepository(
+            self.session, cursor_signing_key=SIGNING_KEY
+        )
         self.run_id = uuid4()
 
     def tearDown(self) -> None:
@@ -158,6 +161,24 @@ class WriteContractTestCase(ResultRepositoryTestCase):
         order = make_order(self.run_id)
         with self.assertRaises(ResultRecordConflictError):
             self.repo.append("orders", order, order)
+
+    def test_same_identity_across_different_runs_is_allowed(self) -> None:
+        shared_order_id = uuid4()
+        other_run = uuid4()
+        self.repo.append(
+            "orders",
+            make_order(self.run_id, order_id=shared_order_id),
+            make_order(other_run, order_id=shared_order_id),
+        )
+        first = self.repo.read_page("orders", run_id=self.run_id)
+        second = self.repo.read_page("orders", run_id=other_run)
+        self.assertEqual([row.order_id for row in first.items], [shared_order_id])
+        self.assertEqual([row.order_id for row in second.items], [shared_order_id])
+
+    def test_missing_signing_key_is_rejected(self) -> None:
+        for bad in ("", "   "):
+            with self.assertRaises(ValueError):
+                BacktestResultRepository(self.session, cursor_signing_key=bad)
 
     def test_positions_unique_per_valuation_point_and_side(self) -> None:
         as_of = ts(15)
@@ -514,6 +535,10 @@ class FilterContractTestCase(ResultRepositoryTestCase):
                 cash="100",
                 market_value="50",
                 equity="150",
+                # Binary-float-exact values so the SQLite test dialect
+                # round-trips them without precision artifacts.
+                period_return="0.5",
+                total_pnl="50",
                 cumulative_return="0.5",
                 drawdown="-0.1",
                 cumulative_fees="3",
@@ -530,6 +555,33 @@ class FilterContractTestCase(ResultRepositoryTestCase):
             for row in page_rows
         ]
         self.assertEqual(normalized, [(ts(9), 0), (ts(10), 1), (ts(10), 2)])
+        # The full valuation detail, including period return and total PnL,
+        # survives the persistence round trip.
+        self.assertEqual(
+            (page_rows[0].period_return, page_rows[0].total_pnl),
+            (Decimal("0.5"), Decimal("50")),
+        )
+
+    def test_blocked_points_require_cash_and_reason(self) -> None:
+        base = dict(
+            run_id=self.run_id,
+            sequence=0,
+            as_of=ts(9),
+            valuation_status=ValuationStatus.BLOCKED,
+            cumulative_fees="1",
+        )
+        with self.assertRaises(Exception):
+            BacktestEquityCurveRecord(**base, cash=None, valuation_reason=None)
+        with self.assertRaises(Exception):
+            BacktestEquityCurveRecord(
+                **base, cash="100", valuation_reason=None
+            )
+        blocked = BacktestEquityCurveRecord(
+            **base, cash="100", valuation_reason="行情数据缺失"
+        )
+        self.assertIsNone(blocked.equity)
+        self.assertIsNone(blocked.period_return)
+        self.assertIsNone(blocked.total_pnl)
 
 
 if __name__ == "__main__":

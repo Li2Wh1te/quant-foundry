@@ -31,6 +31,7 @@ from app.backtesting.result_schemas import ResultCursorPage, BacktestOrderItem
 
 
 UTC = timezone.utc
+SIGNING_KEY = "unit-test-signing-key"
 
 
 def ts(hour: int) -> datetime:
@@ -43,7 +44,9 @@ class ResultApiTestCase(unittest.TestCase):
         result_tables = [Base.metadata.tables[name] for name in RESULT_TABLE_NAMES]
         Base.metadata.create_all(self.engine, tables=result_tables)
         self.session = Session(self.engine)
-        self.repo = BacktestResultRepository(self.session)
+        self.repo = BacktestResultRepository(
+            self.session, cursor_signing_key=SIGNING_KEY
+        )
         self.run_id = uuid4()
 
     def tearDown(self) -> None:

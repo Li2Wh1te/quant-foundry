@@ -11,10 +11,16 @@ an opaque JSON cursor token.  The token carries:
 - ``query_upper_bound``: the maximum sort-key tuple visible when the first
   page was created, so appended rows never leak into an existing cursor.
 
-Tokens are canonical JSON encoded as unpadded base64url.  Clients must treat
-them as opaque; any tampering, version mismatch, format error, or query
-mismatch raises :class:`CursorError` so callers can return a clear parameter
-error instead of silently restarting from the first page.
+Tokens are canonical JSON encoded as unpadded base64url and signed with a
+server-side HMAC-SHA256 (``<payload>.<signature>``).  The signature covers
+every payload field, including ``last_sort_key`` and ``query_upper_bound``,
+so a token edited into another syntactically valid shape is still rejected.
+The ``query_digest`` itself covers the canonicalized query plus the encoded
+upper bound, binding the cursor to one exact server-side query state.
+Clients must treat tokens as opaque; any tampering, version mismatch,
+format error, or query mismatch raises :class:`CursorError` so callers can
+return a clear parameter error instead of silently restarting from the
+first page.
 """
 
 from __future__ import annotations
@@ -175,6 +181,12 @@ def _decode_element(element: Any, kind: str, label: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
+def encode_sort_element(kind: str, value: Any) -> dict[str, Any]:
+    """Public wrapper so callers can canonicalize bound values for digests."""
+
+    return _encode_element(kind, value)
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedCursor:
     """Decoded cursor payload with typed sort-key values."""
@@ -187,13 +199,14 @@ class ParsedCursor:
 
 def build_cursor(
     *,
+    signing_key: str,
     query_digest: str,
     key_kinds: Sequence[str],
     last_sort_key: Sequence[Any],
     upper_bound_columns: Mapping[str, str],
     query_upper_bound: Mapping[str, Any],
 ) -> str:
-    """Encode a cursor token from typed sort-key values.
+    """Encode a signed cursor token from typed sort-key values.
 
     ``upper_bound_columns`` maps each bound column to its element kind.
     Raises :class:`ValueError` when values do not match their declared
@@ -201,6 +214,7 @@ def build_cursor(
     because both sides come from the same result-kind specification.
     """
 
+    key = _require_signing_key(signing_key)
     if len(key_kinds) != len(last_sort_key):
         raise ValueError("last_sort_key length must match key_kinds")
     if set(upper_bound_columns) != set(query_upper_bound):
@@ -209,15 +223,15 @@ def build_cursor(
         "version": CURSOR_VERSION,
         "query_digest": query_digest,
         "last_sort_key": [
-            _encode_element(kind, value)
+            encode_sort_element(kind, value)
             for kind, value in zip(key_kinds, last_sort_key)
         ],
         "query_upper_bound": {
-            column: _encode_element(upper_bound_columns[column], query_upper_bound[column])
+            column: encode_sort_element(upper_bound_columns[column], query_upper_bound[column])
             for column in sorted(query_upper_bound)
         },
     }
-    return _encode_token(payload)
+    return sign_token(payload, key)
 
 
 def _encode_token(payload: dict[str, Any]) -> str:
@@ -227,10 +241,37 @@ def _encode_token(payload: dict[str, Any]) -> str:
     return urlsafe_b64encode(canonical.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def _decode_token(token: str) -> dict[str, Any]:
+def _require_signing_key(signing_key: str | None) -> str:
+    if not isinstance(signing_key, str) or not signing_key.strip():
+        raise ValueError("cursor signing key must be non-blank text")
+    return signing_key
+
+
+def sign_token(payload: dict[str, Any], signing_key: str) -> str:
+    """Encode the payload and append a server-side HMAC-SHA256 signature.
+
+    The signature covers the exact base64url payload bytes, so any change to
+    any field (including ``last_sort_key`` and ``query_upper_bound``)
+    invalidates the token.
+    """
+
+    encoded = _encode_token(payload)
+    mac = hmac.new(
+        signing_key.encode("utf-8"), encoded.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    return f"{encoded}.{mac}"
+
+
+def _split_signed_token(token: str) -> tuple[str, dict[str, Any], str]:
+    """Split a token into (payload-b64, decoded-payload, signature)."""
+
     if not isinstance(token, str) or not token or len(token) > 8192:
         raise MalformedCursorError("cursor must be a non-empty short token")
-    padded = token + "=" * (-len(token) % 4)
+    parts = token.split(".")
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        raise MalformedCursorError("cursor is missing its signature")
+    encoded_payload, signature = parts
+    padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
     try:
         raw = urlsafe_b64decode(padded.encode("ascii"))
         payload = json.loads(raw.decode("utf-8"))
@@ -238,24 +279,34 @@ def _decode_token(token: str) -> dict[str, Any]:
         raise MalformedCursorError("cursor is not valid base64url JSON") from exc
     if not isinstance(payload, dict):
         raise MalformedCursorError("cursor payload must be a JSON object")
-    return payload
+    return encoded_payload, payload, signature
 
 
 def parse_cursor(
     token: str,
     *,
+    signing_key: str,
     expected_query_digest: str | None = None,
     key_kinds: Sequence[str] | None = None,
     upper_bound_columns: Mapping[str, str] | None = None,
 ) -> ParsedCursor:
     """Decode and fully validate a cursor token.
 
-    ``key_kinds`` declares the positional sort-key kinds of the result type;
+    The server-side MAC is verified first; tokens without a valid signature
+    are rejected before their content is interpreted.  ``key_kinds`` declares
+    the positional sort-key kinds of the result type;
     ``upper_bound_columns`` declares the expected upper-bound columns and
     their kinds.  When provided, structural mismatches are rejected.
     """
 
-    payload = _decode_token(token)
+    key = _require_signing_key(signing_key)
+    encoded_payload, payload, signature = _split_signed_token(token)
+    recomputed = hmac.new(
+        key.encode("utf-8"), encoded_payload.encode("ascii"), hashlib.sha256
+    ).hexdigest()
+    if not hmac_compare(signature, recomputed):
+        raise MalformedCursorError("cursor signature verification failed")
+
     version = payload.get("version")
     if version != CURSOR_VERSION:
         raise UnsupportedCursorVersionError(
@@ -327,7 +378,9 @@ __all__ = [
     "build_cursor",
     "canonical_query_payload",
     "compute_query_digest",
+    "encode_sort_element",
     "hmac_compare",
     "normalize_limit",
     "parse_cursor",
+    "sign_token",
 ]

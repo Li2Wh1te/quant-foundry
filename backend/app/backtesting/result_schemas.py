@@ -136,6 +136,8 @@ class BacktestEquityCurveItem(_ResultItem):
     cash: SerializedDecimal = None
     market_value: SerializedDecimal = None
     equity: SerializedDecimal = None
+    period_return: SerializedDecimal = None
+    total_pnl: SerializedDecimal = None
     cumulative_return: SerializedDecimal = None
     drawdown: SerializedDecimal = None
     cumulative_fees: SerializedDecimal = None

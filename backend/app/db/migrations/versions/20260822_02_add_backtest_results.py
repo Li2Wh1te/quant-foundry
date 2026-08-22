@@ -500,6 +500,16 @@ def upgrade() -> None:
         ),
         _amount_column("equity", "Account equity; null for blocked points.", True),
         _amount_column(
+            "period_return",
+            "Period return versus the previous valid point; null for blocked points.",
+            True,
+        ),
+        _amount_column(
+            "total_pnl",
+            "Total profit and loss versus initial equity; null for blocked points.",
+            True,
+        ),
+        _amount_column(
             "cumulative_return",
             "Cumulative return versus initial equity; null for blocked points.",
             True,

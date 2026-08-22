@@ -20,22 +20,36 @@ from app.backtesting.pagination import (
     compute_query_digest,
     normalize_limit,
     parse_cursor,
+    sign_token,
 )
 
 
 TS = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
 KEY_KINDS = ("ts", "uuid")
 UPPER_COLUMNS = {"submitted_at": "ts", "order_id": "uuid"}
+SIGNING_KEY = "unit-test-signing-key"
 
 
-def token_for(last_key, bound, digest="d" * 64) -> str:
+def token_for(last_key, bound, digest="d" * 64, signing_key=SIGNING_KEY) -> str:
     return build_cursor(
+        signing_key=signing_key,
         query_digest=digest,
         key_kinds=KEY_KINDS,
         last_sort_key=last_key,
         upper_bound_columns=UPPER_COLUMNS,
         query_upper_bound=bound,
     )
+
+
+def parse(token, **overrides):
+    kwargs = {
+        "signing_key": SIGNING_KEY,
+        "expected_query_digest": "d" * 64,
+        "key_kinds": KEY_KINDS,
+        "upper_bound_columns": UPPER_COLUMNS,
+    }
+    kwargs.update(overrides)
+    return parse_cursor(token, **kwargs)
 
 
 class LimitPolicyTestCase(unittest.TestCase):
@@ -84,12 +98,7 @@ class CursorRoundTripTestCase(unittest.TestCase):
     def test_round_trip_preserves_typed_values(self) -> None:
         order_id = uuid4()
         token = token_for((TS, order_id), {"submitted_at": TS, "order_id": order_id})
-        parsed = parse_cursor(
-            token,
-            expected_query_digest="d" * 64,
-            key_kinds=KEY_KINDS,
-            upper_bound_columns=UPPER_COLUMNS,
-        )
+        parsed = parse(token)
         self.assertEqual(parsed.version, CURSOR_VERSION)
         self.assertEqual(parsed.last_sort_key[0], TS)
         self.assertEqual(parsed.last_sort_key[1], order_id)
@@ -112,6 +121,7 @@ class CursorRoundTripTestCase(unittest.TestCase):
         fill_id = uuid4()
         columns = {"timestamp": "ts", "fill_id": "uuid"}
         a = build_cursor(
+            signing_key=SIGNING_KEY,
             query_digest=digest,
             key_kinds=("ts", "uuid"),
             last_sort_key=(TS, fill_id),
@@ -119,6 +129,7 @@ class CursorRoundTripTestCase(unittest.TestCase):
             query_upper_bound={"timestamp": TS, "fill_id": fill_id},
         )
         b = build_cursor(
+            signing_key=SIGNING_KEY,
             query_digest=digest,
             key_kinds=("ts", "uuid"),
             last_sort_key=(TS, fill_id),
@@ -128,41 +139,105 @@ class CursorRoundTripTestCase(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+def _split(token: str) -> tuple[str, dict, str]:
+    encoded_payload, signature = token.split(".")
+    padded = encoded_payload + "=" * (-len(encoded_payload) % 4)
+    payload = json.loads(urlsafe_b64decode(padded))
+    return encoded_payload, payload, signature
+
+
+def _reencode_without_signature(payload: dict) -> str:
+    canonical = json.dumps(
+        payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    )
+    return urlsafe_b64encode(canonical.encode()).decode().rstrip("=")
+
+
 class CursorRejectionTestCase(unittest.TestCase):
     def test_malformed_tokens_are_rejected(self) -> None:
-        for bad in ("", "not-base64!!", urlsafe_b64encode(b"[not-json]").decode()):
+        for bad in (
+            "",
+            "not-base64!!",
+            urlsafe_b64encode(b"[not-json]").decode(),
+            # Unsigned legacy tokens must not be accepted either.
+            urlsafe_b64encode(b"{}").decode().rstrip("="),
+        ):
             with self.assertRaises(MalformedCursorError):
-                parse_cursor(bad)
+                parse(bad)
+
+    def test_missing_or_garbled_signature_is_rejected(self) -> None:
+        token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
+        encoded_payload, _, _ = _split(token)
+        with self.assertRaises(MalformedCursorError):
+            parse(encoded_payload)
+
+    def test_wrong_signing_key_is_rejected(self) -> None:
+        token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
+        with self.assertRaises(MalformedCursorError):
+            parse(token, signing_key="a-different-key")
+
+    def test_legitimate_value_tampering_is_rejected(self) -> None:
+        """Swapping in another valid UUID/timestamp must not be accepted."""
+
+        original_bound_id = uuid4()
+        token = token_for(
+            (TS, original_bound_id), {"submitted_at": TS, "order_id": original_bound_id}
+        )
+        _, payload, signature = _split(token)
+
+        # Rewrite the bound to a different but perfectly valid UUID and
+        # timestamp, keeping the original signature untouched.
+        forged_payload = json.loads(json.dumps(payload))
+        forged_payload["query_upper_bound"]["order_id"] = {
+            "k": "uuid",
+            "v": str(uuid4()),
+        }
+        forged_payload["last_sort_key"][0] = {
+            "k": "ts",
+            "v": "2026-05-02T08:00:00+00:00",
+        }
+        forged = f"{_reencode_without_signature(forged_payload)}.{signature}"
+        with self.assertRaises(MalformedCursorError):
+            parse(forged)
+
+    def test_re_signing_with_a_foreign_key_does_not_validate(self) -> None:
+        token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
+        _, payload, _ = _split(token)
+        foreign = build_cursor(
+            signing_key="attacker-key",
+            query_digest=payload["query_digest"],
+            key_kinds=KEY_KINDS,
+            last_sort_key=(TS, uuid4()),
+            upper_bound_columns=UPPER_COLUMNS,
+            query_upper_bound={"submitted_at": TS, "order_id": uuid4()},
+        )
+        with self.assertRaises(MalformedCursorError):
+            parse(foreign)
 
     def test_unsupported_version_is_rejected(self) -> None:
-        payload = {
+        # A properly signed token with an unsupported version must still be
+        # rejected by the version check itself.
+        forged_payload = {
             "version": CURSOR_VERSION + 1,
             "query_digest": "d" * 64,
             "last_sort_key": [],
             "query_upper_bound": {},
         }
-        token = urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
+        token = sign_token(forged_payload, SIGNING_KEY)
         with self.assertRaises(UnsupportedCursorVersionError):
-            parse_cursor(token)
+            parse(token)
 
     def test_tampered_payload_is_detected_by_structure_checks(self) -> None:
         token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
-        padded = token + "=" * (-len(token) % 4)
-        payload = json.loads(urlsafe_b64decode(padded))
+        encoded_payload, payload, _ = _split(token)
         payload["last_sort_key"] = [{"k": "int", "v": 3}, {"k": "str", "v": "x"}]
-        tampered = (
-            urlsafe_b64encode(json.dumps(payload).encode()).decode().rstrip("=")
-        )
+        tampered = f"{_reencode_without_signature(payload)}.{token.split('.')[1]}"
         with self.assertRaises(CursorError):
-            parse_cursor(
-                tampered,
-                expected_query_digest="d" * 64,
-                key_kinds=KEY_KINDS,
-                upper_bound_columns=UPPER_COLUMNS,
-            )
+            parse(tampered)
 
     def test_wrong_length_sort_key_is_rejected(self) -> None:
         token = build_cursor(
+            signing_key=SIGNING_KEY,
             query_digest="d" * 64,
             key_kinds=("ts",),
             last_sort_key=(TS,),
@@ -170,43 +245,41 @@ class CursorRejectionTestCase(unittest.TestCase):
             query_upper_bound={"submitted_at": TS, "order_id": uuid4()},
         )
         with self.assertRaises(MalformedCursorError):
-            parse_cursor(
-                token,
-                expected_query_digest="d" * 64,
-                key_kinds=KEY_KINDS,
-                upper_bound_columns=UPPER_COLUMNS,
-            )
+            parse(token)
 
     def test_query_digest_mismatch_is_rejected(self) -> None:
         token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
         with self.assertRaises(CursorQueryMismatchError):
-            parse_cursor(
-                token,
-                expected_query_digest="e" * 64,
-                key_kinds=KEY_KINDS,
-                upper_bound_columns=UPPER_COLUMNS,
-            )
+            parse(token, expected_query_digest="e" * 64)
 
     def test_upper_bound_column_mismatch_is_rejected(self) -> None:
         token = token_for((TS, uuid4()), {"submitted_at": TS, "order_id": uuid4()})
         with self.assertRaises(MalformedCursorError):
-            parse_cursor(
-                token,
-                expected_query_digest="d" * 64,
-                key_kinds=KEY_KINDS,
-                upper_bound_columns={"other_column": "ts"},
-            )
+            parse(token, upper_bound_columns={"other_column": "ts"})
 
     def test_naive_timestamps_are_refused_at_encoding_time(self) -> None:
         naive = datetime(2026, 5, 1, 8, 0)
         with self.assertRaises(ValueError):
             build_cursor(
+                signing_key=SIGNING_KEY,
                 query_digest="d" * 64,
                 key_kinds=("ts",),
                 last_sort_key=(naive,),
                 upper_bound_columns={"c": "dec"},
                 query_upper_bound={"c": Decimal("1.5")},
             )
+
+    def test_blank_signing_keys_are_refused(self) -> None:
+        for bad in ("", "   ", None):
+            with self.assertRaises(ValueError):
+                build_cursor(
+                    signing_key=bad,
+                    query_digest="d" * 64,
+                    key_kinds=(),
+                    last_sort_key=(),
+                    upper_bound_columns={},
+                    query_upper_bound={},
+                )
 
 
 class EnvelopeTestCase(unittest.TestCase):

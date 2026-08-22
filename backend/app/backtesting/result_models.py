@@ -624,6 +624,8 @@ class BacktestEquityCurveRecord:
     cash: Decimal | int | str | None = None
     market_value: Decimal | int | str | None = None
     equity: Decimal | int | str | None = None
+    period_return: Decimal | int | str | None = None
+    total_pnl: Decimal | int | str | None = None
     cumulative_return: Decimal | int | str | None = None
     drawdown: Decimal | int | str | None = None
     valuation_reason: str | None = None
@@ -640,19 +642,39 @@ class BacktestEquityCurveRecord:
         object.__setattr__(
             self, "cumulative_fees", _non_negative(self.cumulative_fees, "cumulative_fees")
         )
-        for name in ("cash", "market_value", "equity", "cumulative_return", "drawdown"):
+        for name in (
+            "cash",
+            "market_value",
+            "equity",
+            "period_return",
+            "total_pnl",
+            "cumulative_return",
+            "drawdown",
+        ):
             object.__setattr__(
                 self, name, _optional_decimal(getattr(self, name), name)
             )
         blocked = self.valuation_status is ValuationStatus.BLOCKED
-        derived = ("market_value", "equity", "cumulative_return", "drawdown")
+        derived = (
+            "market_value",
+            "equity",
+            "period_return",
+            "total_pnl",
+            "cumulative_return",
+            "drawdown",
+        )
         if blocked:
-            missing_value = any(
-                getattr(self, name) is not None for name in ("market_value", "equity")
-            )
-            if missing_value:
+            if any(getattr(self, name) is not None for name in derived):
                 raise DomainValidationError(
                     "blocked valuation points cannot carry equity-derived values"
+                )
+            if self.cash is None:
+                raise DomainValidationError(
+                    "blocked valuation points must still carry the cash balance"
+                )
+            if self.valuation_reason is None:
+                raise DomainValidationError(
+                    "blocked valuation points require a valuation_reason"
                 )
         else:
             for name in ("cash", *derived):
