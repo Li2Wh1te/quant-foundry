@@ -28,7 +28,7 @@ from app.strategies.validation import StrategyValidationIssue, validate_strategy
 
 
 API_TOKEN = "a" * 64
-SOURCE = "def run(context, parameters):\n    return {'intents': []}\n"
+SOURCE = "def run(context, parameters):\n    return {'mode': 'hold'}\n"
 
 
 class StrategyValidationTestCase(unittest.TestCase):

@@ -121,7 +121,7 @@ curl -i -H "Authorization: Bearer <QF_API_TOKEN>" \
 <summary><strong>首次部署具体做了什么？</strong></summary>
 
 1. 从 `backend/.env.example` 创建权限为 `0600` 的根目录 `.env`，并补充 Web 端口；
-2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码和 API Token；
+2. 使用 Python `secrets` 生成 256-bit PostgreSQL 随机密码、API Token 和游标签名密钥；
 3. 分别构建 Backend 和 Frontend 镜像；
 4. 创建持久化数据卷并启动 PostgreSQL；
 5. 执行全部 Alembic 迁移；
@@ -247,8 +247,9 @@ cd quant-foundry
 cp backend/.env.example backend/.env
 ```
 
-编辑 `.env`，为 `QF_API_TOKEN` 和 `QF_DATABASE_PASSWORD` 设置真实值，并确保对应的
-PostgreSQL 用户和数据库已经存在。API Token 至少需要 32 个字符。然后执行：
+编辑 `.env`，为 `QF_API_TOKEN`、`QF_CURSOR_SIGNING_KEY` 和 `QF_DATABASE_PASSWORD`
+设置真实值，并确保对应的 PostgreSQL 用户和数据库已经存在。API Token 与游标签名密钥
+都至少需要 32 个字符；游标签名密钥仅服务端持有，不得下发给任何客户端。然后执行：
 
 ```bash
 cd backend
@@ -287,6 +288,7 @@ cd frontend && pnpm build
 | `QF_SERVER_HOST` / `QF_SERVER_PORT` | Backend 容器内监听地址和端口；容器部署时 Host 应为 `0.0.0.0` |
 | `QF_WEB_HOST` / `QF_WEB_PORT` | Web 管理台发布到宿主机的地址和端口；局域网访问使用 `0.0.0.0` |
 | `QF_API_TOKEN` | 用于验证 API 请求的共享 Bearer Token |
+| `QF_CURSOR_SIGNING_KEY` | 回测结果游标 HMAC 签名的服务端专用密钥，至少 32 个字符，不得与任何客户端共享 |
 | `QF_DATABASE_*` | PostgreSQL 地址、端口、用户、密码和数据库名 |
 | `QF_LOG_DIR` / `QF_LOG_LEVEL` | 日志目录和最低日志级别 |
 | `QF_LOG_RETENTION_DAYS` | 轮转日志保留天数 |

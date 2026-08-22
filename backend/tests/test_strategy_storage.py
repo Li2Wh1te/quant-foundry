@@ -23,8 +23,11 @@ from app.strategies.service import (
 )
 
 
-SOURCE_V1 = "def run(context, parameters):\n    return {'intents': []}\n"
-SOURCE_V2 = "def run(context, parameters):\n    return {'intents': [{'ts_code': '510300.SH'}]}\n"
+SOURCE_V1 = "def run(context, parameters):\n    return {'mode': 'hold'}\n"
+SOURCE_V2 = (
+    "def run(context, parameters):\n"
+    "    return {'mode': 'target_weights', 'targets': {}}\n"
+)
 
 
 class StrategyStorageModelTestCase(unittest.TestCase):
@@ -239,6 +242,28 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
 
         self.assertEqual(revision.runtime_manifest, DEFAULT_RUNTIME_MANIFEST)
         self.assertIsNot(revision.runtime_manifest, DEFAULT_RUNTIME_MANIFEST)
+
+    def test_publish_rejects_manifests_with_wrong_protocol_version(self) -> None:
+        strategy, draft = self._strategy_with_draft(version=1)
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.get_draft.return_value = draft
+
+        for bad_manifest in (
+            {"strategy_contract_version": 2},
+            {"strategy_contract_version": "1"},
+            {},
+        ):
+            with self.assertRaises(
+                StrategyStorageValidationError, msg=str(bad_manifest)
+            ):
+                self.service.publish_revision(
+                    strategy.id,
+                    expected_draft_version=1,
+                    runtime_manifest=bad_manifest,
+                )
+        # No revision is created when the protocol metadata check fails.
+        self.session.add.assert_not_called()
+        self.assertIsNone(strategy.current_revision_id)
 
     def test_publish_rejects_a_draft_whose_stored_hash_was_tampered_with(self) -> None:
         strategy, draft = self._strategy_with_draft(version=1)

@@ -18,13 +18,18 @@ from app.strategies.validation import (
     StrategyValidationResult,
     validate_strategy_draft,
 )
+from app.strategy_protocol.contract import STRATEGY_CONTRACT_VERSION
 
 
 MAX_STRATEGY_SOURCE_BYTES = 1_048_576
 """Maximum UTF-8 source size accepted for a single first-phase strategy module."""
 
-DEFAULT_RUNTIME_MANIFEST = {"strategy_contract_version": 1}
-"""Baseline compatibility marker snapshotted when a caller supplies no manifest."""
+DEFAULT_RUNTIME_MANIFEST = {"strategy_contract_version": STRATEGY_CONTRACT_VERSION}
+"""Protocol metadata snapshotted when a caller supplies no manifest.
+
+``strategy_contract_version`` identifies the current and only official page
+protocol; it is not a migration marker for historical protocol revisions.
+"""
 
 
 _UNSET = object()
@@ -273,6 +278,24 @@ class StrategyStorageService:
         if not validation.valid:
             raise StrategyDraftValidationError(validation.issues)
 
+        manifest = _normalize_json_object(
+            (
+                DEFAULT_RUNTIME_MANIFEST
+                if runtime_manifest is None
+                else runtime_manifest
+            ),
+            field_name="runtime_manifest",
+        )
+        # Publication-time protocol metadata check: the manifest must pin the
+        # current official contract version, otherwise the revision could not
+        # be interpreted by the backtest subprocess.
+        declared_version = manifest.get("strategy_contract_version")
+        if declared_version != STRATEGY_CONTRACT_VERSION:
+            raise StrategyStorageValidationError(
+                "runtime_manifest strategy_contract_version must equal "
+                f"{STRATEGY_CONTRACT_VERSION}"
+            )
+
         revision = StrategyRevision(
             id=uuid4(),
             strategy_id=strategy.id,
@@ -281,14 +304,7 @@ class StrategyStorageService:
             source_hash=computed_hash,
             parameter_schema=deepcopy(draft.parameter_schema),
             default_parameters=deepcopy(draft.default_parameters),
-            runtime_manifest=_normalize_json_object(
-                (
-                    DEFAULT_RUNTIME_MANIFEST
-                    if runtime_manifest is None
-                    else runtime_manifest
-                ),
-                field_name="runtime_manifest",
-            ),
+            runtime_manifest=manifest,
         )
         self.session.add(revision)
         # Flush the child first so the composite current-revision foreign key can

@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     server_host: IPvAnyAddress = "127.0.0.1"
     server_port: int = Field(default=8000, ge=1, le=65535)
     api_token: SecretStr = Field(min_length=32)
+    # Server-only HMAC secret for opaque result cursors.  Unlike the API
+    # token, this value is never presented by clients, so a holder of the
+    # API token cannot forge validly signed cursors.
+    cursor_signing_key: SecretStr = Field(min_length=32)
     log_dir: Path = PROJECT_ROOT / "data" / "logs"
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_retention_days: int = Field(default=30, ge=1, le=365)

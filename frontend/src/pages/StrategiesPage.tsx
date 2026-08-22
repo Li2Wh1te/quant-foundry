@@ -47,8 +47,14 @@ const SOURCE_TEMPLATE = `"""Private strategy entry point."""
 
 
 def run(context, parameters):
-    """Return declarative trading intents for one decision context."""
-    return {"intents": []}
+    """Return one decision for the current step.
+
+    Two modes are supported in the first version:
+    - target_weights: submit the full target portfolio as
+      {"mode": "target_weights", "targets": {"<instrument_id>": "0.60"}}
+    - hold: submit no new trading intent with {"mode": "hold"}
+    """
+    return {"mode": "hold"}
 `;
 
 const EMPTY_PARAMETER_SCHEMA = {

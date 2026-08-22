@@ -168,6 +168,10 @@ main() {
             compose logs --follow postgres backend frontend
             ;;
         migrate)
+            # Upgrades must also refresh an existing .env so newly required
+            # keys (for example QF_CURSOR_SIGNING_KEY) exist before Alembic
+            # loads the application settings.
+            ensure_environment
             run_migrations
             ;;
         psql)

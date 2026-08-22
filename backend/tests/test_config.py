@@ -8,6 +8,7 @@ from app.core.config import Settings
 
 
 API_TOKEN = "a" * 64
+CURSOR_SIGNING_KEY = "b" * 64
 
 
 class SettingsTestCase(unittest.TestCase):
@@ -15,6 +16,7 @@ class SettingsTestCase(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(
                 api_token=API_TOKEN,
+                cursor_signing_key=CURSOR_SIGNING_KEY,
                 database_password="test-secret",
                 _env_file=None,
             )
@@ -25,6 +27,9 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(str(settings.server_host), "127.0.0.1")
         self.assertEqual(settings.server_port, 8000)
         self.assertEqual(settings.api_token.get_secret_value(), API_TOKEN)
+        self.assertEqual(
+            settings.cursor_signing_key.get_secret_value(), CURSOR_SIGNING_KEY
+        )
         self.assertEqual(settings.log_dir.name, "logs")
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.log_retention_days, 30)
@@ -51,6 +56,7 @@ class SettingsTestCase(unittest.TestCase):
             "QF_SERVER_HOST": "0.0.0.0",
             "QF_SERVER_PORT": "9000",
             "QF_API_TOKEN": API_TOKEN,
+            "QF_CURSOR_SIGNING_KEY": CURSOR_SIGNING_KEY,
             "QF_LOG_DIR": "var/logs",
             "QF_LOG_LEVEL": "WARNING",
             "QF_LOG_RETENTION_DAYS": "14",
@@ -105,6 +111,7 @@ class SettingsTestCase(unittest.TestCase):
             {
                 "QF_ENVIRONMENT": "invalid",
                 "QF_API_TOKEN": API_TOKEN,
+                "QF_CURSOR_SIGNING_KEY": CURSOR_SIGNING_KEY,
                 "QF_DATABASE_PASSWORD": "test-secret",
             },
             clear=True,
@@ -130,6 +137,7 @@ class SettingsTestCase(unittest.TestCase):
                     with self.assertRaises(ValidationError):
                         Settings(
                             api_token=API_TOKEN,
+                            cursor_signing_key=CURSOR_SIGNING_KEY,
                             database_password="test-secret",
                             _env_file=None,
                         )
@@ -137,7 +145,11 @@ class SettingsTestCase(unittest.TestCase):
     def test_database_password_is_required(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaises(ValidationError):
-                Settings(api_token=API_TOKEN, _env_file=None)
+                Settings(
+                    api_token=API_TOKEN,
+                    cursor_signing_key=CURSOR_SIGNING_KEY,
+                    _env_file=None,
+                )
 
     def test_api_token_is_required_and_rejects_short_values(self) -> None:
         invalid_tokens = (None, "too-short")
@@ -148,6 +160,26 @@ class SettingsTestCase(unittest.TestCase):
                 with patch.dict(os.environ, {}, clear=True):
                     with self.assertRaises(ValidationError):
                         Settings(
+                            cursor_signing_key=CURSOR_SIGNING_KEY,
+                            database_password="test-secret",
+                            _env_file=None,
+                            **arguments,
+                        )
+
+    def test_cursor_signing_key_is_required_and_rejects_short_values(self) -> None:
+        invalid_keys = (None, "too-short")
+
+        for cursor_signing_key in invalid_keys:
+            with self.subTest(cursor_signing_key=cursor_signing_key):
+                arguments = (
+                    {"cursor_signing_key": cursor_signing_key}
+                    if cursor_signing_key is not None
+                    else {}
+                )
+                with patch.dict(os.environ, {}, clear=True):
+                    with self.assertRaises(ValidationError):
+                        Settings(
+                            api_token=API_TOKEN,
                             database_password="test-secret",
                             _env_file=None,
                             **arguments,
@@ -156,6 +188,7 @@ class SettingsTestCase(unittest.TestCase):
     def test_database_url_encodes_credentials(self) -> None:
         settings = Settings(
             api_token=API_TOKEN,
+            cursor_signing_key=CURSOR_SIGNING_KEY,
             database_user="user@example.com",
             database_password="p@ss/word",
             _env_file=None,
