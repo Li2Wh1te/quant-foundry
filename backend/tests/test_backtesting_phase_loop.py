@@ -571,10 +571,17 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
 
         class BrokenIterator:
             def __iter__(self):
-                raise TypeError("broken iterator")
+                raise ValueError("broken")
 
         with self.assertRaises(DomainValidationError):
             runner.run_steps(BrokenIterator())
+
+        class RuntimeBrokenIterator:
+            def __iter__(self):
+                raise RuntimeError("worse")
+
+        with self.assertRaises(DomainValidationError):
+            runner.run_steps(RuntimeBrokenIterator())
 
     def test_chunked_execution_never_resets_sequences_or_state(self) -> None:
         axis = build_axis([D0, D1, D2])

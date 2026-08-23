@@ -956,11 +956,13 @@ class DeterministicBacktestRunner:
             )
         try:
             ordered = tuple(steps)
-        except TypeError as exc:
-            # A broken __iter__ must not leak the iterator's own exception
-            # type; the runner contract is a stable domain error.
+        except Exception as exc:
+            # A broken __iter__ can raise anything (TypeError, ValueError,
+            # RuntimeError, ...); the runner contract is a stable domain
+            # error regardless of the iterator's own failure mode.
             raise DomainValidationError(
-                f"steps is not a usable step sequence: {exc}"
+                f"steps is not a usable step sequence: "
+                f"{type(exc).__name__}: {exc}"
             ) from exc
         if not ordered:
             raise DomainValidationError("run_steps requires at least one step")
