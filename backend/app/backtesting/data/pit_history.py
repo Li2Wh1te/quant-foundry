@@ -43,19 +43,23 @@ from app.backtesting.data.errors import (
     IdentityMappingIncompleteError,
     freeze_json,
 )
-from app.backtesting.data.facts import Bar
+from app.backtesting.data.facts import AdjustedSeriesPoint, Bar
 from app.backtesting.data.requests import QualityStatus
 from app.backtesting.domain import _aware_datetime
 from app.instruments.domain import InstrumentCodeMapping
 
 __all__ = [
+    "HistoryCompletenessValidator",
     "PITMappingCoverage",
     "PITMappingResolution",
     "PITMappingSegment",
     "SegmentBarReader",
+    "SegmentFactorReader",
+    "SegmentedAdjustedSeries",
     "SegmentedBarHistory",
-    "resolve_pit_mappings",
+    "read_segmented_adjusted_series",
     "read_segmented_history",
+    "resolve_pit_mappings",
 ]
 
 
@@ -63,6 +67,55 @@ class PITMappingCoverage(StrEnum):
     """Coverage status of a finished mapping resolution."""
 
     COMPLETE = "complete"
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryCompletenessValidator:
+    """Checks that one segment returned exactly one fact per session.
+
+    Shared by the bar and adjustment-factor read paths so both enforce the
+    same completeness rule: a missing session blocks instead of shrinking
+    the window, and a repeated session blocks instead of being deduplicated
+    silently.
+    """
+
+    source_code: str
+    expected_sessions: tuple[date, ...]
+
+    def validate(self, returned_dates: Sequence[date]) -> None:
+        """Block unless ``returned_dates`` matches the expected sessions."""
+
+        expected_set = set(self.expected_sessions)
+        seen: set[date] = set()
+        for day in returned_dates:
+            if day not in expected_set:
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned a fact outside the requested "
+                    "sessions",
+                    details={
+                        "source_code": self.source_code,
+                        "trade_date": day.isoformat(),
+                    },
+                )
+            if day in seen:
+                raise HistoryBarsDuplicateError(
+                    "segment reader returned a duplicate fact for one session",
+                    details={
+                        "source_code": self.source_code,
+                        "trade_date": day.isoformat(),
+                    },
+                )
+            seen.add(day)
+        missing = [day for day in self.expected_sessions if day not in seen]
+        if missing:
+            raise HistoryBarsIncompleteError(
+                "segment reader returned no fact for every requested session",
+                details={
+                    "source_code": self.source_code,
+                    "missing_session_count": len(missing),
+                    "first_missing_session": missing[0].isoformat(),
+                },
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -328,6 +381,8 @@ class SegmentedBarHistory:
 def read_segmented_history(
     resolution: PITMappingResolution,
     reader: SegmentBarReader,
+    *,
+    allow_non_strict_facts: bool = False,
 ) -> SegmentedBarHistory:
     """Read every segment by source code and stitch one stable history.
 
@@ -336,6 +391,14 @@ def read_segmented_history(
     query instead of shrinking the window.  Every bar must carry the
     queried stable ``instrument_id``; results are stitched in ascending
     ``trade_date`` order regardless of segment order.
+
+    By default every bar must also carry strict knowledge-time evidence
+    (``known_at <= data_cutoff``).  Sources whose fact tables keep no
+    reliable ``known_at`` may opt into ``allow_non_strict_facts``: bars
+    without any knowledge-time evidence are then accepted as latest
+    authoritative revisions (declared ``non_strict_pit`` in run metadata),
+    while a bar that *does* carry a ``known_at`` after the cutoff is still
+    blocked — future knowledge never leaks either way.
     """
 
     collected: dict[date, Bar] = {}
@@ -372,20 +435,26 @@ def read_segmented_history(
             # Formal reads re-check fact quality and knowledge time even
             # though upstream boundaries should already enforce them: a
             # leaky or partial row must block instead of stitching in.
-            if row.evidence.known_at is None or row.evidence.known_at > (
-                resolution.data_cutoff
-            ):
+            if row.evidence.known_at is None:
+                if not allow_non_strict_facts:
+                    raise HistoryBarsIncompleteError(
+                        "segment reader returned a bar without strict "
+                        "knowledge-time evidence inside the data cutoff",
+                        details={
+                            "source_code": segment.source_code,
+                            "trade_date": row.trade_date.isoformat(),
+                            "known_at": None,
+                            "data_cutoff": resolution.data_cutoff.isoformat(),
+                        },
+                    )
+            elif row.evidence.known_at > resolution.data_cutoff:
                 raise HistoryBarsIncompleteError(
-                    "segment reader returned a bar without strict "
-                    "knowledge-time evidence inside the data cutoff",
+                    "segment reader returned a bar whose knowledge time "
+                    "is after the data cutoff",
                     details={
                         "source_code": segment.source_code,
                         "trade_date": row.trade_date.isoformat(),
-                        "known_at": (
-                            row.evidence.known_at.isoformat()
-                            if row.evidence.known_at is not None
-                            else None
-                        ),
+                        "known_at": row.evidence.known_at.isoformat(),
                         "data_cutoff": resolution.data_cutoff.isoformat(),
                     },
                 )
@@ -430,5 +499,108 @@ def read_segmented_history(
             )
     return SegmentedBarHistory(
         bars=tuple(collected[day] for day in resolution.requested_sessions),
+        resolution=resolution,
+    )
+
+
+class SegmentFactorReader(Protocol):
+    """Structural source of adjustment factors for one source-code segment."""
+
+    def read_factors(
+        self,
+        source_code: str,
+        start_date: date,
+        end_date: date,
+    ) -> Sequence[object]:
+        """Return factors for exactly the sessions inside ``[start, end]``."""
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class SegmentedAdjustedSeries:
+    """Stitched adjustment series plus its auditable mapping provenance."""
+
+    points: tuple[AdjustedSeriesPoint, ...]
+    resolution: PITMappingResolution
+
+
+def read_segmented_adjusted_series(
+    resolution: PITMappingResolution,
+    reader: SegmentFactorReader,
+) -> SegmentedAdjustedSeries:
+    """Read every segment's factors by source code and stitch one series.
+
+    The adjusted series uses the same mapping split as the bar path: each
+    source-code interval is read separately and the results are keyed back
+    to the stable ``instrument_id``.  First-version factor selection
+    follows the approved ``effective_date <= data_cutoff`` contract: a
+    factor point must sit exactly on each requested session, which is
+    never after the cutoff; no knowledge-time evidence is required and no
+    historical factor revisions are fabricated.
+
+    Any missing, duplicated, out-of-range, or wrong-identity factor blocks
+    the query instead of returning a partial series.
+    """
+
+    collected: dict[date, AdjustedSeriesPoint] = {}
+    cutoff_date = resolution.data_cutoff.date()
+    for segment in resolution.segments:
+        expected = segment.requested_sessions
+        rows = reader.read_factors(
+            segment.source_code,
+            segment.first_requested_session,
+            segment.last_requested_session,
+        )
+        returned_dates: list[date] = []
+        for row in rows:
+            if not isinstance(row, AdjustedSeriesPoint):
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned a non-AdjustedSeriesPoint row",
+                    details={
+                        "source_code": segment.source_code,
+                        "row_type": type(row).__name__,
+                    },
+                )
+            if row.instrument_id != resolution.instrument_id:
+                raise HistoryBarInstrumentMismatchError(
+                    "segment reader returned an adjustment factor keyed by "
+                    "another instrument",
+                    details={
+                        "source_code": segment.source_code,
+                        "expected_instrument_id": str(resolution.instrument_id),
+                        "returned_instrument_id": str(row.instrument_id),
+                        "point_date": row.point_date.isoformat(),
+                    },
+                )
+            # Strict quality gate: a partial or invalid factor must block
+            # the series instead of being stitched into it.
+            if row.evidence.quality_status is not QualityStatus.COMPLETE:
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned an adjustment factor that is "
+                    "not complete quality",
+                    details={
+                        "source_code": segment.source_code,
+                        "point_date": row.point_date.isoformat(),
+                        "quality_status": row.evidence.quality_status.value,
+                    },
+                )
+            if row.point_date > cutoff_date:
+                raise HistoryBarsIncompleteError(
+                    "segment reader returned an adjustment factor with an "
+                    "effective date after the data cutoff",
+                    details={
+                        "source_code": segment.source_code,
+                        "point_date": row.point_date.isoformat(),
+                        "data_cutoff": resolution.data_cutoff.isoformat(),
+                    },
+                )
+            returned_dates.append(row.point_date)
+            collected[row.point_date] = row
+        HistoryCompletenessValidator(
+            source_code=segment.source_code,
+            expected_sessions=expected,
+        ).validate(returned_dates)
+    return SegmentedAdjustedSeries(
+        points=tuple(collected[day] for day in resolution.requested_sessions),
         resolution=resolution,
     )

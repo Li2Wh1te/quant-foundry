@@ -454,5 +454,57 @@ class LookbackTestCase(unittest.TestCase):
             )
 
 
+class AdjustedSeriesQualityTestCase(unittest.TestCase):
+    """Non-complete adjustment factors must block the stitched series."""
+
+    def _resolution(self):
+        from app.backtesting.data.pit_history import resolve_pit_mappings
+
+        return resolve_pit_mappings(
+            INSTRUMENT_ID,
+            source=SOURCE,
+            sessions=[date(2026, 8, 19), date(2026, 8, 20)],
+            mappings=[make_mapping("NEW.CODE", date(2026, 1, 1))],
+            data_cutoff=CUTOFF,
+        )
+
+    def _point(self, quality_status):
+        from app.backtesting.data.facts import AdjustedSeriesPoint, FactEvidence
+
+        return AdjustedSeriesPoint(
+            instrument_id=INSTRUMENT_ID,
+            point_date=date(2026, 8, 20),
+            price_basis=PriceBasis.QFQ,
+            adj_factor=Decimal("1.05"),
+            evidence=FactEvidence(
+                source="tushare",
+                observed_at=datetime(2026, 8, 21, tzinfo=UTC),
+                quality_status=quality_status,
+            ),
+        )
+
+    def test_non_complete_quality_factor_blocks(self) -> None:
+        from app.backtesting.data.pit_history import (
+            read_segmented_adjusted_series,
+        )
+
+        class FactorReader:
+            def __init__(self, points) -> None:
+                self._points = points
+
+            def read_factors(self, source_code, start_date, end_date):
+                return [
+                    point
+                    for point in self._points
+                    if start_date <= point.point_date <= end_date
+                ]
+
+        for status in (QualityStatus.PARTIAL, QualityStatus.INVALID):
+            with self.subTest(quality_status=status.value):
+                reader = FactorReader([self._point(status)])
+                with self.assertRaises(HistoryBarsIncompleteError):
+                    read_segmented_adjusted_series(self._resolution(), reader)
+
+
 if __name__ == "__main__":
     unittest.main()
