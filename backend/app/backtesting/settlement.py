@@ -179,6 +179,32 @@ class CalendarAxisSettlementGateway:
                     },
                 )
             if fact.is_open:
+                # An open day without any effective trading session cannot
+                # host an opening match: the calendar axis would report it
+                # as unresolved_session, so it must never become a
+                # settlement day either.
+                definition = applicable[0]
+                effective_sessions = (
+                    fact.sessions_override
+                    if fact.sessions_override is not None
+                    else definition.default_sessions
+                )
+                if not effective_sessions:
+                    raise SettlementCalendarUnresolvedError(
+                        "the open session fact resolves to no trading "
+                        "sessions; the next settlement session cannot be "
+                        "resolved",
+                        details={
+                            "calendar_id": calendar_id,
+                            "fact_session_date": fact.session_date.isoformat(),
+                            "fact_definition_version": (
+                                fact.definition_version
+                            ),
+                            "has_sessions_override": (
+                                fact.sessions_override is not None
+                            ),
+                        },
+                    )
                 return day
             day += timedelta(days=1)
         raise SettlementNextSessionMissingError(

@@ -247,6 +247,61 @@ class NextOpenSessionTestCase(unittest.TestCase):
             gateway.next_open_session("SSE", date(2026, 8, 21))
         self.assertEqual(ctx.exception.details["applicable_definition_count"], 0)
 
+    def test_open_fact_without_effective_sessions_blocks(self) -> None:
+        # An open day with no effective trading sessions (empty definition
+        # defaults, or an empty sessions_override) cannot host an opening
+        # match and must never be returned as a settlement day.
+        from app.backtesting.calendar_axis import CalendarDefinition, CalendarSessionFact
+
+        empty_session_def = CalendarDefinition(
+            calendar_id="SSE",
+            definition_version=CALENDAR_VERSION,
+            timezone="Asia/Shanghai",
+            default_sessions=(),
+            source="test",
+        )
+        base = calendar_provider({date(2026, 8, 21), date(2026, 8, 24)})
+
+        # Case 1: definition declares the day open but with no sessions.
+        gateway = CalendarAxisSettlementGateway(
+            InMemoryCalendarAxisDataProvider([empty_session_def], [
+                CalendarSessionFact(
+                    calendar_id="SSE",
+                    session_date=day,
+                    is_open=day in {date(2026, 8, 21), date(2026, 8, 24)},
+                    definition_version=CALENDAR_VERSION,
+                    source="test",
+                )
+                for day in (date(2026, 8, 21), date(2026, 8, 22), date(2026, 8, 24))
+            ])
+        )
+        with self.assertRaises(SettlementCalendarUnresolvedError):
+            gateway.next_open_session("SSE", date(2026, 8, 21))
+
+        # Case 2: healthy definition, but the fact's sessions_override is
+        # empty for the next open day.
+        case2_days = [
+            date(2026, 8, 21) + timedelta(days=offset) for offset in range(10)
+        ]
+        gateway = CalendarAxisSettlementGateway(
+            InMemoryCalendarAxisDataProvider(list(base.definitions("SSE")), [
+                CalendarSessionFact(
+                    calendar_id="SSE",
+                    session_date=day,
+                    is_open=day in {date(2026, 8, 21), date(2026, 8, 24)},
+                    definition_version=CALENDAR_VERSION,
+                    sessions_override=(
+                        () if day == date(2026, 8, 24) else None
+                    ),
+                    source="test",
+                )
+                for day in case2_days
+            ])
+        )
+        with self.assertRaises(SettlementCalendarUnresolvedError) as ctx:
+            gateway.next_open_session("SSE", date(2026, 8, 21))
+        self.assertTrue(ctx.exception.details["has_sessions_override"])
+
     def test_no_open_session_within_horizon_blocks(self) -> None:
         gateway = CalendarAxisSettlementGateway(
             calendar_provider(set(), fact_to=date(2027, 12, 31))
