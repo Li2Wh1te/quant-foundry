@@ -803,10 +803,16 @@ class AccountingPolicy:
                 f"buy requires {cash_required} {self.currency}, but only "
                 f"{portfolio.account.available_cash} is available"
             )
+        # Cost-basis convention: ``average_price`` is the fee-inclusive
+        # cost per *base* unit, so the denominator carries the contract
+        # multiplier exactly once.  Sell PnL and valuation re-attach the
+        # multiplier via ``quantity x multiplier``; multiplying here too
+        # would double-count it.
+        base_units = fill.quantity * fill.contract_multiplier
 
         if existing is None or existing.is_zero:
             new_quantity = fill.quantity
-            new_average = cash_required / new_quantity
+            new_average = cash_required / base_units
             new_available = (
                 fill.quantity
                 if not self._uses_deferred_settlement
@@ -820,9 +826,15 @@ class AccountingPolicy:
                 average_price=new_average,
             )
         else:
-            old_cost = existing.average_price * existing.quantity
+            old_cost = (
+                existing.average_price
+                * existing.quantity
+                * fill.contract_multiplier
+            )
             new_quantity = existing.quantity + fill.quantity
-            new_average = (old_cost + cash_required) / new_quantity
+            new_average = (old_cost + cash_required) / (
+                new_quantity * fill.contract_multiplier
+            )
             available_increment = (
                 fill.quantity
                 if not self._uses_deferred_settlement

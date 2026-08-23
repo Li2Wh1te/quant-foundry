@@ -377,6 +377,7 @@ class OpeningMatchService:
                             "plan factory for buy fills"
                         )
                     plan = settlement_plan_factory(fill)
+                    self._validate_settlement_plan(plan, session)
                 accounting.apply_fill(shadow_portfolio, fill, settlement_plan=plan)
         except Exception as exc:
             # Abort: restore accounting internals captured before the
@@ -428,6 +429,7 @@ class OpeningMatchService:
         """
 
         sequenced: list[Order] = []
+        seen_sequences: dict[int, Order] = {}
         for order in orders:
             if order.status is not OrderStatus.SUBMITTED:
                 # Already terminal from an earlier batch; no fees, no cash,
@@ -439,6 +441,16 @@ class OpeningMatchService:
                     "batch priority must not depend on collection order "
                     "or random identifiers"
                 )
+            duplicate = seen_sequences.get(order.submission_sequence)
+            if duplicate is not None:
+                # Duplicate ordinals would silently fall back to caller
+                # collection order inside sort; reject the batch instead.
+                raise SessionMatchError(
+                    f"orders {duplicate.order_id} and {order.order_id} "
+                    f"share submission_sequence {order.submission_sequence}; "
+                    "submission sequences must be unique within a batch"
+                )
+            seen_sequences[order.submission_sequence] = order
             sequenced.append(order)
         return sorted(sequenced, key=lambda order: order.submission_sequence)
 
@@ -594,6 +606,34 @@ class OpeningMatchService:
         )
 
     @staticmethod
+    def _validate_settlement_plan(
+        plan: DeferredSettlementPlan,
+        session: SessionContext,
+    ) -> None:
+        """Bind every factory-produced plan to the matched session.
+
+        A plan pointing at another calendar or another trade date would
+        misplace the T+1 release; the batch is refused instead of
+        accepting the drifted plan.
+        """
+
+        if not isinstance(plan, DeferredSettlementPlan):
+            raise SessionMatchError(
+                "settlement plan factory must return DeferredSettlementPlan "
+                f"instances, got {type(plan).__name__}"
+            )
+        if plan.calendar_id != session.calendar_id:
+            raise SessionMatchError(
+                f"settlement plan calendar {plan.calendar_id} does not "
+                f"match session calendar {session.calendar_id}"
+            )
+        if plan.trade_session != session.session_date:
+            raise SessionMatchError(
+                f"settlement plan trade_session {plan.trade_session} does "
+                f"not match session date {session.session_date}"
+            )
+
+    @staticmethod
     def _market_state_reason(
         order: Order,
         state: MarketState,
@@ -638,6 +678,10 @@ class OpeningMatchService:
                 fee_schedule,
                 fee_categories=policy.fee_categories,
                 side=side,
+                # Applicability-bearing rules filter strictly against the
+                # instrument's resolved facts; a rule declaring facts the
+                # policy does not carry can never apply (fail closed).
+                context=dict(policy.fee_applicability_context),
             )
         except FeeRuleUnresolvedError:
             return MatchOrderReason.FEE_RULE_UNRESOLVED

@@ -316,20 +316,29 @@ class FeeSchedule:
             key=self.key,
             fee_rules=tuple(self.fee_rules),
             metadata=self.metadata,
+            version=self.version,
         )
 
 
 @dataclass(frozen=True, slots=True)
 class FeeScheduleSnapshot:
-    """Complete immutable fee configuration captured by one run."""
+    """Complete immutable fee configuration captured by one run.
+
+    ``version`` carries the source schedule's audit version so restricted
+    per-instrument selections still report where their rules came from in
+    :attr:`FeeBreakdown.schedule_version`.
+    """
 
     key: str
     fee_rules: tuple[FeeRule, ...]
     metadata: Mapping[str, str] = MappingProxyType({})
+    version: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise FeeError("fee schedule snapshot key must be non-blank text")
+        if self.version is not None and self.version <= 0:
+            raise FeeError("fee schedule snapshot version must be positive")
         rules = tuple(self.fee_rules)
         keys = [rule.key for rule in rules]
         if len(keys) != len(set(keys)):
@@ -545,23 +554,15 @@ def fee_snapshot_for_rules(
 ) -> FeeScheduleSnapshot:
     """Build a same-identity snapshot restricted to the given rules.
 
-    Keeping the original schedule ``key`` preserves the audit trail in
-    :class:`FeeBreakdown` while ensuring undeclared categories can never
-    be charged by a later calculation over the full schedule.
+    Keeping the original schedule ``key`` and ``version`` preserves the
+    audit trail in :class:`FeeBreakdown` while ensuring undeclared
+    categories can never be charged by a later calculation over the full
+    schedule.
     """
 
-    version = getattr(schedule, "version", None)
-    snapshot = FeeScheduleSnapshot(
+    return FeeScheduleSnapshot(
         key=schedule.key,
         fee_rules=rules,
         metadata=dict(getattr(schedule, "metadata", {}) or {}),
+        version=getattr(schedule, "version", None),
     )
-    if version is not None and not isinstance(schedule, FeeScheduleSnapshot):
-        # FeeSchedule carries an optional audit version that snapshots do
-        # not model; keep it visible through metadata so the breakdown of
-        # a restricted selection still records where the rules came from.
-        object.__setattr__(snapshot, "metadata", MappingProxyType({
-            **snapshot.metadata,
-            "source_schedule_version": str(version),
-        }))
-    return snapshot

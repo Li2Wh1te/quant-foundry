@@ -179,6 +179,12 @@ class InstrumentExecutionPolicy:
     cash_availability_rule: StrategyRuleDeclaration | VersionedReference
     position_availability_rule: StrategyRuleDeclaration | VersionedReference
     price_limit_rule: StrategyRuleDeclaration | VersionedReference
+    # Fee-rule applicability facts (e.g. ``asset_class``, ``exchange``)
+    # resolved alongside the instrument.  Passed into category selection
+    # so applicability-bearing fee rules filter strictly instead of
+    # silently matching everything; a rule whose declared facts are not
+    # provided here can never apply (fail closed).
+    fee_applicability_context: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_rule_snapshot(
@@ -186,6 +192,7 @@ class InstrumentExecutionPolicy:
         segment: Any,
         *,
         package_reference: VersionedReference,
+        fee_applicability_context: Mapping[str, str] | None = None,
     ) -> "InstrumentExecutionPolicy":
         """Project one frozen instrument rule snapshot segment.
 
@@ -253,6 +260,25 @@ class InstrumentExecutionPolicy:
             price_limit_rule=_strategy_rule(
                 values.get("price_limit_rule"), "price_limit_rule"
             ),
+            fee_applicability_context=fee_applicability_context,
+        )
+
+    def __post_init__(self) -> None:
+        """Normalize and deep-freeze the fee applicability context."""
+
+        context: dict[str, str] = {}
+        for key, value in (self.fee_applicability_context or {}).items():
+            if not isinstance(key, str) or not key.strip():
+                raise ExecutionPolicyError(
+                    "fee_applicability_context keys must be non-blank strings"
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise ExecutionPolicyError(
+                    f"fee_applicability_context[{key!r}] must be non-blank text"
+                )
+            context[key.strip()] = value.strip()
+        object.__setattr__(
+            self, "fee_applicability_context", MappingProxyType(context)
         )
 
     def validate_order_type(self, order_type: Any) -> str | None:

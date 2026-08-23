@@ -11,7 +11,7 @@ from decimal import Decimal
 import unittest
 from uuid import uuid4, UUID
 
-from app.backtesting.domain import PositionSide
+from app.backtesting.domain import DomainValidationError, PositionSide
 from app.backtesting.accounting import (
     AccountingPolicy,
     AccountState,
@@ -37,14 +37,21 @@ from app.backtesting.fees import (
     FeeRuleUnresolvedError,
     FeeSchedule,
     FeeScheduleSnapshot,
+    fee_snapshot_for_rules,
     resolve_instrument_fee_rules,
+)
+from app.backtesting.result_models import (
+    BacktestFillRecord,
+    InstrumentDisplaySnapshot,
 )
 from app.backtesting.session_matching import (
     ACCOUNTING_BATCH_ABORTED,
     AccountingBatchAbortedError,
     OpeningMatchService,
+    SessionMatchError,
 )
 from app.backtesting.slippage import BpsSlippageModel
+from app.instruments.domain import InstrumentDisplay
 from app.instruments.references import VersionedReference
 from app.instruments.rule_snapshots import InstrumentRuleSnapshotSegment
 from app.instruments.rules.contracts import StrategyRuleDeclaration
@@ -578,6 +585,11 @@ class ContractMultiplierTestCase(unittest.TestCase):
         self.assertEqual(fill.contract_multiplier, Decimal("10"))
         # cash 20000 - 10005
         self.assertEqual(state.account.available_cash, Decimal("9995"))
+        # Fee-inclusive cost per *base* unit: 10005 / (100 x 10) = 10.005.
+        self.assertEqual(
+            state.positions[INSTRUMENT_ID].average_price,
+            Decimal("10.005"),
+        )
 
         valuation = AccountingPolicy().value(
             state,
@@ -585,14 +597,14 @@ class ContractMultiplierTestCase(unittest.TestCase):
             as_of=OPEN + timedelta(hours=1),
             contract_multipliers={INSTRUMENT_ID: 10},
         )
-        # unrealized = (12 - avg) * 100 * 10 where avg includes fees/units.
-        expected_avg = Decimal("10005") / Decimal("100")
+        # unrealized = (12 - 10.005) * 100 * 10 = 1995.
+        expected_unrealized = (Decimal("12") - Decimal("10.005")) * 100 * 10
         self.assertAlmostEqual(
             float(valuation.market_value), float(Decimal("12000")), places=6
         )
         self.assertAlmostEqual(
             float(state.positions[INSTRUMENT_ID].unrealized_pnl),
-            float((Decimal("12") - expected_avg) * 100 * 10),
+            float(expected_unrealized),
             places=6,
         )
 
@@ -907,6 +919,223 @@ class ResultAuditRecordTestCase(unittest.TestCase):
             "settlement_boundary_id",
         ):
             self.assertIn(column, mapped)
+
+
+class ReviewFixTestCase(unittest.TestCase):
+    """Regression tests for the 04-04 review fixes 3/7/8/9/10/11."""
+
+    def test_multiplier_average_price_is_per_base_unit_and_sell_pnl_consistent(self):
+        """Fix 3: cost basis divides by quantity x multiplier exactly once."""
+
+        harness = MatchingHarness(contract_multiplier=10)
+        buy = sequenced_order(OrderSide.BUY, 0, quantity="200")
+        state = portfolio("30000")
+        _, state, accounting = harness.run([buy], portfolio_state=state)
+        # Fee-inclusive cost per base unit: (20000 + 6) / (200 x 10),
+        # where commission = max(20000 x 0.0003, 5) = 6.
+        self.assertEqual(
+            state.positions[INSTRUMENT_ID].average_price,
+            Decimal("10.003"),
+        )
+
+        # Partial sell in the next session, after the boundary release.
+        next_open = OPEN + timedelta(days=1)
+        context = session(
+            {INSTRUMENT_ID: market_state(timestamp=next_open)}, opening=next_open
+        )
+        boundary = SettlementBoundary(
+            boundary_id=uuid4(),
+            session_id=context.session_id,
+            calendar_id=context.calendar_id,
+            session_date=context.session_date,
+        )
+        sell = sequenced_order(OrderSide.SELL, 1)
+        result = harness.service.run_opening_match(
+            session=context,
+            orders=[sell],
+            policies=harness.policies,
+            portfolio=state,
+            accounting=accounting,
+            settlement_boundary=boundary,
+            settlement_plan_factory=deferred_plan_factory(),
+        )
+        self.assertEqual(len(result.fills), 1)
+        position = state.positions[INSTRUMENT_ID]
+        self.assertEqual(position.average_price, Decimal("10.003"))
+        expected_realized = (
+            Decimal("10000")
+            - result.fills[0].fees
+            - Decimal("10.003") * 100 * 10
+        )
+        self.assertAlmostEqual(
+            float(position.realized_pnl), float(expected_realized), places=6
+        )
+
+    def test_duplicate_submission_sequence_rejects_the_batch(self):
+        """Fix 7: duplicate ordinals must never fall back to input order."""
+
+        harness = MatchingHarness()
+        first = sequenced_order(OrderSide.SELL, 5)
+        second = sequenced_order(OrderSide.SELL, 5)
+        state = portfolio("0", quantities={INSTRUMENT_ID: ("200", "200")})
+
+        with self.assertRaises(SessionMatchError) as caught:
+            harness.run([first, second], portfolio_state=state)
+
+        self.assertIn("submission_sequence", str(caught.exception))
+        # The whole batch was refused before any planning.
+        self.assertEqual(state.positions[INSTRUMENT_ID].available_quantity, Decimal("200"))
+        for order in (first, second):
+            self.assertEqual(order.status, OrderStatus.SUBMITTED)
+
+    def test_settlement_plan_bound_to_current_session(self):
+        """Fix 8: factory plans with wrong calendar/date abort the batch."""
+
+        harness = MatchingHarness()
+        buy = sequenced_order(OrderSide.BUY, 0)
+        state = portfolio("2000")
+        context = session(harness.states)
+
+        def wrong_calendar(fill):
+            return DeferredSettlementPlan(
+                calendar_id="OTHER",
+                trade_session=fill.timestamp.date(),
+                settlement_session=fill.timestamp.date() + timedelta(days=1),
+            )
+
+        with self.assertRaises(SessionMatchError) as calendar_error:
+            harness.service.run_opening_match(
+                session=context,
+                orders=[buy],
+                policies=harness.policies,
+                portfolio=state,
+                accounting=AccountingPolicy(
+                    settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
+                ),
+                settlement_plan_factory=wrong_calendar,
+            )
+        self.assertIn("calendar", str(calendar_error.exception))
+
+        def wrong_trade_date(fill):
+            return DeferredSettlementPlan(
+                calendar_id=CALENDAR_ID,
+                trade_session=fill.timestamp.date() + timedelta(days=3),
+                settlement_session=fill.timestamp.date() + timedelta(days=4),
+            )
+
+        with self.assertRaises(SessionMatchError) as date_error:
+            harness.service.run_opening_match(
+                session=context,
+                orders=[buy],
+                policies=harness.policies,
+                portfolio=state,
+                accounting=AccountingPolicy(
+                    settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
+                ),
+                settlement_plan_factory=wrong_trade_date,
+            )
+        self.assertIn("trade_session", str(date_error.exception))
+        # Nothing committed by either failed attempt.
+        self.assertNotIn(INSTRUMENT_ID, state.positions)
+        self.assertEqual(buy.status, OrderStatus.SUBMITTED)
+
+    def test_fee_applicability_context_filters_strictly(self):
+        """Fix 9: applicability facts filter rules; missing facts fail closed."""
+
+        applicable_rule = FeeRule(
+            key="commission", category="commission", rate="0.0003",
+            applicability={"asset_class": "etf"},
+            rounding_level=FeeRoundingLevel.FEE_ITEM,
+            rounding_scope="commission", rounding_mode=FeeRoundingMode.HALF_UP,
+            rounding_precision="0.01",
+        )
+        schedule = FeeSchedule(key="s", fee_rules=(applicable_rule,))
+
+        segment = snapshot_segment()
+        resolved = InstrumentExecutionPolicy.from_rule_snapshot(
+            segment,
+            package_reference=VersionedReference(
+                key="china_listed_etf_rules", version=1
+            ),
+            fee_applicability_context={"asset_class": "etf"},
+        )
+        # Matching context: rule applies.
+        rules = resolve_instrument_fee_rules(
+            schedule,
+            fee_categories=resolved.fee_categories,
+            side="buy",
+            context=dict(resolved.fee_applicability_context),
+        )
+        self.assertEqual(len(rules), 1)
+
+        # Mismatched or missing facts: fail closed with an unresolved fee.
+        harness = MatchingHarness(fee_schedule=schedule)
+        harness.policies = {
+            INSTRUMENT_ID: InstrumentExecutionPolicy.from_rule_snapshot(
+                segment,
+                package_reference=VersionedReference(
+                    key="china_listed_etf_rules", version=1
+                ),
+                fee_applicability_context={"asset_class": "futures"},
+            )
+        }
+        buy = sequenced_order(OrderSide.BUY, 0)
+        result, _, _ = harness.run([buy])
+        self.assertEqual(result.fills, ())
+        self.assertEqual(buy.status_reason, "FEE_RULE_UNRESOLVED")
+
+    def test_declared_gross_notional_must_match_components(self):
+        """Fix 10: inconsistent declared notional is rejected."""
+
+        display = InstrumentDisplaySnapshot.from_display(
+            InstrumentDisplay(
+                instrument_id=INSTRUMENT_ID,
+                trading_code="510300",
+                name="沪深300ETF",
+            )
+        )
+        kwargs = dict(
+            run_id=uuid4(),
+            fill_id=uuid4(),
+            order_id=uuid4(),
+            instrument_id=INSTRUMENT_ID,
+            display=display,
+            side="buy",
+            timestamp=OPEN,
+            price="10.00",
+            quantity="100",
+            contract_multiplier="10",
+        )
+        with self.assertRaises(DomainValidationError):
+            BacktestFillRecord(gross_notional="1000", **kwargs)
+        consistent = BacktestFillRecord(gross_notional="10000", **kwargs)
+        self.assertEqual(consistent.gross_notional, Decimal("10000"))
+
+    def test_restricted_fee_snapshot_keeps_schedule_version(self):
+        """Fix 11: FeeBreakdown reports the source schedule version."""
+
+        schedule = FeeSchedule(
+            key="acct_v7",
+            version=7,
+            fee_rules=(
+                FeeRule(
+                    key="commission", category="commission", rate="0.0003",
+                    minimum="5",
+                    rounding_level=FeeRoundingLevel.FEE_ITEM,
+                    rounding_scope="commission",
+                    rounding_mode=FeeRoundingMode.HALF_UP,
+                    rounding_precision="0.01",
+                ),
+            ),
+        )
+        rules = resolve_instrument_fee_rules(
+            schedule, fee_categories={"commission"}, side="sell"
+        )
+        restricted = fee_snapshot_for_rules(schedule, rules)
+        breakdown = FeeCalculator(restricted).calculate(side="sell", notional="1000")
+
+        self.assertEqual(restricted.version, 7)
+        self.assertEqual(breakdown.schedule_version, 7)
 
 
 if __name__ == "__main__":

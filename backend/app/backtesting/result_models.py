@@ -573,11 +573,18 @@ class BacktestFillRecord:
                 * multiplier,
             )
         else:
-            object.__setattr__(
-                self,
-                "gross_notional",
-                _positive(self.gross_notional, "gross_notional"),
+            declared = _decimal(self.gross_notional, "gross_notional")
+            derived = (
+                _positive(self.price, "price")
+                * _positive(self.quantity, "quantity")
+                * multiplier
             )
+            if declared != derived:
+                raise DomainValidationError(
+                    f"declared gross_notional {declared} does not match "
+                    f"price x quantity x contract_multiplier {derived}"
+                )
+            object.__setattr__(self, "gross_notional", derived)
         if self.fee_breakdown is not None:
             object.__setattr__(
                 self, "fee_breakdown", _frozen_json(self.fee_breakdown, "fee_breakdown")
