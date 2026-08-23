@@ -299,6 +299,7 @@ def build_runner(
     component_parameters=None,
     accounting_currency: str = "CNY",
     execution_model=None,
+    settlement_policy=None,
 ):
     """Assemble a fully wired runner with zero slippage and zero fees.
 
@@ -349,7 +350,11 @@ def build_runner(
     )
     accounting = AccountingPolicy(
         currency=accounting_currency,
-        settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
+        settlement_policy=(
+            settlement_policy
+            if settlement_policy is not None
+            else SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
+        ),
     )
     first_day = axis.at(0).metadata["session_date"]
     portfolio = PortfolioState(

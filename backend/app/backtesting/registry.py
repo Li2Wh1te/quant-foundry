@@ -70,6 +70,16 @@ def _freeze_value(value: Any) -> Any:
     return value
 
 
+def _unfreeze_value(value: Any) -> Any:
+    """Convert frozen containers back into plain JSON-serializable types."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _unfreeze_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_unfreeze_value(item) for item in value]
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ComponentRegistryEntry:
     """One immutable registry entry describing a replaceable component.
@@ -142,8 +152,10 @@ class ComponentRegistryEntry:
             "name_zh": self.name_zh,
             "name_en": self.name_en,
             "display_name": self.display_name,
-            "parameter_schema": self.parameter_schema,
-            "capabilities": self.capabilities,
+            # Plain dict/list all the way down: API surfaces serialize this
+            # payload directly, so frozen proxies must never leak out.
+            "parameter_schema": _unfreeze_value(self.parameter_schema),
+            "capabilities": _unfreeze_value(self.capabilities),
         }
 
     def construct(self, parameters: Mapping[str, Any] | None = None) -> object:

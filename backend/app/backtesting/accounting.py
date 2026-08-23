@@ -34,6 +34,13 @@ from app.backtesting.domain import (
 from app.backtesting.fees import FeeBreakdown
 
 
+from app.backtesting.fees import FeeBreakdown
+
+#: Default contract multiplier for fills created before multipliers were
+#: audited explicitly; equity instruments resolve to the same value.
+ONE = Decimal("1")
+
+
 class AccountingError(DomainValidationError):
     """Raised when a fill cannot be applied under the active policy."""
 
@@ -131,6 +138,40 @@ class DeferredSettlementPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class SettlementRelease:
+    """Audit record of one applied settlement boundary.
+
+    ``released_quantities`` maps instrument to the total quantity made
+    sellable by this boundary; an empty mapping records an idempotent
+    re-application that released nothing.
+    """
+
+    calendar_id: str
+    session_date: date
+    released_quantities: Mapping[UUID, Decimal]
+    boundary_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.calendar_id, str) or not self.calendar_id.strip():
+            raise SettlementError("calendar_id must be non-blank text")
+        if not isinstance(self.session_date, date) or isinstance(
+            self.session_date, datetime
+        ):
+            raise SettlementError("session_date must be a calendar date")
+        if not isinstance(self.released_quantities, Mapping):
+            raise SettlementError("released_quantities must be a mapping")
+        object.__setattr__(
+            self,
+            "released_quantities",
+            MappingProxyType(dict(self.released_quantities)),
+        )
+        if self.boundary_id is not None and (
+            not isinstance(self.boundary_id, str) or not self.boundary_id.strip()
+        ):
+            raise SettlementError("boundary_id must be non-blank text when provided")
+
+
+@dataclass(frozen=True, slots=True)
 class PendingSettlement:
     """One immutable batch of bought units awaiting its T+1 release.
 
@@ -208,6 +249,7 @@ class Fill:
     quantity: Decimal | int | str
     fees: Decimal | int | str = ZERO
     currency: str = "CNY"
+    contract_multiplier: Decimal | int | str = ONE
     reference_price: Decimal | int | str | None = None
     fee_breakdown: FeeBreakdown | None = None
     slippage_bps: Decimal | int | str | None = None
@@ -227,6 +269,11 @@ class Fill:
         object.__setattr__(self, "side", normalized_side)
         object.__setattr__(self, "price", _positive(self.price, "price"))
         object.__setattr__(self, "quantity", _positive(self.quantity, "quantity"))
+        object.__setattr__(
+            self,
+            "contract_multiplier",
+            _positive(self.contract_multiplier, "contract_multiplier"),
+        )
         object.__setattr__(self, "fees", _decimal(self.fees, "fees"))
         if self.fees < ZERO:
             raise DomainValidationError("fees must be non-negative")
@@ -271,10 +318,21 @@ class Fill:
             )
 
     @property
-    def notional(self) -> Decimal:
-        """Return gross execution value before fees."""
+    def gross_notional(self) -> Decimal:
+        """Return ``execution_price × quantity × contract_multiplier``.
 
-        return self.price * self.quantity
+        This is the single notional definition used by cash checks, fee
+        bases, realized PnL, and valuation; the multiplier is never
+        implicitly treated as ``1``.
+        """
+
+        return self.price * self.quantity * self.contract_multiplier
+
+    @property
+    def notional(self) -> Decimal:
+        """Alias of :attr:`gross_notional` kept for existing callers."""
+
+        return self.gross_notional
 
 
 @dataclass(frozen=True, slots=True)
@@ -321,6 +379,7 @@ class AccountingPolicy:
     _processed_dividend_event_ids: set[UUID] = field(default_factory=set, init=False)
     _pending_settlement: list[PendingSettlement] = field(default_factory=list, init=False)
     _settled_batches: tuple[PendingSettlement, ...] = field(default=(), init=False)
+    _release_history: tuple[SettlementRelease, ...] = field(default=(), init=False)
 
     def __post_init__(self) -> None:
         """Normalize policy inputs before the first fill is processed."""
@@ -447,15 +506,18 @@ class AccountingPolicy:
                 quantity=ZERO,
                 cash_delta=ZERO,
             )
-        # Consume the id before any early exit: an event without a position
-        # today must never pay out after a later purchase.
-        self._processed_dividend_event_ids.add(dividend_event_id)
-
+        # Precondition checks run before the id is consumed: a caller that
+        # fixes its configuration and retries must not find the event
+        # silently swallowed by an earlier failed attempt.
         account = portfolio.account
         if self.currency not in account.cash_balances:
             raise AccountingError(
                 f"account has no cash balance for currency {self.currency!r}"
             )
+        # Consume the id before the position check: an event without a
+        # position today must never pay out after a later purchase.
+        self._processed_dividend_event_ids.add(dividend_event_id)
+
         position = portfolio.positions.get(instrument_id)
         if position is None or position.is_zero:
             return CashDividendApplication(
@@ -486,12 +548,18 @@ class AccountingPolicy:
 
         return self._settled_batches
 
+    def releases(self) -> tuple[SettlementRelease, ...]:
+        """Applied settlement boundaries, in application order (audit)."""
+
+        return self._release_history
+
     def settle_pending_before_open_match(
         self,
         portfolio: PortfolioState,
         *,
         calendar_id: str,
         session_date: date,
+        boundary_id: str | None = None,
     ) -> tuple[UUID, ...]:
         """Release exactly the batches due before this session's open match.
 
@@ -560,6 +628,7 @@ class AccountingPolicy:
         # the same day accumulate onto a single projected availability
         # value, which is written back exactly once per position.
         projected: dict[UUID, Decimal] = {}
+        released_amounts: dict[UUID, Decimal] = {}
         positions: dict[UUID, PositionState] = {}
         released_instruments: list[UUID] = []
         for batch in due:
@@ -578,6 +647,9 @@ class AccountingPolicy:
             new_available = base + batch.quantity
             _validate_available_quantity(position.quantity, new_available)
             projected[batch.instrument_id] = new_available
+            released_amounts[batch.instrument_id] = (
+                released_amounts.get(batch.instrument_id, ZERO) + batch.quantity
+            )
             positions[batch.instrument_id] = position
             if batch.instrument_id not in released_instruments:
                 released_instruments.append(batch.instrument_id)
@@ -591,6 +663,18 @@ class AccountingPolicy:
         for batch in due:
             self._settled_batches += (batch,)
         self._pending_settlement = remaining
+        # Audit the applied boundary itself; an idempotent re-application
+        # records an empty release instead of being silently dropped.
+        self._release_history += (
+            SettlementRelease(
+                calendar_id=calendar_id,
+                session_date=session_date,
+                released_quantities=released_amounts,
+                boundary_id=(
+                    str(boundary_id) if boundary_id is not None else None
+                ),
+            ),
+        )
         return tuple(sorted(released_instruments, key=str))
 
     def value(
@@ -599,12 +683,20 @@ class AccountingPolicy:
         marks: Mapping[UUID, Decimal | int | str],
         *,
         as_of: datetime,
+        contract_multipliers: Mapping[UUID, Decimal | int | str] | None = None,
     ) -> ValuationResult:
         """Mark every non-zero position and compute single-currency equity.
 
         Missing marks produce a blocked valuation and never become a zero
         price.  In that case ``market_value`` is ``None`` and the previous
         equity is left untouched because it is not a valid current valuation.
+
+        ``contract_multipliers`` supplies the per-instrument multipliers
+        resolved from the frozen rule snapshots.  An instrument absent
+        from the mapping values at multiplier ``1``; a declared
+        multiplier must be positive.  The same multiplier participates in
+        market value and unrealized PnL, matching the fill-time gross
+        notional definition.
         """
 
         _aware_datetime(as_of, "as_of")
@@ -615,6 +707,13 @@ class AccountingPolicy:
             instrument_id: _positive(price, f"marks[{instrument_id}]")
             for instrument_id, price in marks.items()
         }
+        normalized_multipliers: dict[UUID, Decimal] = {}
+        if contract_multipliers:
+            for instrument_id, multiplier in contract_multipliers.items():
+                normalized_multipliers[instrument_id] = _positive(
+                    multiplier,
+                    f"contract_multipliers[{instrument_id}]",
+                )
         missing = False
         market_value = ZERO
         for instrument_id, position in portfolio.positions.items():
@@ -628,9 +727,14 @@ class AccountingPolicy:
                 position.unrealized_pnl = ZERO
                 missing = True
                 continue
+            multiplier = normalized_multipliers.get(instrument_id, ONE)
             position.mark_price = mark
-            position.unrealized_pnl = (mark - position.average_price) * position.quantity
-            market_value += mark * position.quantity
+            position.unrealized_pnl = (
+                (mark - position.average_price)
+                * position.quantity
+                * multiplier
+            )
+            market_value += mark * position.quantity * multiplier
 
         portfolio.as_of = as_of
         if missing:
@@ -738,7 +842,13 @@ class AccountingPolicy:
             )
 
         realized_delta = (
-            fill.notional - fill.fees - (existing.average_price * fill.quantity)
+            fill.notional
+            - fill.fees
+            - (
+                existing.average_price
+                * fill.quantity
+                * fill.contract_multiplier
+            )
         )
         remaining_quantity = existing.quantity - fill.quantity
         remaining_available = existing.available_quantity - fill.quantity

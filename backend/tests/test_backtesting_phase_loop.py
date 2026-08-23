@@ -53,6 +53,7 @@ def scenario_runner(
     component_parameters=None,
     accounting_currency: str = "CNY",
     execution_model=None,
+    settlement_policy=None,
 ):
     """Three-day runner: D0 close 100, D1 open 100/close 102, D2 close 103."""
 
@@ -76,6 +77,7 @@ def scenario_runner(
         component_parameters=component_parameters,
         accounting_currency=accounting_currency,
         execution_model=execution_model,
+        settlement_policy=settlement_policy,
     )
     return runner, strategy
 
@@ -531,6 +533,21 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
             scenario_runner(accounting_currency="USD")
         self.assertIn("currency", str(context.exception))
 
+    def test_runner_enforces_formal_t_plus_one_settlement_policy(self) -> None:
+        from app.backtesting.accounting import SettlementPolicy
+        from app.backtesting.domain import DomainValidationError
+
+        for rejected in (
+            SettlementPolicy.SAME_DAY,
+            SettlementPolicy.T_PLUS_ONE,
+        ):
+            with self.assertRaises(DomainValidationError) as context:
+                scenario_runner(
+                    run_id=f"run-settlement-{rejected.value}",
+                    settlement_policy=rejected,
+                )
+            self.assertIn("settlement", str(context.exception).lower())
+
     def test_malformed_run_steps_input_yields_stable_domain_errors(self) -> None:
         from app.backtesting.domain import DomainValidationError
 
@@ -551,6 +568,13 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
             runner.run_steps([])
         with self.assertRaises(DomainValidationError):
             runner.run_steps("D0")
+
+        class BrokenIterator:
+            def __iter__(self):
+                raise TypeError("broken iterator")
+
+        with self.assertRaises(DomainValidationError):
+            runner.run_steps(BrokenIterator())
 
     def test_chunked_execution_never_resets_sequences_or_state(self) -> None:
         axis = build_axis([D0, D1, D2])

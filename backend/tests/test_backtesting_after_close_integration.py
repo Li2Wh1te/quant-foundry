@@ -363,6 +363,67 @@ class SettlementCalendarResolutionTests(unittest.TestCase):
 
 
 class DividendIdempotencyTests(unittest.TestCase):
+    def test_failed_account_precondition_does_not_consume_the_event_id(
+        self,
+    ) -> None:
+        """A rejected attempt (missing currency) must leave the id free so
+        a corrected retry still applies the dividend."""
+
+        from decimal import Decimal
+        from uuid import uuid4
+
+        from app.backtesting.accounting import (
+            AccountState,
+            AccountingPolicy,
+            PortfolioState,
+        )
+        from tests.backtest_runtime_fixture import session_open
+
+        policy = AccountingPolicy(currency="CNY")
+        # The account only carries USD: the CNY dividend cannot apply.
+        portfolio = PortfolioState(
+            account=AccountState(
+                cash_balances={"USD": "0"},
+                available_cash="0",
+                frozen_cash="0",
+                margin_used="0",
+                margin_available="0",
+                equity="0",
+            ),
+            as_of=session_open(D1),
+        )
+        event_id = uuid4()
+        with self.assertRaises(Exception):
+            policy.apply_cash_dividend(
+                portfolio,
+                dividend_event_id=event_id,
+                instrument_id=INSTRUMENT_ID,
+                effective_date=D1,
+                amount_per_share=Decimal("2"),
+            )
+
+        # Fix the account, then retry with the same event id: the id was
+        # never consumed by the failed attempt, and with no position the
+        # corrected attempt consumes it without paying out.
+        portfolio.account.cash_balances["CNY"] = Decimal("0")
+        application = policy.apply_cash_dividend(
+            portfolio,
+            dividend_event_id=event_id,
+            instrument_id=INSTRUMENT_ID,
+            effective_date=D1,
+            amount_per_share=Decimal("2"),
+        )
+        self.assertFalse(application.applied)
+        # A later replay is still a no-op (no retroactive claim).
+        replay = policy.apply_cash_dividend(
+            portfolio,
+            dividend_event_id=event_id,
+            instrument_id=INSTRUMENT_ID,
+            effective_date=D1,
+            amount_per_share=Decimal("2"),
+        )
+        self.assertFalse(replay.applied)
+
     def test_same_day_distinct_dividend_events_stay_separate(self) -> None:
         """Two corporate actions on the same instrument and day must never
         collapse into one idempotency key."""

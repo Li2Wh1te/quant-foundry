@@ -96,6 +96,18 @@ class RegistryContractTests(unittest.TestCase):
             self.assertNotIn("app.backtesting", rendered)
             self.assertNotIn("factory", rendered)
 
+    def test_describe_payload_is_directly_json_serializable(self) -> None:
+        import json
+
+        registry = build_default_component_registry()
+
+        for item in registry.entries():
+            payload = item.describe()
+            # API surfaces serialize descriptors directly: no frozen
+            # container may leak into the payload.
+            rendered = json.dumps(payload, ensure_ascii=False)
+            self.assertIn(item.display_name, rendered)
+
     def test_capability_requirements_are_declared_and_validated(self) -> None:
         registry = ComponentRegistry()
         registry.register(

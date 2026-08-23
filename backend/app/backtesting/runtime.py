@@ -844,6 +844,15 @@ class DeterministicBacktestRunner:
                     f"accounting policy currency "
                     f"{accounting_currency.strip().upper()!r}"
                 )
+        # The timing policy's semantics assume T+1-before-open-match
+        # settlement: a same-day or legacy policy would let sells fill one
+        # session early and silently rewrite the documented walk-through.
+        from app.backtesting.accounting import SettlementPolicy
+        from app.backtesting.settlement import require_formal_settlement_policy
+
+        require_formal_settlement_policy(
+            getattr(self._accounting, "settlement_policy", None)
+        )
         # Replaceable components must carry the stable identity a registry
         # entry guarantees; ad-hoc instances without key/version cannot be
         # audited and are rejected at admission.
@@ -941,11 +950,18 @@ class DeterministicBacktestRunner:
                 "stopped; inspect the failure and start a new run instead of "
                 "re-executing the failed slice"
             )
-        ordered = tuple(steps) if _is_step_sequence(steps) else None
-        if ordered is None:
+        if not _is_step_sequence(steps):
             raise DomainValidationError(
                 "steps must be a sequence of TimeStep values"
             )
+        try:
+            ordered = tuple(steps)
+        except TypeError as exc:
+            # A broken __iter__ must not leak the iterator's own exception
+            # type; the runner contract is a stable domain error.
+            raise DomainValidationError(
+                f"steps is not a usable step sequence: {exc}"
+            ) from exc
         if not ordered:
             raise DomainValidationError("run_steps requires at least one step")
         # Type-check every entry before touching any attribute, so malformed
@@ -1453,7 +1469,12 @@ class DeterministicBacktestRunner:
             return []
         dividends = sorted(
             self._corporate_actions.cash_dividends(context.session_date),
-            key=lambda dividend: str(dividend.instrument_id),
+            # event_key keeps same-instrument actions in a deterministic
+            # order regardless of the source's return order.
+            key=lambda dividend: (
+                str(dividend.instrument_id),
+                dividend.event_key,
+            ),
         )
         emitted: list[tuple[str, Mapping[str, Any]]] = []
         for dividend in dividends:
