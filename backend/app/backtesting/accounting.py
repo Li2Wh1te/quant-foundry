@@ -288,6 +288,16 @@ class FillApplication:
 
 
 @dataclass(frozen=True, slots=True)
+class CashDividendApplication:
+    """Audit-friendly result of one corporate-action accounting event."""
+
+    dividend_event_id: UUID
+    applied: bool
+    quantity: Decimal
+    cash_delta: Decimal
+
+
+@dataclass(frozen=True, slots=True)
 class ValuationResult:
     """Result of one mark-to-market pass over the in-memory portfolio."""
 
@@ -308,6 +318,7 @@ class AccountingPolicy:
     currency: str = "CNY"
     settlement_policy: SettlementPolicy = SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
     _processed_fill_ids: set[UUID] = field(default_factory=set, init=False)
+    _processed_dividend_event_ids: set[UUID] = field(default_factory=set, init=False)
     _pending_settlement: list[PendingSettlement] = field(default_factory=list, init=False)
     _settled_batches: tuple[PendingSettlement, ...] = field(default=(), init=False)
 
@@ -399,6 +410,71 @@ class AccountingPolicy:
                 portfolio, fill, existing, current_cash, settlement_plan
             )
         return self._apply_sell(portfolio, fill, existing, current_cash)
+
+    def apply_cash_dividend(
+        self,
+        portfolio: PortfolioState,
+        *,
+        dividend_event_id: UUID,
+        instrument_id: UUID,
+        effective_date: date,
+        amount_per_share: Decimal | int | str,
+    ) -> "CashDividendApplication":
+        """Apply one cash dividend as an explicit accounting event.
+
+        The dividend is the only account mutation besides fills and
+        settlement releases.  ``dividend_event_id`` is the idempotency key:
+        replaying the same corporate-action event (a retried phase) is a
+        no-op instead of a second credit.  The id stays consumed even when
+        no position exists on the record date, so a later position cannot
+        retroactively claim the same event.
+        """
+
+        if not isinstance(dividend_event_id, UUID):
+            raise AccountingError("dividend_event_id must be a UUID")
+        if not isinstance(instrument_id, UUID):
+            raise AccountingError("instrument_id must be a UUID")
+        if isinstance(effective_date, datetime) or not isinstance(
+            effective_date, date
+        ):
+            raise AccountingError("effective_date must be a calendar date")
+        per_share = _positive(amount_per_share, "amount_per_share")
+
+        if dividend_event_id in self._processed_dividend_event_ids:
+            return CashDividendApplication(
+                dividend_event_id=dividend_event_id,
+                applied=False,
+                quantity=ZERO,
+                cash_delta=ZERO,
+            )
+        # Consume the id before any early exit: an event without a position
+        # today must never pay out after a later purchase.
+        self._processed_dividend_event_ids.add(dividend_event_id)
+
+        account = portfolio.account
+        if self.currency not in account.cash_balances:
+            raise AccountingError(
+                f"account has no cash balance for currency {self.currency!r}"
+            )
+        position = portfolio.positions.get(instrument_id)
+        if position is None or position.is_zero:
+            return CashDividendApplication(
+                dividend_event_id=dividend_event_id,
+                applied=False,
+                quantity=ZERO,
+                cash_delta=ZERO,
+            )
+        cash_delta = per_share * position.quantity
+        account.cash_balances[self.currency] = (
+            account.cash_balances[self.currency] + cash_delta
+        )
+        account.available_cash = account.available_cash + cash_delta
+        return CashDividendApplication(
+            dividend_event_id=dividend_event_id,
+            applied=True,
+            quantity=position.quantity,
+            cash_delta=cash_delta,
+        )
 
     def pending_batches(self) -> tuple[PendingSettlement, ...]:
         """Batches awaiting release, in fill order (audit view)."""
