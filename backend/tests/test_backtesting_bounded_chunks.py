@@ -755,5 +755,149 @@ class TestCoverageEnvelopeInvariants(unittest.TestCase):
         self.assertIsNone(empty.warmup_first_session_date)
 
 
+class TestLookbackEndBound(unittest.TestCase):
+    """A lookback window never reads sessions beyond its own end_at."""
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.all_days = weekdays(date(2025, 11, 3), date(2026, 1, 30))
+        # Formal window J5..J7 with warmup D31, Jan-2 (the two open days
+        # before J5); bars are complete on every open day.
+        cls.provider = MemoryDataProvider(
+            build_dataset(
+                facts_start=cls.all_days[0],
+                facts_end=cls.all_days[-1],
+                open_days=set(cls.all_days),
+            )
+        )
+        j5 = date(2026, 1, 5)
+        j7 = date(2026, 1, 7)
+        cls.session = open_ready_session(
+            cls.provider,
+            make_intent(start=j5, end=j7, warmup=2),
+        )
+        cls.chunk = cls.session.open_chunk(chunk_query(cls.session, 0))
+        cls.chunk.validate_consistency()
+
+    def _lookback_rows(self, *, end_at: datetime, cutoff: datetime):
+        from app.backtesting.data.requests import LookbackWindow
+
+        return self.chunk.bars(
+            BarQuery(
+                instrument_ids=IID_A,
+                frequency="1d",
+                boundary=QueryBoundary(
+                    data_cutoff=cutoff, include_cutoff_day=True
+                ),
+                window=LookbackWindow(sessions=2, end_at=end_at),
+            )
+        )
+
+    def test_lookback_never_reads_past_its_end_at(self) -> None:
+        end_at = datetime(2026, 1, 5, 15, 0, tzinfo=TZ)
+        cutoff = datetime(2026, 1, 7, 15, 0, tzinfo=TZ)
+        rows = self._lookback_rows(end_at=end_at, cutoff=cutoff)
+        days = [bar.trade_date for bar in rows]
+        # Exactly the two warmup sessions before the end day: the proven
+        # cutoff day (Jan-7) must NOT leak past the lookback's own bound.
+        self.assertEqual(len(days), 2)
+        self.assertEqual(max(days), date(2026, 1, 2))
+
+    def test_end_day_is_admitted_only_when_it_is_the_proven_cutoff(self) -> None:
+        end_at = datetime(2026, 1, 7, 15, 0, tzinfo=TZ)
+        cutoff = end_at
+        rows = self._lookback_rows(end_at=end_at, cutoff=cutoff)
+        days = [bar.trade_date for bar in rows]
+        self.assertEqual(len(days), 2)
+        self.assertEqual(max(days), date(2026, 1, 7))
+
+    def test_end_day_stays_excluded_without_completeness_proof(self) -> None:
+        from app.backtesting.data.requests import LookbackWindow
+
+        end_at = datetime(2026, 1, 7, 15, 0, tzinfo=TZ)
+        chunk = self.chunk
+        rows = chunk.bars(
+            BarQuery(
+                instrument_ids=IID_A,
+                frequency="1d",
+                boundary=QueryBoundary(data_cutoff=end_at),
+                window=LookbackWindow(sessions=2, end_at=end_at),
+            )
+        )
+        self.assertEqual(max(bar.trade_date for bar in rows), date(2026, 1, 6))
+
+
+class TestOpenChunkParameterValidation(unittest.TestCase):
+    """Foreign open_chunk arguments fail with the stable contract error."""
+
+    def setUp(self) -> None:
+        all_days = weekdays(date(2025, 11, 3), date(2026, 1, 30))
+        self.provider = MemoryDataProvider(
+            build_dataset(
+                facts_start=all_days[0],
+                facts_end=all_days[-1],
+                open_days=set(all_days),
+            )
+        )
+        self.session = open_ready_session(
+            self.provider,
+            make_intent(start=date(2026, 1, 5), end=date(2026, 1, 7)),
+        )
+
+    def test_none_query_raises_invalid_request(self) -> None:
+        with self.assertRaises(InvalidDataRequestError):
+            self.session.open_chunk(None)
+
+    def test_non_chunk_query_object_raises_invalid_request(self) -> None:
+        class Forged:
+            chunk_index = -1  # would bypass DTO validation if accepted
+
+            first_session_id = "s"
+            last_session_id = "s"
+            fact_types = ()
+
+        with self.assertRaises(InvalidDataRequestError):
+            self.session.open_chunk(Forged())  # type: ignore[arg-type]
+
+
+class TestBusinessQueryParameterValidation(unittest.TestCase):
+    """Every implemented business query rejects foreign query objects."""
+
+    def setUp(self) -> None:
+        all_days = weekdays(date(2025, 11, 3), date(2026, 1, 30))
+        self.provider = MemoryDataProvider(
+            build_dataset(
+                facts_start=all_days[0],
+                facts_end=all_days[-1],
+                open_days=set(all_days),
+            )
+        )
+        self.session = open_ready_session(
+            self.provider,
+            make_intent(start=date(2026, 1, 5), end=date(2026, 1, 7)),
+        )
+        self.chunk = self.session.open_chunk(chunk_query(self.session, 0))
+        self.chunk.validate_consistency()
+
+    def test_coverage_rejects_none_query(self) -> None:
+        with self.assertRaises(InvalidDataRequestError):
+            self.chunk.coverage(None)  # type: ignore[arg-type]
+
+    def test_coverage_rejects_foreign_object(self) -> None:
+        class Forged:
+            capability = "bars"  # not a DataCapability; would bypass DTO checks
+
+        with self.assertRaises(InvalidDataRequestError):
+            self.chunk.coverage(Forged())  # type: ignore[arg-type]
+
+    def test_instruments_rejects_none_query(self) -> None:
+        with self.assertRaises(InvalidDataRequestError):
+            self.chunk.instruments(None)  # type: ignore[arg-type]
+
+    def test_bars_still_rejects_none_query(self) -> None:
+        with self.assertRaises(InvalidDataRequestError):
+            self.chunk.bars(None)  # type: ignore[arg-type]
+
+
 if __name__ == "__main__":
     unittest.main()

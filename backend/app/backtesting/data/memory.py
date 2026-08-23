@@ -1177,6 +1177,12 @@ class MemoryDataSession:
         """Open one legal fixed chunk as its own context manager."""
 
         self._assert_not_closed()
+        # Type-check before any attribute access: a foreign object (or
+        # None) must fail with the stable contract error instead of an
+        # AttributeError, and can never bypass the DTO's own invariants
+        # such as the non-negative chunk_index.
+        if not isinstance(query, DataChunkQuery):
+            raise InvalidDataRequestError("query must be a DataChunkQuery")
         if self._state is DataSessionState.CREATED:
             raise InvalidDataRequestError(
                 "open_chunk requires a completed ready preflight"
@@ -1486,6 +1492,20 @@ class MemoryDataChunkSession:
                 },
             )
 
+    @staticmethod
+    def _require_query_type(query: object, expected: type, operation: str) -> None:
+        """Reject foreign query objects with the stable contract error.
+
+        Attribute access on ``None`` or an arbitrary class would otherwise
+        surface as AttributeError, and a forged duck-typed object could
+        bypass the DTO's own invariant validation.
+        """
+
+        if not isinstance(query, expected):
+            raise InvalidDataRequestError(
+                f"{operation} query must be a {expected.__name__}"
+            )
+
     def _require_declared_fact_type(
         self, capability: DataCapability, operation: str
     ) -> None:
@@ -1546,6 +1566,7 @@ class MemoryDataChunkSession:
         """Resolve full specs for known identities valid at ``effective_at``."""
 
         self._guard_business_query("instruments")
+        self._require_query_type(query, InstrumentQuery, "instruments")
         self._require_authorized_instruments(query.instrument_ids, "instruments")
         rows: list[InstrumentSpec] = []
         for instrument_id in query.instrument_ids:
@@ -1596,8 +1617,7 @@ class MemoryDataChunkSession:
         """
 
         self._guard_business_query("bars")
-        if not isinstance(query, BarQuery):
-            raise InvalidDataRequestError("query must be a BarQuery")
+        self._require_query_type(query, BarQuery, "bars")
         self._require_declared_fact_type(DataCapability.BARS, "bars")
         self._require_authorized_instruments(query.instrument_ids, "bars")
         boundary = query.boundary
@@ -1634,14 +1654,19 @@ class MemoryDataChunkSession:
                 *self._session.resolved_sessions[: self._formal_end_index],
             ]
             last_eligible_day = lookback.end_at.date()
+            # The lookback's own end_at is a hard upper bound: the
+            # include_cutoff_day proof covers the cutoff day only, so the
+            # end day is admitted solely when it IS that proven cutoff
+            # day -- never a later session beyond end_at.
+            end_day_admitted = (
+                boundary.include_cutoff_day
+                and last_eligible_day == boundary.cutoff_date
+            )
             eligible = [
                 point
                 for point in pool
                 if point.session_date < last_eligible_day
-                or (
-                    boundary.include_cutoff_day
-                    and point.session_date == boundary.cutoff_date
-                )
+                or (end_day_admitted and point.session_date == last_eligible_day)
             ]
             if len(eligible) < lookback.sessions:
                 raise HistoryIncompleteError(
@@ -1747,6 +1772,7 @@ class MemoryDataChunkSession:
         """
 
         self._guard_business_query("coverage")
+        self._require_query_type(query, CoverageQuery, "coverage")
         self._require_declared_fact_type(DataCapability.COVERAGE, "coverage")
         # The audited capability must itself be declared: a coverage report
         # about a fact type the token never declared would fabricate
