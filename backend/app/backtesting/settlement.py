@@ -124,13 +124,7 @@ class CalendarAxisSettlementGateway:
         horizon_end = after_session + timedelta(
             days=_MAX_NEXT_SESSION_LOOKAHEAD_DAYS
         )
-        # Anomalous providers must not turn foreign-calendar or
-        # wrong-date facts into settlement days: every returned fact is
-        # checked for identity, date, and a registered definition version.
-        known_versions = {
-            definition.definition_version
-            for definition in self._provider.definitions(calendar_id)
-        }
+        definitions = list(self._provider.definitions(calendar_id))
         day = after_session + timedelta(days=1)
         while day <= horizon_end:
             fact = self._provider.fact(calendar_id, day)
@@ -144,10 +138,14 @@ class CalendarAxisSettlementGateway:
                         "missing_fact_date": day.isoformat(),
                     },
                 )
+            # Anomalous providers must not turn foreign-calendar or
+            # wrong-date facts into settlement days.  The fact's
+            # definition version must also resolve to *exactly one*
+            # registered definition of this calendar that is valid on the
+            # fact's date — the same rule the calendar axis applies.
             if (
                 fact.calendar_id != calendar_id
                 or fact.session_date != day
-                or fact.definition_version not in known_versions
             ):
                 raise SettlementCalendarUnresolvedError(
                     "the calendar provider returned an inconsistent "
@@ -159,7 +157,25 @@ class CalendarAxisSettlementGateway:
                         "fact_calendar_id": fact.calendar_id,
                         "fact_session_date": fact.session_date.isoformat(),
                         "fact_definition_version": fact.definition_version,
-                        "known_definition_versions": sorted(known_versions),
+                    },
+                )
+            applicable = [
+                definition
+                for definition in definitions
+                if definition.calendar_id == calendar_id
+                and definition.definition_version == fact.definition_version
+                and definition.applies_to(fact.session_date)
+            ]
+            if len(applicable) != 1:
+                raise SettlementCalendarUnresolvedError(
+                    "the session fact's definition version does not "
+                    "resolve to exactly one definition valid on the fact "
+                    "date; the next settlement session cannot be resolved",
+                    details={
+                        "calendar_id": calendar_id,
+                        "fact_session_date": fact.session_date.isoformat(),
+                        "fact_definition_version": fact.definition_version,
+                        "applicable_definition_count": len(applicable),
                     },
                 )
             if fact.is_open:
@@ -226,24 +242,33 @@ def settlement_policy_for_rule_class(
 def require_formal_settlement_policy(policy: SettlementPolicy) -> None:
     """Block any settlement policy other than T+1-before-open-match.
 
-    The legacy ``t_plus_1`` member stays constructible for old in-memory
-    fixtures but can never pass this gate, and neither can ``same_day``
-    or any future category.  Raw strings and unknown values are rejected
-    with the same stable error instead of leaking ``AttributeError``.
+    The formal API accepts only the :class:`SettlementPolicy` enum
+    member: raw strings are always rejected with the stable error, even
+    when they spell a legal value, so callers cannot smuggle untyped
+    configuration past the gate.  The legacy ``t_plus_1`` member stays
+    constructible for old in-memory fixtures but can never pass this
+    gate, and neither can ``same_day`` or any future category.
     """
 
-    try:
-        resolved = SettlementPolicy(getattr(policy, "value", policy))
-    except ValueError:
-        resolved = None
-    if resolved is not SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH:
+    if not isinstance(policy, SettlementPolicy):
         requested = getattr(policy, "value", policy)
         raise UnsupportedSettlementRuleError(
-            f"formal runs accept only "
-            f"'{FORMAL_SETTLEMENT_RULE_CLASS.value}' settlement, got "
-            f"'{requested}'",
+            f"formal settlement policy must be the "
+            f"'{FORMAL_SETTLEMENT_RULE_CLASS.value}' SettlementPolicy "
+            f"enum member, got non-enum input '{requested}'",
             details={
                 "formal_rule_class": FORMAL_SETTLEMENT_RULE_CLASS.value,
                 "requested_policy": str(requested),
+                "input_type": type(policy).__name__,
+            },
+        )
+    if policy is not SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH:
+        raise UnsupportedSettlementRuleError(
+            f"formal runs accept only "
+            f"'{FORMAL_SETTLEMENT_RULE_CLASS.value}' settlement, got "
+            f"'{policy.value}'",
+            details={
+                "formal_rule_class": FORMAL_SETTLEMENT_RULE_CLASS.value,
+                "requested_policy": policy.value,
             },
         )

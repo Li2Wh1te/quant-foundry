@@ -199,6 +199,54 @@ class NextOpenSessionTestCase(unittest.TestCase):
             with self.assertRaises(SettlementCalendarUnresolvedError):
                 gateway.next_open_session(queried_calendar, after)
 
+    def test_definition_not_valid_on_fact_date_blocks(self) -> None:
+        # A fact referencing a definition version whose validity window
+        # does not cover the fact date must never become a settlement day.
+        provider = calendar_provider(
+            {date(2026, 8, 21), date(2026, 8, 24)},
+            fact_from=date(2026, 1, 1),
+        )
+        # Rebuild with a v2 definition that only becomes valid later; the
+        # early facts claim v2 and must be rejected for January dates.
+        from app.backtesting.calendar_axis import CalendarDefinition
+
+        definitions = list(provider.definitions("SSE"))
+        definitions.append(
+            CalendarDefinition(
+                calendar_id="SSE",
+                definition_version="china_exchange_daily@2",
+                timezone="Asia/Shanghai",
+                default_sessions=CHINA_SESSIONS,
+                valid_from=date(2026, 9, 1),
+                source="test",
+            )
+        )
+
+        class EarlyV2Facts(InMemoryCalendarAxisDataProvider):
+            def __init__(self, defs, inner):
+                self._defs = defs
+                self._inner = inner
+
+            def definitions(self, calendar_id):
+                return self._defs
+
+            def fact(self, calendar_id, day):
+                real = self._inner.fact(calendar_id, day)
+                if calendar_id == "SSE" and day == date(2026, 8, 22):
+                    return CalendarSessionFact(
+                        calendar_id="SSE",
+                        session_date=day,
+                        is_open=True,
+                        definition_version="china_exchange_daily@2",
+                        source="test",
+                    )
+                return real
+
+        gateway = CalendarAxisSettlementGateway(EarlyV2Facts(definitions, provider))
+        with self.assertRaises(SettlementCalendarUnresolvedError) as ctx:
+            gateway.next_open_session("SSE", date(2026, 8, 21))
+        self.assertEqual(ctx.exception.details["applicable_definition_count"], 0)
+
     def test_no_open_session_within_horizon_blocks(self) -> None:
         gateway = CalendarAxisSettlementGateway(
             calendar_provider(set(), fact_to=date(2027, 12, 31))
@@ -235,6 +283,17 @@ class FormalSettlementGateTestCase(unittest.TestCase):
             require_formal_settlement_policy("weekly")
         self.assertEqual(ctx.exception.code, "settlement_rule_unsupported")
         self.assertEqual(ctx.exception.details["requested_policy"], "weekly")
+
+    def test_raw_strings_are_rejected_even_when_spelling_a_legal_value(self) -> None:
+        # The formal API accepts only the SettlementPolicy enum member;
+        # untyped configuration can never pass, so raw strings are
+        # rejected even when they spell a legal value.
+        with self.assertRaises(UnsupportedSettlementRuleError) as ctx:
+            require_formal_settlement_policy("t_plus_1_before_open_match")
+        self.assertEqual(ctx.exception.code, "settlement_rule_unsupported")
+        self.assertEqual(
+            ctx.exception.details["input_type"], "str"
+        )
 
     def test_rule_class_mapping_rejects_unknown_classes(self) -> None:
         self.assertEqual(
