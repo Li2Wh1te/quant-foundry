@@ -14,12 +14,13 @@ without dialect-specific constraints.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     Index,
     Integer,
@@ -464,6 +465,45 @@ class BacktestFillResultRecord(_RunBoundRecord):
         Integer,
         nullable=True,
         comment="Version of the slippage model applied to this fill.",
+    )
+    currency: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        default="CNY",
+        server_default="CNY",
+        comment="Settlement currency of the fill.",
+    )
+    contract_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=False,
+        default=Decimal("1"),
+        server_default="1",
+        comment="Contract multiplier resolved from the frozen rule snapshot.",
+    )
+    gross_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="execution_price x quantity x contract_multiplier before fees.",
+    )
+    fee_breakdown: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Frozen fee components with schedule key/version and rounding contract.",
+    )
+    settlement_calendar_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Calendar that owns the deferred settlement of a buy fill.",
+    )
+    settlement_due_session: Mapped[date | None] = mapped_column(
+        Date(),
+        nullable=True,
+        comment="Session whose pre-match boundary releases this buy fill.",
+    )
+    settlement_boundary_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Boundary identifier that released the due quantity.",
     )
 
 

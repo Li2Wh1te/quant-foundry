@@ -38,12 +38,65 @@ class FeeRoundingMode(StrEnum):
     HALF_UP = "half_up"
 
 
+class FeeBaseMeasure(StrEnum):
+    """Declared calculation base of one fee rule.
+
+    ``gross_notional`` uses ``execution_price × quantity ×
+    contract_multiplier`` as computed by the caller; ``quantity`` uses
+    the filled quantity itself; ``fixed`` charges only the declared
+    fixed amount.
+    """
+
+    GROSS_NOTIONAL = "gross_notional"
+    QUANTITY = "quantity"
+    FIXED = "fixed"
+
+
+class FeeChargeTiming(StrEnum):
+    """When a fee component is settled.
+
+    The first slice settles every fee atomically at fill time; async
+    settlement is explicitly out of scope.
+    """
+
+    ON_FILL = "on_fill"
+
+
+class FeeSide(StrEnum):
+    """Direction a fee rule applies to."""
+
+    BUY = "buy"
+    SELL = "sell"
+    BOTH = "both"
+
+
+class FeeRuleUnresolvedError(FeeError):
+    """A required fee category/direction has no rule in the snapshot.
+
+    ``code`` is the stable machine reason surfaced to order lifecycle
+    handling; the formal path must never fall back to a zero fee.
+    """
+
+    code = "fee_rule_unresolved"
+
+
 def _side(value: object) -> str:
     """Normalize an order-side value without coupling fee rules to orders."""
 
     normalized = getattr(value, "value", value)
     if not isinstance(normalized, str) or normalized not in {"buy", "sell"}:
         raise FeeError("side must be buy or sell")
+    return normalized
+
+
+def _rule_side(value: str | None) -> str | None:
+    """Normalize a rule-side declaration (``buy``/``sell``/``both``/``None``)."""
+
+    if value is None:
+        return None
+    normalized = getattr(value, "value", value)
+    if not isinstance(normalized, str) or normalized not in {"buy", "sell", "both"}:
+        raise FeeError("rule side must be buy, sell, both, or None")
     return normalized
 
 
@@ -77,6 +130,9 @@ class FeeRule:
     rate: Decimal | int | str = ZERO
     minimum: Decimal | int | str = ZERO
     fixed_amount: Decimal | int | str = ZERO
+    base_measure: FeeBaseMeasure | str = FeeBaseMeasure.GROSS_NOTIONAL
+    charge_timing: FeeChargeTiming | str = FeeChargeTiming.ON_FILL
+    currency: str | None = None
     rounding_level: FeeRoundingLevel | str | None = None
     rounding_scope: str | None = None
     rounding_mode: FeeRoundingMode | str | None = None
@@ -88,8 +144,21 @@ class FeeRule:
             raise FeeError("fee rule key must be non-blank text")
         if not isinstance(self.category, str) or not self.category.strip():
             raise FeeError("fee rule category must be non-blank text")
-        if self.side is not None:
-            object.__setattr__(self, "side", _side(self.side))
+        object.__setattr__(self, "side", _rule_side(self.side))
+        try:
+            object.__setattr__(
+                self, "base_measure", FeeBaseMeasure(self.base_measure)
+            )
+        except ValueError as exc:
+            raise FeeError("fee rule base_measure is unsupported") from exc
+        try:
+            object.__setattr__(
+                self, "charge_timing", FeeChargeTiming(self.charge_timing)
+            )
+        except ValueError as exc:
+            raise FeeError(
+                "only on_fill fee charge timing is supported in the first slice"
+            ) from exc
         rate = _decimal(self.rate, f"fee_rules[{self.key}].rate")
         minimum = _decimal(self.minimum, f"fee_rules[{self.key}].minimum")
         fixed = _decimal(self.fixed_amount, f"fee_rules[{self.key}].fixed_amount")
@@ -100,6 +169,14 @@ class FeeRule:
         object.__setattr__(self, "rate", rate)
         object.__setattr__(self, "minimum", minimum)
         object.__setattr__(self, "fixed_amount", fixed)
+        if self.currency is not None:
+            if not isinstance(self.currency, str) or not self.currency.strip():
+                raise FeeError(
+                    f"fee rule {self.key!r} currency must be non-blank text"
+                )
+            object.__setattr__(
+                self, "currency", self.currency.strip().upper()
+            )
         if self.rounding_level is not None:
             try:
                 object.__setattr__(
@@ -148,7 +225,7 @@ class FeeRule:
         """Return whether this rule applies to a buy or sell fill."""
 
         normalized_side = _side(side)
-        return self.side is None or self.side == normalized_side
+        return self.side is None or self.side in (normalized_side, FeeSide.BOTH)
 
     def applies_to_context(
         self,
@@ -175,6 +252,15 @@ class FeeRule:
             raise FeeError(f"fee rule {self.key!r} is missing rounding_mode")
         if self.rounding_precision is None:
             raise FeeError(f"fee rule {self.key!r} is missing rounding_precision")
+
+    def require_currency_compatible(self, currency: str) -> None:
+        """Fail closed when the rule currency conflicts with the fill."""
+
+        if self.currency is not None and self.currency != currency:
+            raise FeeRuleUnresolvedError(
+                f"fee rule {self.key!r} is declared in {self.currency} "
+                f"but the fill currency is {currency}"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,22 +388,50 @@ class FeeCalculator:
         side: object,
         notional: Decimal | int | str,
         currency: str = "CNY",
+        quantity: Decimal | int | str | None = None,
     ) -> FeeBreakdown:
-        """Calculate applicable components without mutating the schedule."""
+        """Calculate applicable components without mutating the schedule.
+
+        ``notional`` is the gross notional already computed by the caller
+        as ``execution_price × quantity × contract_multiplier``.  Rules
+        declaring a ``quantity`` base measure receive the filled
+        quantity; a missing quantity for such a rule is a hard error, so
+        the formal path can never silently charge a wrong base.
+        """
 
         self.schedule.validate_for_run()
         normalized_side = _side(side)
         normalized_notional = _decimal(notional, "notional")
         if normalized_notional < ZERO:
             raise FeeError("notional must be non-negative")
-        base = normalized_notional
+        normalized_quantity: Decimal | None = None
+        if quantity is not None:
+            normalized_quantity = _decimal(quantity, "quantity")
+            if normalized_quantity < ZERO:
+                raise FeeError("quantity must be non-negative")
+        normalized_currency = currency.strip().upper()
         if not isinstance(currency, str) or not currency.strip():
             raise FeeError("currency must be non-blank text")
         raw_components: list[tuple[FeeRule, Decimal, Decimal]] = []
         for rule in self.schedule.fee_rules:
             if not rule.applies_to(normalized_side):
                 continue
-            raw_amount = max(base * rule.rate, rule.minimum) + rule.fixed_amount
+            rule.require_currency_compatible(normalized_currency)
+            if rule.base_measure is FeeBaseMeasure.GROSS_NOTIONAL:
+                base = normalized_notional
+                raw_amount = max(base * rule.rate, rule.minimum) + rule.fixed_amount
+            elif rule.base_measure is FeeBaseMeasure.QUANTITY:
+                if normalized_quantity is None:
+                    raise FeeRuleUnresolvedError(
+                        f"fee rule {rule.key!r} charges on quantity but the "
+                        "calculation received no fill quantity"
+                    )
+                base = normalized_quantity
+                raw_amount = max(base * rule.rate, rule.minimum) + rule.fixed_amount
+            else:
+                # Fixed-amount rules ignore rate/minimum by declaration.
+                base = ZERO
+                raw_amount = rule.fixed_amount
             raw_components.append((rule, base, raw_amount))
 
         components: list[FeeComponent] = []
@@ -381,3 +495,73 @@ class FeeCalculator:
             currency=currency.strip().upper(),
             components=tuple(components),
         )
+
+
+def resolve_instrument_fee_rules(
+    schedule: FeeSchedule | FeeScheduleSnapshot,
+    *,
+    fee_categories: frozenset[str] | set[str],
+    side: object,
+    context: Mapping[str, str] | None = None,
+) -> tuple[FeeRule, ...]:
+    """Select schedule rules for one instrument's declared fee categories.
+
+    The selection is fail-closed: every category declared by the
+    instrument must resolve to at least one rule applicable to the
+    requested side, otherwise :class:`FeeRuleUnresolvedError` is raised.
+    Categories the instrument did not declare are never charged, so
+    callers must calculate with the returned subset (see
+    :func:`fee_snapshot_for_rules`) instead of the full schedule.
+    """
+
+    if not fee_categories:
+        raise FeeRuleUnresolvedError(
+            "instrument declares no fee categories; the formal path "
+            "cannot fall back to zero fees"
+        )
+    normalized_side = _side(side)
+    selected: list[FeeRule] = []
+    for category in sorted(fee_categories):
+        matches = [
+            rule
+            for rule in schedule.fee_rules
+            if rule.category == category
+            and rule.applies_to_context(
+                side=normalized_side, context=context
+            )
+        ]
+        if not matches:
+            raise FeeRuleUnresolvedError(
+                f"no fee rule resolves for required category {category!r} "
+                f"on side {normalized_side} in schedule {schedule.key!r}"
+            )
+        selected.extend(matches)
+    return tuple(selected)
+
+
+def fee_snapshot_for_rules(
+    schedule: FeeSchedule | FeeScheduleSnapshot,
+    rules: tuple[FeeRule, ...],
+) -> FeeScheduleSnapshot:
+    """Build a same-identity snapshot restricted to the given rules.
+
+    Keeping the original schedule ``key`` preserves the audit trail in
+    :class:`FeeBreakdown` while ensuring undeclared categories can never
+    be charged by a later calculation over the full schedule.
+    """
+
+    version = getattr(schedule, "version", None)
+    snapshot = FeeScheduleSnapshot(
+        key=schedule.key,
+        fee_rules=rules,
+        metadata=dict(getattr(schedule, "metadata", {}) or {}),
+    )
+    if version is not None and not isinstance(schedule, FeeScheduleSnapshot):
+        # FeeSchedule carries an optional audit version that snapshots do
+        # not model; keep it visible through metadata so the breakdown of
+        # a restricted selection still records where the rules came from.
+        object.__setattr__(snapshot, "metadata", MappingProxyType({
+            **snapshot.metadata,
+            "source_schedule_version": str(version),
+        }))
+    return snapshot

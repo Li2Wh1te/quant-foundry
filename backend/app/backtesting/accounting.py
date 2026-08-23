@@ -138,6 +138,17 @@ class DeferredSettlementPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class AccountingInternalSnapshot:
+    """Immutable capture of the policy's mutable runtime internals."""
+
+    processed_fill_ids: set[UUID]
+    processed_dividend_event_ids: set[UUID]
+    pending_settlement: tuple[PendingSettlement, ...]
+    settled_batches: tuple[PendingSettlement, ...]
+    release_history: tuple[SettlementRelease, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class SettlementRelease:
     """Audit record of one applied settlement boundary.
 
@@ -552,6 +563,35 @@ class AccountingPolicy:
         """Applied settlement boundaries, in application order (audit)."""
 
         return self._release_history
+
+    def _snapshot_internal_state(self) -> "AccountingInternalSnapshot":
+        """Capture the mutable internals for a shadow-account transaction."""
+
+        return AccountingInternalSnapshot(
+            processed_fill_ids=set(self._processed_fill_ids),
+            processed_dividend_event_ids=set(self._processed_dividend_event_ids),
+            pending_settlement=tuple(self._pending_settlement),
+            settled_batches=self._settled_batches,
+            release_history=self._release_history,
+        )
+
+    def _restore_internal_state(
+        self, snapshot: "AccountingInternalSnapshot"
+    ) -> None:
+        """Roll the mutable internals back to a captured snapshot.
+
+        Used when an opening-match batch is aborted inside the shadow
+        account: settlement releases and fill registrations planned by
+        the batch must not survive into the formal policy state.
+        """
+
+        self._processed_fill_ids = set(snapshot.processed_fill_ids)
+        self._processed_dividend_event_ids = set(
+            snapshot.processed_dividend_event_ids
+        )
+        self._pending_settlement = list(snapshot.pending_settlement)
+        self._settled_batches = snapshot.settled_batches
+        self._release_history = snapshot.release_history
 
     def settle_pending_before_open_match(
         self,

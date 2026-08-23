@@ -118,6 +118,12 @@ class Order:
     status_reason: str | None = None
     valid_from: datetime | None = None
     valid_until: datetime | None = None
+    # Stable in-run submission ordinal.  Matching priority must never
+    # depend on caller-supplied collection order or on random UUIDs, so
+    # batch matching sorts by this sequence; ``None`` is only tolerated
+    # for legacy direct constructions and makes the order ineligible for
+    # sequenced batch matching.
+    submission_sequence: int | None = None
 
     def __post_init__(self) -> None:
         _aware_datetime(self.submitted_at, "submitted_at")
@@ -133,6 +139,14 @@ class Order:
         object.__setattr__(self, "filled_quantity", _non_negative(self.filled_quantity, "filled_quantity"))
         if self.filled_quantity > self.quantity:
             raise ExecutionError("filled_quantity cannot exceed quantity")
+        if self.submission_sequence is not None and (
+            isinstance(self.submission_sequence, bool)
+            or not isinstance(self.submission_sequence, int)
+            or self.submission_sequence < 0
+        ):
+            raise ExecutionError(
+                "submission_sequence must be a non-negative integer when provided"
+            )
         try:
             self.order_type = OrderType(self.order_type)
             self.status = OrderStatus(self.status)

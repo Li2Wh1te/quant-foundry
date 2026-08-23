@@ -200,6 +200,13 @@ def _fill_record(dto: BacktestFillDto) -> dict[str, Any]:
         "slippage_amount": dto.slippage_amount,
         "slippage_model_key": dto.slippage_model_key,
         "slippage_model_version": dto.slippage_model_version,
+        "currency": dto.currency,
+        "contract_multiplier": dto.contract_multiplier,
+        "gross_notional": dto.gross_notional,
+        "fee_breakdown": dto.fee_breakdown,
+        "settlement_calendar_id": dto.settlement_calendar_id,
+        "settlement_due_session": dto.settlement_due_session,
+        "settlement_boundary_id": dto.settlement_boundary_id,
     }
 
 

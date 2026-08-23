@@ -23,7 +23,7 @@ Contracts enforced here:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -511,6 +511,13 @@ class BacktestFillRecord:
     slippage_amount: Decimal | int | str | None = None
     slippage_model_key: str | None = None
     slippage_model_version: int | None = None
+    currency: str = "CNY"
+    contract_multiplier: Decimal | int | str = "1"
+    gross_notional: Decimal | int | str | None = None
+    fee_breakdown: Mapping[str, Any] | None = None
+    settlement_calendar_id: str | None = None
+    settlement_due_session: date | None = None
+    settlement_boundary_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -550,6 +557,44 @@ class BacktestFillRecord:
             "slippage_model_version",
             _optional_int(self.slippage_model_version, "slippage_model_version"),
         )
+        if not isinstance(self.currency, str) or not self.currency.strip():
+            raise DomainValidationError("currency must be non-blank text")
+        object.__setattr__(self, "currency", self.currency.strip().upper())
+        multiplier = _decimal(self.contract_multiplier, "contract_multiplier")
+        if multiplier <= ZERO:
+            raise DomainValidationError("contract_multiplier must be positive")
+        object.__setattr__(self, "contract_multiplier", multiplier)
+        if self.gross_notional is None:
+            object.__setattr__(
+                self,
+                "gross_notional",
+                _positive(self.price, "price")
+                * _positive(self.quantity, "quantity")
+                * multiplier,
+            )
+        else:
+            object.__setattr__(
+                self,
+                "gross_notional",
+                _positive(self.gross_notional, "gross_notional"),
+            )
+        if self.fee_breakdown is not None:
+            object.__setattr__(
+                self, "fee_breakdown", _frozen_json(self.fee_breakdown, "fee_breakdown")
+            )
+        for field_name in (
+            "settlement_calendar_id",
+            "settlement_boundary_id",
+        ):
+            value = getattr(self, field_name)
+            object.__setattr__(self, field_name, _optional_text(value, field_name))
+        if self.settlement_due_session is not None:
+            if not isinstance(self.settlement_due_session, date) or isinstance(
+                self.settlement_due_session, datetime
+            ):
+                raise DomainValidationError(
+                    "settlement_due_session must be a calendar date"
+                )
 
     @property
     def cursor_sort_key(self) -> tuple[datetime, UUID]:
