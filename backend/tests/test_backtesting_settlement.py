@@ -263,6 +263,11 @@ class NextOpenSessionTestCase(unittest.TestCase):
         base = calendar_provider({date(2026, 8, 21), date(2026, 8, 24)})
 
         # Case 1: definition declares the day open but with no sessions.
+        # The facts must cover every scanned date so the empty-session
+        # check itself is what raises, not a missing-fact error.
+        case1_days = [
+            date(2026, 8, 21) + timedelta(days=offset) for offset in range(10)
+        ]
         gateway = CalendarAxisSettlementGateway(
             InMemoryCalendarAxisDataProvider([empty_session_def], [
                 CalendarSessionFact(
@@ -272,11 +277,14 @@ class NextOpenSessionTestCase(unittest.TestCase):
                     definition_version=CALENDAR_VERSION,
                     source="test",
                 )
-                for day in (date(2026, 8, 21), date(2026, 8, 22), date(2026, 8, 24))
+                for day in case1_days
             ])
         )
-        with self.assertRaises(SettlementCalendarUnresolvedError):
+        with self.assertRaises(SettlementCalendarUnresolvedError) as ctx:
             gateway.next_open_session("SSE", date(2026, 8, 21))
+        # Distinguishing marker: the block came from empty definition
+        # defaults, not an override (that path is Case 2).
+        self.assertFalse(ctx.exception.details["has_sessions_override"])
 
         # Case 2: healthy definition, but the fact's sessions_override is
         # empty for the next open day.
