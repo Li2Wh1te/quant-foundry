@@ -39,6 +39,7 @@ __all__ = [
     "SettlementBoundaryMissedError",
     "SettlementCalendarGateway",
     "SettlementCalendarUnresolvedError",
+    "SettlementCalendarVersionGateway",
     "SettlementNextSessionMissingError",
     "SettlementRuleClass",
     "UnsupportedSettlementRuleError",
@@ -102,6 +103,25 @@ class SettlementCalendarGateway(Protocol):
         facts beyond the horizon; missing intermediate facts must raise
         :class:`SettlementCalendarUnresolvedError` instead of being read
         as closed days.
+        """
+        ...
+
+
+class SettlementCalendarVersionGateway(SettlementCalendarGateway, Protocol):
+    """Gateway that can also report the definition version of one date.
+
+    Settlement lots pin the calendar version they were resolved against;
+    gateways backed by versioned calendar axes implement this so every
+    lot carries an auditable ``calendar_version``.
+    """
+
+    def calendar_version_for(
+        self, calendar_id: str, session_date: date
+    ) -> str:
+        """Return the definition version governing ``session_date``.
+
+        Missing or ambiguous definitions must raise instead of returning
+        a placeholder version.
         """
         ...
 
@@ -216,6 +236,53 @@ class CalendarAxisSettlementGateway:
                 "after_session": after_session.isoformat(),
             },
         )
+
+    def calendar_version_for(
+        self, calendar_id: str, session_date: date
+    ) -> str:
+        """Return the definition version governing ``session_date``.
+
+        The same consistency rules as the session scan apply: the fact
+        must belong to the requested calendar and date, and its
+        definition version must resolve to exactly one registered
+        definition valid on that date.
+        """
+
+        fact = self._provider.fact(calendar_id, session_date)
+        if (
+            fact is None
+            or fact.calendar_id != calendar_id
+            or fact.session_date != session_date
+        ):
+            raise SettlementCalendarUnresolvedError(
+                "no consistent session fact exists for the requested "
+                "calendar and date; the calendar version cannot be "
+                "resolved",
+                details={
+                    "calendar_id": calendar_id,
+                    "session_date": session_date.isoformat(),
+                },
+            )
+        applicable = [
+            definition
+            for definition in self._provider.definitions(calendar_id)
+            if definition.calendar_id == calendar_id
+            and definition.definition_version == fact.definition_version
+            and definition.applies_to(fact.session_date)
+        ]
+        if len(applicable) != 1:
+            raise SettlementCalendarUnresolvedError(
+                "the session fact's definition version does not resolve "
+                "to exactly one definition valid on the date; the "
+                "calendar version cannot be resolved",
+                details={
+                    "calendar_id": calendar_id,
+                    "session_date": session_date.isoformat(),
+                    "fact_definition_version": fact.definition_version,
+                    "applicable_definition_count": len(applicable),
+                },
+            )
+        return applicable[0].definition_version
 
 
 def settlement_plan_for_fill(

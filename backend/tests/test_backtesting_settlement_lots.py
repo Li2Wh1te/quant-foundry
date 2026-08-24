@@ -282,5 +282,60 @@ class AtomicityTests(unittest.TestCase):
         self.assertTrue(application.applied)
 
 
+class CalendarVersionThreadingTests(unittest.TestCase):
+    """Formal lots pin the calendar definition version they were
+    resolved against when the gateway is version-aware."""
+
+    def test_runtime_lots_carry_the_gateway_calendar_version(self) -> None:
+        from tests.backtest_runtime_fixture import (
+            CountingStrategyView,
+            DictMarketData,
+            INSTRUMENT_ID as FIXTURE_INSTRUMENT,
+            ScriptedStrategy,
+            build_axis,
+            build_runner,
+        )
+
+        d0 = date(2026, 8, 3)
+        d1 = date(2026, 8, 4)
+        d2 = date(2026, 8, 5)
+        runner = build_runner(
+            run_id="run-lot-calendar-version",
+            axis=build_axis([d0, d1, d2]),
+            market_data=DictMarketData(
+                {
+                    d0: {FIXTURE_INSTRUMENT: ("99.00", "100.00")},
+                    d1: {FIXTURE_INSTRUMENT: ("100.00", "102.00")},
+                    d2: {FIXTURE_INSTRUMENT: ("101.00", "103.00")},
+                }
+            ),
+            strategy_view=CountingStrategyView(
+                {d0: "100.00", d1: "102.00", d2: "103.00"}
+            ),
+            strategy=ScriptedStrategy({0: {str(FIXTURE_INSTRUMENT): "1"}}),
+            initial_cash="20000",
+        )
+        result = runner.run()
+
+        fills = [e for e in result.events if e.event_type == "fill_created"]
+        self.assertTrue(fills)
+        lot_id = next(
+            e.payload["settlement_lot_id"]
+            for e in result.events
+            if e.event_type == "fill_applied"
+            and e.payload["settlement_lot_id"] is not None
+        )
+        self.assertIsNotNone(lot_id)
+        batches = (
+            runner._accounting.pending_batches()
+            + runner._accounting.settled_batches()
+        )
+        lot = next(b for b in batches if str(b.lot_id) == lot_id)
+        # The versioned fixture gateway reported its definition version
+        # and the lot froze it.
+        self.assertEqual(lot.calendar_version, "fixture-v1")
+        self.assertEqual(lot.release_phase, SettlementReleasePhase.BEFORE_OPEN_MATCH)
+
+
 if __name__ == "__main__":
     unittest.main()

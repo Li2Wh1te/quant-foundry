@@ -141,8 +141,13 @@ class ResolutionOrderTests(ResolutionFixture):
         self.assertEqual(by_layer["explicit_selection"]["configured"], False)
         self.assertEqual(by_layer["strategy_default"]["outcome"], "hit")
         self.assertEqual(by_layer["strategy_default"]["status"], "active")
-        # Lower layers after a hit are not evaluated at all.
-        self.assertNotIn("user_default_evaluation", payload)
+        # The lower configured layer keeps its pinned identity in the
+        # audit even though the hit made its evaluation irrelevant.
+        user_candidate = by_layer["user_default"]
+        self.assertEqual(user_candidate["outcome"], "not_evaluated")
+        self.assertEqual(user_candidate["configured"], True)
+        self.assertEqual(user_candidate["profile_id"], str(STOCK_ID))
+        self.assertEqual(user_candidate["version"], 2)
 
 
 class FallbackClassificationTests(ResolutionFixture):

@@ -654,15 +654,26 @@ class AccountResolver:
             if candidate.outcome == "hit":
                 # Record every declared layer in the audit, even the ones
                 # a hit made irrelevant, so persisted trails always carry
-                # all three candidates and their statuses.
+                # all three candidates and their statuses.  Configured
+                # lower layers keep their pinned identity -- only their
+                # evaluation is marked as skipped.
                 remaining = _RESOLUTION_ORDER[len(candidates):]
                 for unevaluated in remaining:
+                    reference_lower = refs[unevaluated]
                     candidates.append(
                         AccountResolutionCandidate(
                             layer=unevaluated,
-                            configured=False,
-                            profile_id=None,
-                            version=None,
+                            configured=reference_lower is not None,
+                            profile_id=(
+                                reference_lower.profile_id
+                                if reference_lower is not None
+                                else None
+                            ),
+                            version=(
+                                reference_lower.version
+                                if reference_lower is not None
+                                else None
+                            ),
                             status=None,
                             outcome="not_evaluated",
                         )

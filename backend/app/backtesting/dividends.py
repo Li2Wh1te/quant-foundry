@@ -133,6 +133,8 @@ class CashDividendEvent:
     source_arrival_date: date
     cash_effective_session_id: date
     amount_per_share: Decimal | int | str
+    source_evidence: Mapping[str, str]
+    as_of: date
     currency: str = "CNY"
     cash_effective_phase: CashEffectivePhase | str = (
         CashEffectivePhase.AFTER_OPEN_MATCH
@@ -141,8 +143,6 @@ class CashDividendEvent:
     withholding_tax: Decimal | int | str = ZERO
     entry_kind: DividendEntryKind | str = DividendEntryKind.DIVIDEND
     revision_of_event_id: UUID | None = None
-    source_evidence: Mapping[str, str] = MappingProxyType({})
-    as_of: date | None = None
     derivation_rule_key: str = ENTITLEMENT_RULE_KEY
     derivation_rule_version: int = ENTITLEMENT_RULE_VERSION
 
@@ -159,12 +159,38 @@ class CashDividendEvent:
             "cash_effective_session_id",
         ):
             _calendar_date(getattr(self, name), name)
-        if self.ex_date > self.record_date:
+        # Corporate-action chronology: ex-date cuts first, holders are
+        # registered second, money is paid and arrives afterwards, and
+        # the cash-effective session can never precede registration.
+        if not (
+            self.ex_date
+            <= self.record_date
+            <= self.source_payment_date
+            <= self.source_arrival_date
+            <= self.cash_effective_session_id
+        ):
             raise DividendError(
-                "ex_date cannot be after record_date"
+                f"dividend event {self.event_id} dates violate the "
+                "ex_date <= record_date <= payment_date <= arrival_date "
+                "<= cash_effective_session ordering",
+                details={
+                    "event_id": str(self.event_id),
+                    "ex_date": self.ex_date.isoformat(),
+                    "record_date": self.record_date.isoformat(),
+                    "source_payment_date": self.source_payment_date.isoformat(),
+                    "source_arrival_date": self.source_arrival_date.isoformat(),
+                    "cash_effective_session_id": (
+                        self.cash_effective_session_id.isoformat()
+                    ),
+                },
             )
-        if self.as_of is not None:
-            _calendar_date(self.as_of, "as_of")
+        _calendar_date(self.as_of, "as_of")
+        if not isinstance(self.source_evidence, Mapping) or not self.source_evidence:
+            raise DividendError(
+                f"dividend event {self.event_id} carries no source "
+                "evidence; unverifiable corporate actions cannot enter "
+                "the accounting pipeline"
+            )
         try:
             object.__setattr__(
                 self, "cash_effective_phase", CashEffectivePhase(self.cash_effective_phase)

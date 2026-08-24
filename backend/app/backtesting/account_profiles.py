@@ -1,10 +1,14 @@
 """Explicit account selection and immutable run configuration snapshots.
 
-Account profiles and fee schedules are mutable operator configuration.  They
-are deliberately not versioned in this first slice: a run captures a complete
-snapshot at admission time, which is the historical boundary that matters to
-execution.  No strategy default, user default, or platform fallback exists in
-this module; the caller must provide the selected profile id explicitly.
+Account profiles and fee schedules are mutable operator configuration.
+A run captures a complete snapshot at admission time, which is the
+historical boundary that matters to execution.  Immutable profile
+*versions*, operational availability, and the fixed three-layer
+resolution order (explicit > strategy default > user default) live in
+:mod:`app.backtesting.account_resolution`; this module stays the
+per-run snapshot boundary over whichever configuration a resolution
+selected.  No platform fallback exists here; callers must provide the
+resolved profile explicitly.
 """
 
 from __future__ import annotations

@@ -54,14 +54,16 @@ def dividend_event(
     withholding_tax="0",
     entry_kind="dividend",
     revision_of=None,
+    payment_date=None,
+    arrival_date=None,
 ):
     return CashDividendEvent(
         event_id=event_id if event_id is not None else uuid4(),
         instrument_id=instrument_id,
         ex_date=record_date,
         record_date=record_date,
-        source_payment_date=effective_session,
-        source_arrival_date=effective_session,
+        source_payment_date=payment_date or record_date,
+        source_arrival_date=arrival_date or effective_session,
         cash_effective_session_id=effective_session,
         amount_per_share=Decimal(amount_per_share),
         entitlement_quantity=(
@@ -73,6 +75,7 @@ def dividend_event(
         entry_kind=entry_kind,
         revision_of_event_id=revision_of,
         source_evidence={"source": "unit-test", "announcement": "EQ0001"},
+        as_of=record_date,
     )
 
 
@@ -478,6 +481,212 @@ class CashEffectiveSessionDerivationTests(unittest.TestCase):
                 calendar_id="XSHG",
                 source_arrival_date=date(2027, 1, 1),
             )
+
+
+class EventValidationHardeningTests(unittest.TestCase):
+    """Formal events need evidence, an as-of date, and sound chronology."""
+
+    def test_event_without_source_evidence_is_rejected(self) -> None:
+        event = dividend_event()
+        object.__setattr__(event, "source_evidence", {})
+        with self.assertRaises(DividendError) as context:
+            event.with_entitlement("100")
+        self.assertIn("source evidence", str(context.exception))
+
+    def test_event_without_as_of_is_rejected(self) -> None:
+        with self.assertRaises(TypeError):
+            # as_of is a required constructor field.
+            CashDividendEvent(
+                event_id=uuid4(),
+                instrument_id=INSTRUMENT_ID,
+                ex_date=D1,
+                record_date=D1,
+                source_payment_date=D1,
+                source_arrival_date=D2,
+                cash_effective_session_id=D2,
+                amount_per_share="0.10",
+                source_evidence={"source": "unit-test"},
+            )
+
+    def test_chronologically_impossible_dates_are_rejected(self) -> None:
+        with self.assertRaises(DividendError) as context:
+            # An arrival before the payment date breaks the chronology.
+            dividend_event(record_date=D3, effective_session=D2)
+        self.assertIn("ordering", str(context.exception))
+        with self.assertRaises(DividendError):
+            # Arrival cannot precede the payment date.
+            dividend_event(payment_date=D3, arrival_date=D2)
+
+
+class PreFrozenEntitlementTests(unittest.TestCase):
+    """A run starting after the record date accepts the supplied
+    entitlement instead of attempting a second freeze."""
+
+    def test_record_date_session_uses_the_supplied_entitlement(self) -> None:
+        axis = build_axis([D0, D1, D2])
+        market_data = DictMarketData(
+            {
+                D0: {INSTRUMENT_ID: ("99.00", "100.00")},
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D0: "100.00", D1: "102.00", D2: "103.00"})
+        strategy = ScriptedStrategy({0: {str(INSTRUMENT_ID): "1"}})
+        runner = build_runner(
+            run_id="run-prefrozen",
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=strategy,
+            corporate_actions=StaticDividends(
+                [
+                    dividend_event(
+                        record_date=D0,
+                        effective_session=D2,
+                        entitlement_quantity="250",
+                        amount_per_share="0.10",
+                    )
+                ]
+            ),
+            initial_cash="100000",
+        )
+        result = runner.run()
+
+        dividends = [
+            e for e in result.events if e.event_type == "cash_dividend_applied"
+        ]
+        self.assertEqual(len(dividends), 1)
+        # The supplied 250-unit entitlement survived untouched even
+        # though the record-date session itself is inside the run.
+        self.assertEqual(
+            dividends[0].payload["entitlement_quantity"], Decimal("250")
+        )
+        self.assertEqual(dividends[0].payload["cash_delta"], Decimal("25"))
+
+
+class DeclaredSessionMustMatchDerivationTests(unittest.TestCase):
+    """The declared cash-effective session is verified against the
+    instrument calendar's derivation from the arrival date."""
+
+    def runner_with_event(self, *, run_id: str, event) -> object:
+        axis = build_axis([D0, D1, D2])
+        market_data = DictMarketData(
+            {
+                D0: {INSTRUMENT_ID: ("99.00", "100.00")},
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D0: "100.00", D1: "102.00", D2: "103.00"})
+        return build_runner(
+            run_id=run_id,
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=ScriptedStrategy({}),
+            corporate_actions=StaticDividends([event]),
+            initial_cash="100000",
+        )
+
+    def test_consistent_declaration_credits_normally(self) -> None:
+        # Arrival on D1 derives D1 as the landing session on this
+        # calendar; declaring exactly that passes validation.
+        result = self.runner_with_event(
+            run_id="run-consistent",
+            event=dividend_event(
+                record_date=D0,
+                payment_date=D0,
+                arrival_date=D1,
+                effective_session=D1,
+                entitlement_quantity="100",
+            ),
+        ).run()
+        dividends = [
+            e for e in result.events if e.event_type == "cash_dividend_applied"
+        ]
+        self.assertEqual(len(dividends), 1)
+        self.assertEqual(dividends[0].step_sequence, 1)
+
+    def test_source_cannot_postpone_the_landing_day(self) -> None:
+        from app.backtesting.runtime import PhaseExecutionError
+
+        # Same arrival facts, but the source claims a later landing day
+        # than the calendar derivation can produce.
+        runner = self.runner_with_event(
+            run_id="run-inconsistent",
+            event=dividend_event(
+                record_date=D0,
+                payment_date=D0,
+                arrival_date=D1,
+                effective_session=D2,
+                entitlement_quantity="100",
+            ),
+        )
+        with self.assertRaises(PhaseExecutionError) as context:
+            runner.run()
+        self.assertIn("derives", str(context.exception))
+        # Nothing was credited before the derivation mismatch surfaced.
+        self.assertEqual(
+            runner._portfolio.account.cash_balances["CNY"], Decimal("100000")
+        )
+
+
+class DividendBatchAtomicityTests(unittest.TestCase):
+    """One failing credit rolls back the whole cash-actions batch."""
+
+    def test_failing_reversal_rolls_back_the_sibling_credit(self) -> None:
+        initial_cash = "500"
+        axis = build_axis([D0, D1, D2])
+        market_data = DictMarketData(
+            {
+                D0: {INSTRUMENT_ID: ("99.00", "100.00")},
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D0: "100.00"})
+        runner = build_runner(
+            run_id="run-div-batch-atomic",
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=ScriptedStrategy({}),
+            corporate_actions=StaticDividends(
+                [
+                    # A small legitimate credit due on D2...
+                    dividend_event(
+                        record_date=D0,
+                        effective_session=D2,
+                        entitlement_quantity="1000",
+                        amount_per_share="0.10",
+                    ),
+                    # ...and an oversized reversal that would drive cash
+                    # negative in the same batch.
+                    dividend_event(
+                        record_date=D0,
+                        effective_session=D2,
+                        entitlement_quantity="1000000",
+                        amount_per_share="0.10",
+                        entry_kind="reversal",
+                        revision_of=uuid4(),
+                    ),
+                ]
+            ),
+            initial_cash=initial_cash,
+        )
+
+        from app.backtesting.runtime import PhaseExecutionError
+
+        with self.assertRaises(PhaseExecutionError):
+            runner.run()
+
+        # The +100 credit of the first event did NOT survive the failed
+        # batch: the account is exactly at its initial cash.
+        self.assertEqual(
+            runner._portfolio.account.cash_balances["CNY"],
+            Decimal(initial_cash),
+        )
 
 
 def _empty_portfolio(*, cash="0") -> PortfolioState:

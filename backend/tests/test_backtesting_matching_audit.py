@@ -376,6 +376,53 @@ class FillEventAuditTests(unittest.TestCase):
         # The lot id is a stable machine identifier.
         UUID(lot_id)
 
+    def test_component_snapshot_captures_the_complete_fee_rule(self) -> None:
+        from tests.backtest_runtime_fixture import (
+            CountingStrategyView,
+            DictMarketData,
+            INSTRUMENT_ID,
+            ScriptedStrategy,
+            build_axis,
+            build_runner,
+        )
+
+        from datetime import date as _date
+
+        d0 = _date(2026, 8, 3)
+        d1 = _date(2026, 8, 4)
+        d2 = _date(2026, 8, 5)
+        runner = build_runner(
+            run_id="run-fee-snapshot",
+            axis=build_axis([d0, d1, d2]),
+            market_data=DictMarketData(
+                {
+                    d0: {INSTRUMENT_ID: ("99.00", "100.00")},
+                    d1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                    d2: {INSTRUMENT_ID: ("101.00", "103.00")},
+                }
+            ),
+            strategy_view=CountingStrategyView({d0: "100.00"}),
+            strategy=ScriptedStrategy({}),
+            execution_model=BarMarketExecutionModel(
+                slippage_model=BpsSlippageModel.none(price_tick="0.01"),
+                fee_calculator=FeeCalculator(min_commission_schedule()),
+                model_key="bar_market",
+                model_version=1,
+            ),
+            initial_cash="100000",
+        )
+        result = runner.run()
+
+        fee_snapshot = dict(result.components)["fee_schedule"]
+        self.assertEqual(fee_snapshot["key"], "doc-min-commission")
+        rule = fee_snapshot["fee_rules"][0]
+        # Every money-moving field of the rule is reproducible.
+        self.assertEqual(rule["base_measure"], "gross_notional")
+        self.assertEqual(rule["charge_timing"], "on_fill")
+        self.assertEqual(rule["rule_type"], "simple_rate")
+        self.assertEqual(rule["currency"], None)
+        self.assertEqual(rule["applicability"], {})
+
 
 class FeeRuleValidationTests(unittest.TestCase):
     """Acceptance 5: declared bases, minimums, fixed amounts, rounding,

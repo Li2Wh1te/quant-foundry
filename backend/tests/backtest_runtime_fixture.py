@@ -155,6 +155,15 @@ class SessionListSettlementCalendar:
                 return candidate
         return None
 
+    def calendar_version_for(
+        self, calendar_id: str, session_date: date
+    ) -> str:
+        """Versioned-gateway surface: every fixture date maps to one version."""
+
+        if session_date not in self._sessions.get(calendar_id, ()):
+            raise KeyError(f"no fixture fact for {calendar_id} on {session_date}")
+        return "fixture-v1"
+
 
 class CountingStrategyView:
     """Strategy data view serving bars up to the requested window only.

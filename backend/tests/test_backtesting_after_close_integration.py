@@ -57,6 +57,11 @@ class StaticCorporateActions:
                         source_arrival_date=day,
                         cash_effective_session_id=day,
                         amount_per_share=Decimal(amount),
+                        # The fixture calendar maps every session day to
+                        # itself, so the arrival-day session derives back
+                        # to that same day.
+                        as_of=day,
+                        source_evidence={"source": "fixture", "key": event_key},
                     )
                 )
 
@@ -530,6 +535,8 @@ class DividendIdempotencyTests(unittest.TestCase):
             cash_effective_session_id=D1,
             amount_per_share=Decimal("2"),
             entitlement_quantity=Decimal("100"),
+            source_evidence={"source": "fixture", "key": "replay"},
+            as_of=D1,
         )
         application = runner._accounting.apply_cash_dividend_event(
             runner._portfolio,

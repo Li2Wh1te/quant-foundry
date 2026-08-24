@@ -55,7 +55,12 @@ from app.backtesting.dividends import (
     CashDividendEvent,
     DividendDerivationError,
     DividendError,
+    derive_cash_effective_session,
     entitlement_from_portfolio,
+)
+from app.backtesting.session_matching import (
+    _clone_portfolio,
+    _copy_shadow_into,
 )
 from app.backtesting.execution import (
     ExecutionModel,
@@ -1141,6 +1146,14 @@ class DeterministicBacktestRunner:
                         "rate": rule.rate,
                         "minimum": rule.minimum,
                         "fixed_amount": rule.fixed_amount,
+                        "base_measure": _enum_value_or_self(
+                            rule.base_measure
+                        ),
+                        "charge_timing": _enum_value_or_self(
+                            rule.charge_timing
+                        ),
+                        "rule_type": _enum_value_or_self(rule.rule_type),
+                        "currency": rule.currency,
                         "rounding_level": _enum_value_or_self(
                             rule.rounding_level
                         ),
@@ -1152,6 +1165,9 @@ class DeterministicBacktestRunner:
                             rule.rounding_mode
                         ),
                         "rounding_precision": rule.rounding_precision,
+                        "applicability": dict(
+                            getattr(rule, "applicability", {}) or {}
+                        ),
                     }
                     for rule in getattr(schedule, "fee_rules", ())
                 ],
@@ -1543,10 +1559,20 @@ class DeterministicBacktestRunner:
                 "settlement of this buy cannot be resolved and natural-"
                 "day guesses are not permitted"
             )
+        # Pin the calendar definition version the plan was resolved
+        # against when the gateway is version-aware; lots carry it into
+        # their audit trail.  Gateways without version facts stay None.
+        calendar_version = None
+        version_resolver = getattr(
+            self._settlement_calendar, "calendar_version_for", None
+        )
+        if callable(version_resolver):
+            calendar_version = version_resolver(facts.calendar_id, trade_session)
         return DeferredSettlementPlan(
             calendar_id=facts.calendar_id,
             trade_session=trade_session,
             settlement_session=next_session,
+            calendar_version=calendar_version,
         )
 
     def _phase_cash_effective(
@@ -1591,12 +1617,33 @@ class DeterministicBacktestRunner:
             ),
             key=lambda event: (str(event.instrument_id), str(event.event_id)),
         )
+        if not due:
+            return emitted
         for event in due:
-            application = self._accounting.apply_cash_dividend_event(
-                self._portfolio,
-                event,
-                session_date=today,
-            )
+            # The declared effective session must equal the session the
+            # run derives from the instrument's calendar and the source
+            # arrival date: a source cannot pick its own landing day.
+            self._validate_cash_effective_session(event)
+        # The whole credit batch is atomic: every event applies to a
+        # shadow account first, and the formal state commits only when
+        # all of them succeeded.  A failing reversal can therefore never
+        # leave an earlier credit of the same batch behind.
+        shadow_portfolio = _clone_portfolio(self._portfolio)
+        accounting_snapshot = self._accounting._snapshot_internal_state()
+        applications: list[tuple[CashDividendEvent, Any]] = []
+        try:
+            for event in due:
+                application = self._accounting.apply_cash_dividend_event(
+                    shadow_portfolio,
+                    event,
+                    session_date=today,
+                )
+                applications.append((event, application))
+        except Exception:
+            self._accounting._restore_internal_state(accounting_snapshot)
+            raise
+        _copy_shadow_into(self._portfolio, shadow_portfolio)
+        for event, application in applications:
             if not application.applied:
                 continue
             emitted.append(
@@ -1632,6 +1679,14 @@ class DeterministicBacktestRunner:
 
         if declaration.event_id in self._completed_dividend_events:
             return
+        if declaration.is_entitlement_frozen:
+            # A source may supply the entitlement directly when the run
+            # starts after the record date; register it as completed
+            # instead of attempting a second freeze.
+            self._completed_dividend_events[declaration.event_id] = (
+                declaration
+            )
+            return
         include_pending = _dividend_includes_pending_settlement(declaration)
         quantity = entitlement_from_portfolio(
             self._portfolio,
@@ -1641,6 +1696,46 @@ class DeterministicBacktestRunner:
         )
         completed = declaration.with_entitlement(quantity)
         self._completed_dividend_events[declaration.event_id] = completed
+
+    def _validate_cash_effective_session(self, event: CashDividendEvent) -> None:
+        """Verify the declared effective session against calendar derivation.
+
+        The cash-effective session is not a free parameter: it must equal
+        the session this run derives from the instrument's own calendar
+        and the event's source arrival date.  A source cannot submit an
+        arbitrary landing day and have the account credit it blindly.
+        """
+
+        facts = self._instrument_facts.get(event.instrument_id)
+        if facts is None:
+            raise DividendDerivationError(
+                f"dividend event {event.event_id} refers to instrument "
+                f"{event.instrument_id} outside the run scope; its "
+                "cash-effective session cannot be attributed to a "
+                "trading calendar"
+            )
+        derived = derive_cash_effective_session(
+            self._settlement_calendar,
+            calendar_id=facts.calendar_id,
+            source_arrival_date=event.source_arrival_date,
+        )
+        if derived != event.cash_effective_session_id:
+            raise DividendDerivationError(
+                f"dividend event {event.event_id} declares "
+                f"cash_effective_session "
+                f"{event.cash_effective_session_id.isoformat()} but "
+                f"calendar {facts.calendar_id!r} derives "
+                f"{derived.isoformat()} from the arrival date "
+                f"{event.source_arrival_date.isoformat()}",
+                details={
+                    "event_id": str(event.event_id),
+                    "calendar_id": facts.calendar_id,
+                    "declared_session": (
+                        event.cash_effective_session_id.isoformat()
+                    ),
+                    "derived_session": derived.isoformat(),
+                },
+            )
 
     # ------------------------------------------------------------------
     # Close-time phases
