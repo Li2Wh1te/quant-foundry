@@ -32,6 +32,8 @@ from app.backtesting.data.facts import (
     DataPoint,
     InstrumentCodeMapping,
     InstrumentSpec,
+    PitRateFact,
+    PitRateSnapshotQuery,
     Tick,
     TradingRule,
     TradingStatus,
@@ -77,6 +79,7 @@ __all__ = [
     "DataConsistencyEvidence",
     "DataProvider",
     "DataSession",
+    "PitAnalysisGateway",
 ]
 
 
@@ -626,3 +629,31 @@ class DataChunkSession(Protocol):
         self, query: CorporateActionQuery
     ) -> tuple[CorporateAction, ...]: ...
     def coverage(self, query: CoverageQuery) -> DataCoverageReport: ...
+
+
+@runtime_checkable
+class PitAnalysisGateway(Protocol):
+    """Explicit PIT cutoff and risk-free-rate facts for the analyzer run.
+
+    The analyzer subsystem must never infer a PIT ``data_cutoff_at`` from
+    the runtime's current phase clock: valuation cutoffs and the frozen
+    Sharpe-B rate series come exclusively from this gateway, which the
+    data layer implements when it can provide them.  A gateway that cannot
+    answer simply is not injected, and the run-creation flow fails with an
+    explicit configuration error instead of a silently guessed cutoff.
+    """
+
+    def data_cutoff_at(self, *, session_date: date, as_of: datetime) -> datetime:
+        """Return the source-declared PIT cutoff for one valuation.
+
+        Implementations must return the cutoff their own data actually
+        guarantees for ``session_date``; returning ``as_of`` (or any other
+        runtime clock value) as a fallback defeats the contract.
+        """
+        ...
+
+    def risk_free_rate_snapshot(
+        self, query: "PitRateSnapshotQuery"
+    ) -> tuple["PitRateFact", ...]:
+        """Prefetch daily PIT risk-free rates over one session range."""
+        ...

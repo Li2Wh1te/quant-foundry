@@ -54,6 +54,7 @@ RESULT_TABLE_NAMES = [
     "backtest_metrics",
     "backtest_data_preflight",
     "backtest_data_chunks",
+    "backtest_analysis_summaries",
 ]
 
 
@@ -682,6 +683,10 @@ class BacktestMetricRecord(_RunBoundRecord):
             "(value IS NULL) = (unavailable_reason IS NOT NULL)",
             name="metric_value_xor_reason",
         ),
+        CheckConstraint(
+            "(analyzer_key IS NULL) = (analyzer_version IS NULL)",
+            name="analyzer_identity_pair",
+        ),
         Index(
             "uq_backtest_metrics_run_key_version",
             "run_id",
@@ -731,6 +736,34 @@ class BacktestMetricRecord(_RunBoundRecord):
         nullable=True,
         comment="Why the value is unavailable; required exactly when value is null.",
     )
+    # Analyzer identity (task package 06).  Both columns are null together
+    # for legacy rows written before analyzers existed; new rows must pair
+    # them, enforced by the analyzer_identity_pair check constraint.
+    analyzer_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Stable key of the analyzer that produced this metric; "
+        "null only for legacy rows.",
+    )
+    analyzer_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Registered version of the producing analyzer; paired with analyzer_key.",
+    )
+    analyzer_metadata: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Analyzer context such as reason_code, rate convention, and "
+        "formula signature references.",
+    )
+
+    @property
+    def analyzer_state(self) -> str:
+        """Registry-relative state exposed verbatim by the result API."""
+
+        from app.backtesting.result_models import resolve_analyzer_state
+
+        return resolve_analyzer_state(self.analyzer_key, self.analyzer_version).value
 
 
 class BacktestDataPreflightResultRecord(_RunBoundRecord):
@@ -863,7 +896,141 @@ class BacktestDataChunkRecord(_RunBoundRecord):
     )
 
 
+class BacktestAnalysisSummaryRecord(_RunBoundRecord):
+    """Run-level analyzer lifecycle status and frozen analysis evidence.
+
+    This table is the formal landing point of run-level analysis state
+    (task package 06); ``status`` is never stored in a free-form JSON
+    field.  ``run_id`` stays unique without a ``backtest_runs`` foreign key
+    because the unified run table does not exist yet.
+    """
+
+    __tablename__ = "backtest_analysis_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('partial', 'final', 'aborted')",
+            name="analysis_summary_status_allowed",
+        ),
+        CheckConstraint(
+            "(status = 'aborted') = (abort_reason IS NOT NULL)",
+            name="analysis_summary_abort_reason_pair",
+        ),
+        Index(
+            "uq_backtest_analysis_summaries_run",
+            "run_id",
+            unique=True,
+        ),
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        comment="Analysis lifecycle status: partial, final, or aborted.",
+    )
+    analyzer_snapshot: Mapped[dict] = mapped_column(
+        JsonType,
+        nullable=False,
+        comment="Frozen AnalyzerSpec identities, parameters, and converter identity.",
+    )
+    formula_signature: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="Hash over the logical formula configuration (spec identities, "
+        "parameters, decimal policy).",
+    )
+    input_evidence_signature: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="Hash over the actual input evidence (E0, observations, fills, "
+        "rate snapshot hash).",
+    )
+    initial_equity: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Frozen E0 from the initial equity snapshot.",
+    )
+    valid_day_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Formal days with a valid positive end-of-day equity.",
+    )
+    fill_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Accounting-applied fill count at the latest update.",
+    )
+    gross_traded_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Sum of applied gross traded notionals at the latest update.",
+    )
+    cumulative_fees: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Sum of applied fees at the latest update.",
+    )
+    rate_snapshot: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Complete frozen PIT daily risk-free rate series (Sharpe B "
+        "only); empty for A/C runs.",
+    )
+    rate_snapshot_hash: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Deterministic hash of the frozen rate snapshot content.",
+    )
+    rate_source_versions: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Rate source key/version and query parameters of the snapshot.",
+    )
+    missing_ranges: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Deterministic contiguous missing-session ranges of the rate series.",
+    )
+    reporting_currency: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        comment="Single reporting currency; equals the accounting policy currency.",
+    )
+    last_chunk_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Latest completed or failed step sequence at the last update.",
+    )
+    completed_through_session: Mapped[date | None] = mapped_column(
+        Date(),
+        nullable=True,
+        comment="Last session whose end-of-day observation was committed.",
+    )
+    abort_reason: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+        comment="Structured failure reason; required exactly when aborted.",
+    )
+    failed_step_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Step whose failure aborted the run.",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        comment="Latest write timestamp of this summary.",
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Terminal finalization time; set only for final/aborted rows.",
+    )
+
+
 __all__ = [
+    "BacktestAnalysisSummaryRecord",
     "BacktestDataChunkRecord",
     "BacktestDataPreflightResultRecord",
     "BacktestDecisionRecord",

@@ -42,6 +42,11 @@ from app.backtesting.accounting import (
     Fill,
     OrderSide,
 )
+from app.backtesting.analysis_inputs import (
+    AppliedFillFact,
+    EquityObservation,
+    FillObservation,
+)
 from app.backtesting.domain import (
     ZERO,
     DomainValidationError,
@@ -795,7 +800,14 @@ class OrderOutcomeRecord:
 
 @dataclass(frozen=True, slots=True)
 class BacktestRunResult:
-    """Immutable aggregate of one completed run."""
+    """Immutable aggregate of one completed run.
+
+    ``analysis_status`` is explicit so callers never infer the analysis
+    lifecycle from whether metrics are present: a successful slice that
+    still has official steps ahead reports ``partial``, and only the run
+    that consumed the final official step reports ``final`` with the
+    frozen metric results.
+    """
 
     run_id: str
     events: tuple[EventEnvelope, ...]
@@ -804,6 +816,9 @@ class BacktestRunResult:
     order_outcomes: tuple[OrderOutcomeRecord, ...]
     final_snapshot: PortfolioSnapshot
     components: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+    analysis_status: str | None = None
+    completed_through_step_sequence: int | None = None
+    analysis_metrics: tuple[Any, ...] = ()
 
 
 class DeterministicBacktestRunner:
@@ -834,6 +849,8 @@ class DeterministicBacktestRunner:
         analyzers: Sequence[Callable[[PortfolioSnapshot], None]] = (),
         currency: str = "CNY",
         component_parameters: Mapping[str, Any] | None = None,
+        analysis_engine: Any | None = None,
+        pit_data_gateway: Any | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -862,6 +879,42 @@ class DeterministicBacktestRunner:
         self._analyzers = tuple(analyzers)
         self._currency = currency.upper()
         self._settlement_calendar = settlement_calendar
+        # Analyzer subsystem wiring: the engine accumulates accounting and
+        # valuation facts; the PIT gateway is the only accepted source of
+        # valuation data_cutoff values.  Both are optional so legacy runs
+        # without metric analysis keep working unchanged.
+        if analysis_engine is not None:
+            engine_run_id = getattr(analysis_engine, "run_id", None)
+            if engine_run_id != run_id:
+                raise DomainValidationError(
+                    f"analysis_engine belongs to run {engine_run_id!r} but "
+                    f"the runner executes {run_id!r}"
+                )
+            engine_currency = getattr(
+                analysis_engine, "reporting_currency", None
+            )
+            if (
+                isinstance(engine_currency, str)
+                and engine_currency.strip().upper() != self._currency
+            ):
+                raise DomainValidationError(
+                    f"analysis_engine reporting currency {engine_currency!r} "
+                    f"does not match the runner currency {self._currency!r}"
+                )
+        if pit_data_gateway is not None and not hasattr(pit_data_gateway, "data_cutoff_at"):
+            raise DomainValidationError(
+                "pit_data_gateway must satisfy the PitAnalysisGateway "
+                "protocol with an explicit data_cutoff_at()"
+            )
+        if analysis_engine is not None and pit_data_gateway is None:
+            raise DomainValidationError(
+                "runs with an analyzer engine require a pit_data_gateway; "
+                "the VALUE phase must never guess its PIT data cutoff"
+            )
+        self._analysis_engine = analysis_engine
+        self._pit_data_gateway = pit_data_gateway
+        self._latest_analysis_snapshot: Any | None = None
+        self._last_equity_observation: EquityObservation | None = None
         # Admission check: the accounting policy owns the real settlement
         # currency.  A mismatch would record a wrong currency in the audit
         # snapshot and fail later at fill application, so it is rejected
@@ -910,6 +963,10 @@ class DeterministicBacktestRunner:
         self._portfolio = initial_portfolio
         self._orders: list[Order] = []
         self._pending_fills: tuple[Fill, ...] = ()
+        # Accounting-applied fee accumulator: the analyzer's equity
+        # observations and cumulative-fee metrics read this total instead
+        # of recomputing fees from fills.
+        self._applied_fees_total = Decimal("0")
         # Cash-dividend state: declarations come from the source with the
         # entitlement still open; the runner freezes each entitlement in
         # its record-date session and credits it in the derived
@@ -1077,6 +1134,26 @@ class DeterministicBacktestRunner:
         self._next_expected_step = ordered[-1].sequence + 1
         if self._next_expected_step >= len(self._axis):
             self._finished = True
+        # Analysis lifecycle: only a slice that consumed the final official
+        # step may finalize; every earlier successful chunk stays partial.
+        analysis_status: str | None = None
+        analysis_metrics: tuple[Any, ...] = ()
+        if self._analysis_engine is not None:
+            if self._finished:
+                from app.backtesting.analyzers import AnalysisStatus
+
+                self._analysis_engine.finalize(AnalysisStatus.FINAL)
+                analysis_metrics = tuple(
+                    self._analysis_engine.final_results or ()
+                )
+                analysis_status = "final"
+            else:
+                snapshot = self._latest_analysis_snapshot
+                if snapshot is not None:
+                    analysis_metrics = tuple(
+                        snapshot.compute_provisional_results()
+                    )
+                analysis_status = "partial"
         return BacktestRunResult(
             run_id=self._run_id,
             events=tuple(self._events),
@@ -1099,6 +1176,62 @@ class DeterministicBacktestRunner:
             ),
             final_snapshot=self._portfolio.snapshot(),
             components=self._component_snapshot(),
+            analysis_status=analysis_status,
+            completed_through_step_sequence=ordered[-1].sequence,
+            analysis_metrics=analysis_metrics,
+        )
+
+    def build_analysis_failure_snapshot(self, exc: Exception) -> Any:
+        """Freeze the analyzer-relevant facts after a mid-run failure.
+
+        Called by the failure-finalization boundary right after the runner
+        stopped; the returned immutable snapshot lets an independent
+        transaction persist everything already determined (applied fills,
+        valid equity observations, the blocked observation) without
+        re-deriving anything from the dead runtime.
+        """
+
+        from app.backtesting.analysis_finalization import AnalysisFailureSnapshot
+
+        if self._analysis_engine is None:
+            raise DomainValidationError(
+                "this runner has no analyzer engine; there is no analysis "
+                "failure to freeze"
+            )
+        analysis_snapshot = self._analysis_engine.snapshot()
+        failed_step_sequence = getattr(exc, "step_sequence", None)
+        if not isinstance(failed_step_sequence, int) or isinstance(
+            failed_step_sequence, bool
+        ):
+            failed_step_sequence = self._next_expected_step
+        failed_session_date: date | None = None
+        if 0 <= failed_step_sequence < len(self._axis):
+            session_text = self._axis.at(failed_step_sequence).metadata.get(
+                "session_date"
+            )
+            if isinstance(session_text, str):
+                failed_session_date = date.fromisoformat(session_text)
+        error_type = getattr(exc, "error_type", None)
+        if not isinstance(error_type, str):
+            error_type = type(exc).__name__
+        return AnalysisFailureSnapshot(
+            run_id=self._run_id,
+            failed_step_sequence=failed_step_sequence,
+            failed_session_date=failed_session_date,
+            error_type=error_type,
+            error_message=str(exc),
+            blocked_equity_observation=(
+                self._last_equity_observation
+                if self._last_equity_observation is not None
+                and not self._last_equity_observation.is_valid
+                else None
+            ),
+            analysis_snapshot=analysis_snapshot,
+            analyzer_engine=self._analysis_engine,
+            formula_signature=analysis_snapshot.formula_signature(),
+            input_evidence_signature=analysis_snapshot.input_evidence_signature(),
+            valid_day_count=analysis_snapshot.valid_day_count,
+            fill_count=analysis_snapshot.fill_count,
         )
 
     def _component_snapshot(self) -> Mapping[str, Mapping[str, Any]]:
@@ -1502,6 +1635,29 @@ class DeterministicBacktestRunner:
             )
             if not application.applied:
                 continue
+            self._applied_fees_total += fill.fees
+            if self._analysis_engine is not None:
+                # The accounting layer has confirmed this fact; the analyzer
+                # only aggregates it.  Fill facts carry no PIT cutoff unless
+                # their source declares one.
+                self._analysis_engine.observe_fill(
+                    FillObservation(
+                        fact=AppliedFillFact(
+                            fill_id=fill.fill_id,
+                            run_id=self._run_id,
+                            session_date=context.session_date,
+                            timestamp=fill.timestamp,
+                            instrument_id=fill.instrument_id,
+                            side=fill.side.value,
+                            fill_price=fill.price,
+                            fill_quantity=fill.quantity,
+                            contract_multiplier=fill.contract_multiplier,
+                            currency=fill.currency,
+                            reporting_currency=self._currency,
+                            fees=fill.fees,
+                        )
+                    )
+                )
             self._step_fill_summaries.append(
                 FillSummaryDTO(
                     instrument_id=fill.instrument_id,
@@ -1771,6 +1927,39 @@ class DeterministicBacktestRunner:
         )
         self._last_marks = dict(marks)
         snapshot = valuation.snapshot
+        blocked = self._portfolio.valuation_status is not ValuationStatus.COMPLETE
+        # The analyzer observation is built before any control flow: a
+        # blocked valuation must still hand its fact (with reason, no
+        # equity) to the engine so the aborted finalization can report
+        # exactly what was determined.
+        if self._analysis_engine is not None:
+            cash_total = sum(
+                (
+                    balance
+                    for balance in snapshot.account.cash_balances.values()
+                ),
+                Decimal("0"),
+            )
+            observation = EquityObservation(
+                run_id=self._run_id,
+                step_sequence=context.step_sequence,
+                session_date=context.session_date,
+                as_of=context.decision_time,
+                valuation_status="blocked" if blocked else "valid",
+                data_cutoff_at=self._pit_data_gateway.data_cutoff_at(
+                    session_date=context.session_date,
+                    as_of=context.decision_time,
+                ),
+                reporting_currency=self._currency,
+                cash=cash_total,
+                equity=None if blocked else snapshot.account.equity,
+                cumulative_fees=self._applied_fees_total,
+                valuation_reason=(
+                    "close valuation blocked by missing marks" if blocked else None
+                ),
+            )
+            self._analysis_engine.observe_equity(observation)
+            self._last_equity_observation = observation
         self._equity_curve.append(
             EquitySample(
                 step_sequence=context.step_sequence,
@@ -1809,6 +1998,10 @@ class DeterministicBacktestRunner:
     def _phase_analyze(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
+        if self._analysis_engine is not None:
+            # Freeze the read-only partial snapshot for this step; chunked
+            # callers read it without touching engine state.
+            self._latest_analysis_snapshot = self._analysis_engine.snapshot()
         if not self._analyzers:
             return []
         snapshot = self._portfolio.snapshot()

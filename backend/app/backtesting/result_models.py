@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
 from enum import StrEnum
+from functools import lru_cache
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 from uuid import UUID
@@ -308,6 +309,52 @@ class ChunkValidationStatus(StrEnum):
 
     PASSED = "passed"
     FAILED = "failed"
+
+
+class AnalysisSummaryStatus(StrEnum):
+    """Run-level analysis lifecycle persisted on the summary table."""
+
+    PARTIAL = "partial"
+    FINAL = "final"
+    ABORTED = "aborted"
+
+
+class AnalyzerState(StrEnum):
+    """How a metric row's analyzer identity relates to the registry.
+
+    ``legacy`` marks rows written before analyzer identity existed;
+    ``unknown`` marks rows whose declared identity no longer resolves in
+    the current ComponentRegistry; ``registered`` marks resolvable rows.
+    """
+
+    LEGACY = "legacy"
+    UNKNOWN = "unknown"
+    REGISTERED = "registered"
+
+
+@lru_cache(maxsize=1)
+def _default_component_registry():
+    from app.backtesting.registry import build_default_component_registry
+
+    return build_default_component_registry()
+
+
+def resolve_analyzer_state(
+    analyzer_key: str | None, analyzer_version: int | None
+) -> AnalyzerState:
+    """Classify a metric row's analyzer identity against the registry.
+
+    Rows without identity are legacy data; rows whose declared identity no
+    longer resolves are unknown; everything else is registered.
+    """
+
+    if analyzer_key is None or analyzer_version is None:
+        return AnalyzerState.LEGACY
+    try:
+        _default_component_registry().resolve(analyzer_key, analyzer_version)
+    except Exception:
+        return AnalyzerState.UNKNOWN
+    return AnalyzerState.REGISTERED
 
 
 # ---------------------------------------------------------------------------
@@ -770,7 +817,9 @@ class BacktestMetricRecord:
     """One metric value (logical ``backtest_metrics`` row).
 
     A missing value is expressed as ``value = None`` plus a mandatory
-    ``unavailable_reason``; metrics are never faked with zero.
+    ``unavailable_reason``; metrics are never faked with zero.  New rows
+    carry their producing analyzer identity as a pair; rows without any
+    identity are legacy data and are never backfilled from ``metric_key``.
     """
 
     run_id: UUID
@@ -782,6 +831,9 @@ class BacktestMetricRecord:
     risk_free_rate_note: str | None = None
     sample_count: int | None = None
     unavailable_reason: str | None = None
+    analyzer_key: str | None = None
+    analyzer_version: int | None = None
+    analyzer_metadata: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -815,10 +867,162 @@ class BacktestMetricRecord:
             raise DomainValidationError(
                 "metrics must either carry a value or an unavailable_reason, never both"
             )
+        # Analyzer identity is strictly paired: both fields present (new
+        # rows) or both absent (legacy rows).
+        has_key = self.analyzer_key is not None
+        has_version = self.analyzer_version is not None
+        if has_key != has_version:
+            raise DomainValidationError(
+                "analyzer_key and analyzer_version must be provided together"
+            )
+        if has_version and (
+            isinstance(self.analyzer_version, bool)
+            or not isinstance(self.analyzer_version, int)
+            or self.analyzer_version <= 0
+        ):
+            raise DomainValidationError("analyzer_version must be a positive integer")
+        if self.analyzer_metadata is not None:
+            if not isinstance(self.analyzer_metadata, Mapping):
+                raise DomainValidationError(
+                    "analyzer_metadata must be a mapping when provided"
+                )
+            object.__setattr__(
+                self,
+                "analyzer_metadata",
+                MappingProxyType(dict(self.analyzer_metadata)),
+            )
+
+    @property
+    def analyzer_state(self) -> AnalyzerState:
+        """Registry-relative state of this row's analyzer identity."""
+
+        return resolve_analyzer_state(self.analyzer_key, self.analyzer_version)
 
     @property
     def cursor_sort_key(self) -> tuple[str, str]:
         return (self.metric_key, self.formula_version)
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestAnalysisSummaryRecord:
+    """Run-level analyzer summary (logical ``backtest_analysis_summaries`` row).
+
+    ``partial`` rows are progress checkpoints and never carry a
+    finalization time; ``final``/``aborted`` are terminal states whose
+    writes the repository refuses to overwrite with conflicting content.
+    """
+
+    run_id: UUID
+    status: AnalysisSummaryStatus | str
+    analyzer_snapshot: Mapping[str, Any] | None = None
+    formula_signature: str = ""
+    input_evidence_signature: str = ""
+    reporting_currency: str = "CNY"
+    initial_equity: Decimal | int | str | None = None
+    valid_day_count: int | None = None
+    fill_count: int | None = None
+    gross_traded_notional: Decimal | int | str | None = None
+    cumulative_fees: Decimal | int | str | None = None
+    rate_snapshot: Mapping[str, Any] | Sequence[Any] | None = None
+    rate_snapshot_hash: str | None = None
+    rate_source_versions: Mapping[str, Any] | None = None
+    missing_ranges: Sequence[Any] | None = None
+    last_chunk_sequence: int | None = None
+    completed_through_session: date | None = None
+    abort_reason: str | None = None
+    failed_step_sequence: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    finalized_at: datetime | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
+        object.__setattr__(
+            self,
+            "status",
+            _enum(self.status, AnalysisSummaryStatus, "status"),
+        )
+        object.__setattr__(
+            self,
+            "analyzer_snapshot",
+            _json_payload(self.analyzer_snapshot, "analyzer_snapshot"),
+        )
+        object.__setattr__(
+            self,
+            "formula_signature",
+            _required_text(self.formula_signature, "formula_signature"),
+        )
+        object.__setattr__(
+            self,
+            "input_evidence_signature",
+            _required_text(
+                self.input_evidence_signature, "input_evidence_signature"
+            ),
+        )
+        if not isinstance(self.reporting_currency, str) or not (
+            normalized := self.reporting_currency.strip()
+        ):
+            raise DomainValidationError(
+                "reporting_currency must be non-blank text"
+            )
+        object.__setattr__(self, "reporting_currency", normalized.upper())
+        for name in ("initial_equity", "gross_traded_notional", "cumulative_fees"):
+            object.__setattr__(
+                self, name, _optional_decimal(getattr(self, name), name)
+            )
+        for name in ("valid_day_count", "fill_count", "last_chunk_sequence", "failed_step_sequence"):
+            object.__setattr__(
+                self, name, _optional_int(getattr(self, name), name)
+            )
+        for name in ("rate_source_versions",):
+            value = getattr(self, name)
+            if value is not None:
+                if not isinstance(value, Mapping):
+                    raise DomainValidationError(f"{name} must be a mapping")
+                object.__setattr__(
+                    self, name, MappingProxyType(dict(value))
+                )
+        if self.rate_snapshot is not None:
+            frozen = _frozen_json(self.rate_snapshot, "rate_snapshot")
+            object.__setattr__(self, "rate_snapshot", frozen)
+        if self.missing_ranges is not None:
+            ranges = tuple(self.missing_ranges)
+            object.__setattr__(self, "missing_ranges", ranges)
+        object.__setattr__(
+            self,
+            "rate_snapshot_hash",
+            _optional_text(self.rate_snapshot_hash, "rate_snapshot_hash"),
+        )
+        if self.completed_through_session is not None:
+            if isinstance(self.completed_through_session, datetime) or not isinstance(
+                self.completed_through_session, date
+            ):
+                raise DomainValidationError(
+                    "completed_through_session must be a calendar date"
+                )
+        object.__setattr__(
+            self, "abort_reason", _optional_text(self.abort_reason, "abort_reason")
+        )
+        for name in ("created_at", "updated_at", "finalized_at"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(
+                    self, name, _aware_datetime(value, name)
+                )
+        aborted = self.status is AnalysisSummaryStatus.ABORTED
+        if aborted != (self.abort_reason is not None):
+            raise DomainValidationError(
+                "abort_reason is required exactly when status is aborted"
+            )
+        if aborted or self.status is AnalysisSummaryStatus.FINAL:
+            if self.finalized_at is None:
+                raise DomainValidationError(
+                    f"{self.status.value} summaries require finalized_at"
+                )
+        elif self.finalized_at is not None:
+            raise DomainValidationError(
+                "partial summaries must not carry finalized_at"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -924,12 +1128,17 @@ class BacktestDataChunkRecord:
 
 
 __all__ = [
+    "AnalysisSummaryStatus",
+    "AnalyzerState",
     "ChunkValidationStatus",
     "DataPhase",
     "DataQualityStatus",
     "DecisionValidationStatus",
     "BacktestDataChunkRecord",
     "BacktestDecisionRecord",
+    "AnalysisSummaryStatus",
+    "AnalyzerState",
+    "BacktestAnalysisSummaryRecord",
     "BacktestEquityCurveRecord",
     "BacktestFillRecord",
     "BacktestMetricRecord",

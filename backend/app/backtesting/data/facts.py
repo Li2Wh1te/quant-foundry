@@ -38,12 +38,15 @@ from app.instruments.domain import (
 __all__ = [
     "AdjustedSeriesPoint",
     "Bar",
+    "ClosePriceFact",
     "CorporateAction",
     "DataPoint",
     "FactEvidence",
     "InstrumentCodeMapping",
     "InstrumentDisplay",
     "InstrumentSpec",
+    "PitRateSnapshotQuery",
+    "PitRateFact",
     "Tick",
     "TradingRule",
     "TradingStatus",
@@ -468,3 +471,84 @@ class CorporateAction:
         object.__setattr__(
             self, "attributes", _frozen_attributes(self.attributes, "attributes")
         )
+
+
+@dataclass(frozen=True, slots=True)
+class ClosePriceFact:
+    """One raw close-price valuation mark with its PIT evidence.
+
+    The analyzer subsystem consumes these facts to freeze the initial
+    equity snapshot (E0) and end-of-day valuations; the evidence's
+    ``known_at``/``observed_at`` timestamps are the only accepted proof
+    that the mark was strictly point-in-time available.
+    """
+
+    instrument_id: UUID
+    session_date: date
+    close_price: Decimal | int | str
+    evidence: FactEvidence
+    schema: ContractRef | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "instrument_id", _require_uuid(self.instrument_id, "instrument_id")
+        )
+        object.__setattr__(
+            self, "session_date", _plain_date(self.session_date, "session_date")
+        )
+        object.__setattr__(
+            self, "close_price", _positive_decimal(self.close_price, "close_price")
+        )
+        if not isinstance(self.evidence, FactEvidence):
+            raise ProviderContractViolationError("evidence must be a FactEvidence")
+        object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))
+
+
+@dataclass(frozen=True, slots=True)
+class PitRateSnapshotQuery:
+    """Half-open session range a frozen risk-free rate snapshot must cover.
+
+    ``expected_sessions`` names the official sessions the caller needs;
+    missing sessions become deterministic ``missing_ranges`` in the frozen
+    snapshot instead of being forward-filled.
+    """
+
+    start_session: date
+    end_session: date
+    expected_sessions: tuple[date, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "start_session", _plain_date(self.start_session, "start_session")
+        )
+        object.__setattr__(
+            self, "end_session", _plain_date(self.end_session, "end_session")
+        )
+        if self.end_session < self.start_session:
+            raise ProviderContractViolationError(
+                "end_session must not precede start_session"
+            )
+        expected = tuple(
+            _plain_date(day, "expected_sessions entry")
+            for day in self.expected_sessions
+        )
+        object.__setattr__(self, "expected_sessions", expected)
+
+
+@dataclass(frozen=True, slots=True)
+class PitRateFact:
+    """One daily risk-free rate value with its source and PIT evidence."""
+
+    session_date: date
+    rate: Decimal | int | str
+    evidence: FactEvidence
+    schema: ContractRef | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self, "session_date", _plain_date(self.session_date, "session_date")
+        )
+        object.__setattr__(self, "rate", _finite_decimal(self.rate, "rate"))
+        if not isinstance(self.evidence, FactEvidence):
+            raise ProviderContractViolationError("evidence must be a FactEvidence")
+        object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))

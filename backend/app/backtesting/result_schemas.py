@@ -9,7 +9,7 @@ opaque.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Generic, Optional, TypeVar
 from uuid import UUID
@@ -159,6 +159,38 @@ class BacktestMetricItem(_ResultItem):
     risk_free_rate_note: str | None = None
     sample_count: int | None = None
     unavailable_reason: str | None = None
+    analyzer_key: str | None = None
+    analyzer_version: int | None = None
+    analyzer_metadata: dict | list | None = None
+    # legacy (no identity) / unknown (identity no longer resolves) /
+    # registered (resolvable in the current registry).
+    analyzer_state: str
+
+
+class BacktestAnalysisSummaryItem(_ResultItem):
+    """Run-level analysis summary; never recomputed at read time."""
+
+    status: str
+    analyzer_snapshot: dict | list | None = None
+    formula_signature: str
+    input_evidence_signature: str
+    reporting_currency: str
+    initial_equity: SerializedDecimal = None
+    valid_day_count: int | None = None
+    fill_count: int | None = None
+    gross_traded_notional: SerializedDecimal = None
+    cumulative_fees: SerializedDecimal = None
+    rate_snapshot: dict | list | None = None
+    rate_snapshot_hash: str | None = None
+    rate_source_versions: dict | list | None = None
+    missing_ranges: list | None = None
+    last_chunk_sequence: int | None = None
+    completed_through_session: datetime | date | None = None
+    abort_reason: str | None = None
+    failed_step_sequence: int | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    finalized_at: datetime | None = None
 
 
 class BacktestDataPreflightItem(_ResultItem):
@@ -198,6 +230,7 @@ class ResultCursorPage(BaseModel, Generic[ItemT]):
 
 
 __all__ = [
+    "BacktestAnalysisSummaryItem",
     "BacktestDataChunkItem",
     "BacktestDataPreflightItem",
     "BacktestDecisionItem",

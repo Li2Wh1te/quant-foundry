@@ -24,6 +24,7 @@ from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.backtesting.models import BacktestAccountProfileRecord
 from app.backtesting.result_records import (
     RESULT_TABLE_NAMES,
+    BacktestAnalysisSummaryRecord,
     BacktestDataChunkRecord,
     BacktestDataPreflightResultRecord,
     BacktestDecisionRecord,
@@ -40,6 +41,7 @@ from app.backtesting.result_records import (
 __all__ = [
     "DataSyncCheckpoint",
     "BacktestAccountProfileRecord",
+    "BacktestAnalysisSummaryRecord",
     "BacktestDataChunkRecord",
     "BacktestDataPreflightResultRecord",
     "BacktestDecisionRecord",

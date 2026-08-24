@@ -309,6 +309,8 @@ def build_runner(
     accounting_currency: str = "CNY",
     execution_model=None,
     settlement_policy=None,
+    analysis_engine=None,
+    pit_data_gateway=None,
 ):
     """Assemble a fully wired runner with zero slippage and zero fees.
 
@@ -394,6 +396,8 @@ def build_runner(
         settlement_calendar=settlement_calendar,
         corporate_actions=corporate_actions,
         component_parameters=component_parameters,
+        analysis_engine=analysis_engine,
+        pit_data_gateway=pit_data_gateway,
     )
 
 

@@ -41,6 +41,7 @@ from app.backtesting.pagination import (
     parse_cursor,
 )
 from app.backtesting.result_models import (
+    BacktestAnalysisSummaryRecord as BacktestAnalysisSummaryDto,
     BacktestDataChunkRecord as BacktestDataChunkDto,
     BacktestDataPreflightRecord as BacktestDataPreflightDto,
     BacktestDecisionRecord as BacktestDecisionDto,
@@ -53,6 +54,7 @@ from app.backtesting.result_models import (
     BacktestStepRecord as BacktestStepDto,
 )
 from app.backtesting.result_records import (
+    BacktestAnalysisSummaryRecord,
     BacktestDataChunkRecord,
     BacktestDataPreflightResultRecord,
     BacktestDecisionRecord,
@@ -257,7 +259,149 @@ def _metric_record(dto: BacktestMetricDto) -> dict[str, Any]:
         "risk_free_rate_note": dto.risk_free_rate_note,
         "sample_count": dto.sample_count,
         "unavailable_reason": dto.unavailable_reason,
+        "analyzer_key": dto.analyzer_key,
+        "analyzer_version": dto.analyzer_version,
+        "analyzer_metadata": (
+            _thaw_json(dict(dto.analyzer_metadata))
+            if dto.analyzer_metadata is not None
+            else None
+        ),
     }
+
+
+def _analysis_summary_record(dto: BacktestAnalysisSummaryDto) -> dict[str, Any]:
+    """Map the summary DTO onto its ORM columns (identity excluded)."""
+
+    return {
+        "run_id": dto.run_id,
+        "status": dto.status.value,
+        "analyzer_snapshot": _thaw_json(dict(dto.analyzer_snapshot)),
+        "formula_signature": dto.formula_signature,
+        "input_evidence_signature": dto.input_evidence_signature,
+        "initial_equity": dto.initial_equity,
+        "valid_day_count": dto.valid_day_count,
+        "fill_count": dto.fill_count,
+        "gross_traded_notional": dto.gross_traded_notional,
+        "cumulative_fees": dto.cumulative_fees,
+        "rate_snapshot": (
+            _thaw_json_value(dto.rate_snapshot)
+            if dto.rate_snapshot is not None
+            else None
+        ),
+        "rate_snapshot_hash": dto.rate_snapshot_hash,
+        "rate_source_versions": (
+            _thaw_json(dict(dto.rate_source_versions))
+            if dto.rate_source_versions is not None
+            else None
+        ),
+        "missing_ranges": (
+            [_thaw_json_value(entry) for entry in dto.missing_ranges]
+            if dto.missing_ranges is not None
+            else None
+        ),
+        "reporting_currency": dto.reporting_currency,
+        "last_chunk_sequence": dto.last_chunk_sequence,
+        "completed_through_session": dto.completed_through_session,
+        "abort_reason": dto.abort_reason,
+        "failed_step_sequence": dto.failed_step_sequence,
+        "created_at": dto.created_at,
+        "updated_at": dto.updated_at,
+        "finalized_at": dto.finalized_at,
+    }
+
+
+def _thaw_json_value(value: Any) -> Any:
+    """Thaw one possibly nested frozen value without requiring a mapping."""
+
+    from types import MappingProxyType as _MPT
+
+    if isinstance(value, _MPT) or isinstance(value, Mapping):
+        return {key: _thaw_json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_thaw_json_value(item) for item in value]
+    return value
+
+
+def _decimal_equal(left: Any, right: Any) -> bool:
+    """Compare two optional decimal-ish values exactly."""
+
+    if left is None or right is None:
+        return left is right
+    left_decimal = left if isinstance(left, Decimal) else Decimal(str(left))
+    right_decimal = right if isinstance(right, Decimal) else Decimal(str(right))
+    return left_decimal == right_decimal
+
+
+def _producers_conflict(
+    left: tuple[Any, Any], right: tuple[Any, Any]
+) -> bool:
+    """Compare two producer identities; a missing identity never conflicts."""
+
+    if left == right:
+        return False
+    return left[0] is not None and right[0] is not None
+
+
+def _metric_content_fingerprint(dto: BacktestMetricDto) -> tuple[Any, ...]:
+    """Content identity used for in-batch duplicate collapse."""
+
+    return (
+        dto.value,
+        str(dto.unit) if dto.unit else None,
+        dto.sample_count,
+        dto.unavailable_reason,
+        (
+            _thaw_json(dict(dto.analyzer_metadata))
+            if dto.analyzer_metadata is not None
+            else None
+        ),
+        dto.analyzer_key,
+        dto.analyzer_version,
+    )
+
+
+def _summary_dto_from_record(
+    record: BacktestAnalysisSummaryRecord,
+) -> BacktestAnalysisSummaryDto:
+    """Rebuild the immutable summary DTO from one ORM row."""
+
+    missing_ranges = record.missing_ranges
+    return BacktestAnalysisSummaryDto(
+        run_id=record.run_id,
+        status=record.status,
+        # Thaw JSON payloads into plain containers so API serialization
+        # never sees frozen mapping proxies.
+        analyzer_snapshot=_thaw_json(record.analyzer_snapshot or {}),
+        formula_signature=record.formula_signature,
+        input_evidence_signature=record.input_evidence_signature,
+        reporting_currency=record.reporting_currency,
+        initial_equity=record.initial_equity,
+        valid_day_count=record.valid_day_count,
+        fill_count=record.fill_count,
+        gross_traded_notional=record.gross_traded_notional,
+        cumulative_fees=record.cumulative_fees,
+        rate_snapshot=(
+            _thaw_json_value(record.rate_snapshot)
+            if record.rate_snapshot is not None
+            else None
+        ),
+        rate_snapshot_hash=record.rate_snapshot_hash,
+        rate_source_versions=(
+            _thaw_json(record.rate_source_versions)
+            if record.rate_source_versions is not None
+            else None
+        ),
+        missing_ranges=tuple(missing_ranges) if missing_ranges is not None else None,
+        last_chunk_sequence=record.last_chunk_sequence,
+        completed_through_session=record.completed_through_session,
+        abort_reason=record.abort_reason,
+        failed_step_sequence=record.failed_step_sequence,
+        created_at=_aware(record.created_at),
+        updated_at=_aware(record.updated_at),
+        finalized_at=(
+            _aware(record.finalized_at) if record.finalized_at is not None else None
+        ),
+    )
 
 
 def _preflight_record(dto: BacktestDataPreflightDto) -> dict[str, Any]:
@@ -566,6 +710,209 @@ class BacktestResultRepository:
                 f"{kind} row violates the run-scoped uniqueness contract"
             ) from exc
         return len(payloads)
+
+    def append_metrics(self, *dtos: Any) -> int:
+        """Persist analyzer-produced metrics under v1 producer rules.
+
+        Enforced here, never only through database exceptions:
+
+        1. DTO identity deduplication inside the batch;
+        2. one logical indicator (``metric_key``) per run may have exactly
+           one ``(analyzer_key, analyzer_version)`` producer, checked both
+           in the batch and against persisted rows;
+        3. resubmitting the same identity with the same value and evidence
+           is an idempotent no-op;
+        4. a conflicting rewrite of an existing logical key fails instead
+           of overwriting the persisted value.
+        """
+
+        if not dtos:
+            return 0
+        for dto in dtos:
+            if not isinstance(dto, BacktestMetricDto):
+                raise ResultRepositoryError(
+                    f"append_metrics expects {BacktestMetricDto.__name__}, "
+                    f"got {type(dto).__name__}"
+                )
+        seen_identities: set[tuple[Any, ...]] = {}
+        batch_producers: dict[str, tuple[str | None, int | None]] = {}
+        for dto in dtos:
+            identity = (dto.run_id, dto.metric_key, dto.formula_version)
+            previous = seen_identities.get(identity)
+            if previous is not None:
+                # Same logical key twice in one batch: identical content is
+                # collapsed; anything else is a conflict.
+                if _metric_content_fingerprint(previous) != (
+                    _metric_content_fingerprint(dto)
+                ):
+                    raise ResultRecordConflictError(
+                        f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
+                        "was submitted twice within one batch with different "
+                        "content"
+                    )
+                continue
+            producer = (dto.analyzer_key, dto.analyzer_version)
+            known_producer = batch_producers.get(dto.metric_key)
+            if known_producer is not None and _producers_conflict(
+                known_producer, producer
+            ):
+                raise ResultRecordConflictError(
+                    f"metric key {dto.metric_key!r} already has producer "
+                    f"{known_producer} in this run's batch; one run allows "
+                    "exactly one analyzer producer per logical metric"
+                )
+            batch_producers[dto.metric_key] = producer
+            seen_identities[identity] = dto
+
+        run_ids = {dto.run_id for dto in seen_identities.values()}
+        metric_keys = {dto.metric_key for dto in seen_identities.values()}
+        existing_rows: dict[tuple[UUID, str, str], BacktestMetricRecord] = {}
+        rows = self.session.scalars(
+            select(BacktestMetricRecord).where(
+                BacktestMetricRecord.run_id.in_(run_ids),
+                BacktestMetricRecord.metric_key.in_(metric_keys),
+            )
+        )
+        for row in rows:
+            existing_rows[(row.run_id, row.metric_key, row.formula_version)] = row
+
+        # Producer consistency against persisted rows: one run allows one
+        # analyzer producer per logical metric key, across every formula
+        # version of that key.
+        persisted_producers_by_key: dict[tuple[UUID, str], set[tuple[Any, Any]]] = {}
+        for row in existing_rows.values():
+            if row.analyzer_key is None:
+                continue  # legacy rows never block new producers
+            persisted_producers_by_key.setdefault(
+                (row.run_id, row.metric_key), set()
+            ).add((row.analyzer_key, row.analyzer_version))
+
+        payloads: list[dict[str, Any]] = []
+        for identity, dto in seen_identities.items():
+            incoming_producer = (dto.analyzer_key, dto.analyzer_version)
+            persisted = persisted_producers_by_key.get(
+                (dto.run_id, dto.metric_key), set()
+            )
+            if persisted and persisted != {incoming_producer}:
+                raise ResultRecordConflictError(
+                    f"metric key {dto.metric_key!r} already has producer(s) "
+                    f"{sorted(persisted)} in this run; refusing the new "
+                    f"producer {incoming_producer}"
+                )
+            existing = existing_rows.get(identity)
+            if existing is not None:
+                persisted_producer = (existing.analyzer_key, existing.analyzer_version)
+                if persisted_producer != incoming_producer:
+                    raise ResultRecordConflictError(
+                        f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
+                        f"is already produced by {persisted_producer}; refusing "
+                        f"the new producer {incoming_producer}"
+                    )
+                persisted_metadata = existing.analyzer_metadata or {}
+                incoming_metadata = dict(dto.analyzer_metadata or {})
+                same_value = _decimal_equal(existing.value, dto.value)
+                same_reason = (existing.unavailable_reason or None) == (
+                    dto.unavailable_reason or None
+                )
+                same_metadata = _thaw_json(persisted_metadata) == _thaw_json(
+                    incoming_metadata
+                )
+                same_sample_count = (
+                    existing.sample_count or None
+                ) == (dto.sample_count or None)
+                if not all(
+                    (same_value, same_reason, same_metadata, same_sample_count)
+                ):
+                    raise ResultRecordConflictError(
+                        f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
+                        "already exists with different value or evidence; "
+                        "metric results are immutable"
+                    )
+                continue  # Idempotent retry: nothing to write.
+            payloads.append(_metric_record(dto))
+        try:
+            self.session.add_all(
+                [BacktestMetricRecord(**payload) for payload in payloads]
+            )
+            self.session.flush()
+        except IntegrityError as exc:
+            raise ResultRecordConflictError(
+                "metrics row violates the run-scoped uniqueness contract"
+            ) from exc
+        return len(payloads)
+
+    def upsert_analysis_summary(
+        self, dto: BacktestAnalysisSummaryDto
+    ) -> BacktestAnalysisSummaryRecord:
+        """Insert or advance the run's analysis summary with terminal protection.
+
+        ``partial`` summaries may be updated freely while they stay partial.
+        ``final``/``aborted`` are terminal: an identical retry returns the
+        persisted row unchanged, any conflicting write raises
+        :class:`ResultRecordConflictError`.
+        """
+
+        from datetime import datetime as _datetime
+
+        existing = self.session.scalars(
+            select(BacktestAnalysisSummaryRecord).where(
+                BacktestAnalysisSummaryRecord.run_id == dto.run_id
+            )
+        ).first()
+        payload = _analysis_summary_record(dto)
+        if existing is None:
+            record = BacktestAnalysisSummaryRecord(**payload)
+            self.session.add(record)
+            try:
+                self.session.flush()
+            except IntegrityError as exc:
+                raise ResultRecordConflictError(
+                    "analysis summary violates its run uniqueness contract"
+                ) from exc
+            return record
+
+        terminal_statuses = ("final", "aborted")
+        if existing.status in terminal_statuses:
+            identical_retry = (
+                existing.status == dto.status.value
+                and existing.formula_signature == dto.formula_signature
+                and existing.input_evidence_signature
+                == dto.input_evidence_signature
+                and (existing.abort_reason or None)
+                == (dto.abort_reason or None)
+            )
+            if not identical_retry:
+                raise ResultRecordConflictError(
+                    f"the analysis summary of this run is already terminal "
+                    f"(status={existing.status}); partial progress can never "
+                    "overwrite it"
+                )
+            return existing
+
+        # Partial -> anything is an allowed forward transition.
+        for column, value in payload.items():
+            if column in ("created_at",):
+                continue
+            setattr(existing, column, value)
+        existing.updated_at = _datetime.now(timezone.utc)
+        self.session.flush()
+        return existing
+
+    def get_analysis_summary(
+        self,
+        run_id: UUID | str,
+    ) -> BacktestAnalysisSummaryDto | None:
+        """Read the single analysis summary bound to one run."""
+
+        run_uuid = _require_uuid("run_id", run_id)
+        record = self.session.scalars(
+            select(BacktestAnalysisSummaryRecord).where(
+                BacktestAnalysisSummaryRecord.run_id == run_uuid
+            )
+        ).first()
+        if record is None:
+            return None
+        return _summary_dto_from_record(record)
 
     # -- reads -------------------------------------------------------------
 

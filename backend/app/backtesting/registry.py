@@ -26,6 +26,14 @@ from typing import Any
 from app.backtesting.domain import DomainValidationError
 
 __all__ = [
+    "ANALYZER_COMPONENT_KIND",
+    "ANNUAL_RATE_CONVERTER_COMPONENT_KIND",
+    "ANNUAL_RATE_CONVERTER_KEY_ANNUAL_RATE_DIV_252",
+    "ANALYZER_KEY_CONFIG_RF",
+    "ANALYZER_KEY_FEE_SUMMARY",
+    "ANALYZER_KEY_PIT_RF",
+    "ANALYZER_KEY_SHARPE_SIMPLE",
+    "ANALYZER_KEY_TURNOVER",
     "DECISION_INTERPRETER_KEY_LONG_ONLY_TARGET_WEIGHTS",
     "DECISION_INTERPRETER_KEY_TARGET_WEIGHTS",
     "EXECUTION_MODEL_KEY_BAR_MARKET",
@@ -282,6 +290,8 @@ TIMING_POLICY_KIND = "timing_policy"
 EXECUTION_MODEL_KIND = "execution_model"
 DECISION_INTERPRETER_KIND = "decision_interpreter"
 SLIPPAGE_MODEL_KIND = "slippage_model"
+ANALYZER_COMPONENT_KIND = "analyzer"
+ANNUAL_RATE_CONVERTER_COMPONENT_KIND = "annual_rate_converter"
 
 TIMING_POLICY_KEY_AFTER_CLOSE_TO_NEXT_OPEN = "after_close_to_next_open"
 EXECUTION_MODEL_KEY_BAR_MARKET = "bar_market"
@@ -289,6 +299,81 @@ DECISION_INTERPRETER_KEY_TARGET_WEIGHTS = "target_weights"
 DECISION_INTERPRETER_KEY_LONG_ONLY_TARGET_WEIGHTS = "long_only_target_weights"
 SLIPPAGE_MODEL_KEY_BPS = "bps"
 SLIPPAGE_MODEL_KEY_NONE = "none"
+
+# v1 analyzer and annual-rate-converter identities.  The ``@1`` notation
+# appears only in documentation; the registry fields stay split into
+# ``key`` and ``version``.
+ANALYZER_KEY_SHARPE_SIMPLE = "sharpe_simple"
+ANALYZER_KEY_PIT_RF = "sharpe_pit_rf"
+ANALYZER_KEY_CONFIG_RF = "sharpe_config_rf"
+ANALYZER_KEY_TURNOVER = "turnover"
+ANALYZER_KEY_FEE_SUMMARY = "fee_summary"
+ANNUAL_RATE_CONVERTER_KEY_ANNUAL_RATE_DIV_252 = "annual_rate_div_252"
+
+
+def _build_analyzer_spec(factory_key: str):
+    """Create a registry factory that builds one v1 AnalyzerSpec."""
+
+    def factory(parameters: Mapping[str, Any]) -> object:
+        from app.backtesting import analyzers
+
+        builders = {
+            ANALYZER_KEY_SHARPE_SIMPLE: analyzers.build_sharpe_simple_spec,
+            ANALYZER_KEY_PIT_RF: analyzers.build_sharpe_pit_rf_spec,
+            ANALYZER_KEY_CONFIG_RF: analyzers.build_sharpe_config_rf_spec,
+            ANALYZER_KEY_TURNOVER: analyzers.build_turnover_spec,
+            ANALYZER_KEY_FEE_SUMMARY: analyzers.build_fee_summary_spec,
+        }
+        return builders[factory_key](parameters)
+
+    return factory
+
+
+def _build_annual_rate_div_252(parameters: Mapping[str, Any]) -> object:
+    from app.backtesting.analyzers import (
+        ANNUALIZATION_FACTOR,
+        AnalyzerConfigurationError,
+    )
+    from decimal import Decimal, InvalidOperation
+
+    # The converter is registered without parameters on purpose: its
+    # convention (simple division by 252) is frozen, so callers pass their
+    # rf_annual through compute() and never reconfigure the converter.
+    if parameters:
+        raise RegistryError(
+            "annual_rate_div_252@1 freezes its convention and accepts no "
+            "parameters"
+        )
+
+    class _AnnualRateDiv252:
+        converter_key = ANNUAL_RATE_CONVERTER_KEY_ANNUAL_RATE_DIV_252
+        converter_version = 1
+
+        def compute(self, rf_annual: Decimal | int | str) -> Decimal:
+            if isinstance(rf_annual, bool) or isinstance(rf_annual, float) or not isinstance(
+                rf_annual, (Decimal, int, str)
+            ):
+                raise AnalyzerConfigurationError(
+                    "rf_annual must be a Decimal, int, or decimal string"
+                )
+            try:
+                annual = Decimal(str(rf_annual))
+            except InvalidOperation as exc:
+                raise AnalyzerConfigurationError(
+                    f"rf_annual is not a valid decimal: {rf_annual!r}"
+                ) from exc
+            if not annual.is_finite():
+                raise AnalyzerConfigurationError("rf_annual must be finite")
+            if annual <= Decimal("-1"):
+                raise AnalyzerConfigurationError(
+                    f"rf_annual must be strictly greater than -1; got {annual}"
+                )
+            from app.backtesting.analyzers import analyzer_decimal_context
+
+            with analyzer_decimal_context():
+                return annual / ANNUALIZATION_FACTOR
+
+    return _AnnualRateDiv252()
 
 
 def _build_after_close_to_next_open(parameters: Mapping[str, Any]) -> object:
@@ -566,6 +651,141 @@ def build_default_component_registry() -> ComponentRegistry:
             capabilities={
                 "slippage_bps": "0",
                 "adverse_rounding": "price_tick",
+            },
+        )
+    )
+    # ------------------------------------------------------------------
+    # v1 analyzers and annual-rate converter (task package 06)
+    # ------------------------------------------------------------------
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANALYZER_COMPONENT_KIND,
+            key=ANALYZER_KEY_SHARPE_SIMPLE,
+            version=1,
+            name_zh="简单夏普比率",
+            name_en="Simple Sharpe Ratio",
+            factory=_build_analyzer_spec(ANALYZER_KEY_SHARPE_SIMPLE),
+            parameter_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            capabilities={
+                "metric_key": "sharpe",
+                "formula_version": "sharpe_simple_ddof1_252_v1",
+                "risk_free_rate": "none",
+                "annualization_factor": 252,
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANALYZER_COMPONENT_KIND,
+            key=ANALYZER_KEY_PIT_RF,
+            version=1,
+            name_zh="PIT 无风险利率夏普比率",
+            name_en="PIT Risk-Free Sharpe Ratio",
+            factory=_build_analyzer_spec(ANALYZER_KEY_PIT_RF),
+            parameter_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            capabilities={
+                "metric_key": "sharpe",
+                "formula_version": "sharpe_pit_rf_ddof1_252_v1",
+                "risk_free_rate": "pit_daily_snapshot",
+                "annualization_factor": 252,
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANALYZER_COMPONENT_KIND,
+            key=ANALYZER_KEY_CONFIG_RF,
+            version=1,
+            name_zh="配置无风险利率夏普比率",
+            name_en="Configured Risk-Free Sharpe Ratio",
+            factory=_build_analyzer_spec(ANALYZER_KEY_CONFIG_RF),
+            parameter_schema={
+                "type": "object",
+                "required": ["rf_annual"],
+                "properties": {
+                    "rf_annual": {
+                        "type": "decimal-string",
+                        "description": (
+                            "frozen annual risk-free rate; finite decimal "
+                            "strictly greater than -1"
+                        ),
+                    },
+                },
+                "additionalProperties": False,
+            },
+            capabilities={
+                "metric_key": "sharpe",
+                "formula_version": "sharpe_config_rf_ddof1_252_v1",
+                "risk_free_rate": "config_annual_div_252",
+                "annualization_factor": 252,
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANALYZER_COMPONENT_KIND,
+            key=ANALYZER_KEY_TURNOVER,
+            version=1,
+            name_zh="换手率",
+            name_en="Turnover",
+            factory=_build_analyzer_spec(ANALYZER_KEY_TURNOVER),
+            parameter_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            capabilities={
+                "metric_key": "turnover",
+                "formula_version": "turnover_gross_notional_avg_eod_equity_v1",
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANALYZER_COMPONENT_KIND,
+            key=ANALYZER_KEY_FEE_SUMMARY,
+            version=1,
+            name_zh="费用摘要",
+            name_en="Fee Summary",
+            factory=_build_analyzer_spec(ANALYZER_KEY_FEE_SUMMARY),
+            parameter_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            capabilities={
+                "metric_keys": ("cumulative_fees", "fee_to_gross_traded_notional"),
+                "formula_versions": (
+                    "cumulative_applied_fill_fees_v1",
+                    "fee_to_gross_traded_notional_v1",
+                ),
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=ANNUAL_RATE_CONVERTER_COMPONENT_KIND,
+            key=ANNUAL_RATE_CONVERTER_KEY_ANNUAL_RATE_DIV_252,
+            version=1,
+            name_zh="年化利率除以 252 日化",
+            name_en="Annual Rate Divided by 252",
+            factory=_build_annual_rate_div_252,
+            parameter_schema={
+                "type": "object",
+                "properties": {},
+                "additionalProperties": False,
+            },
+            capabilities={
+                "conversion": "rf_daily = rf_annual / 252",
+                "compound_annualization": False,
             },
         )
     )

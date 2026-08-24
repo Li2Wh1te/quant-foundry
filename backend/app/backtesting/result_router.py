@@ -26,6 +26,7 @@ from app.backtesting.result_repository import (
     UnknownResultKindError,
 )
 from app.backtesting.result_schemas import (
+    BacktestAnalysisSummaryItem,
     BacktestDataChunkItem,
     BacktestDataPreflightItem,
     BacktestDecisionItem,
@@ -309,6 +310,40 @@ def list_metrics(
         session=session,
         signing_key=signing_key,
     )
+
+
+@router.get("/analysis-summary", response_model=BacktestAnalysisSummaryItem)
+def get_analysis_summary(
+    run_id: Annotated[UUID, Path()],
+    session: Session = Depends(get_db_session),
+) -> object:
+    """Return the run's frozen analysis summary without recomputation."""
+
+    import json
+
+    from app.backtesting.analysis_inputs import canonical_evidence_json
+
+    repository = BacktestResultRepository(
+        session,
+        # The read path never builds cursors; a placeholder key only
+        # satisfies the repository constructor contract.
+        cursor_signing_key="internal:analysis-summary-read",
+    )
+    summary = repository.get_analysis_summary(run_id)
+    if summary is None:
+        raise HTTPException(
+            status_code=404,
+            detail="该运行没有分析摘要",
+        )
+    # Render domain objects (Decimals, dates) through the canonical JSON
+    # contract; the schema layer then validates the wire shape.
+    from dataclasses import fields as dataclass_fields
+
+    plain = {
+        field.name: getattr(summary, field.name)
+        for field in dataclass_fields(summary)
+    }
+    return json.loads(canonical_evidence_json(plain))
 
 
 @router.get("/data-preflight", response_model=ResultCursorPage[BacktestDataPreflightItem])
