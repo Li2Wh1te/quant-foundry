@@ -119,6 +119,7 @@ class NextOpenSessionTestCase(unittest.TestCase):
         self.assertEqual(plan.trade_session, date(2026, 8, 21))
         self.assertEqual(plan.settlement_session, date(2026, 8, 24))
         self.assertEqual(plan.calendar_id, "SSE")
+        self.assertEqual(plan.calendar_version, CALENDAR_VERSION)
 
     def test_extended_holiday_cluster_skips_forward(self) -> None:
         open_days = {date(2026, 8, 21), date(2026, 10, 9)}

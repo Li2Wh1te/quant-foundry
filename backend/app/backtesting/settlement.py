@@ -309,10 +309,19 @@ def settlement_plan_for_fill(
                 "trade_session": trade_session.isoformat(),
             },
         )
+    # Pin the calendar definition version when the gateway is
+    # version-aware, so lots created through this helper carry the same
+    # audit trail as runtime-resolved ones.  Gateways without version
+    # facts stay ``None`` for backward compatibility.
+    calendar_version = None
+    version_resolver = getattr(gateway, "calendar_version_for", None)
+    if callable(version_resolver):
+        calendar_version = version_resolver(calendar_id, trade_session)
     return DeferredSettlementPlan(
         calendar_id=calendar_id,
         trade_session=trade_session,
         settlement_session=next_session,
+        calendar_version=calendar_version,
     )
 
 

@@ -24,6 +24,7 @@ from app.backtesting.account_resolution import (
     AccountResolver,
     AccountRunMode,
     BacktestAccountProfileVersion,
+    FeeScheduleVersionMissingError,
     ZeroCostFormalForbiddenError,
 )
 from app.backtesting.fees import (
@@ -184,6 +185,21 @@ class FallbackClassificationTests(ResolutionFixture):
         ]
         self.assertEqual(len(failed), 1)
         self.assertEqual(failed[0].version, 3)
+        self.assertEqual(len(context.exception.audit.candidates), 3)
+        strategy_candidate = next(
+            candidate
+            for candidate in context.exception.audit.candidates
+            if candidate.layer is AccountResolutionLayer.STRATEGY_DEFAULT
+        )
+        self.assertEqual(strategy_candidate.status, AccountProfileLifecycle.DISABLED)
+        user_candidate = next(
+            candidate
+            for candidate in context.exception.audit.candidates
+            if candidate.layer is AccountResolutionLayer.USER_DEFAULT
+        )
+        self.assertEqual(user_candidate.outcome, "not_evaluated")
+        self.assertEqual(user_candidate.profile_id, STOCK_ID)
+        self.assertEqual(user_candidate.version, 2)
 
     def test_retired_reference_is_also_unavailable(self) -> None:
         self.catalog.set_availability(STOCK_ID, 2, "retired")
@@ -219,6 +235,31 @@ class FallbackClassificationTests(ResolutionFixture):
                 applicability_context={"market": "HK", "asset_class": "etf"},
             )
         self.assertEqual(context.exception.code, "account_not_applicable")
+        self.assertEqual(
+            context.exception.audit.candidates[-1].status,
+            AccountProfileLifecycle.ACTIVE,
+        )
+
+    def test_missing_fee_schedule_keeps_active_status_in_audit(self) -> None:
+        profile_id = uuid4()
+        self.catalog.register(
+            BacktestAccountProfileVersion(
+                profile_id=profile_id,
+                version=1,
+                display_name="缺失费用版本账户",
+                fee_schedule_key="missing_schedule",
+                fee_schedule_version=1,
+            )
+        )
+        with self.assertRaises(FeeScheduleVersionMissingError) as context:
+            self.resolver.resolve(
+                run_mode="formal",
+                user_default=self.ref("user", profile_id, 1),
+            )
+        self.assertEqual(
+            context.exception.audit.candidates[-1].status,
+            AccountProfileLifecycle.ACTIVE,
+        )
 
     def test_no_configuration_at_all_requires_an_explicit_choice(self) -> None:
         with self.assertRaises(AccountNotSelectedError) as context:
@@ -251,6 +292,10 @@ class ZeroCostRunModeTests(ResolutionFixture):
                 explicit=self.ref("strategy", self.zero_id, 1),
             )
         self.assertEqual(context.exception.code, "zero_cost_formal_forbidden")
+        self.assertEqual(
+            context.exception.audit.candidates[0].status,
+            AccountProfileLifecycle.ACTIVE,
+        )
 
     def test_test_run_may_bind_zero_cost(self) -> None:
         selection = self.resolver.resolve(

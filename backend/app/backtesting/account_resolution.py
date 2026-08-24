@@ -577,6 +577,43 @@ class AccountProfileVersionCatalog:
         return tuple(sorted(found, key=lambda item: item.version))
 
 
+def _pad_candidates(
+    candidates: list[AccountResolutionCandidate],
+    refs: Mapping[AccountResolutionLayer, "AccountDefaultReference | None"],
+) -> tuple[AccountResolutionCandidate, ...]:
+    """Complete the audit with every declared resolution layer.
+
+    Layers after the evaluation stop (a hit or a failure) are appended
+    as ``not_evaluated`` while keeping their pinned identity, so a
+    persisted trail always shows all three candidates and their
+    configured references.
+    """
+
+    padded = list(candidates)
+    remaining = _RESOLUTION_ORDER[len(padded):]
+    for unevaluated in remaining:
+        reference_lower = refs.get(unevaluated)
+        padded.append(
+            AccountResolutionCandidate(
+                layer=unevaluated,
+                configured=reference_lower is not None,
+                profile_id=(
+                    reference_lower.profile_id
+                    if reference_lower is not None
+                    else None
+                ),
+                version=(
+                    reference_lower.version
+                    if reference_lower is not None
+                    else None
+                ),
+                status=None,
+                outcome="not_evaluated",
+            )
+        )
+    return tuple(padded)
+
+
 def _empty_audit() -> AccountResolutionAudit:
     """Placeholder audit for catalog-level errors outside a resolution."""
 
@@ -652,41 +689,22 @@ class AccountResolver:
             )
             candidates.append(candidate)
             if candidate.outcome == "hit":
-                # Record every declared layer in the audit, even the ones
-                # a hit made irrelevant, so persisted trails always carry
-                # all three candidates and their statuses.  Configured
-                # lower layers keep their pinned identity -- only their
-                # evaluation is marked as skipped.
-                remaining = _RESOLUTION_ORDER[len(candidates):]
-                for unevaluated in remaining:
-                    reference_lower = refs[unevaluated]
-                    candidates.append(
-                        AccountResolutionCandidate(
-                            layer=unevaluated,
-                            configured=reference_lower is not None,
-                            profile_id=(
-                                reference_lower.profile_id
-                                if reference_lower is not None
-                                else None
-                            ),
-                            version=(
-                                reference_lower.version
-                                if reference_lower is not None
-                                else None
-                            ),
-                            status=None,
-                            outcome="not_evaluated",
-                        )
-                    )
                 audit = AccountResolutionAudit(
                     run_mode=mode,
-                    candidates=tuple(candidates),
+                    candidates=_pad_candidates(candidates, refs),
                     hit_layer=layer,
                     resolved_profile_id=candidate.profile_id,
                     resolved_version=candidate.version,
                 )
                 return self._freeze(audit=audit, reference=reference)
-            raise self._candidate_error(candidate, run_mode=mode, candidates=tuple(candidates))
+            raise self._candidate_error(
+                candidate,
+                run_mode=mode,
+                # A failed resolution carries every declared layer too:
+                # lower configured layers keep their pinned identity and
+                # only their evaluation is marked as skipped.
+                candidates=_pad_candidates(candidates, refs),
+            )
         audit = AccountResolutionAudit(
             run_mode=mode,
             candidates=tuple(candidates),
@@ -746,14 +764,17 @@ class AccountResolver:
         """Classify one configured reference without raising."""
 
         def failed(
-            code: str, message: str
+            code: str,
+            message: str,
+            *,
+            status: AccountProfileLifecycle | None = None,
         ) -> AccountResolutionCandidate:
             return AccountResolutionCandidate(
                 layer=layer,
                 configured=True,
                 profile_id=reference.profile_id,
                 version=reference.version,
-                status=None,
+                status=status,
                 outcome="failed",
                 failure_code=code,
                 failure_message=message,
@@ -772,6 +793,7 @@ class AccountResolver:
                 f"account profile {reference.profile_id} version "
                 f"{reference.version} is {availability.status.value}; a "
                 "configured reference must not silently fall back",
+                status=availability.status,
             )
         incompatible = [
             (key, expected)
@@ -784,6 +806,7 @@ class AccountResolver:
                 f"account profile {reference.profile_id} version "
                 f"{reference.version} is incompatible with the run context "
                 f"for {incompatible[0][0]!r}",
+                status=availability.status,
             )
         if (
             version.fee_schedule_key == ZERO_COST_SCHEDULE_KEY
@@ -793,18 +816,27 @@ class AccountResolver:
                 "zero_cost_formal_forbidden",
                 f"the {ZERO_COST_SCHEDULE_KEY}@{version.fee_schedule_version} "
                 "schedule may be referenced by test runs only",
+                status=availability.status,
             )
         try:
             fee_snapshot = self._fee_registry.get(
                 version.fee_schedule_key, version.fee_schedule_version
             )
         except FeeError as exc:
-            return failed("fee_schedule_version_missing", str(exc))
+            return failed(
+                "fee_schedule_version_missing",
+                str(exc),
+                status=availability.status,
+            )
         if run_mode is AccountRunMode.FORMAL:
             try:
                 fee_snapshot.validate_for_run()
             except FeeError as exc:
-                return failed("fee_schedule_version_missing", str(exc))
+                return failed(
+                    "fee_schedule_version_missing",
+                    str(exc),
+                    status=availability.status,
+                )
         return AccountResolutionCandidate(
             layer=layer,
             configured=True,

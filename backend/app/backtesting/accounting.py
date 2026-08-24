@@ -682,23 +682,41 @@ class AccountingPolicy:
                 quantity=ZERO,
                 cash_delta=ZERO,
             )
-        # Consume the id before mutating: a retried batch can never pay
-        # the same corporate action twice.
-        self._processed_dividend_event_ids.add(event.event_id)
-        cash_delta = event.net_cash_delta
+        # Precondition checks run against the current balances BEFORE the
+        # id is consumed: a caller that fixes its configuration and
+        # retries must not find the event silently swallowed by an
+        # earlier failed attempt.
+        net = event.net_cash_delta
         current_cash = account.cash_balances[self.currency]
-        new_cash = current_cash + cash_delta
+        new_cash = current_cash + net
+        new_available = account.available_cash + net
         if new_cash < ZERO:
             raise AccountingError(
-                f"reversal event {event.event_id} would drive cash negative",
+                f"reversal event {event.event_id} would drive total cash "
+                "negative",
                 details={
                     "event_id": str(event.event_id),
                     "current_cash": str(current_cash),
-                    "cash_delta": str(cash_delta),
+                    "cash_delta": str(net),
                 },
             )
+        if new_available < ZERO:
+            # Frozen cash is not reversible by a dividend entry: debits
+            # must fit inside the available part of the balance.
+            raise AccountingError(
+                f"reversal event {event.event_id} would drive available "
+                "cash negative; frozen cash cannot absorb a dividend "
+                "reversal",
+                details={
+                    "event_id": str(event.event_id),
+                    "available_cash": str(account.available_cash),
+                    "cash_delta": str(net),
+                },
+            )
+        # Consume the id only now, immediately before committing.
+        self._processed_dividend_event_ids.add(event.event_id)
         account.cash_balances[self.currency] = new_cash
-        account.available_cash = account.available_cash + cash_delta
+        account.available_cash = new_available
         return CashDividendApplication(
             dividend_event_id=event.event_id,
             applied=True,
@@ -707,7 +725,7 @@ class AccountingPolicy:
                 if event.entitlement_quantity is not None
                 else ZERO
             ),
-            cash_delta=cash_delta,
+            cash_delta=net,
         )
 
     def pending_batches(self) -> tuple[PendingSettlement, ...]:

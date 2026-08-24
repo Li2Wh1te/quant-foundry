@@ -917,7 +917,16 @@ class DeterministicBacktestRunner:
         self._dividend_declarations: tuple[CashDividendEvent, ...] = (
             _load_dividend_declarations(corporate_actions)
         )
-        self._completed_dividend_events: dict[UUID, CashDividendEvent] = {}
+        self._completed_dividend_events: dict[UUID, CashDividendEvent] = {
+            # Declarations that already carry the source-supplied
+            # entitlement are complete at admission, even when their
+            # record date lies before the run window: without this
+            # registration they would be silently skipped and never
+            # credited in their cash-effective session.
+            declaration.event_id: declaration
+            for declaration in self._dividend_declarations
+            if declaration.is_entitlement_frozen
+        }
         # Frozen trading facts observed from engine views; later phases
         # without a view (submit, account) reuse exactly these values.
         self._instrument_facts: dict[UUID, InstrumentFacts] = {}
@@ -1588,6 +1597,12 @@ class DeterministicBacktestRunner:
         # declared derivation rule states explicitly whether unsettled
         # T+1 lots count; nothing about the rule is inferred.
         for declaration in self._dividend_declarations:
+            # Source-supplied entitlements are already quantity-frozen, but
+            # the derivation rule remains part of the event's audit contract.
+            # Validate it here as well so admission-time registration of a
+            # pre-frozen event cannot create a second, weaker path.
+            if declaration.is_entitlement_frozen:
+                _dividend_includes_pending_settlement(declaration)
             already_frozen = (
                 declaration.is_entitlement_frozen
                 or declaration.event_id in self._completed_dividend_events

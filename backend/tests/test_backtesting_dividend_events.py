@@ -13,6 +13,7 @@ from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from app.backtesting.accounting import (
     AccountState,
+    AccountingError,
     AccountingPolicy,
     PortfolioState,
     SettlementPolicy,
@@ -56,6 +57,7 @@ def dividend_event(
     revision_of=None,
     payment_date=None,
     arrival_date=None,
+    derivation_rule_key="record_date_entitlement",
 ):
     return CashDividendEvent(
         event_id=event_id if event_id is not None else uuid4(),
@@ -74,6 +76,7 @@ def dividend_event(
         withholding_tax=Decimal(withholding_tax),
         entry_kind=entry_kind,
         revision_of_event_id=revision_of,
+        derivation_rule_key=derivation_rule_key,
         source_evidence={"source": "unit-test", "announcement": "EQ0001"},
         as_of=record_date,
     )
@@ -563,6 +566,164 @@ class PreFrozenEntitlementTests(unittest.TestCase):
             dividends[0].payload["entitlement_quantity"], Decimal("250")
         )
         self.assertEqual(dividends[0].payload["cash_delta"], Decimal("25"))
+
+    def test_run_starting_after_record_date_registers_prefrozen_event(self) -> None:
+        # The run starts on D1, after the D0 record date.  The source has
+        # already frozen 100 units, so the event must still enter the
+        # completed-event index and credit on D2.
+        axis = build_axis([D1, D2])
+        market_data = DictMarketData(
+            {
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D1: "102.00", D2: "103.00"})
+        runner = build_runner(
+            run_id="run-prefrozen-before-window",
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=ScriptedStrategy({}),
+            corporate_actions=StaticDividends(
+                [
+                    dividend_event(
+                        record_date=D0,
+                        effective_session=D2,
+                        entitlement_quantity="100",
+                        amount_per_share="0.10",
+                    )
+                ]
+            ),
+            initial_cash="1000",
+        )
+
+        result = runner.run()
+
+        dividends = [
+            event
+            for event in result.events
+            if event.event_type == "cash_dividend_applied"
+        ]
+        self.assertEqual(len(dividends), 1)
+        self.assertEqual(dividends[0].step_sequence, 1)
+        self.assertEqual(dividends[0].payload["cash_delta"], Decimal("10"))
+        self.assertEqual(
+            runner._portfolio.account.cash_balances["CNY"], Decimal("1010")
+        )
+
+    def test_prefrozen_event_still_validates_derived_effective_session(self) -> None:
+        # Starting after the record date must not create a validation bypass:
+        # a source-declared landing day that disagrees with the calendar is
+        # rejected before any cash mutation.
+        axis = build_axis([D1, D2])
+        market_data = DictMarketData(
+            {
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D1: "102.00", D2: "103.00"})
+        runner = build_runner(
+            run_id="run-prefrozen-derived-session-mismatch",
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=ScriptedStrategy({}),
+            corporate_actions=StaticDividends(
+                [
+                    dividend_event(
+                        record_date=D0,
+                        arrival_date=D1,
+                        effective_session=D2,
+                        entitlement_quantity="100",
+                        amount_per_share="0.10",
+                    )
+                ]
+            ),
+            initial_cash="1000",
+        )
+
+        from app.backtesting.runtime import PhaseExecutionError
+
+        with self.assertRaises(PhaseExecutionError) as context:
+            runner.run()
+        self.assertIn("derives", str(context.exception))
+        self.assertEqual(
+            runner._portfolio.account.cash_balances["CNY"], Decimal("1000")
+        )
+
+    def test_prefrozen_event_rejects_an_unsupported_entitlement_rule(self) -> None:
+        # A supplied quantity skips recomputation, but it must not skip
+        # validation of the rule identity frozen into the event audit.
+        axis = build_axis([D1, D2])
+        market_data = DictMarketData(
+            {
+                D1: {INSTRUMENT_ID: ("100.00", "102.00")},
+                D2: {INSTRUMENT_ID: ("101.00", "103.00")},
+            }
+        )
+        view = CountingStrategyView({D1: "102.00", D2: "103.00"})
+        runner = build_runner(
+            run_id="run-prefrozen-unsupported-rule",
+            axis=axis,
+            market_data=market_data,
+            strategy_view=view,
+            strategy=ScriptedStrategy({}),
+            corporate_actions=StaticDividends(
+                [
+                    dividend_event(
+                        record_date=D0,
+                        effective_session=D2,
+                        entitlement_quantity="100",
+                        derivation_rule_key="unknown",
+                    )
+                ]
+            ),
+            initial_cash="1000",
+        )
+
+        from app.backtesting.runtime import PhaseExecutionError
+
+        with self.assertRaises(PhaseExecutionError) as context:
+            runner.run()
+        self.assertIn("unsupported entitlement rule", str(context.exception))
+        self.assertEqual(
+            runner._portfolio.account.cash_balances["CNY"], Decimal("1000")
+        )
+
+
+class DividendAvailableCashInvariantTests(unittest.TestCase):
+    def test_reversal_cannot_absorb_frozen_cash(self) -> None:
+        # Total cash alone is insufficient: debiting 100 from an account
+        # with only 10 available would make available_cash negative while
+        # total cash remains non-negative.
+        policy = AccountingPolicy(currency="CNY")
+        portfolio = PortfolioState(
+            account=AccountState(
+                cash_balances={"CNY": "100"},
+                available_cash="10",
+                frozen_cash="90",
+                margin_used="0",
+                margin_available="0",
+                equity="100",
+            ),
+            as_of=session_open(D1),
+        )
+        reversal = dividend_event(
+            effective_session=D2,
+            entitlement_quantity="1000",
+            amount_per_share="0.10",
+            entry_kind=DividendEntryKind.REVERSAL.value,
+            revision_of=uuid4(),
+        )
+
+        with self.assertRaises(AccountingError):
+            policy.apply_cash_dividend_event(
+                portfolio, reversal, session_date=D2
+            )
+        self.assertEqual(portfolio.account.cash_balances["CNY"], Decimal("100"))
+        self.assertEqual(portfolio.account.available_cash, Decimal("10"))
 
 
 class DeclaredSessionMustMatchDerivationTests(unittest.TestCase):
