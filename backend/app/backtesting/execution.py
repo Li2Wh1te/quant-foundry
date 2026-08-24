@@ -55,12 +55,34 @@ class OrderType(StrEnum):
 
 
 class OrderStatus(StrEnum):
-    """Lifecycle states retained on the mutable runtime order."""
+    """Lifecycle states retained on the mutable runtime order.
+
+    ``submitted`` is a runtime-only intermediate state: a completed match
+    always ends in ``filled``, ``partially_filled``, ``expired``, or
+    ``rejected``.
+    """
 
     SUBMITTED = "submitted"
     FILLED = "filled"
+    PARTIALLY_FILLED = "partially_filled"
     EXPIRED = "expired"
     REJECTED = "rejected"
+
+
+class RemainingStatus(StrEnum):
+    """State of the unfilled remainder of one order.
+
+    The remainder is never compressed into an alias of ``order_status``:
+    a partial fill must be able to state *why* the remaining quantity did
+    not trade, and an unsubmitted allocation must be distinguishable from
+    an order that was rejected before execution.
+    """
+
+    NONE = "none"
+    TERMINAL_UNFILLED = "terminal_unfilled"
+    TERMINAL_UNORDERABLE = "terminal_unorderable"
+    NOT_EXECUTED = "not_executed"
+    NOT_SUBMITTED = "not_submitted"
 
 
 class PriceLimitStatus(StrEnum):
@@ -185,6 +207,112 @@ class Order:
 
         self.status = OrderStatus.EXPIRED
         self.status_reason = reason
+
+
+class SubmissionSequenceAllocator:
+    """Run-global, monotonic ``submission_sequence`` source.
+
+    Sequences are unique within one ``run_id``, start at 1, never reset
+    between shards of the same run, and are strictly increasing.  A shard
+    that resumes a split run seeds the allocator with the last sequence
+    already consumed by earlier shards via ``resume_after``.
+
+    Retries must reuse the original ordinal instead of consuming a new
+    one: :meth:`sequence_for` memoizes one sequence per stable retry key,
+    so re-submitting the same intent cannot duplicate or skip ordinals.
+
+    The retry-key map lives in process memory, so a restarted process or
+    a fresh shard must restore it explicitly through
+    ``restored_sequences``; otherwise the same retry key would be treated
+    as new and receive a second ordinal.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: str,
+        resume_after: int = 0,
+        restored_sequences: Mapping[str, int] | None = None,
+    ) -> None:
+        if not isinstance(run_id, str) or not run_id.strip():
+            raise ExecutionError("run_id must be non-blank text")
+        if (
+            isinstance(resume_after, bool)
+            or not isinstance(resume_after, int)
+            or resume_after < 0
+        ):
+            raise ExecutionError("resume_after must be a non-negative integer")
+        self._run_id = run_id
+        self._last_sequence = resume_after
+        self._sequences_by_key: dict[str, int] = {}
+        seen_values: dict[int, str] = {}
+        for key, value in dict(restored_sequences or {}).items():
+            if not isinstance(key, str) or not key:
+                raise ExecutionError(
+                    "restored retry keys must be non-empty strings"
+                )
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 1
+                or value > resume_after
+            ):
+                raise ExecutionError(
+                    f"restored sequence for retry key {key!r} must be an "
+                    f"integer in [1, {resume_after}]"
+                )
+            duplicate = seen_values.get(value)
+            if duplicate is not None:
+                raise ExecutionError(
+                    f"retry keys {duplicate!r} and {key!r} both map to "
+                    f"sequence {value}; restored mappings must be injective"
+                )
+            seen_values[value] = key
+            self._sequences_by_key[key] = value
+
+    @property
+    def run_id(self) -> str:
+        return self._run_id
+
+    @property
+    def last_sequence(self) -> int:
+        """The highest sequence handed out so far (``0`` before first use)."""
+
+        return self._last_sequence
+
+    def sequences_snapshot(self) -> Mapping[str, int]:
+        """Return the retry-key mapping for durable persistence.
+
+        The persistence layer stores this mapping alongside
+        :attr:`last_sequence` and feeds both back through the constructor
+        when a new process or shard resumes the run.
+        """
+
+        return MappingProxyType(dict(self._sequences_by_key))
+
+    def next_sequence(self) -> int:
+        """Allocate the next unused sequence of the run."""
+
+        self._last_sequence += 1
+        return self._last_sequence
+
+    def sequence_for(self, retry_key: str) -> int:
+        """Return the memoized sequence for ``retry_key``, allocating once.
+
+        ``retry_key`` must be the stable identity whose resubmission has to
+        keep its original ordinal (for example ``intent_id``).  The same
+        key always maps to the same sequence; distinct keys never share
+        one.
+        """
+
+        if not isinstance(retry_key, str) or not retry_key:
+            raise ExecutionError("retry_key must be non-empty text")
+        existing = self._sequences_by_key.get(retry_key)
+        if existing is not None:
+            return existing
+        sequence = self.next_sequence()
+        self._sequences_by_key[retry_key] = sequence
+        return sequence
 
 
 @dataclass(frozen=True, slots=True)

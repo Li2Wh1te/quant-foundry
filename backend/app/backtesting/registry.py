@@ -19,14 +19,19 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
 
 from app.backtesting.domain import DomainValidationError
 
 __all__ = [
+    "DECISION_INTERPRETER_KEY_LONG_ONLY_TARGET_WEIGHTS",
     "DECISION_INTERPRETER_KEY_TARGET_WEIGHTS",
     "EXECUTION_MODEL_KEY_BAR_MARKET",
+    "SLIPPAGE_MODEL_KIND",
+    "SLIPPAGE_MODEL_KEY_BPS",
+    "SLIPPAGE_MODEL_KEY_NONE",
     "TIMING_POLICY_KEY_AFTER_CLOSE_TO_NEXT_OPEN",
     "ComponentRegistry",
     "ComponentRegistryEntry",
@@ -276,10 +281,14 @@ class ComponentRegistry:
 TIMING_POLICY_KIND = "timing_policy"
 EXECUTION_MODEL_KIND = "execution_model"
 DECISION_INTERPRETER_KIND = "decision_interpreter"
+SLIPPAGE_MODEL_KIND = "slippage_model"
 
 TIMING_POLICY_KEY_AFTER_CLOSE_TO_NEXT_OPEN = "after_close_to_next_open"
 EXECUTION_MODEL_KEY_BAR_MARKET = "bar_market"
 DECISION_INTERPRETER_KEY_TARGET_WEIGHTS = "target_weights"
+DECISION_INTERPRETER_KEY_LONG_ONLY_TARGET_WEIGHTS = "long_only_target_weights"
+SLIPPAGE_MODEL_KEY_BPS = "bps"
+SLIPPAGE_MODEL_KEY_NONE = "none"
 
 
 def _build_after_close_to_next_open(parameters: Mapping[str, Any]) -> object:
@@ -341,6 +350,72 @@ def _build_target_weights_interpreter(parameters: Mapping[str, Any]) -> object:
 
     board_lot = parameters.get("board_lot", 100)
     return TargetWeightsInterpreter(board_lot=board_lot)
+
+
+def _build_long_only_target_weights_interpreter(
+    parameters: Mapping[str, Any],
+) -> object:
+    from app.strategy_protocol.interpretation import (
+        LongOnlyTargetWeightsInterpreter,
+    )
+
+    return LongOnlyTargetWeightsInterpreter(
+        weight_sum_tolerance=parameters.get("weight_sum_tolerance", "0")
+    )
+
+
+def _decimal_parameter(parameters: Mapping[str, Any], name: str) -> Decimal:
+    """Parse one decimal parameter, failing with a stable RegistryError.
+
+    Malformed values (``"abc"``, nested objects, ...) must surface as the
+    registry's own error type instead of leaking ``decimal.InvalidOperation``
+    to configuration surfaces.
+    """
+
+    try:
+        return Decimal(str(parameters[name]))
+    except (InvalidOperation, ValueError, TypeError) as exc:
+        raise RegistryError(
+            f"parameter {name!r} is not a valid decimal value: "
+            f"{parameters[name]!r}"
+        ) from exc
+
+
+def _build_bps_slippage_model(parameters: Mapping[str, Any]) -> object:
+    from app.backtesting.slippage import BpsSlippageModel
+
+    missing = [name for name in ("slippage_bps",) if name not in parameters]
+    if missing:
+        raise RegistryError(
+            "bps@1 requires an explicit slippage_bps parameter; zero "
+            "slippage must be declared as none@1 instead",
+            details={"missing_parameters": missing},
+        )
+    if _decimal_parameter(parameters, "slippage_bps") == 0:
+        # Zero slippage has its own explicit registered identity; a
+        # zero-bps bps@1 entry would blur the audit trail.
+        raise RegistryError(
+            'bps@1 does not accept slippage_bps = 0; use the explicit '
+            '"none"@1 model to declare zero slippage'
+        )
+    return BpsSlippageModel(
+        slippage_bps=parameters["slippage_bps"],
+        price_tick=parameters.get("price_tick", "0.01"),
+        model_key=SLIPPAGE_MODEL_KEY_BPS,
+        model_version=1,
+    )
+
+
+def _build_none_slippage_model(parameters: Mapping[str, Any]) -> object:
+    from app.backtesting.slippage import BpsSlippageModel
+
+    if "slippage_bps" in parameters and (
+        _decimal_parameter(parameters, "slippage_bps") != 0
+    ):
+        raise RegistryError(
+            "none@1 declares zero slippage; a non-zero slippage_bps is invalid"
+        )
+    return BpsSlippageModel.none(price_tick=parameters.get("price_tick", "0.01"))
 
 
 def build_default_component_registry() -> ComponentRegistry:
@@ -414,6 +489,83 @@ def build_default_component_registry() -> ComponentRegistry:
             capabilities={
                 "decision_mode": "target_weights",
                 "daily_rebalance": True,
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=DECISION_INTERPRETER_KIND,
+            key=DECISION_INTERPRETER_KEY_LONG_ONLY_TARGET_WEIGHTS,
+            version=1,
+            name_zh="只多目标权重",
+            name_en="Long-Only Target Weights",
+            factory=_build_long_only_target_weights_interpreter,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "weight_sum_tolerance": {
+                        "type": "decimal-string",
+                        "default": "0",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            capabilities={
+                "decision_mode": "target_weights",
+                "long_only": True,
+                "reject_semantics": "whole_decision",
+                "daily_rebalance": True,
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=SLIPPAGE_MODEL_KIND,
+            key=SLIPPAGE_MODEL_KEY_BPS,
+            version=1,
+            name_zh="基点滑点",
+            name_en="Basis-Point Slippage",
+            factory=_build_bps_slippage_model,
+            parameter_schema={
+                "type": "object",
+                "required": ["slippage_bps"],
+                "properties": {
+                    "slippage_bps": {"type": "decimal-string"},
+                    "price_tick": {
+                        "type": "decimal-string",
+                        "default": "0.01",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            capabilities={
+                "adverse_rounding": "price_tick",
+                "buy_direction": "up",
+                "sell_direction": "down",
+            },
+        )
+    )
+    registry.register(
+        ComponentRegistryEntry(
+            component_kind=SLIPPAGE_MODEL_KIND,
+            key=SLIPPAGE_MODEL_KEY_NONE,
+            version=1,
+            name_zh="零滑点",
+            name_en="No Slippage",
+            factory=_build_none_slippage_model,
+            parameter_schema={
+                "type": "object",
+                "properties": {
+                    "price_tick": {
+                        "type": "decimal-string",
+                        "default": "0.01",
+                    },
+                },
+                "additionalProperties": False,
+            },
+            capabilities={
+                "slippage_bps": "0",
+                "adverse_rounding": "price_tick",
             },
         )
     )

@@ -28,7 +28,11 @@ D2 = date(2026, 8, 5)
 BUY_ALL = {0: {str(INSTRUMENT_ID): "1"}}
 
 # Expected business event stream of the standard three-day scenario:
-# D0 close 100 -> decide buy all; D1 open 100 fill, close 102; D2 close 103.
+# D0 close 100 -> decide buy all; D1 open 100 fill, close 102 -> the
+# flatten decision submits the full sell delta (interpretation no longer
+# caps sells by availability); D2 restores T+1 availability before the
+# open match, the sell fills at the D2 open (101), and the day closes at
+# 103 with a final valuation.
 EXPECTED_EVENT_TYPES = [
     # step0
     "portfolio_valued",
@@ -39,8 +43,13 @@ EXPECTED_EVENT_TYPES = [
     "fill_applied",
     "portfolio_valued",
     "strategy_decision_created",
-    # step2: final valuation only, plus T+1 sale-availability restore.
+    # The sell is submitted while availability is still zero; matching
+    # happens only after the next settlement restore.
+    "order_submitted",
+    # step2: settlement restore, then the sell fills at the open.
     "settlement_restored",
+    "fill_created",
+    "fill_applied",
     "portfolio_valued",
 ]
 
@@ -631,8 +640,11 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
         submitted = [
             e for e in runner._events if e.event_type == "order_submitted"
         ]
-        self.assertEqual(len(submitted), 1)
-        self.assertEqual(submitted[0].step_sequence, 0)
+        # The D0 buy and the D1 flatten sell are both submitted.
+        self.assertEqual(len(submitted), 2)
+        self.assertEqual(
+            [event.step_sequence for event in submitted], [0, 1]
+        )
 
     def test_failed_runner_refuses_reexecution_without_duplicate_events(
         self,

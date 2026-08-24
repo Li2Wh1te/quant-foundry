@@ -622,9 +622,9 @@ class TargetWeightsInterpreter:
     Desired quantities are sized from the latest close marks against the
     valued equity, floored onto the board-lot grid.  Positions absent from
     the target mapping are interpreted as a zero target.  A rebalance below
-    one board lot produces no order; a sell is additionally capped at the
-    currently available quantity under the settlement policy, so an order
-    that could never fill is not submitted at all.
+    one board lot produces no order.  Sells are submitted for the full
+    target delta: capping by settlement-limited availability belongs to
+    the matching stage, never to interpretation.
     """
 
     interpreter_key = "target_weights"
@@ -705,12 +705,10 @@ class TargetWeightsInterpreter:
                     )
                 )
             elif delta <= -board_lot:
-                available = (
-                    position.available_quantity if position is not None else ZERO
-                )
-                sell_quantity = _floor_to_lot(min(-delta, available), board_lot)
-                if sell_quantity <= 0:
-                    continue
+                # The interpreter submits the full target delta; capping a
+                # sell by settlement-limited availability is the matching
+                # stage's job, not an interpretation decision.
+                sell_quantity = -delta
                 intents.append(
                     OrderIntent(
                         intent_id=uuid5(

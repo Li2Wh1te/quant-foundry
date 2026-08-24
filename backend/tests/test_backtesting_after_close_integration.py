@@ -121,13 +121,16 @@ class DocumentedDividendScenarioTests(unittest.TestCase):
             d1_sequences["cash_dividend_applied"], d1_sequences["portfolio_valued"]
         )
 
-        # The bought units are not sellable on the purchase day (T+1): the
-        # flatten decision on D1 submits nothing while availability is 0.
+        # The bought units are not sellable on the purchase day (T+1), but
+        # the flatten decision still submits the full sell delta: capping
+        # by availability is the matching stage's job, never the
+        # interpreter's.
         step1_types = [
             e.event_type for e in result.events if e.step_sequence == 1
         ]
-        self.assertNotIn("order_submitted", step1_types)
-        # Availability is restored before the D2 open match.
+        self.assertIn("order_submitted", step1_types)
+        # Availability is restored before the D2 open match and the sell
+        # fills there at the D2 open price of 101.
         self.assertIn("settlement_restored", [e.event_type for e in result.events if e.step_sequence == 2])
 
     def test_minimal_case_sample_and_decision_counts(self) -> None:
@@ -148,14 +151,25 @@ class DocumentedDividendScenarioTests(unittest.TestCase):
         # D1: the fill influences the same day's closing equity.
         self.assertIn("fill_created", types_by_step[1])
         self.assertEqual(result.equity_curve[1].equity, Decimal("10400"))
-        # D2: valuation only -- no decisions and no new orders.
-        self.assertEqual(types_by_step[2], {"settlement_restored", "portfolio_valued"})
+        # D2: settlement restore, the sell fills at the D2 open, and the
+        # final close valuation follows -- no decisions and no new orders.
+        self.assertEqual(
+            types_by_step[2],
+            {
+                "settlement_restored",
+                "fill_created",
+                "fill_applied",
+                "portfolio_valued",
+            },
+        )
 
     def test_final_equity_carries_position_at_d2_close(self) -> None:
         runner = document_scenario_runner()
         result = runner.run()
 
-        self.assertEqual(result.equity_curve[2].equity, Decimal("10500"))
+        # The flatten sell fills at the D2 open (101): 200 dividend cash
+        # plus 100 x 101 sale proceeds, with nothing left in position.
+        self.assertEqual(result.equity_curve[2].equity, Decimal("10300"))
 
 
 class OpenMatchCannotSpendSameDayDividendsTests(unittest.TestCase):
@@ -503,8 +517,8 @@ class DividendIdempotencyTests(unittest.TestCase):
 
 class SellAfterSettlementRestoreTests(unittest.TestCase):
     def test_sell_submitted_after_restore_fills_next_open(self) -> None:
-        """A flatten decision waits for T+1 availability, then the sell
-        fills at the following session's open."""
+        """The flatten sell is submitted while availability is zero and
+        fills at the next session's open after the T+1 restore."""
 
         axis = build_axis([D0, D1, D2, D3])
         market_data = DictMarketData(
@@ -538,43 +552,46 @@ class SellAfterSettlementRestoreTests(unittest.TestCase):
         by_step: dict[int, list[str]] = {}
         for event in result.events:
             by_step.setdefault(event.step_sequence, []).append(event.event_type)
-        # D1 close: flatten blocked by zero available quantity -> no order.
-        self.assertNotIn("order_submitted", by_step[1])
-        # D2: availability restored before the open; the close then submits
-        # the sell, which fills at the D3 open.
+        # D1 close: the flatten decision submits the full sell delta even
+        # though availability is still zero (T+1 not restored yet).
+        self.assertIn("order_submitted", by_step[1])
+        # D2: availability is restored before the open match, the sell
+        # fills at the D2 open (101), and the close then values the
+        # all-cash account.
         self.assertEqual(by_step[2][0], "settlement_restored")
-        self.assertIn("order_submitted", by_step[2])
-        # D3 open: the sell fills, accounting applies it, and only the final
-        # valuation follows.
-        self.assertEqual(
-            by_step[3], ["fill_created", "fill_applied", "portfolio_valued"]
+        self.assertIn("fill_created", by_step[2])
+        self.assertLess(
+            by_step[2].index("fill_created"), by_step[2].index("portfolio_valued")
         )
-        # Final equity is pure cash: the sell filled at the D3 open (102).
-        self.assertEqual(result.equity_curve[3].equity, Decimal("10200"))
+        # D3: nothing left to trade; only the final valuation remains.
+        self.assertEqual(by_step[3], ["portfolio_valued"])
+        # Final equity is pure cash: the sell filled at the D2 open (101).
+        self.assertEqual(result.equity_curve[3].equity, Decimal("10100"))
 
 
 class IdempotencyTests(unittest.TestCase):
     def test_replaying_a_fill_produces_no_duplicate_application(self) -> None:
         runner = document_scenario_runner(run_id="run-idem")
-        # Reach inside the fixture decorator to recover the produced fill.
+        # Reach inside the fixture decorator to recover the produced fills.
         result = runner.run()
         fills = runner._execution_model.recorded_fills
-        self.assertEqual(len(fills), 1)
+        self.assertEqual(len(fills), 2)
 
         accounting = runner._accounting
-        cash_before = runner._portfolio.account.cash_balances["CNY"]
-        application = accounting.apply_fill(runner._portfolio, fills[0])
-        self.assertFalse(application.applied)
-        self.assertEqual(
-            runner._portfolio.account.cash_balances["CNY"], cash_before
-        )
-        # Exactly one applied fact exists on the stream for that fill.
+        for fill in fills:
+            cash_before = runner._portfolio.account.cash_balances["CNY"]
+            application = accounting.apply_fill(runner._portfolio, fill)
+            self.assertFalse(application.applied)
+            self.assertEqual(
+                runner._portfolio.account.cash_balances["CNY"], cash_before
+            )
+        # Exactly one applied fact exists on the stream for every fill.
         applied_ids = {
             e.payload["fill_id"]
             for e in result.events
             if e.event_type == "fill_applied"
         }
-        self.assertEqual(applied_ids, {str(fills[0].fill_id)})
+        self.assertEqual(applied_ids, {str(fill.fill_id) for fill in fills})
 
     def test_repeated_runs_do_not_double_apply_fills(self) -> None:
         first = document_scenario_runner(run_id="same")
