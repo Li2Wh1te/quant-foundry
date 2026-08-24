@@ -20,8 +20,9 @@ policy: ``pre_open_settle -> observe -> match -> account -> cash_actions ->
 value -> analyze -> decide -> submit``, where ``pre_open_settle`` restores
 T+1 sale availability before the open match (the task package's
 ``settle_restore``), ``observe`` observes the session open, and
-``cash_actions`` applies cash dividends with ``effective_date = D`` after
-matching (the task package's ``cash_effective``).
+``cash_actions`` freezes record-date dividend entitlements and credits
+cash dividends in their derived cash-effective session, strictly after
+that session's opening match (the task package's ``cash_effective``).
 """
 
 from __future__ import annotations
@@ -49,6 +50,12 @@ from app.backtesting.domain import (
     ValuationStatus,
     _aware_datetime,
     _positive,
+)
+from app.backtesting.dividends import (
+    CashDividendEvent,
+    DividendDerivationError,
+    DividendError,
+    entitlement_from_portfolio,
 )
 from app.backtesting.execution import (
     ExecutionModel,
@@ -549,47 +556,67 @@ class StrategyProgram(Protocol):
         ...
 
 
-@dataclass(frozen=True, slots=True)
-class CashDividend:
-    """One cash dividend becoming effective on a specific session date.
-
-    ``event_key`` is the stable machine identity of the corporate action
-    (assigned by the source); the runner derives its idempotency id from
-    it, so two distinct actions on the same instrument and day never
-    collapse into one.  The amount and date are validated here so an
-    unverified corporate action can never enter the accounting pipeline.
-    """
-
-    event_key: str
-    instrument_id: UUID
-    effective_date: date
-    amount_per_share: Decimal
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.event_key, str) or not self.event_key.strip():
-            raise DomainValidationError(
-                "event_key must be non-blank text; every corporate action "
-                "needs a stable identity for idempotent accounting"
-            )
-        if not isinstance(self.instrument_id, UUID):
-            raise DomainValidationError("instrument_id must be a UUID")
-        if isinstance(self.effective_date, datetime) or not isinstance(
-            self.effective_date, date
-        ):
-            raise DomainValidationError(
-                "effective_date must be a calendar date"
-            )
-        object.__setattr__(
-            self,
-            "amount_per_share",
-            _positive(self.amount_per_share, "amount_per_share"),
-        )
-
-
 class CorporateActionSource(Protocol):
-    def cash_dividends(
-        self, effective_date: date
-    ) -> tuple[CashDividend, ...]: ...
+    def cash_dividend_events(self) -> tuple[CashDividendEvent, ...]:
+        """Return every cash-dividend event of this run's scope."""
+        ...
+
+
+#: Supported entitlement derivation rules are resolved by
+#: :func:`_dividend_includes_pending_settlement`; the pending-lot choice
+#: is part of the frozen rule identity, never inferred.
+def _dividend_includes_pending_settlement(
+    event: CashDividendEvent,
+) -> bool:
+    """Resolve the declared entitlement rule's pending-lot handling."""
+
+    from app.backtesting.dividends import DividendEntitlementRuleError
+
+    if (
+        event.derivation_rule_key == "record_date_entitlement"
+        and event.derivation_rule_version == 1
+    ):
+        return True
+    if (
+        event.derivation_rule_key == "record_date_entitlement_settled_only"
+        and event.derivation_rule_version == 1
+    ):
+        return False
+    raise DividendEntitlementRuleError(
+        f"dividend event {event.event_id} declares unsupported "
+        f"entitlement rule {event.derivation_rule_key}@"
+        f"{event.derivation_rule_version}",
+    )
+
+
+def _load_dividend_declarations(
+    corporate_actions: CorporateActionSource | None,
+) -> tuple[CashDividendEvent, ...]:
+    """Load and deterministically order this run's dividend declarations."""
+
+    if corporate_actions is None:
+        return ()
+    if not hasattr(corporate_actions, "cash_dividend_events"):
+        raise DomainValidationError(
+            "corporate_actions must satisfy CorporateActionSource with "
+            "cash_dividend_events(); arrival-day dividend sources are no "
+            "longer accepted"
+        )
+    declarations = tuple(corporate_actions.cash_dividend_events())
+    seen: set[UUID] = set()
+    for event in declarations:
+        if event.event_id in seen:
+            raise DividendError(
+                f"dividend event id {event.event_id} was declared twice; "
+                "ids are unique across the whole run"
+            )
+        seen.add(event.event_id)
+    return tuple(
+        sorted(
+            declarations,
+            key=lambda event: (str(event.instrument_id), str(event.event_id)),
+        )
+    )
 
 
 class DecisionInterpreter(Protocol):
@@ -878,6 +905,14 @@ class DeterministicBacktestRunner:
         self._portfolio = initial_portfolio
         self._orders: list[Order] = []
         self._pending_fills: tuple[Fill, ...] = ()
+        # Cash-dividend state: declarations come from the source with the
+        # entitlement still open; the runner freezes each entitlement in
+        # its record-date session and credits it in the derived
+        # cash-effective session, strictly after that session's match.
+        self._dividend_declarations: tuple[CashDividendEvent, ...] = (
+            _load_dividend_declarations(corporate_actions)
+        )
+        self._completed_dividend_events: dict[UUID, CashDividendEvent] = {}
         # Frozen trading facts observed from engine views; later phases
         # without a view (submit, account) reuse exactly these values.
         self._instrument_facts: dict[UUID, InstrumentFacts] = {}
@@ -1362,9 +1397,48 @@ class DeterministicBacktestRunner:
                     "order_id": str(fill.order_id),
                     "instrument_id": str(fill.instrument_id),
                     "side": fill.side.value,
-                    "price": fill.price,
+                    "reference_price": fill.reference_price,
+                    "execution_price": fill.price,
                     "quantity": fill.quantity,
+                    "contract_multiplier": fill.contract_multiplier,
+                    "notional": fill.gross_notional,
                     "fees": fill.fees,
+                    "fee_breakdown": (
+                        {
+                            "schedule_key": fill.fee_breakdown.schedule_key,
+                            "schedule_version": (
+                                fill.fee_breakdown.schedule_version
+                            ),
+                            "currency": fill.fee_breakdown.currency,
+                            "total": fill.fee_breakdown.total,
+                            "components": [
+                                {
+                                    "rule_key": component.rule_key,
+                                    "category": component.category,
+                                    "base_amount": component.base_amount,
+                                    "raw_amount": component.raw_amount,
+                                    "amount": component.amount,
+                                }
+                                for component in fill.fee_breakdown.components
+                            ],
+                        }
+                        if fill.fee_breakdown is not None
+                        else None
+                    ),
+                    "slippage_bps": fill.slippage_bps,
+                    "slippage_model_key": fill.slippage_model_key,
+                    "slippage_model_version": fill.slippage_model_version,
+                    "slippage_model_parameters": (
+                        dict(fill.slippage_model_parameters)
+                        if fill.slippage_model_parameters is not None
+                        else None
+                    ),
+                    "settlement_lot_id": (
+                        str(lot_id)
+                        if (lot_id := self._accounting.settlement_lot_for_fill(fill.fill_id))
+                        is not None
+                        else None
+                    ),
                 },
             )
             for fill in result.fills
@@ -1421,6 +1495,19 @@ class DeterministicBacktestRunner:
                         "applied": True,
                         "cash_delta": application.cash_delta,
                         "realized_pnl_delta": application.realized_pnl_delta,
+                        # The lot exists only after the fill is applied,
+                        # so the settlement-lot reference is audited here
+                        # rather than in the earlier fill_created event.
+                        "settlement_lot_id": (
+                            str(lot_id)
+                            if (
+                                lot_id := self._accounting.settlement_lot_for_fill(
+                                    fill.fill_id
+                                )
+                            )
+                            is not None
+                            else None
+                        ),
                     },
                 )
             )
@@ -1467,37 +1554,48 @@ class DeterministicBacktestRunner:
     ) -> list[tuple[str, Mapping[str, Any]]]:
         if self._corporate_actions is None:
             return []
-        dividends = sorted(
-            self._corporate_actions.cash_dividends(context.session_date),
-            # event_key keeps same-instrument actions in a deterministic
-            # order regardless of the source's return order.
-            key=lambda dividend: (
-                str(dividend.instrument_id),
-                dividend.event_key,
-            ),
-        )
         emitted: list[tuple[str, Mapping[str, Any]]] = []
-        for dividend in dividends:
-            if dividend.effective_date != context.session_date:
-                raise DomainValidationError(
-                    f"corporate-action source returned dividend "
-                    f"{dividend.event_key!r} effective "
-                    f"{dividend.effective_date.isoformat()} outside the "
-                    f"requested session {context.session_date.isoformat()}"
-                )
-            # The deterministic event id derives from the action's stable
-            # identity: a retried phase replays the same id (accounting
-            # rejects duplicates), while two distinct actions on the same
-            # instrument and day stay separate accounting events.
-            dividend_event_id = self._derived_id(
-                f"cash-dividend:{dividend.event_key}"
+        today = context.session_date
+
+        # Freeze first: an event whose record date is today completes its
+        # entitlement from the post-match portfolio of this session.  The
+        # declared derivation rule states explicitly whether unsettled
+        # T+1 lots count; nothing about the rule is inferred.
+        for declaration in self._dividend_declarations:
+            already_frozen = (
+                declaration.is_entitlement_frozen
+                or declaration.event_id in self._completed_dividend_events
             )
-            application = self._accounting.apply_cash_dividend(
+            if declaration.record_date == today:
+                self._freeze_dividend_entitlement(declaration)
+            elif (
+                declaration.record_date < today
+                and not already_frozen
+                and declaration.cash_effective_session_id >= today
+            ):
+                raise DividendDerivationError(
+                    f"dividend event {declaration.event_id} has record "
+                    f"date {declaration.record_date.isoformat()} before "
+                    f"the run window but no frozen entitlement; the "
+                    "source must supply the entitlement quantity"
+                )
+
+        # Credit second: due events land after this session's opening
+        # match has fully committed (the fixed phase order guarantees it),
+        # so dividend cash can never fund the same morning's checks.
+        due = sorted(
+            (
+                event
+                for event in self._completed_dividend_events.values()
+                if event.cash_effective_session_id == today
+            ),
+            key=lambda event: (str(event.instrument_id), str(event.event_id)),
+        )
+        for event in due:
+            application = self._accounting.apply_cash_dividend_event(
                 self._portfolio,
-                dividend_event_id=dividend_event_id,
-                instrument_id=dividend.instrument_id,
-                effective_date=dividend.effective_date,
-                amount_per_share=dividend.amount_per_share,
+                event,
+                session_date=today,
             )
             if not application.applied:
                 continue
@@ -1505,16 +1603,44 @@ class DeterministicBacktestRunner:
                 self._emit_pair(
                     BacktestEventType.CASH_DIVIDEND_APPLIED,
                     {
-                        "dividend_event_id": str(dividend_event_id),
-                        "instrument_id": str(dividend.instrument_id),
-                        "effective_date": context.session_date.isoformat(),
-                        "amount_per_share": dividend.amount_per_share,
+                        "dividend_event_id": str(event.event_id),
+                        "instrument_id": str(event.instrument_id),
+                        "record_date": event.record_date.isoformat(),
+                        "cash_effective_session_id": (
+                            event.cash_effective_session_id.isoformat()
+                        ),
+                        "cash_effective_phase": (
+                            event.cash_effective_phase.value
+                        ),
+                        "amount_per_share": event.amount_per_share,
+                        "entitlement_quantity": event.entitlement_quantity,
+                        "withholding_tax": event.withholding_tax,
+                        "currency": event.currency,
+                        "derivation_rule_key": event.derivation_rule_key,
+                        "derivation_rule_version": event.derivation_rule_version,
                         "quantity": application.quantity,
                         "cash_delta": application.cash_delta,
                     },
                 )
             )
         return emitted
+
+    def _freeze_dividend_entitlement(
+        self, declaration: CashDividendEvent
+    ) -> None:
+        """Freeze one open entitlement exactly once, on its record date."""
+
+        if declaration.event_id in self._completed_dividend_events:
+            return
+        include_pending = _dividend_includes_pending_settlement(declaration)
+        quantity = entitlement_from_portfolio(
+            self._portfolio,
+            self._accounting,
+            instrument_id=declaration.instrument_id,
+            include_pending_settlement=include_pending,
+        )
+        completed = declaration.with_entitlement(quantity)
+        self._completed_dividend_events[declaration.event_id] = completed
 
     # ------------------------------------------------------------------
     # Close-time phases

@@ -15,7 +15,7 @@ from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
-from uuid import UUID
+from uuid import UUID, uuid5
 
 from app.backtesting.domain import (
     ZERO,
@@ -79,6 +79,17 @@ class SettlementPolicy(StrEnum):
     T_PLUS_ONE = "t_plus_1"
 
 
+class SettlementReleasePhase(StrEnum):
+    """Fixed pipeline point where a settlement batch is released.
+
+    The first formal release phase only is ``before_open_match``: units
+    bought in session D become sellable right before the opening match
+    of their next open session.
+    """
+
+    BEFORE_OPEN_MATCH = "before_open_match"
+
+
 class SettlementError(DomainValidationError):
     """Base class of stable settlement-accounting failures.
 
@@ -114,12 +125,15 @@ class DeferredSettlementPlan:
     ``app.backtesting.settlement``) so accounting never has to guess
     dates later.  ``settlement_session`` must be strictly after
     ``trade_session``: a same-session release is by definition not
-    T+1-before-open-match.
+    T+1-before-open-match.  ``calendar_version`` pins the calendar
+    definition version the plan was resolved against when the source
+    provides one; batches carry it into their audit trail.
     """
 
     calendar_id: str
     trade_session: date
     settlement_session: date
+    calendar_version: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.calendar_id, str) or not self.calendar_id.strip():
@@ -134,6 +148,13 @@ class DeferredSettlementPlan:
             raise SettlementError(
                 "settlement_session must be strictly after trade_session "
                 "(T+1 releases happen before the next open-session match)"
+            )
+        if self.calendar_version is not None and (
+            not isinstance(self.calendar_version, str)
+            or not self.calendar_version.strip()
+        ):
+            raise SettlementError(
+                "calendar_version must be non-blank text when provided"
             )
 
 
@@ -184,12 +205,14 @@ class SettlementRelease:
 
 @dataclass(frozen=True, slots=True)
 class PendingSettlement:
-    """One immutable batch of bought units awaiting its T+1 release.
+    """One immutable settlement lot of bought units awaiting release.
 
-    Batches are never merged across different trade sessions: doing so
-    would lose the settlement date and the auditable source fill.  Batches
-    from the same trade session stay separate too, so every fill keeps its
-    own ``source_fill_id`` trail.
+    Lots are never merged across different trade sessions: doing so
+    would lose the settlement date and the auditable source fill.  Lots
+    from the same trade session stay separate too, so every fill keeps
+    its own ``source_fill_id`` trail.  ``lot_id`` is derived
+    deterministically from the source fill, giving fills and result
+    records a stable ``settlement_lot_id`` reference.
     """
 
     instrument_id: UUID
@@ -198,6 +221,11 @@ class PendingSettlement:
     settlement_session: date
     calendar_id: str
     source_fill_id: UUID
+    calendar_version: str | None = None
+    release_phase: SettlementReleasePhase = (
+        SettlementReleasePhase.BEFORE_OPEN_MATCH
+    )
+    lot_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -222,6 +250,42 @@ class PendingSettlement:
             raise SettlementError("calendar_id must be non-blank text")
         if not isinstance(self.source_fill_id, UUID):
             raise SettlementError("source_fill_id must be a UUID")
+        if self.calendar_version is not None and (
+            not isinstance(self.calendar_version, str)
+            or not self.calendar_version.strip()
+        ):
+            raise SettlementError(
+                "calendar_version must be non-blank text when provided"
+            )
+        try:
+            object.__setattr__(
+                self,
+                "release_phase",
+                SettlementReleasePhase(self.release_phase),
+            )
+        except ValueError as exc:
+            raise SettlementError(
+                "only before_open_match settlement release is supported"
+            ) from exc
+        if self.lot_id is None:
+            object.__setattr__(
+                self,
+                "lot_id",
+                uuid5(
+                    self.source_fill_id,
+                    f"settlement-lot:{self.calendar_id}:"
+                    f"{self.trade_session.isoformat()}:"
+                    f"{self.settlement_session.isoformat()}",
+                ),
+            )
+        elif not isinstance(self.lot_id, UUID):
+            raise SettlementError("lot_id must be a UUID when provided")
+
+    @property
+    def release_session_id(self) -> date:
+        """Session whose pre-open-match boundary releases this lot."""
+
+        return self.settlement_session
 
 
 def _currency(value: str) -> str:
@@ -490,14 +554,13 @@ class AccountingPolicy:
         effective_date: date,
         amount_per_share: Decimal | int | str,
     ) -> "CashDividendApplication":
-        """Apply one cash dividend as an explicit accounting event.
+        """Legacy arrival-day dividend credit (in-memory fixtures only).
 
-        The dividend is the only account mutation besides fills and
-        settlement releases.  ``dividend_event_id`` is the idempotency key:
-        replaying the same corporate-action event (a retried phase) is a
-        no-op instead of a second credit.  The id stays consumed even when
-        no position exists on the record date, so a later position cannot
-        retroactively claim the same event.
+        This path credits whatever position is held on the arrival day,
+        which is exactly the semantics the frozen corporate-action model
+        forbids for formal runs.  The formal path is
+        :meth:`apply_cash_dividend_event`; this method stays only so old
+        in-memory fixtures keep running.
         """
 
         if not isinstance(dividend_event_id, UUID):
@@ -549,6 +612,104 @@ class AccountingPolicy:
             cash_delta=cash_delta,
         )
 
+    def apply_cash_dividend_event(
+        self,
+        portfolio: PortfolioState,
+        event: "CashDividendEvent",
+        *,
+        session_date: date,
+    ) -> "CashDividendApplication":
+        """Apply one record-date-based cash-dividend event atomically.
+
+        Formal corporate-action path.  The event carries its frozen
+        ``entitlement_quantity`` (fixed on the record date), so selling
+        after the record date keeps the dividend and buying after it
+        gains nothing — the position held today is deliberately not
+        consulted.  The call is refused unless it happens in exactly the
+        event's ``cash_effective_session_id``; the runner's phase order
+        guarantees this is strictly after that session's opening match,
+        so dividend cash can never fund the same morning's checks.
+
+        ``event.event_id`` is the idempotency key: replaying the same
+        event (a retried phase) is a no-op instead of a second credit.
+        Reversals debit the net amount and are rejected when the debit
+        would drive cash negative, keeping the non-negative invariant.
+        """
+
+        from app.backtesting.dividends import (
+            CashEffectivePhase,
+            DividendEntryKind,
+            DividendError,
+        )
+
+        if not isinstance(event.event_id, UUID):
+            raise DividendError("event_id must be a UUID")
+        if isinstance(session_date, datetime) or not isinstance(session_date, date):
+            raise DividendError("session_date must be a calendar date")
+        if event.cash_effective_phase is not CashEffectivePhase.AFTER_OPEN_MATCH:
+            raise DividendError(
+                "only after_open_match cash dividends are supported"
+            )
+        if session_date != event.cash_effective_session_id:
+            raise DividendError(
+                f"dividend event {event.event_id} becomes effective in "
+                f"session {event.cash_effective_session_id.isoformat()}, "
+                f"not {session_date.isoformat()}; crediting it elsewhere "
+                "would break the after-open-match ordering"
+            )
+        if event.entry_kind is DividendEntryKind.REVERSAL:
+            if event.revision_of_event_id is None:
+                raise DividendError(
+                    f"reversal event {event.event_id} must reference the "
+                    "original event it revises"
+                )
+        account = portfolio.account
+        if self.currency not in account.cash_balances:
+            raise AccountingError(
+                f"account has no cash balance for currency {self.currency!r}"
+            )
+        if event.currency != self.currency:
+            raise DividendError(
+                f"dividend event {event.event_id} is declared in "
+                f"{event.currency} but the accounting policy currency is "
+                f"{self.currency}"
+            )
+
+        if event.event_id in self._processed_dividend_event_ids:
+            return CashDividendApplication(
+                dividend_event_id=event.event_id,
+                applied=False,
+                quantity=ZERO,
+                cash_delta=ZERO,
+            )
+        # Consume the id before mutating: a retried batch can never pay
+        # the same corporate action twice.
+        self._processed_dividend_event_ids.add(event.event_id)
+        cash_delta = event.net_cash_delta
+        current_cash = account.cash_balances[self.currency]
+        new_cash = current_cash + cash_delta
+        if new_cash < ZERO:
+            raise AccountingError(
+                f"reversal event {event.event_id} would drive cash negative",
+                details={
+                    "event_id": str(event.event_id),
+                    "current_cash": str(current_cash),
+                    "cash_delta": str(cash_delta),
+                },
+            )
+        account.cash_balances[self.currency] = new_cash
+        account.available_cash = account.available_cash + cash_delta
+        return CashDividendApplication(
+            dividend_event_id=event.event_id,
+            applied=True,
+            quantity=(
+                event.entitlement_quantity
+                if event.entitlement_quantity is not None
+                else ZERO
+            ),
+            cash_delta=cash_delta,
+        )
+
     def pending_batches(self) -> tuple[PendingSettlement, ...]:
         """Batches awaiting release, in fill order (audit view)."""
 
@@ -563,6 +724,21 @@ class AccountingPolicy:
         """Applied settlement boundaries, in application order (audit)."""
 
         return self._release_history
+
+    def settlement_lot_for_fill(self, fill_id: UUID) -> UUID | None:
+        """Return the settlement lot id a buy fill produced, if any.
+
+        Result records attach this as the fill's ``settlement_lot_id`` so
+        every buy fill is traceable to its exact release lot.
+        """
+
+        for batch in self._pending_settlement:
+            if batch.source_fill_id == fill_id:
+                return batch.lot_id
+        for batch in self._settled_batches:
+            if batch.source_fill_id == fill_id:
+                return batch.lot_id
+        return None
 
     def _snapshot_internal_state(self) -> "AccountingInternalSnapshot":
         """Capture the mutable internals for a shadow-account transaction."""
@@ -858,7 +1034,13 @@ class AccountingPolicy:
         # All validation above happens before mutating the live state.  This
         # keeps an insufficient-cash or malformed-fill failure atomic.
         account = portfolio.account
-        account.cash_balances[self.currency] = current_cash - cash_required
+        new_cash = current_cash - cash_required
+        if new_cash < ZERO:
+            raise InsufficientCashError(
+                f"buy would leave {new_cash} {self.currency} cash; the "
+                "cash balance can never go negative"
+            )
+        account.cash_balances[self.currency] = new_cash
         account.available_cash -= cash_required
         portfolio.positions[fill.instrument_id] = new_position
         if self._uses_deferred_settlement and settlement_plan is not None:
@@ -869,6 +1051,7 @@ class AccountingPolicy:
                     trade_session=settlement_plan.trade_session,
                     settlement_session=settlement_plan.settlement_session,
                     calendar_id=settlement_plan.calendar_id,
+                    calendar_version=settlement_plan.calendar_version,
                     source_fill_id=fill.fill_id,
                 )
             )
@@ -922,7 +1105,13 @@ class AccountingPolicy:
 
         cash_delta = fill.notional - fill.fees
         account = portfolio.account
-        account.cash_balances[self.currency] = current_cash + cash_delta
+        new_cash = current_cash + cash_delta
+        if new_cash < ZERO:
+            raise AccountingError(
+                "sell proceeds would leave cash negative; the batch is "
+                "refused instead of committing a negative balance"
+            )
+        account.cash_balances[self.currency] = new_cash
         account.available_cash += cash_delta
         if new_position is None:
             del portfolio.positions[fill.instrument_id]

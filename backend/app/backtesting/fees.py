@@ -9,6 +9,8 @@ global rounding policy or consults a platform-wide default.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP
 from enum import StrEnum
@@ -50,6 +52,18 @@ class FeeBaseMeasure(StrEnum):
     GROSS_NOTIONAL = "gross_notional"
     QUANTITY = "quantity"
     FIXED = "fixed"
+
+
+class FeeRuleType(StrEnum):
+    """Fee rule shapes admitted by the first formal slice.
+
+    Only the simple ``max(rate_fee, minimum) + fixed_amount`` shape
+    exists.  Rebates, tiered rates, fee caps, and waivers are structurally
+    impossible here; declaring such a type is rejected with a stable
+    error instead of being silently misread as a simple rule.
+    """
+
+    SIMPLE_RATE = "simple_rate"
 
 
 class FeeChargeTiming(StrEnum):
@@ -132,6 +146,7 @@ class FeeRule:
     fixed_amount: Decimal | int | str = ZERO
     base_measure: FeeBaseMeasure | str = FeeBaseMeasure.GROSS_NOTIONAL
     charge_timing: FeeChargeTiming | str = FeeChargeTiming.ON_FILL
+    rule_type: FeeRuleType | str = FeeRuleType.SIMPLE_RATE
     currency: str | None = None
     rounding_level: FeeRoundingLevel | str | None = None
     rounding_scope: str | None = None
@@ -158,6 +173,14 @@ class FeeRule:
         except ValueError as exc:
             raise FeeError(
                 "only on_fill fee charge timing is supported in the first slice"
+            ) from exc
+        try:
+            object.__setattr__(self, "rule_type", FeeRuleType(self.rule_type))
+        except ValueError as exc:
+            raise FeeError(
+                f"fee rule type {self.rule_type!r} is unsupported: rebates, "
+                "tiered rates, fee caps, and waivers are not supported in "
+                "the first slice",
             ) from exc
         rate = _decimal(self.rate, f"fee_rules[{self.key}].rate")
         minimum = _decimal(self.minimum, f"fee_rules[{self.key}].minimum")
@@ -252,6 +275,17 @@ class FeeRule:
             raise FeeError(f"fee rule {self.key!r} is missing rounding_mode")
         if self.rounding_precision is None:
             raise FeeError(f"fee rule {self.key!r} is missing rounding_precision")
+        if (
+            self.base_measure is FeeBaseMeasure.FIXED
+            and (self.rate > ZERO or self.minimum > ZERO)
+        ):
+            # Fixed-amount rules ignore rate/minimum by declaration; a
+            # configured nonzero value would silently never charge.
+            raise FeeError(
+                f"fee rule {self.key!r} declares a fixed base but also "
+                "configures a rate or minimum; such components are "
+                "ignored by declaration and the configuration is rejected"
+            )
 
     def require_currency_compatible(self, currency: str) -> None:
         """Fail closed when the rule currency conflicts with the fill."""
@@ -566,3 +600,138 @@ def fee_snapshot_for_rules(
         metadata=dict(getattr(schedule, "metadata", {}) or {}),
         version=getattr(schedule, "version", None),
     )
+
+
+def _rule_digest_payload(rule: FeeRule) -> dict[str, object]:
+    """Canonical JSON-safe representation of one rule for content hashing."""
+
+    return {
+        "key": rule.key,
+        "category": rule.category,
+        "side": rule.side,
+        "rate": format(rule.rate, "f"),
+        "minimum": format(rule.minimum, "f"),
+        "fixed_amount": format(rule.fixed_amount, "f"),
+        "base_measure": FeeBaseMeasure(rule.base_measure).value,
+        "charge_timing": FeeChargeTiming(rule.charge_timing).value,
+        "rule_type": FeeRuleType(rule.rule_type).value,
+        "currency": rule.currency,
+        "rounding_level": (
+            FeeRoundingLevel(rule.rounding_level).value
+            if rule.rounding_level is not None
+            else None
+        ),
+        "rounding_scope": rule.rounding_scope,
+        "rounding_mode": (
+            FeeRoundingMode(rule.rounding_mode).value
+            if rule.rounding_mode is not None
+            else None
+        ),
+        "rounding_precision": (
+            format(rule.rounding_precision, "f")
+            if rule.rounding_precision is not None
+            else None
+        ),
+        "applicability": {
+            str(k): str(v)
+            for k, v in sorted(
+                rule.applicability.items(), key=lambda item: str(item[0])
+            )
+        },
+    }
+
+
+def _schedule_digest(snapshot: FeeScheduleSnapshot) -> str:
+    """Content digest used to detect conflicting duplicate registrations."""
+
+    encoded = json.dumps(
+        {
+            "key": snapshot.key,
+            "version": snapshot.version,
+            "metadata": {
+                str(k): str(v)
+                for k, v in sorted(
+                    snapshot.metadata.items(), key=lambda item: str(item[0])
+                )
+            },
+            "fee_rules": [_rule_digest_payload(rule) for rule in snapshot.fee_rules],
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class FeeScheduleVersionRegistry:
+    """Immutable ``(key, version)`` registry of fee-schedule snapshots.
+
+    Fee schedules use immutable versions: a configuration change creates a
+    new version and never overwrites a historical one.  Registering the
+    same key and version twice is only accepted when the complete rule
+    content is identical (an idempotent replay); any content difference
+    raises instead of rewriting history.  Lookups return detached frozen
+    snapshots, so later registry changes cannot leak into an already
+    resolved account binding.
+    """
+
+    def __init__(self) -> None:
+        self._snapshots: dict[tuple[str, int], FeeScheduleSnapshot] = {}
+        self._digests: dict[tuple[str, int], str] = {}
+
+    def register(
+        self,
+        schedule: FeeSchedule | FeeScheduleSnapshot,
+        *,
+        version: int,
+    ) -> FeeScheduleSnapshot:
+        """Register one immutable version and return its stored snapshot."""
+
+        if (
+            isinstance(version, bool)
+            or not isinstance(version, int)
+            or version <= 0
+        ):
+            raise FeeError("fee schedule version must be a positive integer")
+        snapshot = schedule if isinstance(schedule, FeeScheduleSnapshot) else schedule.snapshot()
+        snapshot.validate_for_run()
+        if snapshot.version is None:
+            # Stamp the registered version onto the frozen snapshot so
+            # every audit consumer sees the same version identity.
+            snapshot = FeeScheduleSnapshot(
+                key=snapshot.key,
+                fee_rules=snapshot.fee_rules,
+                metadata=snapshot.metadata,
+                version=version,
+            )
+        elif snapshot.version != version:
+            raise FeeError(
+                f"fee schedule {snapshot.key!r} carries version "
+                f"{snapshot.version} but was registered as version "
+                f"{version}"
+            )
+        digest = _schedule_digest(snapshot)
+        key = (snapshot.key.strip(), version)
+        existing = self._snapshots.get(key)
+        if existing is not None:
+            if self._digests[key] != digest:
+                raise FeeError(
+                    f"fee schedule {snapshot.key!r} version {version} is "
+                    "already registered with different content; fee "
+                    "versions are immutable"
+                )
+            return existing
+        self._snapshots[key] = snapshot
+        self._digests[key] = digest
+        return snapshot
+
+    def get(self, key: str, version: int) -> FeeScheduleSnapshot:
+        """Return the frozen snapshot or fail without a fallback."""
+
+        lookup = (key.strip(), version)
+        try:
+            return self._snapshots[lookup]
+        except KeyError as exc:
+            raise FeeError(
+                f"fee schedule {key!r} version {version} is not registered"
+            ) from exc

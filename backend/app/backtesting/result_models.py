@@ -518,6 +518,9 @@ class BacktestFillRecord:
     settlement_calendar_id: str | None = None
     settlement_due_session: date | None = None
     settlement_boundary_id: str | None = None
+    # Stable identity of the pending-settlement lot this buy fill produced;
+    # sells carry no lot and stay ``None``.
+    settlement_lot_id: UUID | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -602,6 +605,12 @@ class BacktestFillRecord:
                 raise DomainValidationError(
                     "settlement_due_session must be a calendar date"
                 )
+        if self.settlement_lot_id is not None and not isinstance(
+            self.settlement_lot_id, UUID
+        ):
+            raise DomainValidationError(
+                "settlement_lot_id must be a UUID when provided"
+            )
 
     @property
     def cursor_sort_key(self) -> tuple[datetime, UUID]:

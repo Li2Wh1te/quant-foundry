@@ -771,12 +771,20 @@ class PartialFillRecordTests(MatchingFixture):
         first_update = self.update_for(result, first)
         second_update = self.update_for(result, second)
         for update in (first_update, second_update):
+            # The order-level reason explains the cash shortfall that
+            # truncated the fill.
             self.assertIsNotNone(update.reason_code)
+            self.assertEqual(
+                update.reason_code.code,
+                MatchReasonCode.INSUFFICIENT_CASH.value,
+            )
             self.assertIsNotNone(update.remaining_reason_code.code)
             self.assertEqual(update.remaining_status, "terminal_unfilled")
+            # The unfilled remainder expires after the one-shot match
+            # under its own code instead of rolling to a later session.
             self.assertEqual(
                 update.remaining_reason_code.code,
-                MatchReasonCode.INSUFFICIENT_CASH.value,
+                MatchReasonCode.EXPIRED_AFTER_PARTIAL_FILL.value,
             )
             self.assertGreater(update.filled_quantity, Decimal("0"))
             self.assertLess(update.filled_quantity, update.requested_quantity)

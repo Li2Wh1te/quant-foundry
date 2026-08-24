@@ -10,7 +10,9 @@ and fill-application idempotency under retries.
 import unittest
 from datetime import date
 from decimal import Decimal
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+
+from app.backtesting.dividends import CashDividendEvent
 
 from tests.backtest_runtime_fixture import (
     CountingStrategyView,
@@ -29,33 +31,43 @@ D3 = date(2026, 8, 6)
 
 
 class StaticCorporateActions:
-    """Cash-dividend source backed by one fixed per-date table.
+    """Cash-dividend source emitting full corporate-action events.
 
     Entries are ``(event_key, instrument_id, amount_per_share)``; the
-    event key is the corporate action's stable identity.
+    event key is the corporate action's stable identity and derives the
+    unique ``event_id`` deterministically.  Fixture events register the
+    entitlement on their session day (post-match holdings) and land the
+    cash in that same session, strictly after its opening match.
     """
 
     def __init__(
         self,
         dividends_by_day: dict[date, list[tuple[str, UUID, str]]],
     ) -> None:
-        from app.backtesting.runtime import CashDividend
-
-        self._by_day = {
-            day: tuple(
-                CashDividend(
-                    event_key=event_key,
-                    instrument_id=instrument_id,
-                    effective_date=day,
-                    amount_per_share=Decimal(amount),
+        self._events: list[CashDividendEvent] = []
+        for day, entries in dividends_by_day.items():
+            for event_key, instrument_id, amount in entries:
+                self._events.append(
+                    CashDividendEvent(
+                        event_id=_dividend_event_id(event_key),
+                        instrument_id=instrument_id,
+                        ex_date=day,
+                        record_date=day,
+                        source_payment_date=day,
+                        source_arrival_date=day,
+                        cash_effective_session_id=day,
+                        amount_per_share=Decimal(amount),
+                    )
                 )
-                for event_key, instrument_id, amount in entries
-            )
-            for day, entries in dividends_by_day.items()
-        }
 
-    def cash_dividends(self, effective_date: date):
-        return self._by_day.get(effective_date, ())
+    def cash_dividend_events(self) -> tuple[CashDividendEvent, ...]:
+        return tuple(self._events)
+
+
+def _dividend_event_id(event_key: str) -> UUID:
+    """Deterministic unique event id derived from the stable action key."""
+
+    return uuid5(NAMESPACE_URL, f"quant-foundry:cash-dividend:{event_key}")
 
 
 def document_scenario_runner(*, run_id: str = "run-doc", initial_cash: str = "10000"):
@@ -95,7 +107,10 @@ class DocumentedDividendScenarioTests(unittest.TestCase):
 
         events = {(e.step_sequence, e.event_type): e for e in result.events}
         # Pre-match cash is the untouched 10,000; the buy consumes all of it.
-        self.assertEqual(events[(1, "fill_created")].payload["price"], Decimal("100"))
+        self.assertEqual(
+            events[(1, "fill_created")].payload["execution_price"],
+            Decimal("100"),
+        )
         self.assertEqual(
             events[(1, "fill_applied")].payload["cash_delta"], Decimal("-10000")
         )
@@ -502,12 +517,24 @@ class DividendIdempotencyTests(unittest.TestCase):
         event = dividend_events[0]
         cash_before = runner._portfolio.account.cash_balances["CNY"]
 
-        application = runner._accounting.apply_cash_dividend(
-            runner._portfolio,
-            dividend_event_id=UUID(event.payload["dividend_event_id"]),
+        # Replay the exact same event id through the accounting boundary.
+        from app.backtesting.dividends import CashDividendEvent
+
+        replay_event = CashDividendEvent(
+            event_id=UUID(event.payload["dividend_event_id"]),
             instrument_id=INSTRUMENT_ID,
-            effective_date=D1,
+            ex_date=D1,
+            record_date=D1,
+            source_payment_date=D1,
+            source_arrival_date=D1,
+            cash_effective_session_id=D1,
             amount_per_share=Decimal("2"),
+            entitlement_quantity=Decimal("100"),
+        )
+        application = runner._accounting.apply_cash_dividend_event(
+            runner._portfolio,
+            replay_event,
+            session_date=D1,
         )
         self.assertFalse(application.applied)
         self.assertEqual(

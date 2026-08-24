@@ -69,6 +69,9 @@ class MatchReasonCode(StrEnum):
     SELL_UNAVAILABLE_AT_PRICE_LIMIT = "SELL_UNAVAILABLE_AT_PRICE_LIMIT"
     INSUFFICIENT_CASH = "INSUFFICIENT_CASH"
     INSUFFICIENT_AVAILABLE_QUANTITY = "INSUFFICIENT_AVAILABLE_QUANTITY"
+    # A partially filled order never rolls its remainder over: the
+    # unfilled part expires after the one-shot match under its own code.
+    EXPIRED_AFTER_PARTIAL_FILL = "expired_after_partial_fill"
     NEGATIVE_NET_PROCEEDS = "NEGATIVE_NET_PROCEEDS"
     CASH_ALLOCATION_PRO_RATA_ROUNDED_TO_ZERO = (
         "CASH_ALLOCATION_PRO_RATA_ROUNDED_TO_ZERO"

@@ -1060,10 +1060,15 @@ class BarOpenMatchingModel:
             outcome.order_status = OrderStatus.FILLED
             outcome.remaining_status = "none"
         else:
+            # One-shot matching: the unfilled remainder expires instead of
+            # rolling to a later session, so it carries its own reason
+            # code while the order-level reason explains the shortfall.
             outcome.order_status = OrderStatus.PARTIALLY_FILLED
             outcome.remaining_status = "terminal_unfilled"
             outcome.reason_code = MatchReasonCode.INSUFFICIENT_CASH.value
-            outcome.remaining_reason_code = outcome.reason_code
+            outcome.remaining_reason_code = (
+                MatchReasonCode.EXPIRED_AFTER_PARTIAL_FILL.value
+            )
 
     # ------------------------------------------------------------------
     # Shared helpers

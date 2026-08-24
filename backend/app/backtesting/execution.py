@@ -439,8 +439,15 @@ class BarMarketExecutionModel:
         ordered = sorted(
             orders,
             key=lambda order: (
+                # side_stage: sells release proceeds before buys compete.
                 0 if order.side is OrderSide.SELL else 1,
                 str(order.instrument_id),
+                # In-run submission ordinal; legacy orders without one
+                # sort after sequenced ones deterministically instead of
+                # depending on collection order.
+                (0, order.submission_sequence)
+                if order.submission_sequence is not None
+                else (1, 0),
                 str(order.order_id),
             ),
         )
