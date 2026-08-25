@@ -1,25 +1,25 @@
-"""Run-failure finalization boundary for the metric analyzer subsystem.
+"""Run-failure and success finalization boundary for the analyzer subsystem.
 
-This module is the single agreed landing point for ``aborted`` analysis
-finalization (task package 06 section 10.2).  The deterministic runner
-stays fail-fast; this boundary owns everything that happens *after* the
-runner stopped:
+This module is the single agreed landing point for run-level analysis
+persistence (task package 06 section 10).  The deterministic runner stays
+fail-fast and database-free; this boundary owns everything that happens
+around ``runner.run_steps``:
 
 * :class:`AnalysisFailureSnapshot` -- immutable evidence bundle produced by
   ``DeterministicBacktestRunner.build_analysis_failure_snapshot()``;
-* :class:`AnalysisFinalizationCoordinator.execute_steps(...)` -- thin slice
-  executor that returns the runner's own ``BacktestRunResult`` on success,
-  and on an agreed valuation-blocked failure persists the already
-  determined analysis through :class:`AnalysisFinalizer` before re-raising
-  the original exception;
-* :class:`AnalysisFinalizer.finalize_aborted(...)` -- opens its own
-  SQLAlchemy Session via the injected ``session_factory`` and writes the
-  ``aborted`` run summary plus the determined metric rows in exactly one
-  independent transaction.
+* :class:`AnalysisFinalizationCoordinator.execute_steps(...)` -- slice
+  executor that returns the runner's own result on success while
+  persisting the matching analysis state (``partial`` progress or frozen
+  ``final`` metrics), and on an agreed valuation-blocked failure persists
+  the already determined analysis before re-raising the original
+  exception;
+* :class:`AnalysisFinalizer` -- opens its own SQLAlchemy Session via the
+  injected ``session_factory`` and writes summaries/metric rows in exactly
+  one independent transaction per call.
 
-The coordinator never converts a failure into a normal run result, never
-swallows the original exception, and never touches the runner's execution
-transaction.
+A ``session_factory`` is mandatory whenever the runner carries an analyzer
+engine: skipping persistence silently would let a "successful" run leave
+no queryable results at all.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from sqlalchemy.orm import Session
 
 from app.backtesting.analysis_inputs import EquityObservation
 from app.backtesting.analyzers import (
-    AnalysisStateConflictError,
     AnalysisStatus,
     AnalyzerEngine,
 )
@@ -65,7 +64,7 @@ ANALYSIS_FINALIZATION_CURSOR_SIGNING_KEY = "internal:analysis-finalization"
 
 
 class AnalysisFinalizationError(DomainValidationError):
-    """Raised when the independent aborted-persistence transaction fails.
+    """Raised when the independent persistence transaction fails.
 
     The triggering persistence error stays attached as ``__cause__``; the
     original run failure is re-raised separately by the coordinator, so a
@@ -75,7 +74,7 @@ class AnalysisFinalizationError(DomainValidationError):
 
 @dataclass(frozen=True, slots=True)
 class AnalysisFinalizationResult:
-    """Outcome of one successful aborted finalization."""
+    """Outcome of one successful terminal persistence."""
 
     status: str
     persisted_metric_count: int
@@ -129,8 +128,226 @@ class _SessionFactory(Protocol):
     def __call__(self) -> Session: ...
 
 
+def _metric_result_to_dto(result: Any, run_uuid: UUID) -> Any:
+    """Convert an analyzer MetricResult into its persistence DTO."""
+
+    from app.backtesting.result_models import BacktestMetricRecord
+
+    metadata = dict(result.analyzer_metadata or {})
+    return BacktestMetricRecord(
+        run_id=run_uuid,
+        metric_key=result.metric_key,
+        formula_version=result.formula_version,
+        value=result.value,
+        unit=result.unit,
+        sample_count=result.sample_count,
+        unavailable_reason=result.unavailable_reason,
+        annualization_factor=metadata.get("annualization_factor"),
+        risk_free_rate_note=metadata.get("risk_free_rate_note"),
+        analyzer_key=result.analyzer_key,
+        analyzer_version=result.analyzer_version,
+        analyzer_metadata=metadata,
+    )
+
+
+def _run_uuid_of(run_id: str) -> UUID:
+    try:
+        return UUID(run_id)
+    except ValueError as exc:
+        raise AnalysisFinalizationError(
+            f"run_id {run_id!r} is not a UUID; formal result rows require "
+            "UUID run identities"
+        ) from exc
+
+
+def _rate_evidence(analysis_snapshot: Any) -> dict[str, Any]:
+    """JSON-safe rate evidence block extracted from a partial snapshot."""
+
+    rate_snapshot = analysis_snapshot.rate_snapshot
+    if rate_snapshot is None:
+        return {
+            "rate_snapshot": None,
+            "rate_snapshot_hash": None,
+            "rate_source_versions": None,
+            "missing_ranges": None,
+        }
+    return {
+        "rate_snapshot": {
+            "rates": {
+                day.isoformat(): format(rate, "f")
+                for day, rate in sorted(rate_snapshot.rates.items())
+            },
+            "coverage_start": (
+                rate_snapshot.coverage_start.isoformat()
+                if rate_snapshot.coverage_start is not None
+                else None
+            ),
+            "coverage_end": (
+                rate_snapshot.coverage_end.isoformat()
+                if rate_snapshot.coverage_end is not None
+                else None
+            ),
+            "query_parameters": dict(rate_snapshot.query_parameters),
+        },
+        "rate_snapshot_hash": rate_snapshot.snapshot_hash,
+        "rate_source_versions": {
+            "source_key": rate_snapshot.source_key,
+            "source_version": rate_snapshot.source_version,
+        },
+        "missing_ranges": [
+            [start.isoformat(), end.isoformat()]
+            for start, end in (rate_snapshot.missing_ranges or ())
+        ],
+    }
+
+
 class AnalysisFinalizer:
-    """Persist determined analysis results of an aborted run."""
+    """Persist analyzer summaries and metrics in independent transactions."""
+
+    # -- shared internals ---------------------------------------------------
+
+    def _persist(
+        self,
+        summary: BacktestAnalysisSummaryRecord,
+        metric_dtos: list[Any],
+        session_factory: _SessionFactory,
+    ) -> tuple[UUID, int]:
+        """Write one summary plus its metrics in one new transaction.
+
+        Returns the persisted summary's id; values are captured before
+        commit because the ORM instance is detached afterwards.
+        """
+
+        try:
+            session = session_factory()
+            from app.backtesting.result_repository import BacktestResultRepository
+
+            repository = BacktestResultRepository(
+                session,
+                cursor_signing_key=ANALYSIS_FINALIZATION_CURSOR_SIGNING_KEY,
+            )
+            persisted = repository.upsert_analysis_summary(summary)
+            summary_id = persisted.id
+            written = repository.append_metrics(*metric_dtos)
+            session.commit()
+        except Exception as exc:
+            # A failed independent transaction must roll back cleanly and
+            # surface as a stable finalization error.
+            try:
+                session.rollback()
+            except Exception:
+                pass
+            raise AnalysisFinalizationError(
+                f"the analysis persistence transaction failed: {exc}"
+            ) from exc
+        return summary_id, written
+
+    def _base_summary_fields(
+        self,
+        analysis_snapshot: Any,
+        run_uuid: UUID,
+    ) -> dict[str, Any]:
+        counts = analysis_snapshot.summary_counts()
+        now = datetime.now(timezone.utc)
+        fields: dict[str, Any] = {
+            "run_id": run_uuid,
+            "analyzer_snapshot": {
+                "specs": [
+                    spec.describe() for spec in analysis_snapshot.specs
+                ],
+            },
+            "formula_signature": analysis_snapshot.formula_signature(),
+            "input_evidence_signature": (
+                analysis_snapshot.input_evidence_signature()
+            ),
+            "reporting_currency": analysis_snapshot.reporting_currency,
+            "initial_equity": counts.get("initial_equity"),
+            "valid_day_count": counts.get("valid_day_count"),
+            "fill_count": counts.get("fill_count"),
+            "gross_traded_notional": counts.get("gross_traded_notional"),
+            "cumulative_fees": counts.get("cumulative_fees"),
+            "created_at": now,
+            "updated_at": now,
+        }
+        fields.update(_rate_evidence(analysis_snapshot))
+        return fields
+
+    # -- success paths --------------------------------------------------------
+
+    def persist_partial(
+        self,
+        analysis_snapshot: Any,
+        *,
+        session_factory: _SessionFactory,
+        last_chunk_sequence: int | None = None,
+        completed_through_session: date | None = None,
+    ) -> UUID:
+        """Upsert a ``partial`` progress summary without writing metrics.
+
+        Partial checkpoints never touch the final metric table; only the
+        summary's progress fields and signatures are refreshed.
+        """
+
+        now = datetime.now(timezone.utc)
+        summary = BacktestAnalysisSummaryRecord(
+            **{
+                **self._base_summary_fields(
+                    analysis_snapshot, _run_uuid_of(analysis_snapshot.run_id)
+                ),
+                "status": AnalysisStatus.PARTIAL.value,
+                "last_chunk_sequence": last_chunk_sequence,
+                "completed_through_session": completed_through_session,
+                "abort_reason": None,
+                "failed_step_sequence": None,
+                "finalized_at": None,
+                "updated_at": now,
+            }
+        )
+        persisted_id, _ = self._persist(summary, [], session_factory)
+        return persisted_id
+
+    def persist_final(
+        self,
+        engine: AnalyzerEngine,
+        *,
+        session_factory: _SessionFactory,
+        completed_through_session: date | None = None,
+    ) -> AnalysisFinalizationResult:
+        """Write the frozen ``final`` summary and its complete metrics."""
+
+        status = engine.finalized_status
+        if status is not AnalysisStatus.FINAL:
+            raise AnalysisFinalizationError(
+                "the analyzer engine has not been finalized as final; "
+                "refusing to persist non-terminal results"
+            )
+        analysis_snapshot = engine.snapshot()
+        now = datetime.now(timezone.utc)
+        summary = BacktestAnalysisSummaryRecord(
+            **{
+                **self._base_summary_fields(analysis_snapshot, _run_uuid_of(analysis_snapshot.run_id)),
+                "status": AnalysisStatus.FINAL.value,
+                "last_chunk_sequence": None,
+                "completed_through_session": completed_through_session,
+                "abort_reason": None,
+                "failed_step_sequence": None,
+                "finalized_at": now,
+                "updated_at": now,
+            }
+        )
+        run_uuid = _run_uuid_of(analysis_snapshot.run_id)
+        metric_dtos = [
+            _metric_result_to_dto(result, run_uuid)
+            for result in (engine.final_results or ())
+        ]
+        persisted_id, written = self._persist(summary, metric_dtos, session_factory)
+        return AnalysisFinalizationResult(
+            status=AnalysisStatus.FINAL.value,
+            persisted_metric_count=written,
+            summary_id=persisted_id,
+        )
+
+    # -- abort path -------------------------------------------------------------
 
     def finalize_aborted(
         self,
@@ -160,162 +377,72 @@ class AnalysisFinalizer:
             results = engine.finalize(
                 AnalysisStatus.ABORTED, failure=failure_payload
             )
-        except AnalysisStateConflictError:
+        except Exception:
             # Idempotent retry path: keep the results frozen by the first
             # finalization instead of recomputing or overwriting them.
             results = engine.final_results or ()
-        try:
-            run_uuid = UUID(snapshot.run_id)
-        except ValueError as exc:
-            raise AnalysisFinalizationError(
-                f"run_id {snapshot.run_id!r} is not a UUID; formal result "
-                "rows require UUID run identities"
-            ) from exc
+        run_uuid = _run_uuid_of(snapshot.run_id)
 
-        try:
-            session = session_factory()
-            from app.backtesting.result_repository import BacktestResultRepository
-
-            repository = BacktestResultRepository(
-                session,
-                cursor_signing_key=ANALYSIS_FINALIZATION_CURSOR_SIGNING_KEY,
-            )
-            summary = self._build_summary(snapshot, run_uuid)
-            persisted = repository.upsert_analysis_summary(summary)
-            metric_dtos = [
-                _metric_result_to_dto(result, run_uuid) for result in results
-            ]
-            written = repository.append_metrics(*metric_dtos)
-            session.commit()
-        except Exception as exc:
-            # A failed independent transaction must roll back cleanly and
-            # surface as a stable finalization error; the original run
-            # failure is re-raised separately by the coordinator.
-            try:
-                session.rollback()
-            except Exception:
-                pass
-            raise AnalysisFinalizationError(
-                f"the aborted analysis persistence transaction failed: {exc}"
-            ) from exc
-        return AnalysisFinalizationResult(
-            status=AnalysisStatus.ABORTED.value,
-            persisted_metric_count=written,
-            summary_id=persisted.id,
-        )
-
-    def _build_summary(
-        self,
-        snapshot: AnalysisFailureSnapshot,
-        run_uuid: UUID,
-    ) -> BacktestAnalysisSummaryRecord:
-        analysis_snapshot = snapshot.analysis_snapshot
-        counts = analysis_snapshot.summary_counts()
-        rate_snapshot = analysis_snapshot.rate_snapshot
-        rate_payload: dict[str, Any] | None = None
-        source_versions: dict[str, Any] | None = None
-        missing_ranges: list[list[str]] | None = None
-        if rate_snapshot is not None:
-            rate_payload = {
-                "rates": {
-                    day.isoformat(): format(rate, "f")
-                    for day, rate in sorted(rate_snapshot.rates.items())
-                },
-                "coverage_start": (
-                    rate_snapshot.coverage_start.isoformat()
-                    if rate_snapshot.coverage_start is not None
-                    else None
-                ),
-                "coverage_end": (
-                    rate_snapshot.coverage_end.isoformat()
-                    if rate_snapshot.coverage_end is not None
-                    else None
-                ),
-                "query_parameters": dict(rate_snapshot.query_parameters),
-            }
-            source_versions = {
-                "source_key": rate_snapshot.source_key,
-                "source_version": rate_snapshot.source_version,
-            }
-            missing_ranges = [
-                [start.isoformat(), end.isoformat()]
-                for start, end in (rate_snapshot.missing_ranges or ())
-            ]
-        now = datetime.now(timezone.utc)
         blocked_payload = (
             snapshot.blocked_equity_observation.evidence_payload()
             if snapshot.blocked_equity_observation is not None
             else None
         )
         if blocked_payload is not None:
-            # Evidence payloads carry domain types (dates, Decimals); render
-            # them through the canonical JSON contract before persisting.
-            from app.backtesting.analysis_inputs import (
-                canonical_evidence_json,
-            )
+            # Evidence payloads carry domain types (dates, Decimals);
+            # render them through the canonical JSON contract first.
+            import json
 
-            import json as _json
+            from app.backtesting.analysis_inputs import canonical_evidence_json
 
-            blocked_payload = _json.loads(
+            blocked_payload = json.loads(
                 canonical_evidence_json(blocked_payload)
             )
-        return BacktestAnalysisSummaryRecord(
-            run_id=run_uuid,
+        analysis_snapshot = snapshot.analysis_snapshot
+        base_fields = self._base_summary_fields(analysis_snapshot, run_uuid)
+        specs_block = base_fields.pop("analyzer_snapshot")
+        specs_block["blocked_equity_observation"] = blocked_payload
+        now = datetime.now(timezone.utc)
+        summary = BacktestAnalysisSummaryRecord(
+            **{
+                **base_fields,
+                "analyzer_snapshot": specs_block,
+                "status": AnalysisStatus.ABORTED.value,
+                "last_chunk_sequence": snapshot.failed_step_sequence,
+                "completed_through_session": None,
+                "abort_reason": snapshot.error_message,
+                "failed_step_sequence": snapshot.failed_step_sequence,
+                "finalized_at": now,
+                "updated_at": now,
+            }
+        )
+        metric_dtos = [
+            _metric_result_to_dto(result, run_uuid) for result in results
+        ]
+        persisted_id, written = self._persist(summary, metric_dtos, session_factory)
+        return AnalysisFinalizationResult(
             status=AnalysisStatus.ABORTED.value,
-            analyzer_snapshot={
-                "specs": [
-                    spec.describe() for spec in analysis_snapshot.specs
-                ],
-                "blocked_equity_observation": blocked_payload,
-            },
-            formula_signature=snapshot.formula_signature,
-            input_evidence_signature=snapshot.input_evidence_signature,
-            reporting_currency=analysis_snapshot.reporting_currency,
-            initial_equity=counts.get("initial_equity"),
-            valid_day_count=snapshot.valid_day_count,
-            fill_count=snapshot.fill_count,
-            gross_traded_notional=counts.get("gross_traded_notional"),
-            cumulative_fees=counts.get("cumulative_fees"),
-            rate_snapshot=rate_payload,
-            rate_snapshot_hash=(
-                rate_snapshot.snapshot_hash if rate_snapshot is not None else None
-            ),
-            rate_source_versions=source_versions,
-            missing_ranges=missing_ranges,
-            last_chunk_sequence=snapshot.failed_step_sequence,
-            completed_through_session=None,
-            abort_reason=snapshot.error_message,
-            failed_step_sequence=snapshot.failed_step_sequence,
-            created_at=now,
-            updated_at=now,
-            finalized_at=now,
+            persisted_metric_count=written,
+            summary_id=persisted_id,
         )
 
 
-def _metric_result_to_dto(result: Any, run_uuid: UUID) -> Any:
-    """Convert an analyzer MetricResult into its persistence DTO."""
+def _completed_session_of(runner: Any, result: Any) -> date | None:
+    """Resolve the last completed step's official session from the axis."""
 
-    from app.backtesting.result_models import BacktestMetricRecord
-
-    metadata = dict(result.analyzer_metadata or {})
-    return BacktestMetricRecord(
-        run_id=run_uuid,
-        metric_key=result.metric_key,
-        formula_version=result.formula_version,
-        value=result.value,
-        unit=result.unit,
-        sample_count=result.sample_count,
-        unavailable_reason=result.unavailable_reason,
-        annualization_factor=metadata.get("annualization_factor"),
-        risk_free_rate_note=metadata.get("risk_free_rate_note"),
-        analyzer_key=result.analyzer_key,
-        analyzer_version=result.analyzer_version,
-        analyzer_metadata=metadata,
-    )
+    sequence = getattr(result, "completed_through_step_sequence", None)
+    axis = getattr(runner, "_axis", None)
+    if sequence is None or axis is None:
+        return None
+    try:
+        session_text = axis.at(sequence).metadata.get("session_date")
+        return date.fromisoformat(session_text) if isinstance(session_text, str) else None
+    except Exception:
+        return None
 
 
 class AnalysisFinalizationCoordinator:
-    """Execute runner steps with aborted-finalization semantics."""
+    """Execute runner steps with full analysis-persistence semantics."""
 
     def __init__(
         self,
@@ -334,17 +461,31 @@ class AnalysisFinalizationCoordinator:
         next_after_last: Any | None = None,
         session_factory: Callable[[], Session] | None = None,
     ):
-        """Run one slice; persist aborted analysis before re-raising.
+        """Run one slice and persist the matching analysis state.
 
-        Success returns the runner's own result untouched.  Only the agreed
-        abort triggers (:class:`ValuationBlockedError`, directly or as the
-        wrapped cause of a ``PhaseExecutionError``, plus the explicitly
-        listed unrecoverable types) enter failure finalization; every other
-        exception propagates unchanged.
+        Success returns the runner's own result untouched, but only after
+        its analysis state was persisted: ``final`` runs get their frozen
+        metrics plus the terminal summary, ``partial`` chunks refresh the
+        progress summary without touching the metric table.  When the
+        runner carries an analyzer engine, ``session_factory`` is
+        mandatory — a successful run must never silently skip persistence.
+
+        Only the agreed abort triggers (:class:`ValuationBlockedError`,
+        directly or as the wrapped cause of a ``PhaseExecutionError``,
+        plus the explicitly listed unrecoverable types) enter failure
+        finalization; every other exception propagates unchanged.
         """
 
+        has_engine = bool(getattr(runner, "_analysis_engine", None))
+        if has_engine and session_factory is None:
+            raise DomainValidationError(
+                "execute_steps requires a session_factory when the runner "
+                "carries an analyzer engine; analysis results must always "
+                "be persisted, never silently dropped"
+            )
+
         try:
-            return runner.run_steps(steps, next_after_last=next_after_last)
+            result = runner.run_steps(steps, next_after_last=next_after_last)
         except BaseException as exc:
             blocked = unwrap_valuation_blocked_error(exc)
             listed = isinstance(exc, self._abort_on_error_types)
@@ -358,3 +499,25 @@ class AnalysisFinalizationCoordinator:
                     failure_snapshot, session_factory
                 )
             raise
+
+        analysis_status = getattr(result, "analysis_status", None)
+        if analysis_status == "final":
+            engine = runner._analysis_engine
+            if engine is not None:
+                self._finalizer.persist_final(
+                    engine,
+                    session_factory=session_factory,
+                    completed_through_session=_completed_session_of(runner, result),
+                )
+        elif analysis_status == "partial":
+            snapshot = getattr(runner, "_latest_analysis_snapshot", None)
+            if snapshot is not None:
+                self._finalizer.persist_partial(
+                    snapshot,
+                    session_factory=session_factory,
+                    last_chunk_sequence=getattr(
+                        result, "completed_through_step_sequence", None
+                    ),
+                    completed_through_session=_completed_session_of(runner, result),
+                )
+        return result

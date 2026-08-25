@@ -332,22 +332,19 @@ def _decimal_equal(left: Any, right: Any) -> bool:
     return left_decimal == right_decimal
 
 
-def _producers_conflict(
-    left: tuple[Any, Any], right: tuple[Any, Any]
-) -> bool:
-    """Compare two producer identities; a missing identity never conflicts."""
-
-    if left == right:
-        return False
-    return left[0] is not None and right[0] is not None
-
-
 def _metric_content_fingerprint(dto: BacktestMetricDto) -> tuple[Any, ...]:
-    """Content identity used for in-batch duplicate collapse."""
+    """Full normalized content identity of one metric row.
+
+    Every evidence-bearing column participates, including
+    ``annualization_factor`` and ``risk_free_rate_note``; ``sample_count``
+    is compared raw so 0 and None stay distinct.
+    """
 
     return (
-        dto.value,
-        str(dto.unit) if dto.unit else None,
+        _decimal_text(dto.value),
+        dto.unit,
+        _decimal_text(dto.annualization_factor),
+        dto.risk_free_rate_note,
         dto.sample_count,
         dto.unavailable_reason,
         (
@@ -357,6 +354,85 @@ def _metric_content_fingerprint(dto: BacktestMetricDto) -> tuple[Any, ...]:
         ),
         dto.analyzer_key,
         dto.analyzer_version,
+    )
+
+
+def _orm_metric_matches(record: BacktestMetricRecord, dto: BacktestMetricDto) -> bool:
+    """Exact content comparison between a persisted row and a retry DTO."""
+
+    return _metric_content_fingerprint(
+        BacktestMetricDto(
+            run_id=record.run_id,
+            metric_key=record.metric_key,
+            formula_version=record.formula_version,
+            value=record.value,
+            unit=record.unit,
+            annualization_factor=record.annualization_factor,
+            risk_free_rate_note=record.risk_free_rate_note,
+            sample_count=record.sample_count,
+            unavailable_reason=record.unavailable_reason,
+            analyzer_key=record.analyzer_key,
+            analyzer_version=record.analyzer_version,
+            analyzer_metadata=(
+                dict(record.analyzer_metadata)
+                if record.analyzer_metadata is not None
+                else None
+            ),
+        )
+    ) == _metric_content_fingerprint(dto)
+
+
+def _decimal_text(value: Any) -> str | None:
+    """Canonical text form of a decimal-ish value for content comparison."""
+
+    if value is None:
+        return None
+    normalized = value if isinstance(value, Decimal) else Decimal(str(value))
+    return format(normalized.normalize(), "f")
+
+
+def _summary_content_fingerprint(
+    dto: BacktestAnalysisSummaryDto,
+) -> tuple[Any, ...]:
+    """Full business-content fingerprint of a summary row.
+
+    ``created_at``/``updated_at``/``finalized_at`` are audit timestamps
+    and excluded; every other column participates so conflicting retries
+    with different counts, E0, or rate evidence can never pass as
+    idempotent.
+    """
+
+    return (
+        dto.status.value,
+        _thaw_json(dict(dto.analyzer_snapshot)),
+        dto.formula_signature,
+        dto.input_evidence_signature,
+        dto.reporting_currency,
+        _decimal_text(dto.initial_equity),
+        dto.valid_day_count,
+        dto.fill_count,
+        _decimal_text(dto.gross_traded_notional),
+        _decimal_text(dto.cumulative_fees),
+        (
+            _thaw_json_value(dto.rate_snapshot)
+            if dto.rate_snapshot is not None
+            else None
+        ),
+        dto.rate_snapshot_hash,
+        (
+            _thaw_json(dict(dto.rate_source_versions))
+            if dto.rate_source_versions is not None
+            else None
+        ),
+        (
+            [_thaw_json_value(entry) for entry in dto.missing_ranges]
+            if dto.missing_ranges is not None
+            else None
+        ),
+        dto.last_chunk_sequence,
+        dto.completed_through_session,
+        dto.abort_reason,
+        dto.failed_step_sequence,
     )
 
 
@@ -714,16 +790,20 @@ class BacktestResultRepository:
     def append_metrics(self, *dtos: Any) -> int:
         """Persist analyzer-produced metrics under v1 producer rules.
 
-        Enforced here, never only through database exceptions:
+        This is the formal new-write path: every row must carry its
+        ``(analyzer_key, analyzer_version)`` identity — identity-less
+        legacy-shaped rows can only enter through the generic
+        :meth:`append` compatibility path.  Enforced here, never only
+        through database exceptions:
 
-        1. DTO identity deduplication inside the batch;
-        2. one logical indicator (``metric_key``) per run may have exactly
-           one ``(analyzer_key, analyzer_version)`` producer, checked both
-           in the batch and against persisted rows;
-        3. resubmitting the same identity with the same value and evidence
-           is an idempotent no-op;
-        4. a conflicting rewrite of an existing logical key fails instead
-           of overwriting the persisted value.
+        1. DTO identity deduplication inside the batch per logical key
+           ``(run_id, metric_key, formula_version)``;
+        2. one logical key has exactly one producer: a resubmission with a
+           different analyzer identity conflicts instead of overwriting;
+        3. different formula versions of the same ``metric_key`` may be
+           produced by different analyzers (Sharpe A/B/C coexist);
+        4. resubmitting the same identity with the same normalized content
+           is an idempotent no-op.
         """
 
         if not dtos:
@@ -734,8 +814,14 @@ class BacktestResultRepository:
                     f"append_metrics expects {BacktestMetricDto.__name__}, "
                     f"got {type(dto).__name__}"
                 )
-        seen_identities: set[tuple[Any, ...]] = {}
-        batch_producers: dict[str, tuple[str | None, int | None]] = {}
+            if dto.analyzer_key is None or dto.analyzer_version is None:
+                raise ResultRepositoryError(
+                    f"metric ({dto.metric_key!r}, "
+                    f"{dto.formula_version!r}) lacks analyzer identity; "
+                    "new writes must name their producer — the "
+                    "identity-less shape is reserved for legacy reads"
+                )
+        seen_identities: dict[tuple[Any, ...], BacktestMetricDto] = {}
         for dto in dtos:
             identity = (dto.run_id, dto.metric_key, dto.formula_version)
             previous = seen_identities.get(identity)
@@ -751,17 +837,6 @@ class BacktestResultRepository:
                         "content"
                     )
                 continue
-            producer = (dto.analyzer_key, dto.analyzer_version)
-            known_producer = batch_producers.get(dto.metric_key)
-            if known_producer is not None and _producers_conflict(
-                known_producer, producer
-            ):
-                raise ResultRecordConflictError(
-                    f"metric key {dto.metric_key!r} already has producer "
-                    f"{known_producer} in this run's batch; one run allows "
-                    "exactly one analyzer producer per logical metric"
-                )
-            batch_producers[dto.metric_key] = producer
             seen_identities[identity] = dto
 
         run_ids = {dto.run_id for dto in seen_identities.values()}
@@ -776,60 +851,27 @@ class BacktestResultRepository:
         for row in rows:
             existing_rows[(row.run_id, row.metric_key, row.formula_version)] = row
 
-        # Producer consistency against persisted rows: one run allows one
-        # analyzer producer per logical metric key, across every formula
-        # version of that key.
-        persisted_producers_by_key: dict[tuple[UUID, str], set[tuple[Any, Any]]] = {}
-        for row in existing_rows.values():
-            if row.analyzer_key is None:
-                continue  # legacy rows never block new producers
-            persisted_producers_by_key.setdefault(
-                (row.run_id, row.metric_key), set()
-            ).add((row.analyzer_key, row.analyzer_version))
-
         payloads: list[dict[str, Any]] = []
         for identity, dto in seen_identities.items():
-            incoming_producer = (dto.analyzer_key, dto.analyzer_version)
-            persisted = persisted_producers_by_key.get(
-                (dto.run_id, dto.metric_key), set()
-            )
-            if persisted and persisted != {incoming_producer}:
-                raise ResultRecordConflictError(
-                    f"metric key {dto.metric_key!r} already has producer(s) "
-                    f"{sorted(persisted)} in this run; refusing the new "
-                    f"producer {incoming_producer}"
-                )
             existing = existing_rows.get(identity)
-            if existing is not None:
-                persisted_producer = (existing.analyzer_key, existing.analyzer_version)
-                if persisted_producer != incoming_producer:
-                    raise ResultRecordConflictError(
-                        f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
-                        f"is already produced by {persisted_producer}; refusing "
-                        f"the new producer {incoming_producer}"
-                    )
-                persisted_metadata = existing.analyzer_metadata or {}
-                incoming_metadata = dict(dto.analyzer_metadata or {})
-                same_value = _decimal_equal(existing.value, dto.value)
-                same_reason = (existing.unavailable_reason or None) == (
-                    dto.unavailable_reason or None
+            if existing is None:
+                payloads.append(_metric_record(dto))
+                continue
+            incoming_producer = (dto.analyzer_key, dto.analyzer_version)
+            persisted_producer = (existing.analyzer_key, existing.analyzer_version)
+            if persisted_producer != incoming_producer:
+                raise ResultRecordConflictError(
+                    f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
+                    f"is already produced by {persisted_producer}; refusing "
+                    f"the new producer {incoming_producer}"
                 )
-                same_metadata = _thaw_json(persisted_metadata) == _thaw_json(
-                    incoming_metadata
-                )
-                same_sample_count = (
-                    existing.sample_count or None
-                ) == (dto.sample_count or None)
-                if not all(
-                    (same_value, same_reason, same_metadata, same_sample_count)
-                ):
-                    raise ResultRecordConflictError(
-                        f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
-                        "already exists with different value or evidence; "
-                        "metric results are immutable"
-                    )
+            if _orm_metric_matches(existing, dto):
                 continue  # Idempotent retry: nothing to write.
-            payloads.append(_metric_record(dto))
+            raise ResultRecordConflictError(
+                f"metric ({dto.metric_key!r}, {dto.formula_version!r}) "
+                "already exists with different value or evidence; "
+                "metric results are immutable"
+            )
         try:
             self.session.add_all(
                 [BacktestMetricRecord(**payload) for payload in payloads]
@@ -873,21 +915,18 @@ class BacktestResultRepository:
 
         terminal_statuses = ("final", "aborted")
         if existing.status in terminal_statuses:
-            identical_retry = (
-                existing.status == dto.status.value
-                and existing.formula_signature == dto.formula_signature
-                and existing.input_evidence_signature
-                == dto.input_evidence_signature
-                and (existing.abort_reason or None)
-                == (dto.abort_reason or None)
+            # Terminal rows accept only byte-identical retries: every
+            # business column (counts, E0, aggregates, rate evidence,
+            # abort fields) must match, not just signatures.
+            if _summary_content_fingerprint(
+                _summary_dto_from_record(existing)
+            ) == _summary_content_fingerprint(dto):
+                return existing
+            raise ResultRecordConflictError(
+                f"the analysis summary of this run is already terminal "
+                f"(status={existing.status}); partial progress can never "
+                "overwrite it"
             )
-            if not identical_retry:
-                raise ResultRecordConflictError(
-                    f"the analysis summary of this run is already terminal "
-                    f"(status={existing.status}); partial progress can never "
-                    "overwrite it"
-                )
-            return existing
 
         # Partial -> anything is an allowed forward transition.
         for column, value in payload.items():

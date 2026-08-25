@@ -331,7 +331,7 @@ class InitialEquitySnapshot:
     reporting_currency: str
     cash: Decimal | int | str
     holdings: Sequence[InitialHolding] = ()
-    market_value: Decimal | int | str = Decimal("0")
+    market_value: Decimal | int | str | None = None
     equity_e0: Decimal | int | str | None = None
     source_versions: Mapping[str, Any] | None = None
     evidence_hash: str | None = None
@@ -381,7 +381,11 @@ class InitialEquitySnapshot:
             computed_market_value += holding.quantity * holding.close_price
         object.__setattr__(self, "holdings", holdings)
 
-        market_value = _decimal(self.market_value, "market_value")
+        market_value = (
+            computed_market_value
+            if self.market_value is None
+            else _decimal(self.market_value, "market_value")
+        )
         if market_value != computed_market_value:
             raise DomainValidationError(
                 f"declared market_value {market_value} does not equal the sum "
@@ -435,7 +439,11 @@ class InitialEquitySnapshot:
                 }
                 for holding in self.holdings
             ],
+            # Full provenance participates: dropping any source-version or
+            # evidence field would let different underlying inputs produce
+            # the same input-evidence signature.
             "source_versions": dict(self.source_versions),
+            "evidence_hash": self.evidence_hash,
         }
 
 
@@ -550,6 +558,8 @@ class EquityObservation:
             "equity": self.equity,
             "cumulative_fees": self.cumulative_fees,
             "valuation_reason": self.valuation_reason,
+            "reporting_currency": self.reporting_currency,
+            "evidence_hash": self.evidence_hash,
         }
 
 
@@ -658,8 +668,12 @@ class AppliedFillFact:
             "fill_price": self.fill_price,
             "fill_quantity": self.fill_quantity,
             "contract_multiplier": self.contract_multiplier,
+            "currency": self.currency,
+            "reporting_currency": self.reporting_currency,
             "fees": self.fees,
             "gross_traded_notional": self.gross_traded_notional,
+            "source_versions": dict(self.source_versions),
+            "evidence_hash": self.evidence_hash,
         }
 
 
@@ -713,10 +727,15 @@ class FillObservation:
             self.fact.session_date,
             self.fact.timestamp,
             self.fact.reporting_currency,
+            self.data_cutoff_at,
         )
 
     def evidence_payload(self) -> dict[str, Any]:
-        return self.fact.evidence_payload()
+        """Payload including the optional source-declared PIT cutoff."""
+
+        payload = dict(self.fact.evidence_payload())
+        payload["data_cutoff_at"] = self.data_cutoff_at
+        return payload
 
 
 # ---------------------------------------------------------------------------
@@ -805,11 +824,17 @@ class PitRateSnapshot:
                 self, "snapshot_hash", compute_rate_snapshot_hash(self)
             )
         else:
-            object.__setattr__(
-                self,
-                "snapshot_hash",
-                _optional_text(self.snapshot_hash, "snapshot_hash"),
-            )
+            # A caller-supplied hash is never trusted: the DTO recomputes
+            # the digest from its full normalized content and rejects any
+            # mismatch so the frozen snapshot cannot be forged.
+            expected = compute_rate_snapshot_hash(self)
+            supplied = _optional_text(self.snapshot_hash, "snapshot_hash")
+            if supplied != expected:
+                raise DomainValidationError(
+                    "snapshot_hash does not match the recomputed content "
+                    f"digest {expected}"
+                )
+            object.__setattr__(self, "snapshot_hash", supplied)
 
     def rate_for(self, session_date: date) -> Decimal | None:
         """The frozen rate of one session, or ``None`` when missing."""

@@ -27,7 +27,7 @@ import hashlib
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 from types import MappingProxyType
@@ -482,11 +482,28 @@ class AnalyzerSpec:
 
 
 def _freeze_json_mapping(value: Mapping[str, Any] | None, field_name: str) -> Mapping[str, Any]:
+    """Deep-freeze a JSON-like mapping into read-only containers.
+
+    Shallow freezing would leave nested mappings and sequences mutable,
+    letting later edits silently change formula signatures and results.
+    """
+
+    def freeze(item: Any) -> Any:
+        if isinstance(item, Mapping):
+            return MappingProxyType(
+                {str(key): freeze(inner) for key, inner in item.items()}
+            )
+        if isinstance(item, (list, tuple)):
+            return tuple(freeze(entry) for entry in item)
+        return item
+
     if value is None:
         return MappingProxyType({})
     if not isinstance(value, Mapping):
         raise DomainValidationError(f"{field_name} must be a mapping")
-    return MappingProxyType(dict(value))
+    return MappingProxyType(
+        {str(key): freeze(entry) for key, entry in value.items()}
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -591,7 +608,13 @@ def _sharpe_result(
     try:
         if series.has_invalid_points:
             raise _invalid_equity_unavailable(series)
-        assert x_values is not None
+        if x_values is None:
+            # No valid end-of-day equity at all (e.g. no observation was
+            # ever submitted): a stable unavailability, never an assert.
+            raise _MetricUnavailable(
+                ReasonCode.INSUFFICIENT_RETURNS,
+                sample_count=series.valid_day_count,
+            )
         with analyzer_decimal_context():
             value = _sharpe_from_x(x_values)
     except _MetricUnavailable as unavailable:
@@ -1305,6 +1328,12 @@ class AnalyzerEngine:
         self._finalized_status: AnalysisStatus | None = None
         self._failure_payload: Mapping[str, Any] | None = None
         self._final_results: tuple[MetricResult, ...] | None = None
+        # Optional formal-timeline contract: when attached, equity
+        # observations must match the official session sequence exactly
+        # (no skipped zero-return days, no gaps) with contiguous,
+        # monotonically increasing step sequences.
+        self._formal_sessions: tuple[date, ...] | None = None
+        self._first_step_sequence: int = 0
 
     # -- construction -----------------------------------------------------
 
@@ -1366,6 +1395,46 @@ class AnalyzerEngine:
     def input_evidence_signature(self) -> str:
         return self._state().input_evidence_signature()
 
+    def attach_formal_timeline(
+        self,
+        sessions: Sequence[date],
+        *,
+        first_step_sequence: int = 0,
+    ) -> None:
+        """Pin the official session/step sequence equity must follow.
+
+        Once attached, every :meth:`observe_equity` call is checked against
+        the exact next formal session and the contiguous next step, so a
+        skipped zero-return day, a gap, or an inverted step can never
+        reshape the return series.  Attaching is only possible before any
+        observation was submitted.
+        """
+
+        if self._equity_observations:
+            raise AnalysisStateConflictError(
+                "the formal timeline can only be attached before the first "
+                "equity observation"
+            )
+        if isinstance(first_step_sequence, bool) or not isinstance(
+            first_step_sequence, int
+        ):
+            raise DomainValidationError(
+                "first_step_sequence must be an integer"
+            )
+        normalized = tuple(sessions)
+        for session_date in normalized:
+            if not isinstance(session_date, date) or isinstance(session_date, datetime):
+                raise DomainValidationError(
+                    "sessions entries must be calendar dates"
+                )
+        for index in range(1, len(normalized)):
+            if normalized[index] <= normalized[index - 1]:
+                raise DomainValidationError(
+                    "formal sessions must strictly increase"
+                )
+        self._formal_sessions = normalized
+        self._first_step_sequence = first_step_sequence
+
     # -- observation intake -------------------------------------------------
 
     def observe_equity(self, observation: EquityObservation) -> None:
@@ -1382,6 +1451,7 @@ class AnalyzerEngine:
                 f"equity observation reports {observation.reporting_currency} "
                 f"but the engine aggregates {self._reporting_currency}"
             )
+        position = len(self._equity_observations)
         if self._equity_observations:
             last_date = self._equity_observations[-1].session_date
             if observation.session_date == last_date:
@@ -1400,6 +1470,29 @@ class AnalyzerEngine:
                 "the first equity observation precedes the first formal "
                 "session of the run"
             )
+        expected_session: date | None = None
+        if self._formal_sessions is not None:
+            if position >= len(self._formal_sessions):
+                raise AnalyzerInputError(
+                    "more equity observations than official formal sessions; "
+                    "the observation does not belong to the frozen timeline"
+                )
+            expected_session = self._formal_sessions[position]
+            if observation.session_date != expected_session:
+                raise AnalyzerInputError(
+                    f"equity observation session "
+                    f"{observation.session_date.isoformat()} does not match "
+                    f"the official timeline's next session "
+                    f"{expected_session.isoformat()}; skipping or reordering "
+                    "formal sessions would fabricate the return series"
+                )
+            expected_step = self._first_step_sequence + position
+            if observation.step_sequence != expected_step:
+                raise AnalyzerInputError(
+                    f"equity observation step_sequence "
+                    f"{observation.step_sequence} does not match the "
+                    f"contiguous timeline expectation {expected_step}"
+                )
         self._equity_observations.append(observation)
 
     def observe_fill(self, observation: FillObservation) -> None:

@@ -913,6 +913,19 @@ class DeterministicBacktestRunner:
             )
         self._analysis_engine = analysis_engine
         self._pit_data_gateway = pit_data_gateway
+        # Pin the official timeline into the analyzer so equity facts can
+        # never skip a formal session (e.g. a zero-return day) or arrive
+        # with an inverted/duplicated step sequence.
+        if analysis_engine is not None and hasattr(
+            analysis_engine, "attach_formal_timeline"
+        ):
+            sessions = [
+                date.fromisoformat(step.metadata["session_date"])
+                for step in tuple(self._axis)
+            ]
+            analysis_engine.attach_formal_timeline(
+                sessions, first_step_sequence=self._axis.at(0).sequence
+            )
         self._latest_analysis_snapshot: Any | None = None
         self._last_equity_observation: EquityObservation | None = None
         # Admission check: the accounting policy owns the real settlement

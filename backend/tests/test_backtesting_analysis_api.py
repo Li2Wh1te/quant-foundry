@@ -46,7 +46,7 @@ class AnalysisApiTestCase(unittest.TestCase):
         self.engine.dispose()
 
     def seed_metrics(self) -> None:
-        rows = [
+        new_rows = [
             BacktestMetricRecord(
                 run_id=self.run_id,
                 metric_key="cumulative_fees",
@@ -71,15 +71,19 @@ class AnalysisApiTestCase(unittest.TestCase):
                     "annualization_factor": "252",
                 },
             ),
-            # A legacy row written before analyzer identity existed.
+        ]
+        self.repo.append_metrics(*new_rows)
+        # A legacy row written before analyzers existed enters only
+        # through the generic compatibility write path.
+        self.repo.append(
+            "metrics",
             BacktestMetricRecord(
                 run_id=self.run_id,
                 metric_key="sharpe",
                 formula_version="pre_analyzer_v0",
                 value=Decimal("1"),
             ),
-        ]
-        self.repo.append_metrics(*rows)
+        )
 
     def serialize_metrics_page(self) -> dict:
         page = list_metrics(

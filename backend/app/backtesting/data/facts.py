@@ -487,6 +487,7 @@ class ClosePriceFact:
     session_date: date
     close_price: Decimal | int | str
     evidence: FactEvidence
+    currency: str = "CNY"
     schema: ContractRef | None = None
 
     def __post_init__(self) -> None:
@@ -501,6 +502,9 @@ class ClosePriceFact:
         )
         if not isinstance(self.evidence, FactEvidence):
             raise ProviderContractViolationError("evidence must be a FactEvidence")
+        if not isinstance(self.currency, str) or not self.currency.strip():
+            raise ProviderContractViolationError("currency must be non-blank text")
+        object.__setattr__(self, "currency", self.currency.strip().upper())
         object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))
 
 

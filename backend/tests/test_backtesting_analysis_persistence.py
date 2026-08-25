@@ -122,16 +122,56 @@ class PersistenceTestCase(unittest.TestCase):
 
     # -- producer consistency ---------------------------------------------
 
-    def test_same_logical_metric_second_producer_rejected(self):
-        self.repo.append("metrics", make_metric(self.run_id))
+    def test_same_identity_second_producer_rejected(self):
+        self.repo.append_metrics(make_metric(self.run_id))
         impostor = make_metric(
             self.run_id,
-            formula_version="sharpe_config_rf_ddof1_252_v1",
             analyzer_key="sharpe_config_rf",
-            analyzer_version=1,
         )
         with self.assertRaises(ResultRecordConflictError):
             self.repo.append_metrics(impostor)
+
+    def test_sharpe_abc_can_coexist_under_different_formula_versions(self):
+        written = self.repo.append_metrics(
+            make_metric(self.run_id),
+            make_metric(
+                self.run_id,
+                formula_version="sharpe_pit_rf_ddof1_252_v1",
+                analyzer_key="sharpe_pit_rf",
+            ),
+            make_metric(
+                self.run_id,
+                formula_version="sharpe_config_rf_ddof1_252_v1",
+                analyzer_key="sharpe_config_rf",
+                value="0.9",
+            ),
+        )
+        self.assertEqual(written, 3)
+        page = self.repo.read_page("metrics", run_id=self.run_id, limit=10)
+        producers = {
+            (row.metric_key, row.formula_version): (
+                row.analyzer_key,
+                row.analyzer_version,
+            )
+            for row in page.items
+        }
+        self.assertEqual(len(producers), 3)
+        self.assertEqual(
+            producers[("sharpe", "sharpe_config_rf_ddof1_252_v1")][0],
+            "sharpe_config_rf",
+        )
+
+    def test_append_metrics_requires_analyzer_identity(self):
+        from app.backtesting.result_repository import ResultRepositoryError
+
+        legacy_shaped = BacktestMetricDto(
+            run_id=self.run_id,
+            metric_key="sharpe",
+            formula_version="v",
+            value="1",
+        )
+        with self.assertRaises(ResultRepositoryError):
+            self.repo.append_metrics(legacy_shaped)
 
     def test_conflicting_value_rewrite_rejected_but_identical_retry_idempotent(self):
         written = self.repo.append_metrics(make_metric(self.run_id))

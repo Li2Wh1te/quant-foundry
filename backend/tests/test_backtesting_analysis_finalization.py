@@ -132,6 +132,32 @@ def make_runner(engine: AnalyzerEngine):
     )
 
 
+FULL_CLOSES = {
+    SESSION_DATES[0]: "10",
+    SESSION_DATES[1]: "10",
+    SESSION_DATES[2]: "11",
+    SESSION_DATES[3]: "11",
+    SESSION_DATES[4]: "12",
+}
+
+
+def make_successful_runner(engine: AnalyzerEngine):
+    axis = build_axis(SESSION_DATES)
+    quotes = {
+        day: {INSTRUMENT_ID: (close, close)} for day, close in FULL_CLOSES.items()
+    }
+    return build_runner(
+        run_id=RUN_ID,
+        axis=axis,
+        market_data=DictMarketData(quotes),
+        strategy_view=CountingStrategyView(dict(FULL_CLOSES)),
+        strategy=ScriptedStrategy(HOLD_TARGETS),
+        analysis_engine=engine,
+        pit_data_gateway=FixedCutoffGateway(),
+        initial_cash="10000",
+    )
+
+
 class SqliteHarness:
     """Shared in-memory SQLite database served through independent Sessions."""
 
@@ -212,6 +238,7 @@ class TestAnalysisFinalization(unittest.TestCase):
     def test_repeated_aborted_finalization_is_idempotent(self):
         from app.backtesting.analysis_finalization import (
             AnalysisFinalizationCoordinator,
+            AnalysisFinalizer,
         )
 
         coordinator = AnalysisFinalizationCoordinator()
@@ -222,10 +249,15 @@ class TestAnalysisFinalization(unittest.TestCase):
                 next_after_last=None,
                 session_factory=self.harness.session_factory,
             )
-        snapshot = self.runner.build_analysis_failure_snapshot(first_caught.exception)
+        original_exc = first_caught.exception
         finalizer = AnalysisFinalizer()
+        # Replaying the SAME failure evidence must be an idempotent retry:
+        # no duplicate rows, same summary identity.
+        replay_snapshot = self.runner.build_analysis_failure_snapshot(
+            original_exc
+        )
         second = finalizer.finalize_aborted(
-            snapshot, self.harness.session_factory
+            replay_snapshot, self.harness.session_factory
         )
 
         with self.harness.session_factory() as session:
@@ -295,6 +327,94 @@ class TestAnalysisFinalization(unittest.TestCase):
         with self.assertRaises(ValueError):
             coordinator.execute_steps(Broken(), (object(),))
         self.assertIsNone(self.engine.finalized_status)
+
+    def test_successful_run_persists_final_summary_and_metrics(self):
+        from app.backtesting.analysis_finalization import (
+            AnalysisFinalizationCoordinator,
+        )
+
+        engine = make_engine()
+        runner = make_successful_runner(engine)
+        coordinator = AnalysisFinalizationCoordinator()
+        result = coordinator.execute_steps(
+            runner,
+            tuple(build_axis(SESSION_DATES)),
+            next_after_last=None,
+            session_factory=self.harness.session_factory,
+        )
+        self.assertEqual(result.analysis_status, "final")
+        with self.harness.session_factory() as session:
+            summary = session.scalars(
+                select(BacktestAnalysisSummaryRecord).where(
+                    BacktestAnalysisSummaryRecord.run_id == UUID(RUN_ID)
+                )
+            ).one()
+            metrics = session.scalars(
+                select(BacktestMetricOrm).where(
+                    BacktestMetricOrm.run_id == UUID(RUN_ID)
+                )
+            ).all()
+        self.assertEqual(summary.status, "final")
+        self.assertIsNotNone(summary.finalized_at)
+        self.assertIsNone(summary.rate_snapshot)  # A/C run: no rate snapshot
+        self.assertEqual(summary.completed_through_session, SESSION_DATES[-1])
+        self.assertEqual(len(metrics), 4)
+
+    def test_partial_chunk_persists_progress_without_metrics(self):
+        from app.backtesting.analysis_finalization import (
+            AnalysisFinalizationCoordinator,
+        )
+
+        engine = make_engine()
+        runner = make_successful_runner(engine)
+        steps = list(build_axis(SESSION_DATES))
+        coordinator = AnalysisFinalizationCoordinator()
+        result = coordinator.execute_steps(
+            runner,
+            tuple(steps[:2]),
+            next_after_last=steps[2],
+            session_factory=self.harness.session_factory,
+        )
+        self.assertEqual(result.analysis_status, "partial")
+        with self.harness.session_factory() as session:
+            summary = session.scalars(
+                select(BacktestAnalysisSummaryRecord).where(
+                    BacktestAnalysisSummaryRecord.run_id == UUID(RUN_ID)
+                )
+            ).one()
+            metrics = session.scalars(
+                select(BacktestMetricOrm).where(
+                    BacktestMetricOrm.run_id == UUID(RUN_ID)
+                )
+            ).all()
+        self.assertEqual(summary.status, "partial")
+        self.assertIsNone(summary.finalized_at)
+        # Partial checkpoints never write final metric rows.
+        self.assertEqual(metrics, [])
+
+    def test_missing_session_factory_fails_fast_before_running(self):
+        from app.backtesting.analysis_finalization import (
+            AnalysisFinalizationCoordinator,
+        )
+
+        engine = make_engine()
+        runner = make_runner(engine)
+        coordinator = AnalysisFinalizationCoordinator()
+        with self.assertRaises(Exception) as caught:
+            coordinator.execute_steps(
+                runner,
+                tuple(build_axis(SESSION_DATES)),
+                next_after_last=None,
+                session_factory=None,
+            )
+        # Fail-fast happened before any step executed and nothing persisted.
+        self.assertNotIn("analysis persistence", str(caught.exception))
+        self.assertIsNone(engine.finalized_status)
+        with self.harness.session_factory() as session:
+            summaries = session.scalars(
+                select(BacktestAnalysisSummaryRecord)
+            ).all()
+        self.assertEqual(summaries, [])
 
 
 if __name__ == "__main__":
