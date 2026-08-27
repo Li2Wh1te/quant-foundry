@@ -315,6 +315,20 @@ class SessionQuote:
     session_date: date
     open_price: Decimal | None
     close_price: Decimal | None
+    evidence: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.evidence, Mapping) or not self.evidence:
+            raise DomainValidationError(
+                "session quote evidence must be a non-empty source mapping"
+            )
+        from app.backtesting.analysis_inputs import freeze_canonical_evidence
+
+        object.__setattr__(
+            self,
+            "evidence",
+            freeze_canonical_evidence(self.evidence, "session quote evidence"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -425,6 +439,29 @@ class EngineDataView:
     def close_mark(self, instrument_id: UUID) -> Decimal | None:
         quote = self._quotes.get(instrument_id)
         return quote.close_price if quote is not None else None
+
+    def close_mark_evidence(
+        self, instrument_ids: Sequence[UUID]
+    ) -> Mapping[str, Any]:
+        """Return immutable provenance for every requested valuation mark.
+
+        Missing marks remain explicit in the payload. Consequently a blocked
+        valuation and a later repaired data revision cannot share evidence.
+        """
+
+        return MappingProxyType(
+            {
+                str(instrument_id): (
+                    {
+                        "close_price": quote.close_price,
+                        "evidence": quote.evidence,
+                    }
+                    if (quote := self._quotes.get(instrument_id)) is not None
+                    else None
+                )
+                for instrument_id in sorted(instrument_ids, key=str)
+            }
+        )
 
     def facts(self, instrument_id: UUID) -> InstrumentFacts:
         facts = self._facts.get(instrument_id)
@@ -1136,6 +1173,9 @@ class DeterministicBacktestRunner:
         # the official timeline and can never run twice.
         self._next_expected_step = 0
         self._analysis_chunk_sequence = 0
+        self._last_analysis_chunk_sequence: int | None = None
+        self._last_analysis_chunk_token: str | None = None
+        self._last_analysis_completed_session: date | None = None
         self._finished = False
         self._failed = False
 
@@ -1354,6 +1394,16 @@ class DeterministicBacktestRunner:
                     ),
                 }
             )
+            # Advance checkpoint identity only after the entire chunk has
+            # succeeded. A later failed chunk must preserve this exact pair.
+            self._last_analysis_chunk_sequence = current_chunk_sequence
+            self._last_analysis_chunk_token = analysis_chunk_token
+            session_text = ordered[-1].metadata.get("session_date")
+            self._last_analysis_completed_session = (
+                date.fromisoformat(session_text)
+                if isinstance(session_text, str)
+                else None
+            )
         return BacktestRunResult(
             run_id=self._run_id,
             events=tuple(self._events),
@@ -1478,6 +1528,13 @@ class DeterministicBacktestRunner:
                 else None
             ),
             "blocked_equity_observation": blocked_observation.evidence_payload(),
+            "last_chunk_sequence": self._last_analysis_chunk_sequence,
+            "last_chunk_token": self._last_analysis_chunk_token,
+            "completed_through_session": (
+                self._last_analysis_completed_session.isoformat()
+                if self._last_analysis_completed_session is not None
+                else None
+            ),
         }
 
         snapshot_binding = _bind_failure_snapshot(
@@ -1504,6 +1561,9 @@ class DeterministicBacktestRunner:
             valid_day_count=analysis_snapshot.valid_day_count,
             fill_count=analysis_snapshot.fill_count,
             snapshot_binding=snapshot_binding,
+            last_chunk_sequence=self._last_analysis_chunk_sequence,
+            last_chunk_token=self._last_analysis_chunk_token,
+            completed_through_session=self._last_analysis_completed_session,
         )
         # Capture the terminal identity from the immutable snapshot when
         # possible.  The finalizer recomputes it and rejects any mismatch;
@@ -2242,6 +2302,7 @@ class DeterministicBacktestRunner:
         # equity) to the engine so the aborted finalization can report
         # exactly what was determined.
         if self._analysis_engine is not None:
+            from app.backtesting.analysis_inputs import evidence_digest
             from app.backtesting.analyzers import analyzer_decimal_context
 
             with analyzer_decimal_context():
@@ -2252,22 +2313,34 @@ class DeterministicBacktestRunner:
                     ),
                     Decimal("0"),
                 )
+            data_cutoff_at = self._pit_data_gateway.data_cutoff_at(
+                session_date=context.session_date,
+                as_of=context.decision_time,
+            )
+            mark_evidence = view.close_mark_evidence(
+                tuple(self._portfolio.positions)
+            )
             observation = EquityObservation(
                 run_id=self._run_id,
                 step_sequence=context.step_sequence,
                 session_date=context.session_date,
                 as_of=context.decision_time,
                 valuation_status="blocked" if blocked else "valid",
-                data_cutoff_at=self._pit_data_gateway.data_cutoff_at(
-                    session_date=context.session_date,
-                    as_of=context.decision_time,
-                ),
+                data_cutoff_at=data_cutoff_at,
                 reporting_currency=self._currency,
                 cash=cash_total,
                 equity=None if blocked else snapshot.account.equity,
                 cumulative_fees=self._applied_fees_total,
                 valuation_reason=(
                     "close valuation blocked by missing marks" if blocked else None
+                ),
+                evidence_hash=evidence_digest(
+                    {
+                        "contract": "end_of_day_valuation_marks_v1",
+                        "session_date": context.session_date,
+                        "data_cutoff_at": data_cutoff_at,
+                        "marks": mark_evidence,
+                    }
                 ),
             )
             self._analysis_engine.observe_equity(observation)

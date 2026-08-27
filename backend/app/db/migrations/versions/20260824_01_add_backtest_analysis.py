@@ -176,7 +176,10 @@ def upgrade() -> None:
             "last_chunk_sequence",
             sa.Integer(),
             nullable=True,
-            comment="Latest completed or failed step sequence at the last update.",
+            comment=(
+                "Zero-based sequence of the latest successfully persisted chunk; "
+                "aborted runs never record the failed chunk."
+            ),
         ),
         sa.Column(
             "completed_through_session",

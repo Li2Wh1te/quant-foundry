@@ -270,7 +270,7 @@ def _select_unique_close_fact(candidates: Sequence[ClosePriceFact]) -> ClosePric
     }
     if len(evidence_keys) > 1:
         raise AdmissionBlockedError(
-            "AMBIGUOUS_PIT_FACT",
+            "MISSING_INITIAL_MARK",
             "multiple initial close facts share the same PIT revision key "
             "but carry different evidence",
             details={
@@ -282,8 +282,10 @@ def _select_unique_close_fact(candidates: Sequence[ClosePriceFact]) -> ClosePric
     return min(leaders, key=lambda fact: canonical_evidence_json(_mark_provenance(fact)))
 
 
-def _select_unique_rate_fact(candidates: Sequence[PitRateFact]) -> PitRateFact:
-    """Select one PIT rate fact or reject an ambiguous revision set."""
+def _select_unique_rate_fact(
+    candidates: Sequence[PitRateFact],
+) -> tuple[PitRateFact | None, tuple[PitRateFact, ...]]:
+    """Select one PIT rate fact and return conflicting leaders as evidence."""
 
     priority = max(
         (
@@ -305,16 +307,18 @@ def _select_unique_rate_fact(candidates: Sequence[PitRateFact]) -> PitRateFact:
         canonical_evidence_json(_rate_provenance(fact)) for fact in leaders
     }
     if len(evidence_keys) > 1:
-        raise AdmissionBlockedError(
-            "AMBIGUOUS_PIT_FACT",
-            "multiple PIT rate facts share the same revision key but carry "
-            "different evidence",
-            details={
-                "session_date": leaders[0].session_date.isoformat(),
-                "source_revision": priority[1],
-            },
+        # Ambiguous rate evidence is a deterministic coverage gap. Sharpe B
+        # reports MISSING_PIT_RF while rate-independent analyzers continue.
+        return None, tuple(
+            sorted(
+                leaders,
+                key=lambda fact: canonical_evidence_json(_rate_provenance(fact)),
+            )
         )
-    return min(leaders, key=lambda fact: canonical_evidence_json(_rate_provenance(fact)))
+    return (
+        min(leaders, key=lambda fact: canonical_evidence_json(_rate_provenance(fact))),
+        (),
+    )
 
 
 def _portfolio_quantities(portfolio_state: Any) -> dict[UUID, Decimal]:
@@ -416,6 +420,14 @@ def compute_portfolio_snapshot_binding(
                     _decimal(position.mark_price, "position mark price")
                     if getattr(position, "mark_price", None) is not None
                     else None
+                ),
+                "realized_pnl": _decimal(
+                    getattr(position, "realized_pnl", Decimal("0")),
+                    "position realized pnl",
+                ),
+                "unrealized_pnl": _decimal(
+                    getattr(position, "unrealized_pnl", Decimal("0")),
+                    "position unrealized pnl",
                 ),
             }
             for position in sorted(
@@ -770,7 +782,20 @@ def freeze_rate_snapshot(
     for session_date, candidates in eligible_by_date.items():
         # Freeze the latest source revision known by the session, independent
         # of the order in which a gateway happens to return duplicate facts.
-        fact = _select_unique_rate_fact(candidates)
+        fact, ambiguous = _select_unique_rate_fact(candidates)
+        if fact is None:
+            fact_evidence[session_date.isoformat()] = {
+                "status": "ambiguous",
+                "session_date": session_date.isoformat(),
+                "candidates": [
+                    _rate_provenance(
+                        candidate,
+                        session_open_at=resolve_open(session_date),
+                    )
+                    for candidate in ambiguous
+                ],
+            }
+            continue
         rates[fact.session_date] = fact.rate
         fact_evidence[fact.session_date.isoformat()] = _rate_provenance(
             fact,
@@ -957,6 +982,46 @@ def _admit_analysis_run_unwrapped(
             "INVALID_ANALYZER_CONFIG",
             "every run must explicitly select exactly one Sharpe analyzer",
         )
+    # Validate the complete analyzer contract before touching cash movements,
+    # E0 facts, or an external PIT gateway. This preserves the frozen failure
+    # precedence and prevents invalid configurations from causing I/O.
+    try:
+        from app.backtesting.analyzers import (
+            AnalyzerSpec,
+            resolve_config_rf_daily,
+            validate_v1_analyzer_spec,
+        )
+
+        seen_identities: set[tuple[str, int]] = set()
+        seen_outputs: set[tuple[str, str]] = set()
+        for spec in analyzer_specs:
+            if not isinstance(spec, AnalyzerSpec):
+                raise DomainValidationError(
+                    "analyzer_specs entries must be AnalyzerSpec instances"
+                )
+            identity = (spec.analyzer_key, spec.analyzer_version)
+            if identity in seen_identities:
+                raise DomainValidationError(
+                    f"analyzer {spec.display_identity} is configured more than once"
+                )
+            seen_identities.add(identity)
+            validate_v1_analyzer_spec(spec)
+            for descriptor in spec.output_contract:
+                logical_key = (descriptor.metric_key, descriptor.formula_version)
+                if logical_key in seen_outputs:
+                    raise DomainValidationError(
+                        f"metric {logical_key[0]}@{logical_key[1]} has multiple producers"
+                    )
+                seen_outputs.add(logical_key)
+            if spec.analyzer_key == CONFIG_RF_ANALYZER_KEY:
+                resolve_config_rf_daily(spec)
+    except AdmissionBlockedError:
+        raise
+    except Exception as exc:
+        raise AdmissionBlockedError(
+            "INVALID_ANALYZER_CONFIG",
+            f"invalid analyzer configuration: {exc}",
+        ) from exc
     timeline = FormalSessionTimeline(formal_sessions)
     sessions = timeline.sessions
     if isinstance(first_step_sequence, bool) or not isinstance(
@@ -983,16 +1048,13 @@ def _admit_analysis_run_unwrapped(
             "run admission requires the complete initial portfolio state",
         )
 
-    # 1. External cash-flow preflight.
-    ensure_modeled_cash_movements(cash_movements)
-
     # Derive the held quantities from the same immutable starting portfolio
     # that is checked below.  A caller may provide an explicit declaration,
     # but it can never omit a real position and still pass admission.
     if initial_quantities is None:
         initial_quantities = _portfolio_quantities(initial_portfolio_state)
 
-    # 2. E0 preflight from strictly pre-open PIT marks.
+    # 1. Currency and E0 preflight from strictly pre-open PIT marks.
     snapshot = build_initial_equity_snapshot(
         run_id=run_id,
         first_formal_session_date=sessions[0],
@@ -1008,9 +1070,14 @@ def _admit_analysis_run_unwrapped(
         formal_timeline=timeline,
     )
 
-    # 3. The frozen E0 must describe and cryptographically bind the exact
+    # 2. The frozen E0 must describe and cryptographically bind the exact
     # starting portfolio, not merely an equal total equity value.
     snapshot = bind_initial_equity_snapshot(snapshot, initial_portfolio_state)
+
+    # 3. External cash-flow preflight follows all E0/portfolio gates. This
+    # preserves the task-package failure precedence without touching the PIT
+    # rate gateway for a run that already has invalid cash-flow evidence.
+    ensure_modeled_cash_movements(cash_movements)
 
     # 4. Sharpe B requires one frozen PIT window.  Coverage gaps remain
     # explicit input evidence and make only Sharpe B unavailable; they must

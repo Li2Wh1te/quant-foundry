@@ -4,6 +4,7 @@ consistency, frozen rate prefetch, and external cash-flow blocking."""
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -12,12 +13,14 @@ from app.backtesting.analysis_admission import (
     AdmissionBlockedError,
     admit_analysis_run,
     build_initial_equity_snapshot,
+    compute_portfolio_snapshot_binding,
     ensure_modeled_cash_movements,
     freeze_rate_snapshot,
     verify_initial_portfolio_consistency,
 )
 from app.backtesting.analyzers import (
     build_sharpe_config_rf_spec,
+    build_sharpe_pit_rf_spec,
     build_sharpe_simple_spec,
     build_turnover_spec,
 )
@@ -75,6 +78,129 @@ def build_snapshot(close_facts, quantities=None, cash="10000", **overrides):
 
 
 class TestInitialEquityAdmission(unittest.TestCase):
+    def test_invalid_analyzer_config_precedes_cash_and_market_fact_access(self):
+        class Account:
+            cash_balances = {"CNY": Decimal("10000")}
+            equity = Decimal("10000")
+
+        class Portfolio:
+            account = Account()
+            positions = {}
+
+        class ExplodingMovements:
+            def __iter__(self):
+                raise AssertionError("cash movements must not be queried")
+
+        with self.assertRaises(AdmissionBlockedError) as caught:
+            admit_analysis_run(
+                run_id=RUN_ID,
+                formal_sessions=SESSIONS,
+                market_open_at=OPEN_AT,
+                valuation_as_of=datetime(2026, 7, 31, 15, 0, tzinfo=UTC),
+                data_cutoff_at=datetime(2026, 7, 31, 16, 0, tzinfo=UTC),
+                reporting_currency="CNY",
+                initial_cash="10000",
+                initial_portfolio_state=Portfolio(),
+                analyzer_specs=[
+                    build_sharpe_config_rf_spec(
+                        {"rf_annual": "-1", "rf_source_note": "unit config"}
+                    )
+                ],
+                cash_movements=ExplodingMovements(),
+            )
+        self.assertEqual(caught.exception.reason_code, "INVALID_ANALYZER_CONFIG")
+
+    def test_currency_and_e0_precede_cash_and_rate_gateway(self):
+        class Account:
+            cash_balances = {"CNY": Decimal("10000")}
+            equity = Decimal("10000")
+
+        class Portfolio:
+            account = Account()
+            positions = {}
+
+        class ExplodingGateway:
+            def risk_free_rate_snapshot(self, query):  # pragma: no cover
+                raise AssertionError("rate I/O must remain the final gate")
+
+        common = dict(
+            run_id=RUN_ID,
+            formal_sessions=SESSIONS,
+            market_open_at=OPEN_AT,
+            valuation_as_of=datetime(2026, 7, 31, 15, 0, tzinfo=UTC),
+            data_cutoff_at=datetime(2026, 7, 31, 16, 0, tzinfo=UTC),
+            reporting_currency="CNY",
+            initial_cash="10000",
+            initial_portfolio_state=Portfolio(),
+            analyzer_specs=[build_sharpe_simple_spec()],
+            cash_movements=[("owner_deposit", "1")],
+        )
+        with self.assertRaises(AdmissionBlockedError) as currency_error:
+            admit_analysis_run(**common, accounting_currency="USD")
+        self.assertEqual(currency_error.exception.reason_code, "INVALID_ANALYZER_CONFIG")
+
+        with self.assertRaises(AdmissionBlockedError) as e0_error:
+            admit_analysis_run(
+                **{**common, "initial_quantities": {INSTRUMENT: Decimal("1")}}
+            )
+        self.assertEqual(e0_error.exception.reason_code, "MISSING_INITIAL_MARK")
+
+        with self.assertRaises(AdmissionBlockedError) as cash_error:
+            admit_analysis_run(
+                **{
+                    **common,
+                    "analyzer_specs": [build_sharpe_pit_rf_spec()],
+                    "pit_gateway": ExplodingGateway(),
+                    "rate_source_key": "rf",
+                    "rate_source_version": 1,
+                    "rate_session_open_at": {day: OPEN_AT for day in SESSIONS},
+                }
+            )
+        self.assertEqual(
+            cash_error.exception.reason_code, "UNMODELED_EXTERNAL_CASH_FLOW"
+        )
+
+    def test_ambiguous_initial_mark_uses_frozen_missing_reason(self):
+        first = close_fact()
+        second = replace(first, close_price=Decimal("11"))
+        with self.assertRaises(AdmissionBlockedError) as caught:
+            build_snapshot([first, second], quantities={INSTRUMENT: "1"})
+        self.assertEqual(caught.exception.reason_code, "MISSING_INITIAL_MARK")
+
+    def test_portfolio_binding_covers_both_accounting_pnl_fields(self):
+        class Position:
+            instrument_id = INSTRUMENT
+            side = "long"
+            quantity = Decimal("1")
+            available_quantity = Decimal("1")
+            average_price = Decimal("10")
+            mark_price = Decimal("11")
+            realized_pnl = Decimal("2")
+            unrealized_pnl = Decimal("1")
+
+        class Account:
+            cash_balances = {"CNY": Decimal("100")}
+            equity = Decimal("111")
+
+        class Portfolio:
+            account = Account()
+            positions = {INSTRUMENT: Position()}
+
+        portfolio = Portfolio()
+        _, original = compute_portfolio_snapshot_binding(
+            portfolio, reporting_currency="CNY"
+        )
+        portfolio.positions[INSTRUMENT].realized_pnl = Decimal("3")
+        _, realized_changed = compute_portfolio_snapshot_binding(
+            portfolio, reporting_currency="CNY"
+        )
+        portfolio.positions[INSTRUMENT].realized_pnl = Decimal("2")
+        portfolio.positions[INSTRUMENT].unrealized_pnl = Decimal("2")
+        _, unrealized_changed = compute_portfolio_snapshot_binding(
+            portfolio, reporting_currency="CNY"
+        )
+        self.assertNotEqual(original, realized_changed)
+        self.assertNotEqual(original, unrealized_changed)
     def test_run_must_select_exactly_one_sharpe_convention(self):
         common = dict(
             run_id=RUN_ID,
@@ -90,7 +216,9 @@ class TestInitialEquityAdmission(unittest.TestCase):
             [build_turnover_spec()],
             [
                 build_sharpe_simple_spec(),
-                build_sharpe_config_rf_spec({"rf_annual": "0.02"}),
+                build_sharpe_config_rf_spec(
+                    {"rf_annual": "0.02", "rf_source_note": "unit config"}
+                ),
             ],
         )
         for specs in invalid_selections:
@@ -205,6 +333,83 @@ class _RateGateway:
 
 
 class TestRatePrefetch(unittest.TestCase):
+    def test_snapshot_hash_binds_the_complete_expected_session_axis(self):
+        sparse_sessions = (SESSIONS[0], SESSIONS[2], SESSIONS[-1])
+        dense_sessions = tuple(SESSIONS)
+        sparse = PitRateSnapshot(
+            rates={},
+            source_key="unit_rf",
+            source_version=1,
+            coverage_start=SESSIONS[0],
+            coverage_end=SESSIONS[-1],
+            expected_sessions=sparse_sessions,
+        )
+        dense = PitRateSnapshot(
+            rates={},
+            source_key="unit_rf",
+            source_version=1,
+            coverage_start=SESSIONS[0],
+            coverage_end=SESSIONS[-1],
+            expected_sessions=dense_sessions,
+        )
+        # These are all fields the legacy hash could observe. Their equality
+        # demonstrates the old collision; only the ordered formal axis differs.
+        self.assertEqual(sparse.coverage_start, dense.coverage_start)
+        self.assertEqual(sparse.coverage_end, dense.coverage_end)
+        self.assertEqual(sparse.rates, dense.rates)
+        self.assertEqual(sparse.missing_ranges, dense.missing_ranges)
+        self.assertNotEqual(sparse.expected_sessions, dense.expected_sessions)
+        self.assertNotEqual(sparse.snapshot_hash, dense.snapshot_hash)
+
+    def test_ambiguous_rate_revision_becomes_missing_coverage(self):
+        first = PitRateFact(
+            session_date=SESSIONS[0],
+            rate="0.02",
+            evidence=evidence(datetime(2026, 8, 1, tzinfo=UTC)),
+            data_cutoff_at=datetime(2026, 8, 1, tzinfo=UTC),
+        )
+        snapshot = freeze_rate_snapshot(
+            _RateGateway([first, replace(first, rate=Decimal("0.03"))]),
+            expected_sessions=SESSIONS,
+            source_key="unit_rf",
+            source_version=1,
+            session_open_at={
+                day: datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+                for day in SESSIONS
+            },
+        )
+        assert snapshot is not None
+        self.assertNotIn(SESSIONS[0], snapshot.rates)
+        self.assertEqual(snapshot.missing_ranges, ((SESSIONS[0], SESSIONS[-1]),))
+        self.assertEqual(
+            snapshot.fact_evidence[SESSIONS[0].isoformat()]["status"],
+            "ambiguous",
+        )
+
+        reversed_snapshot = freeze_rate_snapshot(
+            _RateGateway([replace(first, rate=Decimal("0.03")), first]),
+            expected_sessions=SESSIONS,
+            source_key="unit_rf",
+            source_version=1,
+            session_open_at={
+                day: datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+                for day in SESSIONS
+            },
+        )
+        changed_snapshot = freeze_rate_snapshot(
+            _RateGateway([first, replace(first, rate=Decimal("0.04"))]),
+            expected_sessions=SESSIONS,
+            source_key="unit_rf",
+            source_version=1,
+            session_open_at={
+                day: datetime.combine(day, datetime.min.time(), tzinfo=UTC)
+                for day in SESSIONS
+            },
+        )
+        assert reversed_snapshot is not None and changed_snapshot is not None
+        self.assertEqual(snapshot.snapshot_hash, reversed_snapshot.snapshot_hash)
+        self.assertNotEqual(snapshot.snapshot_hash, changed_snapshot.snapshot_hash)
+
     def test_full_window_prefetched_once_with_missing_ranges(self):
         gateway = _RateGateway(
             [

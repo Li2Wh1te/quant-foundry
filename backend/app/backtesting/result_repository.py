@@ -18,8 +18,8 @@ never resolves instruments itself, so no market-data client can leak in.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import date, datetime, timezone
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from types import MappingProxyType
 from typing import Any, Callable, Mapping, Sequence
 from uuid import UUID
@@ -101,17 +101,412 @@ def _validate_metric_producer_contract(dto: BacktestMetricDto) -> None:
             f"analyzer identity ({dto.analyzer_key!r}, "
             f"{dto.analyzer_version!r}) is not a registered v1 producer"
         ) from exc
-    declared = {
-        (descriptor.metric_key, descriptor.formula_version)
-        for descriptor in contract
-    }
-    if (dto.metric_key, dto.formula_version) not in declared:
+    descriptor = next(
+        (
+            item
+            for item in contract
+            if (item.metric_key, item.formula_version)
+            == (dto.metric_key, dto.formula_version)
+        ),
+        None,
+    )
+    if descriptor is None:
         raise ResultRecordConflictError(
             f"analyzer ({dto.analyzer_key!r}, {dto.analyzer_version!r}) "
             f"cannot produce metric ({dto.metric_key!r}, "
             f"{dto.formula_version!r}); the mapping is fixed by the frozen "
             "registry contract"
         )
+    if dto.unit != descriptor.unit:
+        raise ResultRecordConflictError(
+            f"metric {dto.metric_key!r} unit {dto.unit!r} does not match "
+            f"the frozen contract unit {descriptor.unit!r}"
+        )
+    metadata = dto.analyzer_metadata
+    if not isinstance(metadata, Mapping):
+        raise ResultRecordConflictError(
+            "formal analyzer metrics require complete analyzer_metadata"
+        )
+    required_metadata = {
+        "formula_signature",
+        "input_evidence_signature",
+        "contract_unit",
+        "sample_count_semantics",
+    }
+    missing = sorted(required_metadata.difference(metadata))
+    if missing:
+        raise ResultRecordConflictError(
+            f"formal analyzer metric metadata is missing {missing}"
+        )
+    for signature_name in ("formula_signature", "input_evidence_signature"):
+        signature = metadata.get(signature_name)
+        if (
+            not isinstance(signature, str)
+            or len(signature) != 71
+            or not signature.startswith("sha256:")
+            or any(character not in "0123456789abcdef" for character in signature[7:])
+        ):
+            raise ResultRecordConflictError(
+                f"{signature_name} must be sha256:<64 lowercase hex digits>"
+            )
+    if metadata.get("contract_unit") != descriptor.unit:
+        raise ResultRecordConflictError(
+            "metric contract_unit metadata differs from the frozen descriptor"
+        )
+    if metadata.get("sample_count_semantics") != descriptor.sample_count_semantics:
+        raise ResultRecordConflictError(
+            "metric sample_count_semantics differs from the frozen descriptor"
+        )
+    if dto.sample_count is None:
+        raise ResultRecordConflictError(
+            "formal analyzer metrics require the sample_count defined by the contract"
+        )
+    identity_required_metadata = {
+        "sharpe_simple": {"valid_equity_day_count", "candidate_return_count"},
+        "sharpe_pit_rf": {
+            "valid_equity_day_count",
+            "candidate_return_count",
+            "rate_unit",
+            "rate_convention",
+            "rate_effective_at",
+            "rate_session_mapping",
+            "rate_cutoff_boundary",
+            "rate_data_cutoff_semantics",
+            "rate_source_key",
+            "rate_source_version",
+            "rate_snapshot_hash",
+            "missing_ranges",
+        },
+        "sharpe_config_rf": {
+            "valid_equity_day_count",
+            "candidate_return_count",
+            "rf_annual",
+            "rf_daily",
+            "annual_rate_converter",
+            "risk_free_rate_note",
+        },
+        "turnover": {"gross_traded_notional", "fill_count"},
+        "fee_summary": {"gross_traded_notional", "cumulative_fees"},
+    }
+    analyzer_missing = sorted(
+        identity_required_metadata.get(dto.analyzer_key, set()).difference(metadata)
+    )
+    if analyzer_missing:
+        raise ResultRecordConflictError(
+            f"formal {dto.analyzer_key} metric metadata is missing "
+            f"{analyzer_missing}"
+        )
+    reason_code = metadata.get("reason_code")
+    if dto.value is None:
+        if reason_code not in descriptor.unavailable_reason_codes:
+            raise ResultRecordConflictError(
+                "unavailable metric reason_code is absent or not declared by "
+                "the frozen descriptor"
+            )
+    elif reason_code is not None:
+        raise ResultRecordConflictError(
+            "available metrics cannot carry unavailable reason_code metadata"
+        )
+    if dto.analyzer_key != "sharpe_config_rf" and dto.risk_free_rate_note is not None:
+        raise ResultRecordConflictError(
+            "risk_free_rate_note is reserved for configured-rate Sharpe metrics"
+        )
+    if not dto.analyzer_key.startswith("sharpe_") and dto.annualization_factor is not None:
+        raise ResultRecordConflictError(
+            "annualization_factor is reserved for Sharpe metrics"
+        )
+    if reason_code == "ZERO_GROSS_TRADED_NOTIONAL" and (
+        _metadata_decimal(metadata, "gross_traded_notional") != 0
+    ):
+        raise ResultRecordConflictError(
+            "ZERO_GROSS_TRADED_NOTIONAL requires zero gross traded notional"
+        )
+    if reason_code == "NO_VALID_END_OF_DAY_EQUITY" and dto.sample_count != 0:
+        raise ResultRecordConflictError(
+            "NO_VALID_END_OF_DAY_EQUITY requires zero valid observations"
+        )
+    if reason_code == "INSUFFICIENT_RETURNS" and dto.sample_count >= 2:
+        raise ResultRecordConflictError(
+            "INSUFFICIENT_RETURNS requires fewer than two return candidates"
+        )
+    if reason_code == "ZERO_RETURN_STDDEV" and dto.sample_count < 2:
+        raise ResultRecordConflictError(
+            "ZERO_RETURN_STDDEV requires at least two return candidates"
+        )
+    if reason_code == "MISSING_PIT_RF" and not (
+        metadata.get("missing_ranges") or metadata.get("missing_rate_session_dates")
+    ):
+        raise ResultRecordConflictError(
+            "MISSING_PIT_RF requires non-empty missing rate evidence"
+        )
+    if reason_code == "INVALID_EQUITY" and not metadata.get(
+        "invalid_session_dates"
+    ):
+        raise ResultRecordConflictError(
+            "INVALID_EQUITY requires non-empty failed-session evidence"
+        )
+    if dto.analyzer_key.startswith("sharpe_"):
+        for count_name in ("valid_equity_day_count", "candidate_return_count"):
+            count = metadata.get(count_name)
+            if isinstance(count, bool) or not isinstance(count, int) or count < 0:
+                raise ResultRecordConflictError(
+                    f"Sharpe metadata {count_name} must be a non-negative integer"
+                )
+        if metadata.get("annualization_factor") != "252" or metadata.get("std_ddof") != 1:
+            raise ResultRecordConflictError(
+                "Sharpe metadata must freeze annualization_factor=252 and std_ddof=1"
+            )
+        if dto.annualization_factor != Decimal("252"):
+            raise ResultRecordConflictError(
+                "Sharpe annualization_factor column must equal 252"
+            )
+        if dto.sample_count != metadata.get("candidate_return_count"):
+            raise ResultRecordConflictError(
+                "Sharpe sample_count must equal candidate_return_count"
+            )
+    if dto.analyzer_key == "sharpe_pit_rf":
+        fixed_rate_contract = {
+            "rate_unit": "decimal_fraction",
+            "rate_convention": "simple_daily_rate",
+            "rate_effective_at": "session_date",
+            "rate_session_mapping": "exact_formal_session_date",
+            "rate_cutoff_boundary": "data_cutoff_at_not_after_session_open",
+            "rate_data_cutoff_semantics": (
+                "data_cutoff_at_not_after_session_open"
+            ),
+        }
+        for name, expected in fixed_rate_contract.items():
+            if metadata.get(name) != expected:
+                raise ResultRecordConflictError(
+                    f"PIT rate metadata {name} must equal {expected!r}"
+                )
+        rate_hash = metadata.get("rate_snapshot_hash")
+        if (
+            not isinstance(rate_hash, str)
+            or len(rate_hash) != 71
+            or not rate_hash.startswith("sha256:")
+            or not isinstance(metadata.get("rate_source_key"), str)
+            or not metadata.get("rate_source_key", "").strip()
+            or isinstance(metadata.get("rate_source_version"), bool)
+            or not isinstance(metadata.get("rate_source_version"), int)
+            or metadata.get("rate_source_version") <= 0
+            or any(character not in "0123456789abcdef" for character in rate_hash[7:])
+            or not isinstance(metadata.get("missing_ranges"), (list, tuple))
+        ):
+            raise ResultRecordConflictError(
+                "PIT rate source, hash, and missing_ranges metadata are invalid"
+            )
+        for missing_range in metadata["missing_ranges"]:
+            if not isinstance(missing_range, Mapping) or set(missing_range) != {
+                "start_session",
+                "end_session",
+            }:
+                raise ResultRecordConflictError(
+                    "PIT missing_ranges entries must contain start/end sessions"
+                )
+            try:
+                start = date.fromisoformat(missing_range["start_session"])
+                end = date.fromisoformat(missing_range["end_session"])
+            except (TypeError, ValueError) as exc:
+                raise ResultRecordConflictError(
+                    "PIT missing_ranges sessions must be ISO calendar dates"
+                ) from exc
+            if end < start:
+                raise ResultRecordConflictError(
+                    "PIT missing_ranges end_session must not precede start_session"
+                )
+    if dto.analyzer_key == "sharpe_config_rf":
+        if metadata.get("annual_rate_converter") != "annual_rate_div_252@1":
+            raise ResultRecordConflictError(
+                "configured-rate Sharpe must use annual_rate_div_252@1"
+            )
+        note = metadata.get("risk_free_rate_note")
+        if not isinstance(note, str) or not note.strip() or dto.risk_free_rate_note != note.strip():
+            raise ResultRecordConflictError(
+                "configured-rate Sharpe requires the frozen risk-free source note"
+            )
+        try:
+            annual = Decimal(str(metadata.get("rf_annual")))
+            daily = Decimal(str(metadata.get("rf_daily")))
+        except (InvalidOperation, ValueError) as exc:
+            raise ResultRecordConflictError(
+                "configured-rate Sharpe rates must be decimal strings"
+            ) from exc
+        if not annual.is_finite() or annual <= -1 or not daily.is_finite():
+            raise ResultRecordConflictError(
+                "configured-rate Sharpe rf_annual must be finite and greater than -1"
+            )
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            if daily != annual / Decimal("252"):
+                raise ResultRecordConflictError(
+                    "configured-rate Sharpe rf_daily must equal rf_annual / 252"
+                )
+
+
+def _metadata_decimal(metadata: Mapping[str, Any], name: str) -> Decimal:
+    try:
+        value = Decimal(str(metadata.get(name)))
+    except (InvalidOperation, ValueError) as exc:
+        raise ResultRecordConflictError(f"metric metadata {name} must be Decimal") from exc
+    if not value.is_finite():
+        raise ResultRecordConflictError(f"metric metadata {name} must be finite")
+    return value
+
+
+def _validate_metric_against_summary(
+    dto: BacktestMetricDto,
+    summary: BacktestAnalysisSummaryRecord,
+) -> None:
+    """Bind every formal metric to its run's immutable terminal summary."""
+
+    if summary.status not in ("final", "aborted"):
+        raise ResultRecordConflictError(
+            "formal metrics may only be written under a terminal analysis summary"
+        )
+    snapshot = summary.analyzer_snapshot
+    specs = snapshot.get("specs") if isinstance(snapshot, Mapping) else None
+    if not isinstance(specs, (list, tuple)):
+        raise ResultRecordConflictError(
+            "formal metrics require a structured analyzer_snapshot.specs contract"
+        )
+    matching_specs = [
+        spec
+        for spec in specs
+        if isinstance(spec, Mapping)
+        and spec.get("analyzer_key") == dto.analyzer_key
+        and spec.get("analyzer_version") == dto.analyzer_version
+    ]
+    if len(matching_specs) != 1:
+        raise ResultRecordConflictError(
+            "metric producer is absent from or duplicated in the terminal analyzer snapshot"
+        )
+    outputs = matching_specs[0].get("output_contract")
+    if not isinstance(outputs, (list, tuple)):
+        raise ResultRecordConflictError(
+            "metric producer snapshot lacks a structured output contract"
+        )
+    matching_outputs = [
+        output
+        for output in outputs
+        if isinstance(output, Mapping)
+        and output.get("metric_key") == dto.metric_key
+        and output.get("formula_version") == dto.formula_version
+        and output.get("unit") == dto.unit
+    ]
+    if len(matching_outputs) != 1:
+        raise ResultRecordConflictError(
+            "metric output is absent from or duplicated in the terminal analyzer snapshot"
+        )
+    metadata = dto.analyzer_metadata or {}
+    if (
+        metadata.get("formula_signature") != summary.formula_signature
+        or metadata.get("input_evidence_signature")
+        != summary.input_evidence_signature
+    ):
+        raise ResultRecordConflictError(
+            "metric signatures differ from the terminal analysis summary"
+        )
+    if dto.analyzer_key.startswith("sharpe_"):
+        if (
+            metadata.get("valid_equity_day_count") != summary.valid_day_count
+            or metadata.get("candidate_return_count")
+            != summary.candidate_return_count
+        ):
+            raise ResultRecordConflictError(
+                "Sharpe counts differ from the terminal analysis summary"
+            )
+    if dto.analyzer_key == "sharpe_pit_rf":
+        source_versions = summary.rate_source_versions or {}
+        rate_snapshot = summary.rate_snapshot or {}
+        if (
+            metadata.get("rate_source_key") != source_versions.get("source_key")
+            or metadata.get("rate_source_version")
+            != source_versions.get("source_version")
+            or metadata.get("rate_snapshot_hash") != summary.rate_snapshot_hash
+            or _thaw_json_value(metadata.get("missing_ranges"))
+            != _thaw_json_value(summary.missing_ranges or ())
+            or rate_snapshot.get("rate_unit") != metadata.get("rate_unit")
+            or rate_snapshot.get("rate_convention")
+            != metadata.get("rate_convention")
+            or rate_snapshot.get("effective_at")
+            != metadata.get("rate_effective_at")
+            or rate_snapshot.get("session_mapping")
+            != metadata.get("rate_session_mapping")
+            or rate_snapshot.get("cutoff_boundary")
+            != metadata.get("rate_cutoff_boundary")
+            or rate_snapshot.get("data_cutoff_semantics")
+            != metadata.get("rate_data_cutoff_semantics")
+        ):
+            raise ResultRecordConflictError(
+                "PIT rate evidence differs from the terminal analysis summary"
+            )
+    if dto.analyzer_key == "turnover":
+        from app.backtesting.analyzers import quantize_for_persistence
+
+        if (
+            dto.sample_count != summary.valid_day_count
+            or metadata.get("fill_count") != summary.fill_count
+            or quantize_for_persistence(
+                _metadata_decimal(metadata, "gross_traded_notional")
+            )
+            != summary.gross_traded_notional
+        ):
+            raise ResultRecordConflictError(
+                "turnover counts or gross notional differ from the summary"
+            )
+        if dto.value is not None:
+            average = _metadata_decimal(metadata, "average_end_of_day_equity")
+            gross = _metadata_decimal(metadata, "gross_traded_notional")
+            if average <= 0:
+                raise ResultRecordConflictError(
+                    "turnover average equity must be strictly positive"
+                )
+            with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+                expected_turnover = quantize_for_persistence(gross / average)
+            if dto.value != expected_turnover:
+                raise ResultRecordConflictError(
+                    "turnover value does not equal gross notional / average equity"
+                )
+    if dto.analyzer_key == "fee_summary":
+        from app.backtesting.analyzers import quantize_for_persistence
+
+        if (
+            dto.sample_count != summary.fill_count
+            or quantize_for_persistence(
+                _metadata_decimal(metadata, "gross_traded_notional")
+            )
+            != summary.gross_traded_notional
+            or quantize_for_persistence(
+                _metadata_decimal(metadata, "cumulative_fees")
+            )
+            != summary.cumulative_fees
+        ):
+            raise ResultRecordConflictError(
+                "fee counts or amounts differ from the terminal summary"
+            )
+        cumulative = _metadata_decimal(metadata, "cumulative_fees")
+        gross = _metadata_decimal(metadata, "gross_traded_notional")
+        if (
+            dto.metric_key == "cumulative_fees"
+            and dto.value != quantize_for_persistence(cumulative)
+        ):
+            raise ResultRecordConflictError(
+                "cumulative_fees metric value differs from accounting metadata"
+            )
+        if (
+            dto.metric_key == "fee_to_gross_traded_notional"
+            and dto.value is not None
+        ):
+            with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+                expected_ratio = (
+                    None
+                    if gross == 0
+                    else quantize_for_persistence(cumulative / gross)
+                )
+            if expected_ratio is None or dto.value != expected_ratio:
+                raise ResultRecordConflictError(
+                    "fee ratio metric does not equal cumulative_fees / gross notional"
+                )
 
 
 # ---------------------------------------------------------------------------
@@ -826,18 +1221,10 @@ class BacktestResultRepository:
                 for dto in dtos
             ]
             if any(has_identity):
-                if not all(has_identity):
-                    raise ResultRepositoryError(
-                        "metrics batch cannot mix analyzer-identified and "
-                        "legacy identity-less rows"
-                    )
-                for dto in dtos:
-                    if not isinstance(dto, BacktestMetricDto):
-                        raise ResultRepositoryError(
-                            f"metrics expects {BacktestMetricDto.__name__}, got "
-                            f"{type(dto).__name__}"
-                        )
-                    _validate_metric_producer_contract(dto)
+                raise ResultRepositoryError(
+                    "analyzer-identified metrics must use append_metrics; "
+                    "generic append is reserved for identity-less legacy rows"
+                )
         seen: set[tuple[Any, ...]] = set()
         payloads: list[dict[str, Any]] = []
         for dto in dtos:
@@ -923,6 +1310,22 @@ class BacktestResultRepository:
             seen_identities[identity] = dto
 
         run_ids = {dto.run_id for dto in seen_identities.values()}
+        summaries = {
+            row.run_id: row
+            for row in self.session.scalars(
+                select(BacktestAnalysisSummaryRecord).where(
+                    BacktestAnalysisSummaryRecord.run_id.in_(run_ids)
+                ).with_for_update()
+            )
+        }
+        for dto in seen_identities.values():
+            summary = summaries.get(dto.run_id)
+            if summary is None:
+                raise ResultRecordConflictError(
+                    "formal metrics require a terminal analysis summary in "
+                    "the same transaction"
+                )
+            _validate_metric_against_summary(dto, summary)
         metric_keys = {dto.metric_key for dto in seen_identities.values()}
         existing_rows: dict[tuple[UUID, str, str], BacktestMetricRecord] = {}
         rows = self.session.scalars(
@@ -986,6 +1389,10 @@ class BacktestResultRepository:
         ).first()
         payload = _analysis_summary_record(dto)
         if existing is None:
+            if dto.last_chunk_sequence not in (None, 0):
+                raise ResultRecordConflictError(
+                    "the first persisted analysis checkpoint must start at sequence 0"
+                )
             record = BacktestAnalysisSummaryRecord(**payload)
             self.session.add(record)
             try:
@@ -1017,10 +1424,22 @@ class BacktestResultRepository:
         # sequence (or session boundary) is rejected outright, and the
         # same sequence only passes when its content is identical.
         incoming_status = dto.status.value
+        if incoming_status == "aborted" and (
+            dto.last_chunk_sequence,
+            dto.last_chunk_token,
+            dto.completed_through_session,
+        ) != (
+            existing.last_chunk_sequence,
+            existing.last_chunk_token,
+            existing.completed_through_session,
+        ):
+            raise ResultRecordConflictError(
+                "aborted finalization must preserve the last successful checkpoint exactly"
+            )
         if existing.last_chunk_sequence is not None:
-            if incoming_status == "partial" and dto.last_chunk_sequence is None:
+            if dto.last_chunk_sequence is None:
                 raise ResultRecordConflictError(
-                    "stale partial progress: incoming checkpoint has no chunk "
+                    "stale progress: incoming checkpoint has no chunk "
                     "sequence after a sequenced checkpoint was persisted"
                 )
             if dto.last_chunk_sequence is not None and (
@@ -1032,21 +1451,42 @@ class BacktestResultRepository:
                     f"{existing.last_chunk_sequence}"
                 )
             if (
-                incoming_status == "partial"
-                and dto.last_chunk_sequence is not None
-                and dto.last_chunk_sequence == existing.last_chunk_sequence
-                and _summary_content_fingerprint(_summary_dto_from_record(existing))
-                != _summary_content_fingerprint(dto)
+                incoming_status in ("partial", "final")
+                and dto.last_chunk_sequence > existing.last_chunk_sequence + 1
             ):
                 raise ResultRecordConflictError(
-                    "conflicting partial progress for the same chunk "
-                    "sequence; identical retries are accepted, diverging "
-                    "content is not"
+                    "successful checkpoint sequences must advance contiguously"
+                )
+            if dto.last_chunk_sequence == existing.last_chunk_sequence:
+                if dto.last_chunk_token != existing.last_chunk_token:
+                    raise ResultRecordConflictError(
+                        "conflicting checkpoint token for the same chunk sequence"
+                    )
+                if incoming_status == "final":
+                    raise ResultRecordConflictError(
+                        "a final summary must advance beyond the persisted "
+                        "partial chunk sequence"
+                    )
+                if incoming_status == "partial" and (
+                    _summary_content_fingerprint(_summary_dto_from_record(existing))
+                    != _summary_content_fingerprint(dto)
+                ):
+                    raise ResultRecordConflictError(
+                        "conflicting partial progress for the same chunk "
+                        "sequence; identical retries are accepted, diverging "
+                        "content is not"
+                    )
+            if (
+                incoming_status == "aborted"
+                and dto.last_chunk_sequence > existing.last_chunk_sequence
+            ):
+                raise ResultRecordConflictError(
+                    "aborted progress cannot claim a checkpoint from the failed chunk"
                 )
         if existing.completed_through_session is not None:
-            if incoming_status == "partial" and dto.completed_through_session is None:
+            if dto.completed_through_session is None:
                 raise ResultRecordConflictError(
-                    "stale partial progress: incoming checkpoint has no session "
+                    "stale progress: incoming checkpoint has no session "
                     "boundary after a session boundary was persisted"
                 )
             if (

@@ -28,7 +28,20 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove the timeline payload column."""
+    """Remove timeline columns only when no persisted evidence uses them."""
+
+    bind = op.get_bind()
+    evidence_count = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM backtest_analysis_summaries "
+            "WHERE formal_timeline IS NOT NULL "
+            "OR candidate_return_count IS NOT NULL"
+        )
+    ).scalar_one()
+    if evidence_count:
+        raise RuntimeError(
+            "refusing downgrade 20260825_04: formal timeline evidence exists"
+        )
 
     op.drop_column("backtest_analysis_summaries", "candidate_return_count")
     op.drop_column("backtest_analysis_summaries", "formal_timeline")

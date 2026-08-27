@@ -15,15 +15,17 @@ from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
 from app.backtesting.analysis_finalization import (
+    AnalysisFinalizationCoordinator,
     AnalysisFinalizationError,
     AnalysisFinalizer,
     unwrap_valuation_blocked_error,
 )
-from app.backtesting.analysis_inputs import InitialEquitySnapshot
+from app.backtesting.analysis_inputs import InitialEquitySnapshot, PitRateSnapshot
 from app.backtesting.analyzers import (
     AnalyzerEngine,
     build_fee_summary_spec,
     build_sharpe_config_rf_spec,
+    build_sharpe_pit_rf_spec,
     build_sharpe_simple_spec,
     build_turnover_spec,
 )
@@ -37,6 +39,7 @@ from app.backtesting.result_records import (
     Base,
     RESULT_TABLE_NAMES,
 )
+from app.backtesting.runtime import ValuationBlockedError
 
 from tests.backtest_runtime_fixture import (
     INSTRUMENT_ID,
@@ -190,7 +193,10 @@ class TestAnalysisFinalization(unittest.TestCase):
         c_engine = AnalyzerEngine.create(
             self.engine._initial_equity_snapshot,
             [
-                build_sharpe_config_rf_spec({"rf_annual": "0.02"}),
+                build_sharpe_config_rf_spec({
+                    "rf_annual": "0.02",
+                    "rf_source_note": "unit config",
+                }),
                 build_turnover_spec(),
             ],
         )
@@ -333,6 +339,20 @@ class TestAnalysisFinalization(unittest.TestCase):
                 self.harness.session_factory,
             )
 
+    def test_failure_snapshot_rejects_incomplete_checkpoint_evidence(self):
+        with self.assertRaises(Exception) as caught:
+            self.runner.run_steps(tuple(self.steps), next_after_last=None)
+        failure_snapshot = self.runner.build_analysis_failure_snapshot(
+            caught.exception
+        )
+        with self.assertRaises(AnalysisFinalizationError):
+            replace(
+                failure_snapshot,
+                last_chunk_sequence=0,
+                last_chunk_token=None,
+                completed_through_session=None,
+            )
+
     def test_persistence_failure_raises_finalization_error(self):
         from app.backtesting.analysis_finalization import (
             AnalysisFinalizationCoordinator,
@@ -352,7 +372,13 @@ class TestAnalysisFinalization(unittest.TestCase):
                 session_factory=ExplodingFactory(),
             )
         self.assertIsInstance(caught.exception, AnalysisFinalizationError)
-        self.assertIsInstance(caught.exception.__cause__, RuntimeError)
+        self.assertIsInstance(caught.exception.__cause__, ValuationBlockedError)
+        self.assertIsInstance(
+            caught.exception.persistence_error, AnalysisFinalizationError
+        )
+        self.assertIsInstance(
+            caught.exception.persistence_error.__cause__, RuntimeError
+        )
 
         # Nothing was persisted; a later retry can still finalize because
         # the engine reuses its frozen aborted results idempotently.
@@ -390,6 +416,33 @@ class TestAnalysisFinalization(unittest.TestCase):
             coordinator.execute_steps(Broken(), (object(),))
         self.assertIsNone(self.engine.finalized_status)
 
+    def test_forged_valuation_error_type_text_cannot_trigger_finalization(self):
+        class ForgedValuationFailure(ValueError):
+            error_type = "ValuationBlockedError"
+
+        engine = make_engine()
+
+        class Broken:
+            _analysis_engine = engine
+
+            def run_steps(self, *args, **kwargs):
+                raise ForgedValuationFailure("forged structured type text")
+
+            def build_analysis_failure_snapshot(self, exc):  # pragma: no cover
+                raise AssertionError("non-valuation errors must not be finalized")
+
+        with self.assertRaises(ForgedValuationFailure):
+            AnalysisFinalizationCoordinator().execute_steps(
+                Broken(),
+                (object(),),
+                session_factory=self.harness.session_factory,
+            )
+        self.assertIsNone(engine.finalized_status)
+
+    def test_coordinator_does_not_expose_an_abort_family_override(self):
+        with self.assertRaises(TypeError):
+            AnalysisFinalizationCoordinator(abort_on_error_types=(ValueError,))
+
     def test_successful_run_persists_final_summary_and_metrics(self):
         from app.backtesting.analysis_finalization import (
             AnalysisFinalizationCoordinator,
@@ -422,6 +475,38 @@ class TestAnalysisFinalization(unittest.TestCase):
         self.assertEqual(summary.completed_through_session, SESSION_DATES[-1])
         self.assertEqual(len(metrics), 4)
 
+    def test_missing_pit_rate_sharpe_persists_fixed_column_contract(self):
+        base_engine = make_engine()
+        rate_snapshot = PitRateSnapshot(
+            rates={},
+            source_key="unit_rf",
+            source_version=1,
+            coverage_start=SESSION_DATES[0],
+            coverage_end=SESSION_DATES[-1],
+            expected_sessions=SESSION_DATES,
+        )
+        engine = AnalyzerEngine.create(
+            base_engine._initial_equity_snapshot,
+            [build_sharpe_pit_rf_spec()],
+            frozen_rate_snapshot=rate_snapshot,
+        )
+        result = AnalysisFinalizationCoordinator().execute_steps(
+            make_successful_runner(engine),
+            tuple(build_axis(SESSION_DATES)),
+            next_after_last=None,
+            session_factory=self.harness.session_factory,
+        )
+        self.assertEqual(result.analysis_status, "final")
+        with self.harness.session_factory() as session:
+            metric = session.scalars(select(BacktestMetricOrm)).one()
+        self.assertIsNone(metric.value)
+        self.assertEqual(metric.annualization_factor, Decimal("252"))
+        self.assertEqual(metric.analyzer_metadata["annualization_factor"], "252")
+        self.assertEqual(metric.analyzer_metadata["std_ddof"], 1)
+        self.assertEqual(
+            metric.analyzer_metadata["reason_code"], "MISSING_PIT_RF"
+        )
+
     def test_partial_chunk_persists_progress_without_metrics(self):
         from app.backtesting.analysis_finalization import (
             AnalysisFinalizationCoordinator,
@@ -453,6 +538,48 @@ class TestAnalysisFinalization(unittest.TestCase):
         self.assertIsNone(summary.finalized_at)
         # Partial checkpoints never write final metric rows.
         self.assertEqual(metrics, [])
+
+    def test_partial_persistence_rejects_missing_success_checkpoint(self):
+        runner = make_successful_runner(make_engine())
+        snapshot = runner._analysis_engine.snapshot()
+        with self.assertRaises(AnalysisFinalizationError):
+            AnalysisFinalizer().persist_partial(
+                snapshot,
+                session_factory=self.harness.session_factory,
+            )
+
+    def test_aborted_run_preserves_previous_successful_chunk_checkpoint(self):
+        from app.backtesting.analysis_finalization import (
+            AnalysisFinalizationCoordinator,
+        )
+
+        engine = make_engine()
+        runner = make_runner(engine)
+        steps = list(build_axis(SESSION_DATES))
+        coordinator = AnalysisFinalizationCoordinator()
+        partial = coordinator.execute_steps(
+            runner,
+            tuple(steps[:2]),
+            next_after_last=steps[2],
+            session_factory=self.harness.session_factory,
+        )
+        with self.assertRaises(Exception):
+            coordinator.execute_steps(
+                runner,
+                tuple(steps[2:]),
+                next_after_last=None,
+                session_factory=self.harness.session_factory,
+            )
+        with self.harness.session_factory() as session:
+            summary = session.scalars(
+                select(BacktestAnalysisSummaryRecord).where(
+                    BacktestAnalysisSummaryRecord.run_id == UUID(RUN_ID)
+                )
+            ).one()
+        self.assertEqual(summary.status, "aborted")
+        self.assertEqual(summary.last_chunk_sequence, partial.chunk_sequence)
+        self.assertEqual(summary.last_chunk_token, partial.analysis_chunk_token)
+        self.assertEqual(summary.completed_through_session, SESSION_DATES[1])
 
     def test_missing_session_factory_fails_fast_before_running(self):
         from app.backtesting.analysis_finalization import (

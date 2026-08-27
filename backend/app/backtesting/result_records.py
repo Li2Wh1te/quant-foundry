@@ -1016,7 +1016,7 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
         nullable=True,
         comment="Rate source key/version and query parameters of the snapshot.",
     )
-    missing_ranges: Mapped[dict | None] = mapped_column(
+    missing_ranges: Mapped[list[dict[str, str]] | None] = mapped_column(
         JsonType,
         nullable=True,
         comment="Deterministic contiguous missing-session ranges of the rate series.",
@@ -1029,7 +1029,10 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
     last_chunk_sequence: Mapped[int | None] = mapped_column(
         Integer,
         nullable=True,
-        comment="Latest completed or failed step sequence at the last update.",
+        comment=(
+            "Zero-based sequence of the latest successfully persisted chunk; "
+            "aborted runs never record the failed chunk."
+        ),
     )
     last_chunk_token: Mapped[str | None] = mapped_column(
         String(128),

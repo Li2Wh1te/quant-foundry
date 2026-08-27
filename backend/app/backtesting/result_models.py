@@ -45,6 +45,21 @@ from app.backtesting.domain import (
 from app.instruments.domain import InstrumentDisplay, InstrumentDisplayProvider
 
 
+def _require_sha256_signature(value: str, field_name: str) -> str:
+    """Validate the canonical lowercase SHA-256 evidence identifier shape."""
+
+    normalized = _required_text(value, field_name)
+    if (
+        len(normalized) != 71
+        or not normalized.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in normalized[7:])
+    ):
+        raise DomainValidationError(
+            f"{field_name} must be sha256:<64 lowercase hex digits>"
+        )
+    return normalized
+
+
 ZERO = Decimal("0")
 
 
@@ -927,6 +942,10 @@ class BacktestMetricRecord:
             "risk_free_rate_note",
             _optional_text(self.risk_free_rate_note, "risk_free_rate_note"),
         )
+        if self.risk_free_rate_note is not None and len(self.risk_free_rate_note) > 200:
+            raise DomainValidationError(
+                "risk_free_rate_note must not exceed 200 characters"
+            )
         object.__setattr__(
             self, "sample_count", _optional_int(self.sample_count, "sample_count")
         )
@@ -1050,12 +1069,12 @@ class BacktestAnalysisSummaryRecord:
         object.__setattr__(
             self,
             "formula_signature",
-            _required_text(self.formula_signature, "formula_signature"),
+            _require_sha256_signature(self.formula_signature, "formula_signature"),
         )
         object.__setattr__(
             self,
             "input_evidence_signature",
-            _required_text(
+            _require_sha256_signature(
                 self.input_evidence_signature, "input_evidence_signature"
             ),
         )
@@ -1070,6 +1089,19 @@ class BacktestAnalysisSummaryRecord:
             object.__setattr__(
                 self, name, _optional_decimal(getattr(self, name), name)
             )
+        # Summary monetary columns are stored in NUMERIC(38,18). Keep
+        # producer metadata as exact formula evidence, but normalize E0 and
+        # accounting aggregates at this explicit persistence-shape boundary.
+        from app.backtesting.analyzers import quantize_for_persistence
+
+        for name in (
+            "initial_equity",
+            "gross_traded_notional",
+            "cumulative_fees",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, quantize_for_persistence(value))
         for name in (
             "valid_day_count",
             "candidate_return_count",
@@ -1080,48 +1112,109 @@ class BacktestAnalysisSummaryRecord:
             object.__setattr__(
                 self, name, _optional_int(getattr(self, name), name)
             )
-        for name in ("rate_source_versions",):
-            value = getattr(self, name)
-            if value is not None:
-                if not isinstance(value, Mapping):
-                    raise DomainValidationError(f"{name} must be a mapping")
-                object.__setattr__(
-                    self, name, MappingProxyType(dict(value))
-                )
+            if getattr(self, name) is not None and getattr(self, name) < 0:
+                raise DomainValidationError(f"{name} must be non-negative")
+        if self.initial_equity is not None and self.initial_equity <= 0:
+            raise DomainValidationError("initial_equity must be strictly positive")
+        if self.gross_traded_notional is not None and self.gross_traded_notional < 0:
+            raise DomainValidationError("gross_traded_notional must be non-negative")
+        if self.cumulative_fees is not None and self.cumulative_fees < 0:
+            raise DomainValidationError("cumulative_fees must be non-negative")
+        if (
+            self.candidate_return_count is not None
+            and self.valid_day_count is not None
+            and self.candidate_return_count > self.valid_day_count
+        ):
+            raise DomainValidationError(
+                "candidate_return_count must not exceed valid_day_count"
+            )
+        if self.rate_source_versions is not None:
+            if not isinstance(self.rate_source_versions, Mapping):
+                raise DomainValidationError("rate_source_versions must be a mapping")
+            object.__setattr__(
+                self,
+                "rate_source_versions",
+                _frozen_json(self.rate_source_versions, "rate_source_versions"),
+            )
         if self.rate_snapshot is not None:
             frozen = _frozen_json(self.rate_snapshot, "rate_snapshot")
             object.__setattr__(self, "rate_snapshot", frozen)
         if self.missing_ranges is not None:
-            ranges = tuple(self.missing_ranges)
-            object.__setattr__(self, "missing_ranges", ranges)
+            if isinstance(self.missing_ranges, (str, bytes, bytearray)):
+                raise DomainValidationError("missing_ranges must be a sequence")
+            normalized_ranges: list[Mapping[str, Any]] = []
+            previous_end: date | None = None
+            for item in self.missing_ranges:
+                if not isinstance(item, Mapping) or set(item) != {
+                    "start_session",
+                    "end_session",
+                }:
+                    raise DomainValidationError(
+                        "missing_ranges entries must contain start_session and end_session"
+                    )
+                try:
+                    start = date.fromisoformat(item["start_session"])
+                    end = date.fromisoformat(item["end_session"])
+                except (TypeError, ValueError) as exc:
+                    raise DomainValidationError(
+                        "missing_ranges sessions must be ISO calendar dates"
+                    ) from exc
+                if end < start:
+                    raise DomainValidationError(
+                        "missing_ranges end_session must not precede start_session"
+                    )
+                if previous_end is not None and start <= previous_end:
+                    raise DomainValidationError(
+                        "missing_ranges must be strictly ordered and non-overlapping"
+                    )
+                previous_end = end
+                normalized_ranges.append(
+                    MappingProxyType(
+                        {
+                            "start_session": start.isoformat(),
+                            "end_session": end.isoformat(),
+                        }
+                    )
+                )
+            object.__setattr__(self, "missing_ranges", tuple(normalized_ranges))
         object.__setattr__(
             self,
             "rate_snapshot_hash",
             _optional_text(self.rate_snapshot_hash, "rate_snapshot_hash"),
         )
+        if self.rate_snapshot_hash is not None:
+            object.__setattr__(
+                self,
+                "rate_snapshot_hash",
+                _require_sha256_signature(
+                    self.rate_snapshot_hash, "rate_snapshot_hash"
+                ),
+            )
         object.__setattr__(
             self,
             "last_chunk_token",
             _optional_text(self.last_chunk_token, "last_chunk_token"),
         )
-        if self.last_chunk_sequence is not None and self.last_chunk_token is None:
-            from app.backtesting.analysis_inputs import evidence_digest
-
-            object.__setattr__(
-                self,
-                "last_chunk_token",
-                evidence_digest(
-                    {
-                        "contract": "analysis_chunk_v1_compat",
-                        "run_id": self.run_id,
-                        "chunk_sequence": self.last_chunk_sequence,
-                        "input_evidence_signature": self.input_evidence_signature,
-                    }
-                ),
-            )
-        if (self.last_chunk_sequence is None) != (self.last_chunk_token is None):
+        checkpoint_fields = (
+            self.last_chunk_sequence,
+            self.last_chunk_token,
+            self.completed_through_session,
+        )
+        checkpoint_present = tuple(value is not None for value in checkpoint_fields)
+        if any(checkpoint_present) and not all(checkpoint_present):
             raise DomainValidationError(
-                "last_chunk_sequence and last_chunk_token must be provided together"
+                "chunk sequence, token, and completed session must be provided together"
+            )
+        if self.last_chunk_token is not None and (
+            len(self.last_chunk_token) != 71
+            or not self.last_chunk_token.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.last_chunk_token[7:]
+            )
+        ):
+            raise DomainValidationError(
+                "last_chunk_token must be sha256:<64 lowercase hex digits>"
             )
         object.__setattr__(
             self,
@@ -1146,6 +1239,13 @@ class BacktestAnalysisSummaryRecord:
                 raise DomainValidationError(
                     "completed_through_session must be a calendar date"
                 )
+        if self.status in (
+            AnalysisSummaryStatus.PARTIAL,
+            AnalysisSummaryStatus.FINAL,
+        ) and not all(checkpoint_present):
+            raise DomainValidationError(
+                f"{self.status.value} summaries require a complete successful checkpoint"
+            )
         object.__setattr__(
             self, "abort_reason", _optional_text(self.abort_reason, "abort_reason")
         )

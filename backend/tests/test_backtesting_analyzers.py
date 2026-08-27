@@ -6,7 +6,7 @@ from __future__ import annotations
 import unittest
 from dataclasses import replace
 from datetime import date, datetime, time, timezone
-from decimal import Decimal, Overflow, Subnormal, localcontext
+from decimal import Context, Decimal, Overflow, ROUND_HALF_EVEN, Subnormal, localcontext
 from uuid import UUID, uuid4
 
 import app.backtesting.analyzers as analyzers_module
@@ -96,7 +96,14 @@ def observation(
     )
 
 
-def fill_observation(fees: str = "5", notional: str = "1000") -> FillObservation:
+def fill_observation(
+    fees: str = "5",
+    notional: str = "1000",
+    *,
+    price: str = "10",
+    quantity: str = "100",
+    multiplier: str = "1",
+) -> FillObservation:
     fact = AppliedFillFact(
         fill_id=uuid4(),
         run_id=RUN_ID,
@@ -104,9 +111,9 @@ def fill_observation(fees: str = "5", notional: str = "1000") -> FillObservation
         timestamp=datetime(2026, 1, 5, 1, 0, tzinfo=timezone.utc),
         instrument_id=INSTRUMENT,
         side="buy",
-        fill_price="10",
-        fill_quantity="100",
-        contract_multiplier="1",
+        fill_price=price,
+        fill_quantity=quantity,
+        contract_multiplier=multiplier,
         currency="CNY",
         reporting_currency="CNY",
         fees=fees,
@@ -369,7 +376,9 @@ class TestSharpeFormulas(unittest.TestCase):
         self.assertEqual(pit_result.analyzer_metadata["missing_ranges"], ())
 
     def test_sharpe_c_negative_rate_allowed_and_divides_by_252(self):
-        engine = make_test_engine([build_sharpe_config_rf_spec({"rf_annual": "-0.01"})])
+        engine = make_test_engine([build_sharpe_config_rf_spec(
+            {"rf_annual": "-0.01", "rf_source_note": "unit config"}
+        )])
         observe_days(engine, ["101000", "102000", "101000"])
         (result,) = engine.finalize(
             "aborted", failure={"abort_reason": "partial test timeline"}
@@ -384,13 +393,17 @@ class TestSharpeFormulas(unittest.TestCase):
                 Decimal("-0.01") / ANNUALIZATION_FACTOR,
             )
         self.assertEqual(metadata["annual_rate_converter"], "annual_rate_div_252@1")
+        self.assertEqual(metadata["risk_free_rate_note"], "unit config")
 
     def test_invalid_config_rf_blocks_run_creation(self):
         for rf_annual in ("-1", "-1.5", "abc"):
             with self.assertRaises(AnalyzerConfigurationError) as caught:
                 AnalyzerEngine.create(
                     e0(),
-                    [build_sharpe_config_rf_spec({"rf_annual": rf_annual})],
+                    [build_sharpe_config_rf_spec({
+                        "rf_annual": rf_annual,
+                        "rf_source_note": "unit config",
+                    })],
                 )
             self.assertEqual(
                 caught.exception.reason_code, ReasonCode.INVALID_ANALYZER_CONFIG.value
@@ -399,6 +412,16 @@ class TestSharpeFormulas(unittest.TestCase):
     def test_missing_config_rf_parameter_blocks_run_creation(self):
         with self.assertRaises(AnalyzerConfigurationError):
             make_test_engine([build_sharpe_config_rf_spec({})])
+
+    def test_config_rf_requires_bounded_explicit_source_note(self):
+        for parameters in (
+            {"rf_annual": "0.02"},
+            {"rf_annual": "0.02", "rf_source_note": " "},
+            {"rf_annual": "0.02", "rf_source_note": "x" * 201},
+        ):
+            with self.subTest(parameters=parameters):
+                with self.assertRaises(AnalyzerConfigurationError):
+                    make_test_engine([build_sharpe_config_rf_spec(parameters)])
 
 
 class TestTurnoverAndFees(unittest.TestCase):
@@ -502,6 +525,70 @@ class TestTurnoverAndFees(unittest.TestCase):
             ratio.formula_version, "fee_to_gross_traded_notional_v1"
         )
         self.assertEqual(ratio.value, Decimal("7") / Decimal("1000"))
+
+    def test_fee_aggregates_share_the_numeric_38_18_boundary(self):
+        engine = make_test_engine([build_fee_summary_spec()])
+        engine.observe_fill(
+            fill_observation(
+                fees="6.1424372340224469887",
+                notional="21.0137899097747100929",
+                price="21.0137899097747100929",
+                quantity="1",
+            )
+        )
+        results = engine.finalize(
+            "aborted", failure={"abort_reason": "partial test timeline"}
+        )
+        cumulative, ratio = results
+        raw_fees = Decimal("6.1424372340224469887")
+        raw_notional = Decimal("21.0137899097747100929")
+        expected_fees = Decimal("6.142437234022446989")
+        self.assertEqual(cumulative.value, expected_fees)
+        self.assertEqual(
+            cumulative.analyzer_metadata["cumulative_fees"],
+            format(raw_fees, "f"),
+        )
+        self.assertEqual(
+            cumulative.analyzer_metadata["gross_traded_notional"],
+            format(raw_notional, "f"),
+        )
+        self.assertEqual(
+            engine.snapshot().summary_counts()["cumulative_fees"], raw_fees
+        )
+        expected_ratio = Decimal("0.292305065406847420")
+        prematurely_quantized_ratio = Decimal("0.292305065406847421")
+        self.assertEqual(
+            ratio.value,
+            expected_ratio,
+        )
+        self.assertNotEqual(ratio.value, prematurely_quantized_ratio)
+
+    def test_turnover_divides_raw_aggregates_before_final_quantization(self):
+        engine = make_test_engine([build_turnover_spec()])
+        engine.observe_equity(
+            observation(SESSIONS[0], "21.0137899097747100929")
+        )
+        engine.observe_fill(
+            fill_observation(
+                fees="0",
+                notional="6.1424372340224469887",
+                price="6.1424372340224469887",
+                quantity="1",
+            )
+        )
+        (turnover,) = engine.finalize(
+            "aborted", failure={"abort_reason": "partial test timeline"}
+        )
+        self.assertEqual(turnover.value, Decimal("0.292305065406847420"))
+        self.assertNotEqual(turnover.value, Decimal("0.292305065406847421"))
+        self.assertEqual(
+            turnover.analyzer_metadata["gross_traded_notional"],
+            "6.1424372340224469887",
+        )
+        self.assertEqual(
+            turnover.analyzer_metadata["average_end_of_day_equity"],
+            "21.0137899097747100929",
+        )
 
     def test_ratio_unavailable_without_gross_traded_notional(self):
         engine = make_test_engine([build_fee_summary_spec()])
@@ -825,7 +912,7 @@ class TestAnalyzerEngineContracts(unittest.TestCase):
                 gross_traded_notional=None,
             )
 
-    def test_declared_gross_traded_notional_is_consumed_as_accounting_evidence(self):
+    def test_declared_gross_traded_notional_must_match_accounting_identity(self):
         fact = AppliedFillFact(
             fill_id=uuid4(),
             run_id=RUN_ID,
@@ -839,11 +926,42 @@ class TestAnalyzerEngineContracts(unittest.TestCase):
             currency="CNY",
             reporting_currency="CNY",
             fees="5",
-            # Deliberately differs from price * quantity: the accounting
-            # layer's declared amount is the analyzer input contract.
-            gross_traded_notional="999",
+            gross_traded_notional="1000",
         )
-        self.assertEqual(fact.gross_traded_notional, Decimal("999"))
+        self.assertEqual(fact.gross_traded_notional, Decimal("1000"))
+        with self.assertRaises(DomainValidationError):
+            replace(fact, gross_traded_notional="999")
+
+    def test_fill_notional_identity_uses_multiplier_and_prec_50_product(self):
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            high_precision_product = (
+                Decimal("1.234567890123456789")
+                * Decimal("3.000000000000000001")
+                * Decimal("2.5")
+            )
+        fact = AppliedFillFact(
+            fill_id=uuid4(),
+            run_id=RUN_ID,
+            session_date=SESSIONS[0],
+            timestamp=datetime(2026, 1, 5, 1, 0, tzinfo=timezone.utc),
+            instrument_id=INSTRUMENT,
+            side="buy",
+            fill_price="1.234567890123456789",
+            fill_quantity="3.000000000000000001",
+            contract_multiplier="2.5",
+            currency="CNY",
+            reporting_currency="CNY",
+            fees="0",
+            gross_traded_notional=format(high_precision_product, "f"),
+        )
+        self.assertEqual(fact.gross_traded_notional, high_precision_product)
+        with self.assertRaises(DomainValidationError):
+            replace(
+                fact,
+                gross_traded_notional=format(
+                    high_precision_product.quantize(Decimal("1e-18")), "f"
+                ),
+            )
 
     def test_unavailable_reason_code_cannot_be_overridden(self):
         with self.assertRaises(DomainValidationError):
@@ -897,7 +1015,10 @@ class TestAnalyzerEngineContracts(unittest.TestCase):
             e0(),
             [
                 build_sharpe_simple_spec(),
-                build_sharpe_config_rf_spec({"rf_annual": "0.02"}),
+                build_sharpe_config_rf_spec({
+                    "rf_annual": "0.02",
+                    "rf_source_note": "unit config",
+                }),
             ],
         )
         self.assertEqual(len(engine.specs), 2)
@@ -1037,7 +1158,7 @@ class TestAnalyzerEngineContracts(unittest.TestCase):
                 currency="CNY",
                 reporting_currency="CNY",
                 fees="5",
-                gross_traded_notional="1000",
+                gross_traded_notional="1100",
             )
         )
         with self.assertRaises(DomainValidationError):

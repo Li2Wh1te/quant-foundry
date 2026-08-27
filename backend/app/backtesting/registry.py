@@ -717,13 +717,21 @@ def build_default_component_registry() -> ComponentRegistry:
             factory=_build_analyzer_spec(ANALYZER_KEY_CONFIG_RF),
             parameter_schema={
                 "type": "object",
-                "required": ["rf_annual"],
+                "required": ["rf_annual", "rf_source_note"],
                 "properties": {
                     "rf_annual": {
                         "type": "decimal-string",
                         "description": (
                             "frozen annual risk-free rate; finite decimal "
                             "strictly greater than -1"
+                        ),
+                    },
+                    "rf_source_note": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 200,
+                        "description": (
+                            "explicit frozen provenance note for rf_annual"
                         ),
                     },
                 },

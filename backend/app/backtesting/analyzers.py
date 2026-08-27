@@ -1174,6 +1174,8 @@ def _sharpe_result(
             ),
             reason_code=unavailable.reason_code,
             extra_metadata={
+                "annualization_factor": format(ANNUALIZATION_FACTOR, "f"),
+                "std_ddof": 1,
                 "valid_equity_day_count": series.valid_day_count,
                 "candidate_return_count": series.candidate_return_count,
                 **unavailable.metadata,
@@ -1278,6 +1280,11 @@ def _produce_sharpe_pit_rf(
         "rate_cutoff_boundary": (
             rate_snapshot.cutoff_boundary if rate_snapshot is not None else None
         ),
+        "rate_data_cutoff_semantics": (
+            rate_snapshot.data_cutoff_semantics
+            if rate_snapshot is not None
+            else None
+        ),
         "rate_source_key": (
             rate_snapshot.source_key if rate_snapshot is not None else None
         ),
@@ -1312,6 +1319,10 @@ def _produce_sharpe_pit_rf(
                     reason_code=ReasonCode.MISSING_PIT_RF,
                     extra_metadata={
                         **extra_metadata,
+                        "annualization_factor": format(
+                            ANNUALIZATION_FACTOR, "f"
+                        ),
+                        "std_ddof": 1,
                         "valid_equity_day_count": series.valid_day_count,
                         "candidate_return_count": series.candidate_return_count,
                         "missing_rate_session_dates": [
@@ -1346,6 +1357,16 @@ def resolve_config_rf_daily(spec: AnalyzerSpec) -> Decimal:
     """
 
     parameters = spec.parameters
+    source_note = parameters.get("rf_source_note")
+    if (
+        not isinstance(source_note, str)
+        or not source_note.strip()
+        or len(source_note.strip()) > 200
+    ):
+        raise AnalyzerConfigurationError(
+            f"{spec.display_identity} requires an explicit non-blank "
+            "rf_source_note parameter of at most 200 characters"
+        )
     if "rf_annual" not in parameters:
         raise AnalyzerConfigurationError(
             f"{spec.display_identity} requires an explicit rf_annual parameter"
@@ -1417,6 +1438,7 @@ def _produce_sharpe_config_rf(
         "annual_rate_converter": (
             f"{ANNUAL_RATE_CONVERTER_KEY}@{ANNUAL_RATE_CONVERTER_VERSION}"
         ),
+        "risk_free_rate_note": spec.parameters["rf_source_note"].strip(),
     }
     x_values: list[Decimal] | None = None
     if not series.has_invalid_points and series.valid_day_count > 0:
@@ -1441,10 +1463,11 @@ def _produce_turnover(
     series = _build_equity_series(
         state.equity_observations, state.initial_equity_snapshot.equity_e0
     )
-    gross_traded_notional = sum(
-        (fill.fact.gross_traded_notional for fill in state.fill_observations),
-        Decimal("0"),
-    )
+    with analyzer_decimal_context():
+        gross_traded_notional = sum(
+            (fill.fact.gross_traded_notional for fill in state.fill_observations),
+            Decimal("0"),
+        )
     base_metadata = {
         "gross_traded_notional": format(gross_traded_notional, "f"),
         "fill_count": len(state.fill_observations),
@@ -1511,13 +1534,14 @@ def _produce_fee_summary(
     cumulative_descriptor = spec.output_contract[0]
     ratio_descriptor = spec.output_contract[1]
     fill_count = len(state.fill_observations)
-    cumulative_fees = sum(
-        (fill.fact.fees for fill in state.fill_observations), Decimal("0")
-    )
-    gross_traded_notional = sum(
-        (fill.fact.gross_traded_notional for fill in state.fill_observations),
-        Decimal("0"),
-    )
+    with analyzer_decimal_context():
+        cumulative_fees = sum(
+            (fill.fact.fees for fill in state.fill_observations), Decimal("0")
+        )
+        gross_traded_notional = sum(
+            (fill.fact.gross_traded_notional for fill in state.fill_observations),
+            Decimal("0"),
+        )
     results = [
         MetricResult.available(
             run_id=state.run_id,
@@ -1529,6 +1553,7 @@ def _produce_fee_summary(
             sample_count=fill_count,
             extra_metadata={
                 "gross_traded_notional": format(gross_traded_notional, "f"),
+                "cumulative_fees": format(cumulative_fees, "f"),
             },
         )
     ]
@@ -1543,7 +1568,8 @@ def _produce_fee_summary(
                 sample_count=fill_count,
                 reason_code=ReasonCode.ZERO_GROSS_TRADED_NOTIONAL,
                 extra_metadata={
-                    "gross_traded_notional": format(gross_traded_notional, "f")
+                    "gross_traded_notional": format(gross_traded_notional, "f"),
+                    "cumulative_fees": format(cumulative_fees, "f"),
                 },
             )
         )
@@ -1582,7 +1608,7 @@ _BUILTIN_PRODUCERS: dict[tuple[str, int], Callable[["_EngineState", AnalyzerSpec
 _FROZEN_V1_PARAMETERS: dict[str, tuple[str, ...]] = {
     SHARPE_SIMPLE_ANALYZER_KEY: (),
     PIT_RF_ANALYZER_KEY: (),
-    CONFIG_RF_ANALYZER_KEY: ("rf_annual",),
+    CONFIG_RF_ANALYZER_KEY: ("rf_annual", "rf_source_note"),
     TURNOVER_ANALYZER_KEY: (),
     FEE_SUMMARY_ANALYZER_KEY: (),
 }
@@ -1755,7 +1781,11 @@ def build_sharpe_config_rf_spec(parameters: Mapping[str, Any] | None = None) -> 
         name_zh="配置无风险利率夏普比率",
         name_en="Configured Risk-Free Sharpe Ratio",
         parameters=parameters,
-        input_contract={**_INPUT_CONTRACT_NO_RATES, "rf_annual": True},
+        input_contract={
+            **_INPUT_CONTRACT_NO_RATES,
+            "rf_annual": True,
+            "rf_source_note": True,
+        },
         output_contract=(
             MetricOutputDescriptor(
                 metric_key=METRIC_KEY_SHARPE,
@@ -2005,7 +2035,8 @@ class _EngineState:
                 Decimal("0"),
             )
             cumulative_fees = sum(
-                (fill.fact.fees for fill in self.fill_observations), Decimal("0")
+                (fill.fact.fees for fill in self.fill_observations),
+                Decimal("0"),
             )
         return {
             "initial_equity": self.initial_equity_snapshot.equity_e0,

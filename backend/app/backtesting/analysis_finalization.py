@@ -42,7 +42,7 @@ from app.backtesting.analyzers import (
 )
 from app.backtesting.domain import DomainValidationError
 from app.backtesting.result_models import BacktestAnalysisSummaryRecord
-from app.backtesting.runtime import PhaseExecutionError, ValuationBlockedError
+from app.backtesting.runtime import ValuationBlockedError
 
 __all__ = [
     "ABORTED_ERROR_TYPES",
@@ -89,10 +89,12 @@ ANALYSIS_FINALIZATION_CURSOR_SIGNING_KEY = "internal:analysis-finalization"
 class AnalysisFinalizationError(DomainValidationError):
     """Raised when the independent persistence transaction fails.
 
-    The triggering persistence error stays attached as ``__cause__``; the
-    original run failure is re-raised separately by the coordinator, so a
-    failed finalization can never be mistaken for persisted state.
+    The coordinator exposes the original run failure as ``__cause__`` for
+    aborted runs. The independent transaction failure remains available via
+    ``persistence_error`` for operator diagnostics and retry decisions.
     """
+
+    persistence_error: BaseException | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -114,11 +116,21 @@ def analysis_equivalence_projection(result: Any, analysis_snapshot: Any) -> dict
 
     counts = analysis_snapshot.summary_counts()
     metrics = getattr(result, "analysis_metrics", ())
+    initial_equity_evidence = json.loads(
+        canonical_evidence_json(
+            analysis_snapshot.initial_equity_snapshot.evidence_payload()
+        )
+    )
     return {
         "run_id": getattr(result, "run_id", None),
         "analysis_status": getattr(result, "analysis_status", None),
         "events": tuple(getattr(result, "events", ())),
         "equity_curve": tuple(getattr(result, "equity_curve", ())),
+        "final_snapshot": getattr(result, "final_snapshot", None),
+        # The complete E0 evidence is explicit in the fixed projection rather
+        # than represented only by its digest. It includes the authoritative
+        # portfolio id/hash, held-mark PIT provenance, and formal timeline.
+        "initial_equity_evidence": initial_equity_evidence,
         "formula_signature": analysis_snapshot.formula_signature(),
         "input_evidence_signature": analysis_snapshot.input_evidence_signature(),
         "formal_timeline": analysis_snapshot.formal_timeline.as_payload(),
@@ -194,10 +206,73 @@ class AnalysisFailureSnapshot:
     failed_session_date: date | None = None
     blocked_equity_observation: EquityObservation | None = None
     terminal_fingerprint: str | None = None
+    last_chunk_sequence: int | None = None
+    last_chunk_token: str | None = None
+    completed_through_session: date | None = None
+
+    def __post_init__(self) -> None:
+        present = (
+            self.last_chunk_sequence is not None,
+            self.last_chunk_token is not None,
+            self.completed_through_session is not None,
+        )
+        if any(present) and not all(present):
+            raise AnalysisFinalizationError(
+                "failure checkpoint sequence, token, and session must be paired"
+            )
+        if self.last_chunk_sequence is not None and (
+            isinstance(self.last_chunk_sequence, bool)
+            or not isinstance(self.last_chunk_sequence, int)
+            or self.last_chunk_sequence < 0
+        ):
+            raise AnalysisFinalizationError(
+                "failure checkpoint sequence must be a non-negative integer"
+            )
+        if self.last_chunk_token is not None and (
+            not isinstance(self.last_chunk_token, str)
+            or len(self.last_chunk_token) != 71
+            or not self.last_chunk_token.startswith("sha256:")
+            or any(c not in "0123456789abcdef" for c in self.last_chunk_token[7:])
+        ):
+            raise AnalysisFinalizationError(
+                "failure checkpoint token must be sha256:<64 lowercase hex digits>"
+            )
+        if self.completed_through_session is not None and (
+            isinstance(self.completed_through_session, datetime)
+            or not isinstance(self.completed_through_session, date)
+        ):
+            raise AnalysisFinalizationError(
+                "failure completed session must be a calendar date"
+            )
 
 
 class _SessionFactory(Protocol):
     def __call__(self) -> Session: ...
+
+
+def _require_success_checkpoint(
+    *,
+    sequence: int | None,
+    token: str | None,
+    completed_session: date | None,
+) -> None:
+    """Validate the checkpoint emitted by one fully successful runtime slice."""
+
+    if (
+        isinstance(sequence, bool)
+        or not isinstance(sequence, int)
+        or sequence < 0
+        or not isinstance(completed_session, date)
+        or isinstance(completed_session, datetime)
+        or not isinstance(token, str)
+        or len(token) != 71
+        or not token.startswith("sha256:")
+        or any(character not in "0123456789abcdef" for character in token[7:])
+    ):
+        raise AnalysisFinalizationError(
+            "successful analysis persistence requires a non-negative sequence, "
+            "sha256 token, and completed calendar session"
+        )
 
 
 def _metric_result_to_dto(result: Any, run_uuid: UUID) -> Any:
@@ -395,6 +470,12 @@ class AnalysisFinalizer:
 
         from app.backtesting.analyzers import _is_admission_token_valid
 
+        _require_success_checkpoint(
+            sequence=last_chunk_sequence,
+            token=last_chunk_token,
+            completed_session=completed_through_session,
+        )
+
         if not isinstance(analysis_snapshot, AnalysisSnapshot):
             raise AnalysisFinalizationError(
                 "partial persistence requires an AnalysisSnapshot"
@@ -457,6 +538,12 @@ class AnalysisFinalizer:
         """Write the frozen ``final`` summary and its complete metrics."""
 
         from app.backtesting.analyzers import _is_coordinator_admitted
+
+        _require_success_checkpoint(
+            sequence=last_chunk_sequence,
+            token=last_chunk_token,
+            completed_session=completed_through_session,
+        )
 
         admission_token = getattr(engine, "_admission_token", None)
         if not _is_coordinator_admitted(engine, admission_token):
@@ -627,6 +714,13 @@ class AnalysisFinalizer:
                 else None
             ),
             "blocked_equity_observation": snapshot.blocked_equity_observation.evidence_payload(),
+            "last_chunk_sequence": snapshot.last_chunk_sequence,
+            "last_chunk_token": snapshot.last_chunk_token,
+            "completed_through_session": (
+                snapshot.completed_through_session.isoformat()
+                if snapshot.completed_through_session is not None
+                else None
+            ),
         }
         if not _is_admission_token_valid(
             snapshot.admission_token,
@@ -739,9 +833,9 @@ class AnalysisFinalizer:
                 **base_fields,
                 "analyzer_snapshot": specs_block,
                 "status": AnalysisStatus.ABORTED.value,
-                "last_chunk_sequence": None,
-                "last_chunk_token": None,
-                "completed_through_session": snapshot.failed_session_date,
+                "last_chunk_sequence": snapshot.last_chunk_sequence,
+                "last_chunk_token": snapshot.last_chunk_token,
+                "completed_through_session": snapshot.completed_through_session,
                 "abort_reason": snapshot.error_message,
                 "failed_step_sequence": snapshot.failed_step_sequence,
                 "terminal_fingerprint": terminal_fingerprint,
@@ -781,39 +875,8 @@ class AnalysisFinalizationCoordinator:
         self,
         *,
         finalizer: AnalysisFinalizer | None = None,
-        abort_on_error_types: Sequence[type[BaseException]] | None = None,
     ) -> None:
         self._finalizer = finalizer or AnalysisFinalizer()
-        # v1 freezes the aborted capture set to ValuationBlockedError only.
-        # Configuration/programming exceptions propagate unchanged instead
-        # of being converted into apparently valid metric finalization.
-        # Keep the explicit constructor override for integrations that have a
-        # separately audited unrecoverable error family; the default remains
-        # the closed v1 set and never broadens implicitly.
-        raw_abort_types = (
-            ABORTED_ERROR_TYPES
-            if abort_on_error_types is None
-            else abort_on_error_types
-        )
-        if isinstance(raw_abort_types, (str, bytes, bytearray)):
-            raise DomainValidationError(
-                "abort_on_error_types must be an ordered sequence of exception types"
-            )
-        try:
-            normalized_abort_types = tuple(raw_abort_types)
-        except TypeError as exc:
-            raise DomainValidationError(
-                "abort_on_error_types must be an ordered sequence of exception types"
-            ) from exc
-        if any(
-            not isinstance(error_type, type)
-            or not issubclass(error_type, BaseException)
-            for error_type in normalized_abort_types
-        ):
-            raise DomainValidationError(
-                "abort_on_error_types must contain only exception types"
-            )
-        self._abort_on_error_types = normalized_abort_types
 
     def execute_steps(
         self,
@@ -849,8 +912,7 @@ class AnalysisFinalizationCoordinator:
             result = runner.run_steps(steps, next_after_last=next_after_last)
         except BaseException as exc:
             blocked = unwrap_valuation_blocked_error(exc)
-            listed = isinstance(exc, self._abort_on_error_types)
-            if blocked is None and not listed:
+            if blocked is None:
                 raise
             if not has_engine:
                 # Legacy runners have no analyzer state to persist.  Preserve
@@ -885,9 +947,17 @@ class AnalysisFinalizationCoordinator:
                         f"aborted metric computation failed: {finalize_exc}"
                     ) from finalize_exc
             if session_factory is not None:
-                self._finalizer.finalize_aborted(
-                    failure_snapshot, session_factory
-                )
+                try:
+                    self._finalizer.finalize_aborted(
+                        failure_snapshot, session_factory
+                    )
+                except AnalysisFinalizationError as persistence_exc:
+                    wrapped = AnalysisFinalizationError(
+                        "aborted analysis persistence failed; the original run "
+                        f"failure is preserved as cause: {persistence_exc}"
+                    )
+                    wrapped.persistence_error = persistence_exc
+                    raise wrapped from blocked
             raise
 
         analysis_status = getattr(result, "analysis_status", None)

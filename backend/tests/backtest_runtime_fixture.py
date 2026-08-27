@@ -77,7 +77,11 @@ class DictMarketData:
         calendar_id: str = "XSHG",
         calendar_by_instrument: Mapping[UUID, str] | None = None,
         suspended_instruments: Sequence[UUID] = (),
+        quote_evidence_by_day: Mapping[
+            date, Mapping[UUID, Mapping[str, object]]
+        ] | None = None,
     ) -> None:
+        quote_evidence_by_day = quote_evidence_by_day or {}
         self._quotes_by_day = {
             day: {
                 instrument_id: SessionQuote(
@@ -87,6 +91,15 @@ class DictMarketData:
                     # express incomplete bars without extra plumbing.
                     open_price=Decimal(open_price) if open_price else None,
                     close_price=Decimal(close_price) if close_price else None,
+                    evidence=quote_evidence_by_day.get(day, {}).get(
+                        instrument_id,
+                        {
+                            "source_key": "runtime_fixture",
+                            "source_version": 1,
+                            "source_revision": day.isoformat(),
+                            "coverage": {"session_date": day.isoformat()},
+                        },
+                    ),
                 )
                 for instrument_id, (open_price, close_price) in quotes.items()
             }
@@ -398,6 +411,16 @@ def build_runner(
             analyzer_specs=analysis_engine.specs,
             close_facts=(),
             pit_gateway=pit_data_gateway,
+            rate_source_key=(
+                analysis_engine._rate_snapshot.source_key
+                if analysis_engine._rate_snapshot is not None
+                else None
+            ),
+            rate_source_version=(
+                analysis_engine._rate_snapshot.source_version
+                if analysis_engine._rate_snapshot is not None
+                else None
+            ),
             rate_session_open_at={
                 date.fromisoformat(step.metadata["session_date"]): step.start_time
                 for step in axis

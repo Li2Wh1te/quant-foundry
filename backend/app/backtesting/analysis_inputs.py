@@ -14,8 +14,8 @@ Frozen contracts enforced here (task package 06):
   data-source-declared PIT ``data_cutoff_at`` (never inferred by the VALUE
   phase);
 * :class:`AppliedFillFact` / :class:`FillObservation` -- accounting-applied
-  fill facts whose ``gross_traded_notional`` is accepted as-is; the
-  analyzer only sums it;
+  fill facts whose confirmed ``gross_traded_notional`` is validated once
+  against price, quantity, and multiplier; the analyzer only sums it;
 * :class:`PitRateSnapshot` -- the complete pre-fetched PIT daily risk-free
   rate series for Sharpe B, frozen once at run admission with source
   versions, deterministic ``missing_ranges``, and a snapshot hash.
@@ -58,6 +58,7 @@ __all__ = [
     "compute_formal_timeline_hash",
     "compute_rate_snapshot_hash",
     "evidence_digest",
+    "freeze_canonical_evidence",
 ]
 
 
@@ -241,6 +242,14 @@ def _frozen_mapping(
     return freeze(value, field_name)
 
 
+def freeze_canonical_evidence(
+    value: Mapping[str, Any], field_name: str = "evidence"
+) -> Mapping[str, Any]:
+    """Validate and deeply freeze a mapping in the evidence type closure."""
+
+    return _frozen_mapping(value, field_name)
+
+
 # ---------------------------------------------------------------------------
 # Canonical evidence serialization
 # ---------------------------------------------------------------------------
@@ -422,6 +431,12 @@ def compute_rate_snapshot_hash(snapshot: "PitRateSnapshot") -> str:
             if snapshot.coverage_end is not None
             else None
         ),
+        # The exact ordered formal-session axis is part of the snapshot
+        # identity. Missing ranges only preserve their endpoints and cannot
+        # distinguish sparse from dense calendars that share the same window.
+        "expected_sessions": [
+            day.isoformat() for day in snapshot.expected_sessions
+        ],
         "rates": [
             [day.isoformat(), rate]
             for day, rate in sorted(snapshot.rates.items())
@@ -983,15 +998,23 @@ class AppliedFillFact:
         if fees < 0:
             raise DomainValidationError("fees must be non-negative")
         object.__setattr__(self, "fees", fees)
-        # The accounting layer owns this confirmed amount.  The analyzer
-        # accepts and aggregates it as evidence; it must never derive a
-        # replacement value from price, quantity, or multiplier here.
+        # The accounting layer owns this confirmed amount. Validate its
+        # identity once at the input boundary under the frozen exact context;
+        # downstream analyzers aggregate the declaration and never recompute
+        # a replacement from price, quantity, or multiplier.
         declared_notional = _decimal(
             self.gross_traded_notional, "gross_traded_notional"
         )
         if declared_notional < 0:
             raise DomainValidationError(
                 "gross_traded_notional must be non-negative"
+            )
+        with _exact_context():
+            confirmed_notional = price * quantity * multiplier
+        if declared_notional != confirmed_notional:
+            raise DomainValidationError(
+                "gross_traded_notional must exactly equal fill_price * "
+                "fill_quantity * contract_multiplier under Decimal prec=50"
             )
         object.__setattr__(self, "gross_traded_notional", declared_notional)
         object.__setattr__(

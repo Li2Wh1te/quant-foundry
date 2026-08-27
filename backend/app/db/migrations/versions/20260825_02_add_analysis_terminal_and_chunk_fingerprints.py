@@ -31,7 +31,21 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Remove analysis retry fingerprints."""
+    """Remove retry columns only when doing so cannot discard evidence."""
+
+    bind = op.get_bind()
+    evidence_count = bind.execute(
+        sa.text(
+            "SELECT COUNT(*) FROM backtest_analysis_summaries "
+            "WHERE terminal_fingerprint IS NOT NULL "
+            "OR last_chunk_token IS NOT NULL"
+        )
+    ).scalar_one()
+    if evidence_count:
+        raise RuntimeError(
+            "refusing downgrade 20260825_02: analysis retry fingerprint "
+            "evidence exists"
+        )
 
     op.drop_column("backtest_analysis_summaries", "terminal_fingerprint")
     op.drop_column("backtest_analysis_summaries", "last_chunk_token")

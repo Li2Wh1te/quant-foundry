@@ -5,7 +5,7 @@ endpoint (including rate_snapshot), and unchanged cursor pagination."""
 from __future__ import annotations
 
 import unittest
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
@@ -23,6 +23,10 @@ from app.backtesting.result_schemas import (
     BacktestAnalysisSummaryItem,
     BacktestMetricItem,
     ResultCursorPage,
+)
+from app.backtesting.analyzers import (
+    build_fee_summary_spec,
+    build_sharpe_simple_spec,
 )
 from fastapi import HTTPException
 
@@ -46,6 +50,35 @@ class AnalysisApiTestCase(unittest.TestCase):
         self.engine.dispose()
 
     def seed_metrics(self) -> None:
+        now = datetime.now(UTC)
+        self.repo.upsert_analysis_summary(
+            BacktestAnalysisSummaryRecord(
+                run_id=self.run_id,
+                status="final",
+                analyzer_snapshot={
+                    "specs": [
+                        build_fee_summary_spec().describe(),
+                        build_sharpe_simple_spec().describe(),
+                    ]
+                },
+                formula_signature="sha256:" + "1" * 64,
+                input_evidence_signature="sha256:" + "2" * 64,
+                reporting_currency="CNY",
+                initial_equity=Decimal("10000"),
+                valid_day_count=3,
+                candidate_return_count=2,
+                fill_count=3,
+                gross_traded_notional=Decimal("5000"),
+                cumulative_fees=Decimal("12.5"),
+                last_chunk_sequence=0,
+                last_chunk_token="sha256:" + "a" * 64,
+                completed_through_session=date(2026, 7, 10),
+                terminal_fingerprint="sha256:" + "b" * 64,
+                created_at=now,
+                updated_at=now,
+                finalized_at=now,
+            )
+        )
         new_rows = [
             BacktestMetricRecord(
                 run_id=self.run_id,
@@ -56,12 +89,20 @@ class AnalysisApiTestCase(unittest.TestCase):
                 sample_count=3,
                 analyzer_key="fee_summary",
                 analyzer_version=1,
-                analyzer_metadata={"gross_traded_notional": "5000"},
+                analyzer_metadata={
+                    "gross_traded_notional": "5000",
+                    "cumulative_fees": "12.5",
+                    "formula_signature": "sha256:" + "1" * 64,
+                    "input_evidence_signature": "sha256:" + "2" * 64,
+                    "contract_unit": "currency",
+                    "sample_count_semantics": "applied_fill_count",
+                },
             ),
             BacktestMetricRecord(
                 run_id=self.run_id,
                 metric_key="sharpe",
                 formula_version="sharpe_simple_ddof1_252_v1",
+                unit="ratio",
                 sample_count=2,
                 unavailable_reason="收益率标准差为 0",
                 analyzer_key="sharpe_simple",
@@ -69,7 +110,17 @@ class AnalysisApiTestCase(unittest.TestCase):
                 analyzer_metadata={
                     "reason_code": "ZERO_RETURN_STDDEV",
                     "annualization_factor": "252",
+                    "std_ddof": 1,
+                    "formula_signature": "sha256:" + "1" * 64,
+                    "input_evidence_signature": "sha256:" + "2" * 64,
+                    "contract_unit": "ratio",
+                    "sample_count_semantics": (
+                        "candidate_return_count_including_zero_return_days"
+                    ),
+                    "valid_equity_day_count": 3,
+                    "candidate_return_count": 2,
                 },
+                annualization_factor=Decimal("252"),
             ),
         ]
         self.repo.append_metrics(*new_rows)
@@ -164,8 +215,8 @@ class AnalysisApiTestCase(unittest.TestCase):
             run_id=self.run_id,
             status="final",
             analyzer_snapshot={"specs": [{"analyzer_key": "sharpe_simple"}]},
-            formula_signature="sha256:formula",
-            input_evidence_signature="sha256:evidence",
+            formula_signature="sha256:" + "1" * 64,
+            input_evidence_signature="sha256:" + "2" * 64,
             reporting_currency="CNY",
             initial_equity=Decimal("10000"),
             valid_day_count=5,
@@ -173,10 +224,17 @@ class AnalysisApiTestCase(unittest.TestCase):
             gross_traded_notional=Decimal("5000"),
             cumulative_fees=Decimal("12.5"),
             rate_snapshot={"rates": {"2026-07-06": "0.02"}},
-            rate_snapshot_hash="sha256:rates",
+            rate_snapshot_hash="sha256:" + "3" * 64,
             rate_source_versions={"source_key": "rf", "source_version": 1},
-            missing_ranges=[["2026-07-07", "2026-07-08"]],
-            last_chunk_sequence=4,
+            missing_ranges=[
+                {
+                    "start_session": "2026-07-07",
+                    "end_session": "2026-07-08",
+                }
+            ],
+            last_chunk_sequence=0,
+            last_chunk_token="sha256:" + "a" * 64,
+            completed_through_session=date(2026, 7, 10),
             finalized_at=now,
             terminal_fingerprint="sha256:" + "0" * 64,
             created_at=now,
@@ -192,8 +250,11 @@ class AnalysisApiTestCase(unittest.TestCase):
         self.assertEqual(item["initial_equity"], "10000")
         self.assertEqual(item["valid_day_count"], 5)
         self.assertEqual(item["rate_snapshot"]["rates"], {"2026-07-06": "0.02"})
-        self.assertEqual(item["rate_snapshot_hash"], "sha256:rates")
-        self.assertEqual(item["missing_ranges"], [["2026-07-07", "2026-07-08"]])
+        self.assertEqual(item["rate_snapshot_hash"], "sha256:" + "3" * 64)
+        self.assertEqual(
+            item["missing_ranges"],
+            [{"start_session": "2026-07-07", "end_session": "2026-07-08"}],
+        )
         self.assertIsNone(item["abort_reason"])
 
     def test_summary_endpoint_404_without_rows(self):

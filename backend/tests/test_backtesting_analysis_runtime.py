@@ -16,8 +16,10 @@ from app.backtesting.analysis_inputs import (
     FillObservation,
     InitialEquitySnapshot,
     PitRateSnapshot,
+    canonical_evidence_json,
 )
 from app.backtesting.analysis_admission import AdmissionBlockedError
+from app.backtesting.analysis_finalization import analysis_equivalence_projection
 from app.backtesting.analyzers import (
     AnalyzerEngine,
     build_fee_summary_spec,
@@ -26,6 +28,7 @@ from app.backtesting.analyzers import (
 )
 from app.backtesting.runtime import (
     DeterministicBacktestRunner,
+    SessionQuote,
     ValuationBlockedError,
 )
 
@@ -99,9 +102,16 @@ def build_wired_runner(
     targets_by_step=None,
     axis=None,
     analysis_engine=None,
+    quote_evidence_by_day=None,
 ):
     axis = axis or build_axis(SESSION_DATES)
-    market_data = market_data_for(closes)
+    market_data = DictMarketData(
+        {
+            day: {INSTRUMENT_ID: (close, close)}
+            for day, close in closes.items()
+        },
+        quote_evidence_by_day=quote_evidence_by_day,
+    )
     strategy_view = CountingStrategyView(dict(closes))
     return build_runner(
         run_id=RUN_ID,
@@ -136,6 +146,16 @@ BUY_THEN_HOLD = {
 
 
 class TestFullRunAnalysis(unittest.TestCase):
+    def test_session_quote_rejects_float_in_canonical_evidence(self):
+        with self.assertRaises(Exception):
+            SessionQuote(
+                instrument_id=INSTRUMENT_ID,
+                session_date=SESSION_DATES[0],
+                open_price=Decimal("10"),
+                close_price=Decimal("10"),
+                evidence={"source_revision": 1.5},
+            )
+
     def test_engine_with_preexisting_fills_is_rejected_by_admission(self):
         engine = fresh_engine()
         engine.observe_fill(
@@ -210,6 +230,59 @@ class TestFullRunAnalysis(unittest.TestCase):
             self.assertEqual(observation.data_cutoff_at, FIXED_CUTOFF)
             self.assertNotEqual(observation.as_of, FIXED_CUTOFF)
 
+    def test_equal_prices_with_different_revisions_have_distinct_evidence(self):
+        signatures = []
+        for revision in ("revision-a", "revision-b"):
+            engine = fresh_engine()
+            evidence_by_day = {
+                day: {
+                    INSTRUMENT_ID: {
+                        "source_key": "unit_market",
+                        "source_version": 1,
+                        "source_revision": revision,
+                        "coverage": {"session_date": day.isoformat()},
+                    }
+                }
+                for day in SESSION_DATES
+            }
+            runner = build_wired_runner(
+                closes=FULL_CLOSES,
+                analysis_engine=engine,
+                quote_evidence_by_day=evidence_by_day,
+                targets_by_step=BUY_THEN_HOLD,
+            )
+            runner.run()
+            signatures.append(engine.input_evidence_signature())
+        self.assertNotEqual(*signatures)
+
+    def test_missing_close_revision_remains_in_blocked_evidence(self):
+        hashes = []
+        closes = {**FULL_CLOSES, SESSION_DATES[-1]: ""}
+        for revision in ("missing-a", "missing-b"):
+            engine = fresh_engine()
+            evidence_by_day = {
+                day: {
+                    INSTRUMENT_ID: {
+                        "source_key": "unit_market",
+                        "source_version": 1,
+                        "source_revision": (
+                            revision if day == SESSION_DATES[-1] else "stable"
+                        ),
+                    }
+                }
+                for day in SESSION_DATES
+            }
+            runner = build_wired_runner(
+                closes=closes,
+                analysis_engine=engine,
+                quote_evidence_by_day=evidence_by_day,
+                targets_by_step=BUY_THEN_HOLD,
+            )
+            with self.assertRaises(Exception):
+                runner.run()
+            hashes.append(engine.snapshot().equity_observations[-1].evidence_hash)
+        self.assertNotEqual(*hashes)
+
     def test_runner_rejects_foreign_engine_and_missing_gateway(self):
         foreign = AnalyzerEngine.create(
             InitialEquitySnapshot(
@@ -257,10 +330,10 @@ class TestChunkedRunEquivalence(unittest.TestCase):
         steps = list(axis)
         first = runner.run_steps(tuple(steps[:split]), next_after_last=steps[split])
         second = runner.run_steps(tuple(steps[split:]), next_after_last=None)
-        return first, second
+        return first, second, engine
 
     def test_partial_chunk_reports_partial_without_metrics_write(self):
-        first, second = self._chunked_run(3)
+        first, second, _ = self._chunked_run(3)
         self.assertEqual(first.analysis_status, "partial")
         self.assertEqual(first.completed_through_step_sequence, 2)
         # Provisional metrics exist as an intermediate view but are marked
@@ -274,10 +347,14 @@ class TestChunkedRunEquivalence(unittest.TestCase):
             (
                 m.metric_key,
                 m.formula_version,
+                m.unit,
+                m.analyzer_key,
+                m.analyzer_version,
                 m.status.value,
                 m.value,
                 m.sample_count,
                 m.unavailable_reason,
+                canonical_evidence_json(dict(m.analyzer_metadata)),
             )
             for m in metrics
         ]
@@ -290,7 +367,7 @@ class TestChunkedRunEquivalence(unittest.TestCase):
         full_result = full_runner.run()
 
         for split in (1, 2, 3, 4):
-            _, second = self._chunked_run(split)
+            _, second, chunked_engine = self._chunked_run(split)
             self.assertEqual(
                 self._metric_fingerprint(second.analysis_metrics),
                 self._metric_fingerprint(full_result.analysis_metrics),
@@ -300,6 +377,38 @@ class TestChunkedRunEquivalence(unittest.TestCase):
                 second.events,
                 full_result.events,
                 f"event stream diverged at chunk split {split}",
+            )
+            self.assertEqual(second.equity_curve, full_result.equity_curve)
+            self.assertEqual(second.final_snapshot, full_result.final_snapshot)
+            full_snapshot = full_engine.snapshot()
+            chunked_snapshot = chunked_engine.snapshot()
+            self.assertEqual(
+                analysis_equivalence_projection(second, chunked_snapshot),
+                analysis_equivalence_projection(full_result, full_snapshot),
+                f"fixed business projection diverged at chunk split {split}",
+            )
+            self.assertEqual(
+                chunked_snapshot.summary_counts(), full_snapshot.summary_counts()
+            )
+            self.assertEqual(
+                chunked_snapshot.formula_signature(),
+                full_snapshot.formula_signature(),
+            )
+            self.assertEqual(
+                chunked_snapshot.input_evidence_signature(),
+                full_snapshot.input_evidence_signature(),
+            )
+            self.assertEqual(
+                chunked_snapshot.initial_equity_snapshot.evidence_hash,
+                full_snapshot.initial_equity_snapshot.evidence_hash,
+            )
+            self.assertEqual(
+                chunked_snapshot.initial_equity_snapshot.portfolio_snapshot_hash,
+                full_snapshot.initial_equity_snapshot.portfolio_snapshot_hash,
+            )
+            self.assertEqual(
+                chunked_snapshot.rate_snapshot,
+                full_snapshot.rate_snapshot,
             )
 
 
