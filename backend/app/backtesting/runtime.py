@@ -817,6 +817,8 @@ class BacktestRunResult:
     final_snapshot: PortfolioSnapshot
     components: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
     analysis_status: str | None = None
+    chunk_sequence: int | None = None
+    analysis_chunk_token: str | None = None
     completed_through_step_sequence: int | None = None
     analysis_metrics: tuple[Any, ...] = ()
 
@@ -831,6 +833,22 @@ class DeterministicBacktestRunner:
     :meth:`AccountingPolicy.apply_fill`, explicit settlement restoration,
     and cash-dividend accounting events.
     """
+
+    @classmethod
+    def create_admitted(
+        cls,
+        *,
+        admission_kwargs: Mapping[str, Any],
+        runner_kwargs: Mapping[str, Any],
+    ) -> "DeterministicBacktestRunner":
+        """Construct an analyzer-enabled runner through one admission path."""
+
+        from app.backtesting.analysis_admission import build_admitted_runner
+
+        return build_admitted_runner(
+            admission_kwargs=admission_kwargs,
+            runner_kwargs=runner_kwargs,
+        )
 
     def __init__(
         self,
@@ -850,6 +868,7 @@ class DeterministicBacktestRunner:
         currency: str = "CNY",
         component_parameters: Mapping[str, Any] | None = None,
         analysis_engine: Any | None = None,
+        analysis_admission: Any | None = None,
         pit_data_gateway: Any | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
@@ -879,11 +898,38 @@ class DeterministicBacktestRunner:
         self._analyzers = tuple(analyzers)
         self._currency = currency.upper()
         self._settlement_calendar = settlement_calendar
+        if analysis_admission is not None:
+            if analysis_engine is not None:
+                raise DomainValidationError(
+                    "provide either analysis_admission or analysis_engine, "
+                    "never both"
+                )
+            analysis_engine = getattr(analysis_admission, "engine", None)
+            if analysis_engine is None:
+                raise DomainValidationError(
+                    "analysis_admission must expose its admitted engine"
+                )
+        elif analysis_engine is not None:
+            # A bare AnalyzerEngine has no proof that E0, cash-flow, PIT, and
+            # portfolio gates were executed.  Requiring the coordinator
+            # object (below) closes the old mutable-attribute bypass.
+            raise DomainValidationError(
+                "analyzer-enabled runners must be constructed through the "
+                "run-admission coordinator; pass analysis_admission"
+            )
         # Analyzer subsystem wiring: the engine accumulates accounting and
         # valuation facts; the PIT gateway is the only accepted source of
         # valuation data_cutoff values.  Both are optional so legacy runs
         # without metric analysis keep working unchanged.
         if analysis_engine is not None:
+            from app.backtesting.analyzers import _is_coordinator_admitted
+
+            capability_token = getattr(analysis_admission, "_capability_token", None)
+            if not _is_coordinator_admitted(analysis_engine, capability_token):
+                raise DomainValidationError(
+                    "analysis_admission is not a coordinator-issued admission "
+                    "for this engine"
+                )
             engine_run_id = getattr(analysis_engine, "run_id", None)
             if engine_run_id != run_id:
                 raise DomainValidationError(
@@ -901,6 +947,124 @@ class DeterministicBacktestRunner:
                     f"analysis_engine reporting currency {engine_currency!r} "
                     f"does not match the runner currency {self._currency!r}"
                 )
+            # Admission evidence is read from the immutable coordinator
+            # result, never from mutable engine attributes.
+            admission_evidence = getattr(analysis_admission, "admission_evidence", None)
+            if not admission_evidence:
+                raise DomainValidationError(
+                    "analysis_admission has no frozen admission evidence"
+                )
+            if admission_evidence.get("run_id") != run_id:
+                raise DomainValidationError(
+                    "analysis admission evidence is bound to a different run"
+                )
+            axis_sessions = tuple(
+                step.metadata.get("session_date") for step in tuple(axis)
+            )
+            admitted_sessions = tuple(
+                admission_evidence.get("formal_sessions", ())
+            )
+            if admitted_sessions != axis_sessions:
+                raise DomainValidationError(
+                    "analysis admission evidence does not match the official "
+                    "runner timeline"
+                )
+            if admission_evidence.get("formal_session_count") != len(axis_sessions):
+                raise DomainValidationError(
+                    "analysis admission evidence has an invalid session count"
+                )
+            from app.backtesting.analysis_inputs import (
+                FormalSessionTimeline,
+                compute_formal_timeline_hash,
+            )
+
+            admitted_timeline_hash = admission_evidence.get("timeline_hash")
+            parsed_admitted_sessions = tuple(
+                date.fromisoformat(value) for value in admitted_sessions
+            )
+            timeline_payload = admission_evidence.get("formal_timeline")
+            if not isinstance(timeline_payload, Mapping):
+                raise DomainValidationError(
+                    "analysis admission evidence has no FormalSessionTimeline"
+                )
+            admitted_timeline = FormalSessionTimeline(
+                tuple(date.fromisoformat(value) for value in timeline_payload.get("sessions", ())),
+                timeline_hash=timeline_payload.get("timeline_hash"),
+            )
+            if admitted_timeline.sessions != parsed_admitted_sessions:
+                raise DomainValidationError(
+                    "analysis admission evidence carries conflicting formal timelines"
+                )
+            if admitted_timeline_hash != compute_formal_timeline_hash(
+                parsed_admitted_sessions
+            ):
+                raise DomainValidationError(
+                    "analysis admission evidence has an invalid formal timeline hash"
+                )
+            if admitted_timeline_hash != compute_formal_timeline_hash(
+                tuple(date.fromisoformat(value) for value in axis_sessions)
+            ):
+                raise DomainValidationError(
+                    "analysis admission evidence does not match the runner timeline hash"
+                )
+            if admission_evidence.get("initial_equity_hash") != getattr(
+                getattr(analysis_engine, "_initial_equity_snapshot", None),
+                "evidence_hash",
+                None,
+            ):
+                raise DomainValidationError(
+                    "analysis admission evidence is not bound to the engine E0"
+                )
+            if admitted_timeline_hash != getattr(
+                getattr(analysis_engine, "_initial_equity_snapshot", None),
+                "timeline_hash",
+                None,
+            ):
+                raise DomainValidationError(
+                    "analysis admission evidence is not bound to the engine timeline"
+                )
+            if admitted_timeline != getattr(
+                getattr(analysis_engine, "_initial_equity_snapshot", None),
+                "formal_timeline",
+                None,
+            ):
+                raise DomainValidationError(
+                    "analysis admission evidence is not bound to the engine FormalSessionTimeline"
+                )
+            from app.backtesting.analysis_admission import (
+                compute_portfolio_snapshot_binding,
+            )
+
+            portfolio_snapshot_id, portfolio_snapshot_hash = (
+                compute_portfolio_snapshot_binding(
+                    initial_portfolio,
+                    reporting_currency=self._currency,
+                )
+            )
+            if (
+                admission_evidence.get("portfolio_snapshot_id")
+                != portfolio_snapshot_id
+                or admission_evidence.get("portfolio_snapshot_hash")
+                != portfolio_snapshot_hash
+            ):
+                raise DomainValidationError(
+                    "the runner initial portfolio changed after analysis "
+                    "admission or belongs to different E0 evidence"
+                )
+            expected_first_step = self._axis.at(0).sequence
+            if admission_evidence.get("first_step_sequence") != expected_first_step:
+                raise DomainValidationError(
+                    "analysis admission evidence is not bound to the runner "
+                    "step sequence"
+                )
+            rate_snapshot = getattr(analysis_engine, "_rate_snapshot", None)
+            if any(
+                getattr(spec, "analyzer_key", None) == "sharpe_pit_rf"
+                for spec in getattr(analysis_engine, "specs", ())
+            ) and rate_snapshot is None:
+                raise DomainValidationError(
+                    "analyzer-enabled runner requires a frozen PIT rate snapshot"
+                )
         if pit_data_gateway is not None and not hasattr(pit_data_gateway, "data_cutoff_at"):
             raise DomainValidationError(
                 "pit_data_gateway must satisfy the PitAnalysisGateway "
@@ -912,6 +1076,7 @@ class DeterministicBacktestRunner:
                 "the VALUE phase must never guess its PIT data cutoff"
             )
         self._analysis_engine = analysis_engine
+        self._analysis_admission = analysis_admission
         self._pit_data_gateway = pit_data_gateway
         # Pin the official timeline into the analyzer so equity facts can
         # never skip a formal session (e.g. a zero-return day) or arrive
@@ -970,6 +1135,7 @@ class DeterministicBacktestRunner:
         # Lifecycle: the runner accepts only the contiguous next slice of
         # the official timeline and can never run twice.
         self._next_expected_step = 0
+        self._analysis_chunk_sequence = 0
         self._finished = False
         self._failed = False
 
@@ -1147,6 +1313,8 @@ class DeterministicBacktestRunner:
         self._next_expected_step = ordered[-1].sequence + 1
         if self._next_expected_step >= len(self._axis):
             self._finished = True
+        current_chunk_sequence = self._analysis_chunk_sequence
+        self._analysis_chunk_sequence += 1
         # Analysis lifecycle: only a slice that consumed the final official
         # step may finalize; every earlier successful chunk stays partial.
         analysis_status: str | None = None
@@ -1167,6 +1335,25 @@ class DeterministicBacktestRunner:
                         snapshot.compute_provisional_results()
                     )
                 analysis_status = "partial"
+        analysis_chunk_token: str | None = None
+        if self._analysis_engine is not None:
+            from app.backtesting.analysis_inputs import evidence_digest
+
+            analysis_chunk_token = evidence_digest(
+                {
+                    "contract": "analysis_chunk_v1",
+                    "run_id": self._run_id,
+                    "chunk_sequence": current_chunk_sequence,
+                    "first_step_sequence": ordered[0].sequence,
+                    "last_step_sequence": ordered[-1].sequence,
+                    "completed_through_session": ordered[-1].metadata.get(
+                        "session_date"
+                    ),
+                    "input_evidence_signature": (
+                        self._analysis_engine.input_evidence_signature()
+                    ),
+                }
+            )
         return BacktestRunResult(
             run_id=self._run_id,
             events=tuple(self._events),
@@ -1190,6 +1377,12 @@ class DeterministicBacktestRunner:
             final_snapshot=self._portfolio.snapshot(),
             components=self._component_snapshot(),
             analysis_status=analysis_status,
+            chunk_sequence=(
+                current_chunk_sequence
+                if self._analysis_engine is not None
+                else None
+            ),
+            analysis_chunk_token=analysis_chunk_token,
             completed_through_step_sequence=ordered[-1].sequence,
             analysis_metrics=analysis_metrics,
         )
@@ -1204,15 +1397,56 @@ class DeterministicBacktestRunner:
         re-deriving anything from the dead runtime.
         """
 
-        from app.backtesting.analysis_finalization import AnalysisFailureSnapshot
-
         if self._analysis_engine is None:
             raise DomainValidationError(
                 "this runner has no analyzer engine; there is no analysis "
                 "failure to freeze"
             )
+        if not isinstance(exc, BaseException):
+            raise DomainValidationError(
+                "analysis failure snapshots require the original exception "
+                "instance"
+            )
+        if not self._failed:
+            raise DomainValidationError(
+                "analysis failure snapshots can only be built after the "
+                "runner has actually failed"
+            )
+        pending: list[BaseException] = [exc]
+        visited: set[int] = set()
+        has_real_valuation_block = False
+        source_exception: BaseException = exc
+        phase_exception: PhaseExecutionError | None = None
+        while pending and len(visited) < 16:
+            current = pending.pop(0)
+            if id(current) in visited:
+                continue
+            visited.add(id(current))
+            if isinstance(current, ValuationBlockedError):
+                has_real_valuation_block = True
+            if isinstance(current, PhaseExecutionError) and phase_exception is None:
+                phase_exception = current
+            if current.__cause__ is not None:
+                pending.append(current.__cause__)
+            if current.__context__ is not None:
+                pending.append(current.__context__)
+        if not has_real_valuation_block:
+            raise DomainValidationError(
+                "analysis failure snapshots require a real valuation-blocked "
+                "exception in the failure chain"
+            )
+        if phase_exception is not None:
+            source_exception = phase_exception
+        blocked_observation = self._last_equity_observation
+        if blocked_observation is None or blocked_observation.is_valid:
+            raise DomainValidationError(
+                "analysis failure snapshots require a blocked equity "
+                "observation"
+            )
+
+        from app.backtesting.analysis_finalization import AnalysisFailureSnapshot
         analysis_snapshot = self._analysis_engine.snapshot()
-        failed_step_sequence = getattr(exc, "step_sequence", None)
+        failed_step_sequence = getattr(source_exception, "step_sequence", None)
         if not isinstance(failed_step_sequence, int) or isinstance(
             failed_step_sequence, bool
         ):
@@ -1224,15 +1458,39 @@ class DeterministicBacktestRunner:
             )
             if isinstance(session_text, str):
                 failed_session_date = date.fromisoformat(session_text)
-        error_type = getattr(exc, "error_type", None)
+        error_type = getattr(source_exception, "error_type", None)
         if not isinstance(error_type, str):
-            error_type = type(exc).__name__
-        return AnalysisFailureSnapshot(
+            error_type = type(source_exception).__name__
+        admission_token = getattr(
+            getattr(self, "_analysis_admission", None),
+            "_capability_token",
+            None,
+        )
+        from app.backtesting.analyzers import _bind_failure_snapshot
+
+        failure_envelope = {
+            "error_message": str(source_exception),
+            "error_type": error_type,
+            "failed_step_sequence": failed_step_sequence,
+            "failed_session_date": (
+                failed_session_date.isoformat()
+                if failed_session_date is not None
+                else None
+            ),
+            "blocked_equity_observation": blocked_observation.evidence_payload(),
+        }
+
+        snapshot_binding = _bind_failure_snapshot(
+            admission_token,
+            analysis_snapshot,
+            failure_envelope,
+        )
+        snapshot = AnalysisFailureSnapshot(
             run_id=self._run_id,
             failed_step_sequence=failed_step_sequence,
             failed_session_date=failed_session_date,
             error_type=error_type,
-            error_message=str(exc),
+            error_message=str(source_exception),
             blocked_equity_observation=(
                 self._last_equity_observation
                 if self._last_equity_observation is not None
@@ -1240,12 +1498,43 @@ class DeterministicBacktestRunner:
                 else None
             ),
             analysis_snapshot=analysis_snapshot,
-            analyzer_engine=self._analysis_engine,
+            admission_token=admission_token,
             formula_signature=analysis_snapshot.formula_signature(),
             input_evidence_signature=analysis_snapshot.input_evidence_signature(),
             valid_day_count=analysis_snapshot.valid_day_count,
             fill_count=analysis_snapshot.fill_count,
+            snapshot_binding=snapshot_binding,
         )
+        # Capture the terminal identity from the immutable snapshot when
+        # possible.  The finalizer recomputes it and rejects any mismatch;
+        # a computation failure is deliberately left to that boundary so the
+        # original metric error is not disguised here.
+        try:
+            from app.backtesting.analyzers import compute_terminal_fingerprint
+
+            failure_payload = {
+                "abort_reason": snapshot.error_message,
+                "failed_step_sequence": snapshot.failed_step_sequence,
+                "failed_session_date": (
+                    snapshot.failed_session_date.isoformat()
+                    if snapshot.failed_session_date is not None
+                    else None
+                ),
+                "error_type": snapshot.error_type,
+            }
+            fingerprint = compute_terminal_fingerprint(
+                status="aborted",
+                analysis_snapshot=analysis_snapshot,
+                results=analysis_snapshot.compute_provisional_results(),
+                failure=failure_payload,
+            )
+            from app.backtesting.analyzers import _bind_failure_terminal_fingerprint
+
+            _bind_failure_terminal_fingerprint(snapshot.admission_token, fingerprint)
+            snapshot = replace(snapshot, terminal_fingerprint=fingerprint)
+        except Exception:
+            pass
+        return snapshot
 
     def _component_snapshot(self) -> Mapping[str, Mapping[str, Any]]:
         """Record the identity of every replaceable component used.
@@ -1648,7 +1937,10 @@ class DeterministicBacktestRunner:
             )
             if not application.applied:
                 continue
-            self._applied_fees_total += fill.fees
+            from app.backtesting.analyzers import analyzer_decimal_context
+
+            with analyzer_decimal_context():
+                self._applied_fees_total += fill.fees
             if self._analysis_engine is not None:
                 # The accounting layer has confirmed this fact; the analyzer
                 # only aggregates it.  Fill facts carry no PIT cutoff unless
@@ -1668,6 +1960,10 @@ class DeterministicBacktestRunner:
                             currency=fill.currency,
                             reporting_currency=self._currency,
                             fees=fill.fees,
+                            # Preserve the accounting layer's confirmed
+                            # notional; the analyzer must not recompute it
+                            # under the process-default Decimal context.
+                            gross_traded_notional=fill.gross_notional,
                         )
                     )
                 )
@@ -1946,13 +2242,16 @@ class DeterministicBacktestRunner:
         # equity) to the engine so the aborted finalization can report
         # exactly what was determined.
         if self._analysis_engine is not None:
-            cash_total = sum(
-                (
-                    balance
-                    for balance in snapshot.account.cash_balances.values()
-                ),
-                Decimal("0"),
-            )
+            from app.backtesting.analyzers import analyzer_decimal_context
+
+            with analyzer_decimal_context():
+                cash_total = sum(
+                    (
+                        balance
+                        for balance in snapshot.account.cash_balances.values()
+                    ),
+                    Decimal("0"),
+                )
             observation = EquityObservation(
                 run_id=self._run_id,
                 step_sequence=context.step_sequence,

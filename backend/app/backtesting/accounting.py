@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Mapping
@@ -401,7 +401,11 @@ class Fill:
         implicitly treated as ``1``.
         """
 
-        return self.price * self.quantity * self.contract_multiplier
+        # Keep the accounting-confirmed notional at the analyzer's frozen
+        # precision.  The process default Decimal context (often 28) is not
+        # sufficient for NUMERIC(38,18) values and would alter the audit fact.
+        with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)):
+            return self.price * self.quantity * self.contract_multiplier
 
     @property
     def notional(self) -> Decimal:

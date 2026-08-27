@@ -84,6 +84,36 @@ class ResultRecordConflictError(Exception):
     """The row violates the run-scoped uniqueness contract."""
 
 
+def _validate_metric_producer_contract(dto: BacktestMetricDto) -> None:
+    """Validate an analyzer-bearing metric against the frozen Registry."""
+
+    if dto.analyzer_key is None or dto.analyzer_version is None:
+        raise ResultRepositoryError(
+            f"metric ({dto.metric_key!r}, {dto.formula_version!r}) lacks "
+            "analyzer identity; producer identity is required for this path"
+        )
+    from app.backtesting.analyzers import frozen_output_contract_for
+
+    try:
+        contract = frozen_output_contract_for(dto.analyzer_key, dto.analyzer_version)
+    except Exception as exc:
+        raise ResultRecordConflictError(
+            f"analyzer identity ({dto.analyzer_key!r}, "
+            f"{dto.analyzer_version!r}) is not a registered v1 producer"
+        ) from exc
+    declared = {
+        (descriptor.metric_key, descriptor.formula_version)
+        for descriptor in contract
+    }
+    if (dto.metric_key, dto.formula_version) not in declared:
+        raise ResultRecordConflictError(
+            f"analyzer ({dto.analyzer_key!r}, {dto.analyzer_version!r}) "
+            f"cannot produce metric ({dto.metric_key!r}, "
+            f"{dto.formula_version!r}); the mapping is fixed by the frozen "
+            "registry contract"
+        )
+
+
 # ---------------------------------------------------------------------------
 # DTO -> record conversion helpers
 # ---------------------------------------------------------------------------
@@ -276,10 +306,16 @@ def _analysis_summary_record(dto: BacktestAnalysisSummaryDto) -> dict[str, Any]:
         "run_id": dto.run_id,
         "status": dto.status.value,
         "analyzer_snapshot": _thaw_json(dict(dto.analyzer_snapshot)),
+        "formal_timeline": (
+            _thaw_json(dict(dto.formal_timeline))
+            if dto.formal_timeline is not None
+            else None
+        ),
         "formula_signature": dto.formula_signature,
         "input_evidence_signature": dto.input_evidence_signature,
         "initial_equity": dto.initial_equity,
         "valid_day_count": dto.valid_day_count,
+        "candidate_return_count": dto.candidate_return_count,
         "fill_count": dto.fill_count,
         "gross_traded_notional": dto.gross_traded_notional,
         "cumulative_fees": dto.cumulative_fees,
@@ -301,9 +337,11 @@ def _analysis_summary_record(dto: BacktestAnalysisSummaryDto) -> dict[str, Any]:
         ),
         "reporting_currency": dto.reporting_currency,
         "last_chunk_sequence": dto.last_chunk_sequence,
+        "last_chunk_token": dto.last_chunk_token,
         "completed_through_session": dto.completed_through_session,
         "abort_reason": dto.abort_reason,
         "failed_step_sequence": dto.failed_step_sequence,
+        "terminal_fingerprint": dto.terminal_fingerprint,
         "created_at": dto.created_at,
         "updated_at": dto.updated_at,
         "finalized_at": dto.finalized_at,
@@ -382,13 +420,15 @@ def _orm_metric_matches(record: BacktestMetricRecord, dto: BacktestMetricDto) ->
     ) == _metric_content_fingerprint(dto)
 
 
-def _decimal_text(value: Any) -> str | None:
-    """Canonical text form of a decimal-ish value for content comparison."""
+def _decimal_text(value: Any) -> Any:
+    """Return the value unchanged for numeric-equality fingerprinting.
 
-    if value is None:
-        return None
-    normalized = value if isinstance(value, Decimal) else Decimal(str(value))
-    return format(normalized.normalize(), "f")
+    Decimals compare numerically under ``==`` regardless of exponent, and
+    any normalization via ``normalize()`` would round under the process
+    default 28-digit precision — colliding distinct NUMERIC(38,18) values.
+    """
+
+    return value
 
 
 def _summary_content_fingerprint(
@@ -405,11 +445,17 @@ def _summary_content_fingerprint(
     return (
         dto.status.value,
         _thaw_json(dict(dto.analyzer_snapshot)),
+        (
+            _thaw_json(dict(dto.formal_timeline))
+            if dto.formal_timeline is not None
+            else None
+        ),
         dto.formula_signature,
         dto.input_evidence_signature,
         dto.reporting_currency,
         _decimal_text(dto.initial_equity),
         dto.valid_day_count,
+        dto.candidate_return_count,
         dto.fill_count,
         _decimal_text(dto.gross_traded_notional),
         _decimal_text(dto.cumulative_fees),
@@ -430,9 +476,11 @@ def _summary_content_fingerprint(
             else None
         ),
         dto.last_chunk_sequence,
+        dto.last_chunk_token,
         dto.completed_through_session,
         dto.abort_reason,
         dto.failed_step_sequence,
+        dto.terminal_fingerprint,
     )
 
 
@@ -448,11 +496,17 @@ def _summary_dto_from_record(
         # Thaw JSON payloads into plain containers so API serialization
         # never sees frozen mapping proxies.
         analyzer_snapshot=_thaw_json(record.analyzer_snapshot or {}),
+        formal_timeline=(
+            _thaw_json(record.formal_timeline)
+            if record.formal_timeline is not None
+            else None
+        ),
         formula_signature=record.formula_signature,
         input_evidence_signature=record.input_evidence_signature,
         reporting_currency=record.reporting_currency,
         initial_equity=record.initial_equity,
         valid_day_count=record.valid_day_count,
+        candidate_return_count=record.candidate_return_count,
         fill_count=record.fill_count,
         gross_traded_notional=record.gross_traded_notional,
         cumulative_fees=record.cumulative_fees,
@@ -469,9 +523,11 @@ def _summary_dto_from_record(
         ),
         missing_ranges=tuple(missing_ranges) if missing_ranges is not None else None,
         last_chunk_sequence=record.last_chunk_sequence,
+        last_chunk_token=record.last_chunk_token,
         completed_through_session=record.completed_through_session,
         abort_reason=record.abort_reason,
         failed_step_sequence=record.failed_step_sequence,
+        terminal_fingerprint=record.terminal_fingerprint,
         created_at=_aware(record.created_at),
         updated_at=_aware(record.updated_at),
         finalized_at=(
@@ -759,6 +815,29 @@ class BacktestResultRepository:
         spec = get_result_kind_spec(kind)
         if not dtos:
             return 0
+        if kind == "metrics":
+            # Analyzer-bearing metric rows must use the same frozen Registry
+            # contract regardless of which public repository method is used.
+            # Keep the identity-less shape only for legacy rows that cannot
+            # claim a producer identity.
+            has_identity = [
+                getattr(dto, "analyzer_key", None) is not None
+                or getattr(dto, "analyzer_version", None) is not None
+                for dto in dtos
+            ]
+            if any(has_identity):
+                if not all(has_identity):
+                    raise ResultRepositoryError(
+                        "metrics batch cannot mix analyzer-identified and "
+                        "legacy identity-less rows"
+                    )
+                for dto in dtos:
+                    if not isinstance(dto, BacktestMetricDto):
+                        raise ResultRepositoryError(
+                            f"metrics expects {BacktestMetricDto.__name__}, got "
+                            f"{type(dto).__name__}"
+                        )
+                    _validate_metric_producer_contract(dto)
         seen: set[tuple[Any, ...]] = set()
         payloads: list[dict[str, Any]] = []
         for dto in dtos:
@@ -821,6 +900,10 @@ class BacktestResultRepository:
                     "new writes must name their producer — the "
                     "identity-less shape is reserved for legacy reads"
                 )
+            # Registry-contract mapping: a registered analyzer identity may
+            # only write the metric keys and formula versions its frozen
+            # output contract declares.
+            _validate_metric_producer_contract(dto)
         seen_identities: dict[tuple[Any, ...], BacktestMetricDto] = {}
         for dto in dtos:
             identity = (dto.run_id, dto.metric_key, dto.formula_version)
@@ -899,7 +982,7 @@ class BacktestResultRepository:
         existing = self.session.scalars(
             select(BacktestAnalysisSummaryRecord).where(
                 BacktestAnalysisSummaryRecord.run_id == dto.run_id
-            )
+            ).with_for_update()
         ).first()
         payload = _analysis_summary_record(dto)
         if existing is None:
@@ -915,12 +998,13 @@ class BacktestResultRepository:
 
         terminal_statuses = ("final", "aborted")
         if existing.status in terminal_statuses:
-            # Terminal rows accept only byte-identical retries: every
-            # business column (counts, E0, aggregates, rate evidence,
-            # abort fields) must match, not just signatures.
-            if _summary_content_fingerprint(
-                _summary_dto_from_record(existing)
-            ) == _summary_content_fingerprint(dto):
+            # The terminal fingerprint covers every business field while
+            # excluding chunk/audit timestamps.  Same-state/same-fingerprint
+            # is the sole idempotent retry; every other transition conflicts.
+            if (
+                existing.status == dto.status.value
+                and existing.terminal_fingerprint == dto.terminal_fingerprint
+            ):
                 return existing
             raise ResultRecordConflictError(
                 f"the analysis summary of this run is already terminal "
@@ -928,7 +1012,53 @@ class BacktestResultRepository:
                 "overwrite it"
             )
 
-        # Partial -> anything is an allowed forward transition.
+        # Partial -> anything is an allowed forward transition, but stale
+        # progress can never rewind a newer checkpoint: an older chunk
+        # sequence (or session boundary) is rejected outright, and the
+        # same sequence only passes when its content is identical.
+        incoming_status = dto.status.value
+        if existing.last_chunk_sequence is not None:
+            if incoming_status == "partial" and dto.last_chunk_sequence is None:
+                raise ResultRecordConflictError(
+                    "stale partial progress: incoming checkpoint has no chunk "
+                    "sequence after a sequenced checkpoint was persisted"
+                )
+            if dto.last_chunk_sequence is not None and (
+                dto.last_chunk_sequence < existing.last_chunk_sequence
+            ):
+                raise ResultRecordConflictError(
+                    f"stale partial progress: incoming chunk sequence "
+                    f"{dto.last_chunk_sequence} precedes persisted "
+                    f"{existing.last_chunk_sequence}"
+                )
+            if (
+                incoming_status == "partial"
+                and dto.last_chunk_sequence is not None
+                and dto.last_chunk_sequence == existing.last_chunk_sequence
+                and _summary_content_fingerprint(_summary_dto_from_record(existing))
+                != _summary_content_fingerprint(dto)
+            ):
+                raise ResultRecordConflictError(
+                    "conflicting partial progress for the same chunk "
+                    "sequence; identical retries are accepted, diverging "
+                    "content is not"
+                )
+        if existing.completed_through_session is not None:
+            if incoming_status == "partial" and dto.completed_through_session is None:
+                raise ResultRecordConflictError(
+                    "stale partial progress: incoming checkpoint has no session "
+                    "boundary after a session boundary was persisted"
+                )
+            if (
+                dto.completed_through_session is not None
+                and dto.completed_through_session < existing.completed_through_session
+            ):
+                raise ResultRecordConflictError(
+                    "stale partial progress: incoming completed session "
+                    f"{dto.completed_through_session} precedes persisted "
+                    f"{existing.completed_through_session}"
+                )
+
         for column, value in payload.items():
             if column in ("created_at",):
                 continue

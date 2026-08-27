@@ -10,10 +10,16 @@ from uuid import UUID
 
 from app.backtesting.analysis_admission import (
     AdmissionBlockedError,
+    admit_analysis_run,
     build_initial_equity_snapshot,
     ensure_modeled_cash_movements,
     freeze_rate_snapshot,
     verify_initial_portfolio_consistency,
+)
+from app.backtesting.analyzers import (
+    build_sharpe_config_rf_spec,
+    build_sharpe_simple_spec,
+    build_turnover_spec,
 )
 from app.backtesting.analysis_inputs import PitRateSnapshot
 from app.backtesting.data.facts import ClosePriceFact, FactEvidence, PitRateFact
@@ -69,6 +75,42 @@ def build_snapshot(close_facts, quantities=None, cash="10000", **overrides):
 
 
 class TestInitialEquityAdmission(unittest.TestCase):
+    def test_run_must_select_exactly_one_sharpe_convention(self):
+        common = dict(
+            run_id=RUN_ID,
+            formal_sessions=SESSIONS,
+            market_open_at=OPEN_AT,
+            valuation_as_of=datetime(2026, 7, 31, 15, 0, tzinfo=UTC),
+            data_cutoff_at=datetime(2026, 7, 31, 16, 0, tzinfo=UTC),
+            reporting_currency="CNY",
+            initial_cash="10000",
+            initial_portfolio_state=None,
+        )
+        invalid_selections = (
+            [build_turnover_spec()],
+            [
+                build_sharpe_simple_spec(),
+                build_sharpe_config_rf_spec({"rf_annual": "0.02"}),
+            ],
+        )
+        for specs in invalid_selections:
+            with self.subTest(specs=specs):
+                with self.assertRaises(AdmissionBlockedError) as caught:
+                    admit_analysis_run(**common, analyzer_specs=specs)
+                self.assertEqual(
+                    caught.exception.reason_code,
+                    "INVALID_ANALYZER_CONFIG",
+                )
+
+    def test_creation_failure_has_structured_non_persisted_response(self):
+        with self.assertRaises(AdmissionBlockedError) as caught:
+            build_snapshot([], quantities={INSTRUMENT: "1"})
+        response = caught.exception.with_run_id(RUN_ID).as_response()
+        self.assertEqual(response["status"], "blocked")
+        self.assertEqual(response["run_id"], RUN_ID)
+        self.assertEqual(response["reason_code"], "MISSING_INITIAL_MARK")
+        self.assertFalse(response["persisted"])
+
     def test_pre_open_mark_builds_frozen_e0(self):
         snapshot = build_snapshot(
             [close_fact()], quantities={INSTRUMENT: "100"}
@@ -170,6 +212,7 @@ class TestRatePrefetch(unittest.TestCase):
                     session_date=day,
                     rate="0.02",
                     evidence=evidence(datetime(2026, 8, 1, tzinfo=UTC)),
+                    data_cutoff_at=datetime(2026, 8, 1, tzinfo=UTC),
                 )
                 for day in SESSIONS[:3]  # last two sessions intentionally absent
             ]
@@ -179,6 +222,7 @@ class TestRatePrefetch(unittest.TestCase):
             expected_sessions=SESSIONS,
             source_key="unit_rf",
             source_version=1,
+            session_open_at={day: datetime.combine(day, datetime.min.time(), tzinfo=UTC) for day in SESSIONS},
         )
         assert snapshot is not None
         self.assertIsInstance(snapshot, PitRateSnapshot)
@@ -190,6 +234,10 @@ class TestRatePrefetch(unittest.TestCase):
         )
         # The hash is recomputed by the DTO itself, not caller-supplied.
         self.assertTrue(snapshot.snapshot_hash.startswith("sha256:"))
+        self.assertEqual(snapshot.rate_unit, "decimal_fraction")
+        self.assertEqual(snapshot.rate_convention, "simple_daily_rate")
+        self.assertEqual(snapshot.effective_at, "session_date")
+        self.assertEqual(snapshot.session_mapping, "exact_formal_session_date")
 
     def test_empty_session_window_returns_none(self):
         self.assertIsNone(
@@ -198,6 +246,7 @@ class TestRatePrefetch(unittest.TestCase):
                 expected_sessions=[],
                 source_key="s",
                 source_version=1,
+                session_open_at={},
             )
         )
 

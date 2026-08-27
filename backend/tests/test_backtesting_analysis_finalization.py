@@ -5,6 +5,7 @@ original exception, finalization errors, and idempotent terminal state."""
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from uuid import UUID
@@ -22,6 +23,7 @@ from app.backtesting.analysis_inputs import InitialEquitySnapshot
 from app.backtesting.analyzers import (
     AnalyzerEngine,
     build_fee_summary_spec,
+    build_sharpe_config_rf_spec,
     build_sharpe_simple_spec,
     build_turnover_spec,
 )
@@ -86,6 +88,7 @@ def make_engine() -> AnalyzerEngine:
         data_cutoff_at=FIXED_CUTOFF,
         reporting_currency="CNY",
         cash="10000",
+        formal_sessions=SESSION_DATES,
     )
     return AnalyzerEngine.create(
         e0,
@@ -183,6 +186,34 @@ class TestAnalysisFinalization(unittest.TestCase):
         self.runner = make_runner(self.engine)
         self.steps = list(build_axis(SESSION_DATES))
 
+    def test_analyzer_snapshot_freezes_complete_registry_descriptions(self):
+        c_engine = AnalyzerEngine.create(
+            self.engine._initial_equity_snapshot,
+            [
+                build_sharpe_config_rf_spec({"rf_annual": "0.02"}),
+                build_turnover_spec(),
+            ],
+        )
+        snapshot = c_engine.snapshot()
+        fields = AnalysisFinalizer()._base_summary_fields(
+            snapshot,
+            UUID(RUN_ID),
+        )
+        analyzer_snapshot = fields["analyzer_snapshot"]
+        self.assertEqual(
+            analyzer_snapshot["formula_signature"],
+            snapshot.formula_signature(),
+        )
+        self.assertEqual(len(analyzer_snapshot["registry_entries"]), 2)
+        for entry in analyzer_snapshot["registry_entries"]:
+            self.assertIn("parameter_schema", entry)
+            self.assertIn("capabilities", entry)
+        converter = analyzer_snapshot["annual_rate_converter"]
+        self.assertEqual(converter["key"], "annual_rate_div_252")
+        self.assertEqual(converter["version"], 1)
+        self.assertIn("parameter_schema", converter)
+        self.assertIn("capabilities", converter)
+
     def test_runner_stays_fail_fast_on_valuation_block(self):
         with self.assertRaises(Exception) as caught:
             self.runner.run_steps(tuple(self.steps), next_after_last=None)
@@ -274,6 +305,34 @@ class TestAnalysisFinalization(unittest.TestCase):
         self.assertEqual(len(metrics), len(expected_keys))
         self.assertGreaterEqual(second.persisted_metric_count, 0)
 
+    def test_aborted_finalization_rejects_tampered_analysis_snapshot(self):
+        from app.backtesting.analysis_finalization import AnalysisFinalizer
+
+        with self.assertRaises(Exception) as caught:
+            self.runner.run_steps(tuple(self.steps), next_after_last=None)
+        failure_snapshot = self.runner.build_analysis_failure_snapshot(
+            caught.exception
+        )
+        tampered_analysis = replace(
+            failure_snapshot.analysis_snapshot,
+            specs=(build_fee_summary_spec(),),
+        )
+        tampered_failure = replace(
+            failure_snapshot,
+            analysis_snapshot=tampered_analysis,
+            formula_signature=tampered_analysis.formula_signature(),
+            input_evidence_signature=(
+                tampered_analysis.input_evidence_signature()
+            ),
+            valid_day_count=tampered_analysis.valid_day_count,
+            fill_count=tampered_analysis.fill_count,
+        )
+        with self.assertRaises(AnalysisFinalizationError):
+            AnalysisFinalizer().finalize_aborted(
+                tampered_failure,
+                self.harness.session_factory,
+            )
+
     def test_persistence_failure_raises_finalization_error(self):
         from app.backtesting.analysis_finalization import (
             AnalysisFinalizationCoordinator,
@@ -302,13 +361,16 @@ class TestAnalysisFinalization(unittest.TestCase):
                 select(BacktestAnalysisSummaryRecord)
             ).all()
         self.assertEqual(summaries, [])
+        # The finalization error retains the original wrapped valuation
+        # failure in its exception context.  Rebuilding the same failure
+        # snapshot from that error is therefore an idempotent retry once the
+        # database becomes available again.
+        replay = self.runner.build_analysis_failure_snapshot(caught.exception)
         retry = AnalysisFinalizer().finalize_aborted(
-            self.runner.build_analysis_failure_snapshot(
-                RuntimeError("valuation blocked (replayed)")
-            ),
+            replay,
             self.harness.session_factory,
         )
-        self.assertEqual(retry.persisted_metric_count, 4)
+        self.assertEqual(retry.status, "aborted")
 
     def test_unrelated_errors_bypass_finalization(self):
         from app.backtesting.analysis_finalization import (

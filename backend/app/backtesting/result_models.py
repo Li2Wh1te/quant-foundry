@@ -157,6 +157,55 @@ def _json_payload(value: Mapping[str, Any] | None, field_name: str) -> Mapping[s
     return frozen
 
 
+def _formal_timeline_payload(
+    value: Mapping[str, Any], field_name: str
+) -> Mapping[str, Any]:
+    """Validate and canonicalize one persisted FormalSessionTimeline payload.
+
+    Summary rows are an output of the admission boundary, but callers can
+    still construct DTOs directly. Re-validating the DTO shape here prevents
+    a hand-written sessions/hash pair from being persisted as if it were the
+    coordinator-issued timeline. ``None`` remains supported by this helper's
+    caller for legacy summaries created before the timeline column existed.
+    """
+
+    if not isinstance(value, Mapping):
+        raise DomainValidationError(f"{field_name} must be a mapping")
+    expected_keys = {"contract", "sessions", "timeline_hash"}
+    if set(value) != expected_keys:
+        raise DomainValidationError(
+            f"{field_name} must contain exactly contract, sessions, and timeline_hash"
+        )
+    if value["contract"] != "formal_timeline_v1":
+        raise DomainValidationError(
+            f"{field_name}.contract must be 'formal_timeline_v1'"
+        )
+    sessions = value["sessions"]
+    if not isinstance(sessions, (list, tuple)):
+        raise DomainValidationError(f"{field_name}.sessions must be a sequence")
+    parsed_sessions: list[date] = []
+    for index, item in enumerate(sessions):
+        if isinstance(item, date) and not isinstance(item, datetime):
+            parsed_sessions.append(item)
+            continue
+        if not isinstance(item, str):
+            raise DomainValidationError(
+                f"{field_name}.sessions[{index}] must be an ISO calendar date"
+            )
+        try:
+            parsed_sessions.append(date.fromisoformat(item))
+        except ValueError as exc:
+            raise DomainValidationError(
+                f"{field_name}.sessions[{index}] is not an ISO calendar date"
+            ) from exc
+    from app.backtesting.analysis_inputs import FormalSessionTimeline
+
+    timeline = FormalSessionTimeline(
+        tuple(parsed_sessions), timeline_hash=value["timeline_hash"]
+    )
+    return _json_payload(timeline.as_payload(), field_name)
+
+
 def _enum(value: StrEnum, enum_type: type[StrEnum], field_name: str) -> StrEnum:
     try:
         return enum_type(getattr(value, "value", value))
@@ -340,7 +389,10 @@ def _default_component_registry():
 
 
 def resolve_analyzer_state(
-    analyzer_key: str | None, analyzer_version: int | None
+    analyzer_key: str | None,
+    analyzer_version: int | None,
+    metric_key: str | None = None,
+    formula_version: str | None = None,
 ) -> AnalyzerState:
     """Classify a metric row's analyzer identity against the registry.
 
@@ -351,9 +403,25 @@ def resolve_analyzer_state(
     if analyzer_key is None or analyzer_version is None:
         return AnalyzerState.LEGACY
     try:
-        _default_component_registry().resolve(analyzer_key, analyzer_version)
+        entry = _default_component_registry().resolve(analyzer_key, analyzer_version)
     except Exception:
         return AnalyzerState.UNKNOWN
+    if getattr(entry, "component_kind", None) != "analyzer":
+        return AnalyzerState.UNKNOWN
+    if metric_key is not None and formula_version is not None:
+        try:
+            from app.backtesting.analyzers import frozen_output_contract_for
+
+            declared = {
+                (item.metric_key, item.formula_version)
+                for item in frozen_output_contract_for(
+                    analyzer_key, analyzer_version
+                )
+            }
+        except Exception:
+            return AnalyzerState.UNKNOWN
+        if (metric_key, formula_version) not in declared:
+            return AnalyzerState.UNKNOWN
     return AnalyzerState.REGISTERED
 
 
@@ -841,8 +909,14 @@ class BacktestMetricRecord:
         object.__setattr__(
             self, "formula_version", _required_text(self.formula_version, "formula_version")
         )
+        if len(self.metric_key) > 100:
+            raise DomainValidationError("metric_key must not exceed 100 characters")
+        if len(self.formula_version) > 64:
+            raise DomainValidationError("formula_version must not exceed 64 characters")
         object.__setattr__(self, "value", _optional_decimal(self.value, "value"))
         object.__setattr__(self, "unit", _optional_text(self.unit, "unit"))
+        if self.unit is not None and len(self.unit) > 32:
+            raise DomainValidationError("unit must not exceed 32 characters")
         object.__setattr__(
             self,
             "annualization_factor",
@@ -875,6 +949,11 @@ class BacktestMetricRecord:
             raise DomainValidationError(
                 "analyzer_key and analyzer_version must be provided together"
             )
+        if self.analyzer_key is not None:
+            normalized_key = _required_text(self.analyzer_key, "analyzer_key")
+            if len(normalized_key) > 100:
+                raise DomainValidationError("analyzer_key must not exceed 100 characters")
+            object.__setattr__(self, "analyzer_key", normalized_key)
         if has_version and (
             isinstance(self.analyzer_version, bool)
             or not isinstance(self.analyzer_version, int)
@@ -889,14 +968,19 @@ class BacktestMetricRecord:
             object.__setattr__(
                 self,
                 "analyzer_metadata",
-                MappingProxyType(dict(self.analyzer_metadata)),
+                _json_payload(self.analyzer_metadata, "analyzer_metadata"),
             )
 
     @property
     def analyzer_state(self) -> AnalyzerState:
         """Registry-relative state of this row's analyzer identity."""
 
-        return resolve_analyzer_state(self.analyzer_key, self.analyzer_version)
+        return resolve_analyzer_state(
+            self.analyzer_key,
+            self.analyzer_version,
+            self.metric_key,
+            self.formula_version,
+        )
 
     @property
     def cursor_sort_key(self) -> tuple[str, str]:
@@ -915,11 +999,16 @@ class BacktestAnalysisSummaryRecord:
     run_id: UUID
     status: AnalysisSummaryStatus | str
     analyzer_snapshot: Mapping[str, Any] | None = None
+    # Explicit immutable formal-session contract; this is kept as a JSON
+    # value at the persistence boundary so summary readers do not need to
+    # reconstruct it from analyzer_snapshot.
+    formal_timeline: Mapping[str, Any] | None = None
     formula_signature: str = ""
     input_evidence_signature: str = ""
     reporting_currency: str = "CNY"
     initial_equity: Decimal | int | str | None = None
     valid_day_count: int | None = None
+    candidate_return_count: int | None = None
     fill_count: int | None = None
     gross_traded_notional: Decimal | int | str | None = None
     cumulative_fees: Decimal | int | str | None = None
@@ -928,9 +1017,11 @@ class BacktestAnalysisSummaryRecord:
     rate_source_versions: Mapping[str, Any] | None = None
     missing_ranges: Sequence[Any] | None = None
     last_chunk_sequence: int | None = None
+    last_chunk_token: str | None = None
     completed_through_session: date | None = None
     abort_reason: str | None = None
     failed_step_sequence: int | None = None
+    terminal_fingerprint: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     finalized_at: datetime | None = None
@@ -946,6 +1037,15 @@ class BacktestAnalysisSummaryRecord:
             self,
             "analyzer_snapshot",
             _json_payload(self.analyzer_snapshot, "analyzer_snapshot"),
+        )
+        object.__setattr__(
+            self,
+            "formal_timeline",
+            (
+                _formal_timeline_payload(self.formal_timeline, "formal_timeline")
+                if self.formal_timeline is not None
+                else None
+            ),
         )
         object.__setattr__(
             self,
@@ -970,7 +1070,13 @@ class BacktestAnalysisSummaryRecord:
             object.__setattr__(
                 self, name, _optional_decimal(getattr(self, name), name)
             )
-        for name in ("valid_day_count", "fill_count", "last_chunk_sequence", "failed_step_sequence"):
+        for name in (
+            "valid_day_count",
+            "candidate_return_count",
+            "fill_count",
+            "last_chunk_sequence",
+            "failed_step_sequence",
+        ):
             object.__setattr__(
                 self, name, _optional_int(getattr(self, name), name)
             )
@@ -993,6 +1099,46 @@ class BacktestAnalysisSummaryRecord:
             "rate_snapshot_hash",
             _optional_text(self.rate_snapshot_hash, "rate_snapshot_hash"),
         )
+        object.__setattr__(
+            self,
+            "last_chunk_token",
+            _optional_text(self.last_chunk_token, "last_chunk_token"),
+        )
+        if self.last_chunk_sequence is not None and self.last_chunk_token is None:
+            from app.backtesting.analysis_inputs import evidence_digest
+
+            object.__setattr__(
+                self,
+                "last_chunk_token",
+                evidence_digest(
+                    {
+                        "contract": "analysis_chunk_v1_compat",
+                        "run_id": self.run_id,
+                        "chunk_sequence": self.last_chunk_sequence,
+                        "input_evidence_signature": self.input_evidence_signature,
+                    }
+                ),
+            )
+        if (self.last_chunk_sequence is None) != (self.last_chunk_token is None):
+            raise DomainValidationError(
+                "last_chunk_sequence and last_chunk_token must be provided together"
+            )
+        object.__setattr__(
+            self,
+            "terminal_fingerprint",
+            _optional_text(self.terminal_fingerprint, "terminal_fingerprint"),
+        )
+        if self.terminal_fingerprint is not None and (
+            len(self.terminal_fingerprint) != 71
+            or not self.terminal_fingerprint.startswith("sha256:")
+            or any(
+                character not in "0123456789abcdef"
+                for character in self.terminal_fingerprint[7:]
+            )
+        ):
+            raise DomainValidationError(
+                "terminal_fingerprint must be sha256:<64 lowercase hex digits>"
+            )
         if self.completed_through_session is not None:
             if isinstance(self.completed_through_session, datetime) or not isinstance(
                 self.completed_through_session, date
@@ -1019,9 +1165,18 @@ class BacktestAnalysisSummaryRecord:
                 raise DomainValidationError(
                     f"{self.status.value} summaries require finalized_at"
                 )
+            if self.terminal_fingerprint is None:
+                raise DomainValidationError(
+                    f"{self.status.value} summaries require the coordinator-issued "
+                    "terminal_fingerprint"
+                )
         elif self.finalized_at is not None:
             raise DomainValidationError(
                 "partial summaries must not carry finalized_at"
+            )
+        elif self.terminal_fingerprint is not None:
+            raise DomainValidationError(
+                "partial summaries must not carry terminal_fingerprint"
             )
 
 

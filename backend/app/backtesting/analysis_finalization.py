@@ -24,38 +24,61 @@ no queryable results at all.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+import json
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from typing import Any, Callable, Protocol
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
-from app.backtesting.analysis_inputs import EquityObservation
+from app.backtesting.analysis_inputs import EquityObservation, canonical_evidence_json
 from app.backtesting.analyzers import (
     AnalysisStatus,
+    AnalysisSnapshot,
     AnalyzerEngine,
+    compute_terminal_fingerprint,
 )
 from app.backtesting.domain import DomainValidationError
 from app.backtesting.result_models import BacktestAnalysisSummaryRecord
-from app.backtesting.runtime import ValuationBlockedError
+from app.backtesting.runtime import PhaseExecutionError, ValuationBlockedError
 
 __all__ = [
     "ABORTED_ERROR_TYPES",
+    "ANALYSIS_EQUIVALENCE_EXCLUDED_FIELDS",
     "ANALYSIS_FINALIZATION_CURSOR_SIGNING_KEY",
     "AnalysisFailureSnapshot",
     "AnalysisFinalizationCoordinator",
     "AnalysisFinalizationError",
     "AnalysisFinalizationResult",
     "AnalysisFinalizer",
+    "analysis_equivalence_projection",
     "unwrap_valuation_blocked_error",
 ]
 
 
-#: Unrecoverable error types, beyond ValuationBlockedError, whose runs are
-#: finalized as aborted instead of being left without analysis evidence.
+#: v1 deliberately has no additional catch-all error set.  Only
+#: ``ValuationBlockedError`` (including its wrapped cause chain) enters the
+#: aborted transition; configuration, persistence, and programming failures
+#: propagate unchanged.
 ABORTED_ERROR_TYPES: tuple[type[BaseException], ...] = ()
+
+# Full-run/chunked-run equivalence intentionally excludes orchestration and
+# wall-clock audit fields.  All formula/input evidence, terminal metrics,
+# events, counts and accounting aggregates remain comparable.
+ANALYSIS_EQUIVALENCE_EXCLUDED_FIELDS = frozenset(
+    {
+        "chunk_sequence",
+        "analysis_chunk_token",
+        "last_chunk_sequence",
+        "last_chunk_token",
+        "created_at",
+        "updated_at",
+        "finalized_at",
+        "partial_checkpoint_count",
+    }
+)
 
 #: The write-only finalization repository never builds cursors; a fixed
 #: non-blank key satisfies the repository's construction contract without
@@ -81,28 +104,73 @@ class AnalysisFinalizationResult:
     summary_id: UUID
 
 
+def analysis_equivalence_projection(result: Any, analysis_snapshot: Any) -> dict[str, Any]:
+    """Return the frozen fields that must match across chunk boundaries.
+
+    Partial checkpoint count, tokens/sequences and audit timestamps are
+    orchestration evidence and are excluded by contract.  Event order,
+    terminal metric content, signatures, counts and rate evidence are not.
+    """
+
+    counts = analysis_snapshot.summary_counts()
+    metrics = getattr(result, "analysis_metrics", ())
+    return {
+        "run_id": getattr(result, "run_id", None),
+        "analysis_status": getattr(result, "analysis_status", None),
+        "events": tuple(getattr(result, "events", ())),
+        "equity_curve": tuple(getattr(result, "equity_curve", ())),
+        "formula_signature": analysis_snapshot.formula_signature(),
+        "input_evidence_signature": analysis_snapshot.input_evidence_signature(),
+        "formal_timeline": analysis_snapshot.formal_timeline.as_payload(),
+        "summary_counts": counts,
+        "rate_snapshot_hash": getattr(
+            getattr(analysis_snapshot, "rate_snapshot", None),
+            "snapshot_hash",
+            None,
+        ),
+        "metrics": tuple(
+            (
+                metric.metric_key,
+                metric.formula_version,
+                metric.analyzer_key,
+                metric.analyzer_version,
+                metric.status.value,
+                metric.value,
+                metric.unit,
+                metric.sample_count,
+                metric.unavailable_reason,
+                canonical_evidence_json(dict(metric.analyzer_metadata)),
+            )
+            for metric in metrics
+        ),
+    }
+
+
 def unwrap_valuation_blocked_error(
     exc: BaseException,
 ) -> ValuationBlockedError | None:
     """Find the agreed abort trigger inside an exception chain.
 
     The runner wraps phase failures into ``PhaseExecutionError``, so the
-    original ``ValuationBlockedError`` usually appears as the cause; both
-    the direct type and the declared ``error_type`` name are accepted.
+    original ``ValuationBlockedError`` usually appears as the cause.  The
+    structured ``error_type`` string is deliberately ignored: a caller must
+    provide an actual exception instance in the chain, never merely a forged
+    type name.
     """
 
-    current: BaseException | None = exc
-    for _ in range(16):
-        if current is None:
-            break
+    pending: list[BaseException] = [exc]
+    visited: set[int] = set()
+    while pending and len(visited) < 16:
+        current = pending.pop(0)
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
         if isinstance(current, ValuationBlockedError):
             return current
-        error_type = getattr(current, "error_type", None)
-        if isinstance(error_type, str) and error_type == (
-            ValuationBlockedError.__name__
-        ):
-            return current  # type: ignore[return-value]
-        current = current.__cause__
+        if current.__cause__ is not None:
+            pending.append(current.__cause__)
+        if current.__context__ is not None:
+            pending.append(current.__context__)
     return None
 
 
@@ -115,13 +183,17 @@ class AnalysisFailureSnapshot:
     error_type: str
     error_message: str
     analysis_snapshot: Any
-    analyzer_engine: AnalyzerEngine
+    # Only immutable analyzer state crosses the failure boundary. Keeping a
+    # live engine here would allow later mutations to change failure evidence.
+    admission_token: object
     formula_signature: str
     input_evidence_signature: str
     valid_day_count: int
     fill_count: int
+    snapshot_binding: str
     failed_session_date: date | None = None
     blocked_equity_observation: EquityObservation | None = None
+    terminal_fingerprint: str | None = None
 
 
 class _SessionFactory(Protocol):
@@ -173,6 +245,13 @@ def _rate_evidence(analysis_snapshot: Any) -> dict[str, Any]:
         }
     return {
         "rate_snapshot": {
+            "contract_version": "pit_rate_snapshot_v1",
+            "rate_unit": rate_snapshot.rate_unit,
+            "rate_convention": rate_snapshot.rate_convention,
+            "effective_at": rate_snapshot.effective_at,
+            "session_mapping": rate_snapshot.session_mapping,
+            "data_cutoff_semantics": rate_snapshot.data_cutoff_semantics,
+            "cutoff_boundary": rate_snapshot.cutoff_boundary,
             "rates": {
                 day.isoformat(): format(rate, "f")
                 for day, rate in sorted(rate_snapshot.rates.items())
@@ -187,7 +266,14 @@ def _rate_evidence(analysis_snapshot: Any) -> dict[str, Any]:
                 if rate_snapshot.coverage_end is not None
                 else None
             ),
+            "expected_sessions": [
+                day.isoformat() for day in rate_snapshot.expected_sessions
+            ],
             "query_parameters": dict(rate_snapshot.query_parameters),
+            "fact_evidence": {
+                day: json.loads(canonical_evidence_json(dict(provenance)))
+                for day, provenance in sorted(rate_snapshot.fact_evidence.items())
+            },
         },
         "rate_snapshot_hash": rate_snapshot.snapshot_hash,
         "rate_source_versions": {
@@ -195,7 +281,10 @@ def _rate_evidence(analysis_snapshot: Any) -> dict[str, Any]:
             "source_version": rate_snapshot.source_version,
         },
         "missing_ranges": [
-            [start.isoformat(), end.isoformat()]
+            {
+                "start_session": start.isoformat(),
+                "end_session": end.isoformat(),
+            }
             for start, end in (rate_snapshot.missing_ranges or ())
         ],
     }
@@ -218,6 +307,7 @@ class AnalysisFinalizer:
         commit because the ORM instance is detached afterwards.
         """
 
+        session = None
         try:
             session = session_factory()
             from app.backtesting.result_repository import BacktestResultRepository
@@ -240,6 +330,12 @@ class AnalysisFinalizer:
             raise AnalysisFinalizationError(
                 f"the analysis persistence transaction failed: {exc}"
             ) from exc
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except Exception:
+                    pass
         return summary_id, written
 
     def _base_summary_fields(
@@ -249,13 +345,20 @@ class AnalysisFinalizer:
     ) -> dict[str, Any]:
         counts = analysis_snapshot.summary_counts()
         now = datetime.now(timezone.utc)
+        registry_snapshot = json.loads(
+            canonical_evidence_json(analysis_snapshot.registry_snapshot)
+        )
         fields: dict[str, Any] = {
             "run_id": run_uuid,
             "analyzer_snapshot": {
                 "specs": [
                     spec.describe() for spec in analysis_snapshot.specs
                 ],
+                **registry_snapshot,
+                "formula_signature": analysis_snapshot.formula_signature(),
+                "formal_timeline": analysis_snapshot.formal_timeline.as_payload(),
             },
+            "formal_timeline": analysis_snapshot.formal_timeline.as_payload(),
             "formula_signature": analysis_snapshot.formula_signature(),
             "input_evidence_signature": (
                 analysis_snapshot.input_evidence_signature()
@@ -263,6 +366,7 @@ class AnalysisFinalizer:
             "reporting_currency": analysis_snapshot.reporting_currency,
             "initial_equity": counts.get("initial_equity"),
             "valid_day_count": counts.get("valid_day_count"),
+            "candidate_return_count": counts.get("candidate_return_count"),
             "fill_count": counts.get("fill_count"),
             "gross_traded_notional": counts.get("gross_traded_notional"),
             "cumulative_fees": counts.get("cumulative_fees"),
@@ -280,6 +384,7 @@ class AnalysisFinalizer:
         *,
         session_factory: _SessionFactory,
         last_chunk_sequence: int | None = None,
+        last_chunk_token: str | None = None,
         completed_through_session: date | None = None,
     ) -> UUID:
         """Upsert a ``partial`` progress summary without writing metrics.
@@ -288,6 +393,39 @@ class AnalysisFinalizer:
         summary's progress fields and signatures are refreshed.
         """
 
+        from app.backtesting.analyzers import _is_admission_token_valid
+
+        if not isinstance(analysis_snapshot, AnalysisSnapshot):
+            raise AnalysisFinalizationError(
+                "partial persistence requires an AnalysisSnapshot"
+            )
+
+        if getattr(analysis_snapshot, "status", None) != AnalysisStatus.PARTIAL:
+            raise AnalysisFinalizationError(
+                "only a partial analysis snapshot may be persisted as partial"
+            )
+        admission_token = getattr(analysis_snapshot, "admission_token", None)
+        if not _is_admission_token_valid(
+            admission_token,
+            run_id=getattr(analysis_snapshot, "run_id", None),
+            initial_equity_hash=getattr(
+                analysis_snapshot.initial_equity_snapshot,
+                "evidence_hash",
+                None,
+            ),
+            rate_snapshot_hash=getattr(
+                getattr(analysis_snapshot, "rate_snapshot", None),
+                "snapshot_hash",
+                None,
+            ),
+            analysis_snapshot=analysis_snapshot,
+            require_failure_binding=False,
+            require_snapshot_binding=True,
+        ):
+            raise AnalysisFinalizationError(
+                "the partial analysis snapshot is not bound to a coordinator "
+                "admission"
+            )
         now = datetime.now(timezone.utc)
         summary = BacktestAnalysisSummaryRecord(
             **{
@@ -296,6 +434,7 @@ class AnalysisFinalizer:
                 ),
                 "status": AnalysisStatus.PARTIAL.value,
                 "last_chunk_sequence": last_chunk_sequence,
+                "last_chunk_token": last_chunk_token,
                 "completed_through_session": completed_through_session,
                 "abort_reason": None,
                 "failed_step_sequence": None,
@@ -312,9 +451,19 @@ class AnalysisFinalizer:
         *,
         session_factory: _SessionFactory,
         completed_through_session: date | None = None,
+        last_chunk_sequence: int | None = None,
+        last_chunk_token: str | None = None,
     ) -> AnalysisFinalizationResult:
         """Write the frozen ``final`` summary and its complete metrics."""
 
+        from app.backtesting.analyzers import _is_coordinator_admitted
+
+        admission_token = getattr(engine, "_admission_token", None)
+        if not _is_coordinator_admitted(engine, admission_token):
+            raise AnalysisFinalizationError(
+                "the analyzer engine was not created by the run-admission "
+                "coordinator; refusing to persist analysis results"
+            )
         status = engine.finalized_status
         if status is not AnalysisStatus.FINAL:
             raise AnalysisFinalizationError(
@@ -327,10 +476,12 @@ class AnalysisFinalizer:
             **{
                 **self._base_summary_fields(analysis_snapshot, _run_uuid_of(analysis_snapshot.run_id)),
                 "status": AnalysisStatus.FINAL.value,
-                "last_chunk_sequence": None,
+                "last_chunk_sequence": last_chunk_sequence,
+                "last_chunk_token": last_chunk_token,
                 "completed_through_session": completed_through_session,
                 "abort_reason": None,
                 "failed_step_sequence": None,
+                "terminal_fingerprint": engine.terminal_fingerprint,
                 "finalized_at": now,
                 "updated_at": now,
             }
@@ -362,7 +513,160 @@ class AnalysisFinalizer:
         overwrite while accepting identical retries.
         """
 
-        engine = snapshot.analyzer_engine
+        if not isinstance(snapshot, AnalysisFailureSnapshot):
+            raise AnalysisFinalizationError(
+                "aborted finalization requires an AnalysisFailureSnapshot"
+            )
+        if (
+            not isinstance(snapshot.run_id, str)
+            or not snapshot.run_id.strip()
+            or not isinstance(snapshot.error_message, str)
+            or not snapshot.error_message.strip()
+            or not isinstance(snapshot.error_type, str)
+            or not snapshot.error_type.strip()
+            or isinstance(snapshot.failed_step_sequence, bool)
+            or not isinstance(snapshot.failed_step_sequence, int)
+            or snapshot.failed_step_sequence < 0
+            or isinstance(snapshot.valid_day_count, bool)
+            or not isinstance(snapshot.valid_day_count, int)
+            or snapshot.valid_day_count < 0
+            or isinstance(snapshot.fill_count, bool)
+            or not isinstance(snapshot.fill_count, int)
+            or snapshot.fill_count < 0
+            or not isinstance(snapshot.formula_signature, str)
+            or not snapshot.formula_signature.strip()
+            or not isinstance(snapshot.input_evidence_signature, str)
+            or not snapshot.input_evidence_signature.strip()
+            or (
+                snapshot.failed_session_date is not None
+                and not isinstance(snapshot.failed_session_date, date)
+            )
+            or not isinstance(snapshot.snapshot_binding, str)
+            or not snapshot.snapshot_binding.strip()
+            or not isinstance(snapshot.terminal_fingerprint, str)
+            or not snapshot.terminal_fingerprint.strip()
+        ):
+            raise AnalysisFinalizationError(
+                "aborted finalization carries an invalid failure envelope"
+            )
+
+        from app.backtesting.analyzers import _is_admission_token_valid
+
+        analysis_snapshot = snapshot.analysis_snapshot
+        if not isinstance(analysis_snapshot, AnalysisSnapshot):
+            raise AnalysisFinalizationError(
+                "aborted finalization requires an AnalysisSnapshot"
+            )
+        if analysis_snapshot.admission_token is not snapshot.admission_token:
+            raise AnalysisFinalizationError(
+                "the failure snapshot admission token does not match its "
+                "analysis snapshot"
+            )
+        if not isinstance(snapshot.blocked_equity_observation, EquityObservation):
+            raise AnalysisFinalizationError(
+                "aborted finalization requires a valid blocked equity observation"
+            )
+        if (
+            isinstance(snapshot.failed_session_date, datetime)
+            or snapshot.failed_session_date
+            != snapshot.blocked_equity_observation.session_date
+            or snapshot.failed_step_sequence
+            != snapshot.blocked_equity_observation.step_sequence
+        ):
+            raise AnalysisFinalizationError(
+                "aborted finalization carries a failure location that does "
+                "not match the blocked observation"
+            )
+        if snapshot.terminal_fingerprint is None:
+            raise AnalysisFinalizationError(
+                "aborted finalization requires a precomputed terminal "
+                "fingerprint"
+            )
+        try:
+            formula_signature = analysis_snapshot.formula_signature()
+            input_evidence_signature = analysis_snapshot.input_evidence_signature()
+            summary_counts = analysis_snapshot.summary_counts()
+        except Exception as exc:
+            raise AnalysisFinalizationError(
+                f"the failure snapshot cannot be verified: {exc}"
+            ) from exc
+        if snapshot.formula_signature != formula_signature:
+            raise AnalysisFinalizationError(
+                "the failure snapshot carries a conflicting formula signature"
+            )
+        if snapshot.input_evidence_signature != input_evidence_signature:
+            raise AnalysisFinalizationError(
+                "the failure snapshot carries a conflicting input evidence signature"
+            )
+        if snapshot.valid_day_count != summary_counts.get("valid_day_count"):
+            raise AnalysisFinalizationError(
+                "the failure snapshot carries a conflicting valid-day count"
+            )
+        if snapshot.fill_count != summary_counts.get("fill_count"):
+            raise AnalysisFinalizationError(
+                "the failure snapshot carries a conflicting fill count"
+            )
+        observations = tuple(analysis_snapshot.equity_observations)
+        expected_blocked_observation = (
+            observations[-1]
+            if observations and not observations[-1].is_valid
+            else None
+        )
+        if snapshot.blocked_equity_observation != expected_blocked_observation:
+            raise AnalysisFinalizationError(
+                "the failure snapshot carries a blocked observation that "
+                "differs from the frozen analysis timeline"
+            )
+        failure_envelope = {
+            "error_message": snapshot.error_message,
+            "error_type": snapshot.error_type,
+            "failed_step_sequence": snapshot.failed_step_sequence,
+            "failed_session_date": (
+                snapshot.failed_session_date.isoformat()
+                if snapshot.failed_session_date is not None
+                else None
+            ),
+            "blocked_equity_observation": snapshot.blocked_equity_observation.evidence_payload(),
+        }
+        if not _is_admission_token_valid(
+            snapshot.admission_token,
+            run_id=snapshot.run_id,
+            initial_equity_hash=getattr(
+                snapshot.analysis_snapshot.initial_equity_snapshot,
+                "evidence_hash",
+                None,
+            ),
+            rate_snapshot_hash=getattr(
+                getattr(analysis_snapshot, "rate_snapshot", None),
+                "snapshot_hash",
+                None,
+            ),
+            analysis_snapshot=analysis_snapshot,
+            failure_snapshot_binding=snapshot.snapshot_binding,
+            failure_envelope=failure_envelope,
+            terminal_fingerprint=snapshot.terminal_fingerprint,
+        ):
+            raise AnalysisFinalizationError(
+                "the failure snapshot differs from its coordinator-bound "
+                "admission or runtime evidence"
+            )
+        status_before = snapshot.analysis_snapshot.status
+        status_value = getattr(status_before, "value", status_before)
+        if status_value == AnalysisStatus.FINAL.value:
+            # A run already finalized as final must never be rewritten as
+            # aborted; this is a hard conflict, not an idempotent retry.
+            raise AnalysisFinalizationError(
+                "the analyzer engine was already finalized as final; "
+                "refusing to persist aborted results over it"
+            )
+        if status_value not in (
+            AnalysisStatus.PARTIAL.value,
+            AnalysisStatus.ABORTED.value,
+        ):
+            raise AnalysisFinalizationError(
+                "aborted finalization requires a partial or aborted analysis "
+                "snapshot"
+            )
         failure_payload = {
             "abort_reason": snapshot.error_message,
             "failed_step_sequence": snapshot.failed_step_sequence,
@@ -373,14 +677,31 @@ class AnalysisFinalizer:
             ),
             "error_type": snapshot.error_type,
         }
-        try:
-            results = engine.finalize(
-                AnalysisStatus.ABORTED, failure=failure_payload
-            )
-        except Exception:
-            # Idempotent retry path: keep the results frozen by the first
-            # finalization instead of recomputing or overwriting them.
-            results = engine.final_results or ()
+        if getattr(status_before, "value", status_before) == AnalysisStatus.ABORTED.value:
+            # Idempotent retry path: the recorded failure evidence must
+            # match the replay exactly, otherwise this is a conflicting
+            # write against a terminal state.
+            recorded_failure = snapshot.analysis_snapshot.failure
+            if not isinstance(recorded_failure, Mapping):
+                raise AnalysisFinalizationError(
+                    "aborted analysis snapshot carries invalid failure evidence"
+                )
+            recorded = dict(recorded_failure)
+            if recorded != failure_payload:
+                raise AnalysisFinalizationError(
+                    "conflicting aborted retry: the persisted failure evidence "
+                    "differs from the replayed evidence"
+                )
+            results = snapshot.analysis_snapshot.compute_provisional_results()
+        else:
+            try:
+                results = snapshot.analysis_snapshot.compute_provisional_results()
+            except Exception as exc:
+                # Real metric-computation failures are never disguised as
+                # idempotent retries.
+                raise AnalysisFinalizationError(
+                    f"aborted metric computation failed: {exc}"
+                ) from exc
         run_uuid = _run_uuid_of(snapshot.run_id)
 
         blocked_payload = (
@@ -398,7 +719,17 @@ class AnalysisFinalizer:
             blocked_payload = json.loads(
                 canonical_evidence_json(blocked_payload)
             )
-        analysis_snapshot = snapshot.analysis_snapshot
+        terminal_fingerprint = compute_terminal_fingerprint(
+            status=AnalysisStatus.ABORTED,
+            analysis_snapshot=analysis_snapshot,
+            results=results,
+            failure=failure_payload,
+        )
+        if snapshot.terminal_fingerprint != terminal_fingerprint:
+            raise AnalysisFinalizationError(
+                "the immutable failure snapshot carries a conflicting terminal "
+                "fingerprint"
+            )
         base_fields = self._base_summary_fields(analysis_snapshot, run_uuid)
         specs_block = base_fields.pop("analyzer_snapshot")
         specs_block["blocked_equity_observation"] = blocked_payload
@@ -408,10 +739,12 @@ class AnalysisFinalizer:
                 **base_fields,
                 "analyzer_snapshot": specs_block,
                 "status": AnalysisStatus.ABORTED.value,
-                "last_chunk_sequence": snapshot.failed_step_sequence,
-                "completed_through_session": None,
+                "last_chunk_sequence": None,
+                "last_chunk_token": None,
+                "completed_through_session": snapshot.failed_session_date,
                 "abort_reason": snapshot.error_message,
                 "failed_step_sequence": snapshot.failed_step_sequence,
+                "terminal_fingerprint": terminal_fingerprint,
                 "finalized_at": now,
                 "updated_at": now,
             }
@@ -448,10 +781,39 @@ class AnalysisFinalizationCoordinator:
         self,
         *,
         finalizer: AnalysisFinalizer | None = None,
-        abort_on_error_types: Sequence[type[BaseException]] = (),
+        abort_on_error_types: Sequence[type[BaseException]] | None = None,
     ) -> None:
         self._finalizer = finalizer or AnalysisFinalizer()
-        self._abort_on_error_types = tuple(abort_on_error_types)
+        # v1 freezes the aborted capture set to ValuationBlockedError only.
+        # Configuration/programming exceptions propagate unchanged instead
+        # of being converted into apparently valid metric finalization.
+        # Keep the explicit constructor override for integrations that have a
+        # separately audited unrecoverable error family; the default remains
+        # the closed v1 set and never broadens implicitly.
+        raw_abort_types = (
+            ABORTED_ERROR_TYPES
+            if abort_on_error_types is None
+            else abort_on_error_types
+        )
+        if isinstance(raw_abort_types, (str, bytes, bytearray)):
+            raise DomainValidationError(
+                "abort_on_error_types must be an ordered sequence of exception types"
+            )
+        try:
+            normalized_abort_types = tuple(raw_abort_types)
+        except TypeError as exc:
+            raise DomainValidationError(
+                "abort_on_error_types must be an ordered sequence of exception types"
+            ) from exc
+        if any(
+            not isinstance(error_type, type)
+            or not issubclass(error_type, BaseException)
+            for error_type in normalized_abort_types
+        ):
+            raise DomainValidationError(
+                "abort_on_error_types must contain only exception types"
+            )
+        self._abort_on_error_types = normalized_abort_types
 
     def execute_steps(
         self,
@@ -470,13 +832,12 @@ class AnalysisFinalizationCoordinator:
         runner carries an analyzer engine, ``session_factory`` is
         mandatory — a successful run must never silently skip persistence.
 
-        Only the agreed abort triggers (:class:`ValuationBlockedError`,
-        directly or as the wrapped cause of a ``PhaseExecutionError``,
-        plus the explicitly listed unrecoverable types) enter failure
-        finalization; every other exception propagates unchanged.
+        Only :class:`ValuationBlockedError`, directly or as the wrapped cause
+        of a ``PhaseExecutionError``, enters failure finalization.  Every
+        other exception propagates unchanged.
         """
 
-        has_engine = bool(getattr(runner, "_analysis_engine", None))
+        has_engine = getattr(runner, "_analysis_engine", None) is not None
         if has_engine and session_factory is None:
             raise DomainValidationError(
                 "execute_steps requires a session_factory when the runner "
@@ -491,9 +852,38 @@ class AnalysisFinalizationCoordinator:
             listed = isinstance(exc, self._abort_on_error_types)
             if blocked is None and not listed:
                 raise
+            if not has_engine:
+                # Legacy runners have no analyzer state to persist.  Preserve
+                # the original valuation exception instead of manufacturing a
+                # secondary "no analyzer engine" domain error.
+                raise
             if not hasattr(runner, "build_analysis_failure_snapshot"):
                 raise
             failure_snapshot = runner.build_analysis_failure_snapshot(exc)
+            # Advance the live engine to ``aborted`` exactly once, but keep
+            # persistence based on the immutable failure snapshot.  A final
+            # engine is left untouched and is rejected as a conflict by the
+            # finalizer.
+            engine = getattr(runner, "_analysis_engine", None)
+            if engine is not None and engine.finalized_status is None:
+                failure_payload = {
+                    "abort_reason": failure_snapshot.error_message,
+                    "failed_step_sequence": failure_snapshot.failed_step_sequence,
+                    "failed_session_date": (
+                        failure_snapshot.failed_session_date.isoformat()
+                        if failure_snapshot.failed_session_date is not None
+                        else None
+                    ),
+                    "error_type": failure_snapshot.error_type,
+                }
+                try:
+                    engine.finalize(
+                        AnalysisStatus.ABORTED, failure=failure_payload
+                    )
+                except Exception as finalize_exc:
+                    raise AnalysisFinalizationError(
+                        f"aborted metric computation failed: {finalize_exc}"
+                    ) from finalize_exc
             if session_factory is not None:
                 self._finalizer.finalize_aborted(
                     failure_snapshot, session_factory
@@ -508,16 +898,30 @@ class AnalysisFinalizationCoordinator:
                     engine,
                     session_factory=session_factory,
                     completed_through_session=_completed_session_of(runner, result),
+                    last_chunk_sequence=getattr(result, "chunk_sequence", None),
+                    last_chunk_token=getattr(result, "analysis_chunk_token", None),
                 )
         elif analysis_status == "partial":
             snapshot = getattr(runner, "_latest_analysis_snapshot", None)
-            if snapshot is not None:
-                self._finalizer.persist_partial(
-                    snapshot,
-                    session_factory=session_factory,
-                    last_chunk_sequence=getattr(
-                        result, "completed_through_step_sequence", None
-                    ),
-                    completed_through_session=_completed_session_of(runner, result),
+            if snapshot is None:
+                raise AnalysisFinalizationError(
+                    "analyzer-enabled partial run produced no analysis snapshot"
                 )
+            self._finalizer.persist_partial(
+                snapshot,
+                session_factory=session_factory,
+                last_chunk_sequence=getattr(
+                    result, "chunk_sequence", None
+                ),
+                last_chunk_token=getattr(result, "analysis_chunk_token", None),
+                completed_through_session=_completed_session_of(runner, result),
+            )
+        elif has_engine:
+            # An analyzer-enabled runner must explicitly report one of the
+            # two persistence states.  Silently returning a custom result
+            # with ``analysis_status=None`` would recreate the old hole where
+            # a successful run had no queryable analysis summary.
+            raise AnalysisFinalizationError(
+                "analyzer-enabled run returned an invalid analysis status"
+            )
         return result

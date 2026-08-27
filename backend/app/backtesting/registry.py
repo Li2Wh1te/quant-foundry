@@ -174,6 +174,8 @@ class ComponentRegistryEntry:
     def construct(self, parameters: Mapping[str, Any] | None = None) -> object:
         """Build one component instance from frozen parameter values."""
 
+        if parameters is not None and not isinstance(parameters, Mapping):
+            raise RegistryError("parameters must be a mapping when provided")
         params = MappingProxyType(dict(parameters or {}))
         return self.factory(params)
 
@@ -205,6 +207,12 @@ class ComponentRegistry:
     def resolve(self, key: str, version: int) -> ComponentRegistryEntry:
         """Resolve one entry by exact ``(key, version)``; never fall back."""
 
+        if not isinstance(key, str):
+            raise RegistryError("component key must be text")
+        if isinstance(version, bool) or not isinstance(version, int):
+            raise RegistryError("component version must be a positive integer")
+        if version <= 0:
+            raise RegistryError("component version must be a positive integer")
         entry = self._entries.get((key, version))
         if entry is None:
             known_versions = sorted(

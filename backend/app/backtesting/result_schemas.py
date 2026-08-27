@@ -14,7 +14,7 @@ from decimal import Decimal
 from typing import Generic, Optional, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic import PlainSerializer
 from typing_extensions import Annotated
 
@@ -29,7 +29,15 @@ def _decimal_as_string(value: Decimal | None) -> str | None:
 
     if value is None:
         return None
-    return format(value.normalize(), "f")
+    # Decimal.normalize() obeys the process-global context and can round a
+    # NUMERIC(38,18) value before it reaches the wire.  Formatting the exact
+    # coefficient and trimming zeros as text preserves every represented digit.
+    rendered = format(value, "f")
+    if "." not in rendered:
+        return rendered
+    integer, fraction = rendered.split(".", 1)
+    fraction = fraction.rstrip("0")
+    return f"{integer}.{fraction}" if fraction else integer
 
 
 # Carries exact decimals internally, serializes as a string on the wire.
@@ -172,11 +180,13 @@ class BacktestAnalysisSummaryItem(_ResultItem):
 
     status: str
     analyzer_snapshot: dict | list | None = None
+    formal_timeline: dict | list | None = None
     formula_signature: str
     input_evidence_signature: str
     reporting_currency: str
     initial_equity: SerializedDecimal = None
     valid_day_count: int | None = None
+    candidate_return_count: int | None = None
     fill_count: int | None = None
     gross_traded_notional: SerializedDecimal = None
     cumulative_fees: SerializedDecimal = None
@@ -185,12 +195,29 @@ class BacktestAnalysisSummaryItem(_ResultItem):
     rate_source_versions: dict | list | None = None
     missing_ranges: list | None = None
     last_chunk_sequence: int | None = None
+    last_chunk_token: str | None = None
     completed_through_session: datetime | date | None = None
     abort_reason: str | None = None
     failed_step_sequence: int | None = None
+    terminal_fingerprint: str | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
     finalized_at: datetime | None = None
+
+
+class AnalysisAdmissionFailureItem(BaseModel):
+    """Synchronous response when analysis run creation is blocked.
+
+    This response is not persisted.  Because no admitted run exists, later
+    analysis-summary/metric reads for the proposed run id return 404.
+    """
+
+    status: str = "blocked"
+    run_id: str | None = None
+    reason_code: str
+    message: str
+    details: dict = Field(default_factory=dict)
+    persisted: bool = False
 
 
 class BacktestDataPreflightItem(_ResultItem):
@@ -231,6 +258,7 @@ class ResultCursorPage(BaseModel, Generic[ItemT]):
 
 __all__ = [
     "BacktestAnalysisSummaryItem",
+    "AnalysisAdmissionFailureItem",
     "BacktestDataChunkItem",
     "BacktestDataPreflightItem",
     "BacktestDecisionItem",

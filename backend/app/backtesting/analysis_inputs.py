@@ -31,9 +31,10 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime
-from decimal import Decimal, InvalidOperation
+from datetime import date, datetime, timezone
+from decimal import Context, Decimal, InvalidOperation, ROUND_HALF_EVEN, localcontext
 from types import MappingProxyType
 from typing import Any
 from uuid import UUID
@@ -47,11 +48,14 @@ __all__ = [
     "CanonicalEvidenceValue",
     "EquityObservation",
     "FillObservation",
+    "FormalSessionTimeline",
     "InitialEquitySnapshot",
     "InitialHolding",
+    "PIT_RATE_CUTOFF_BOUNDARY",
     "PitRateSnapshot",
     "canonical_evidence_json",
     "compute_input_evidence_signature",
+    "compute_formal_timeline_hash",
     "compute_rate_snapshot_hash",
     "evidence_digest",
 ]
@@ -59,6 +63,12 @@ __all__ = [
 
 #: Hash algorithm used for every analysis evidence digest.
 ANALYSIS_EVIDENCE_HASH_ALGORITHM = "sha256"
+PIT_RATE_VALUE_UNIT = "decimal_fraction"
+PIT_RATE_CONVENTION = "simple_daily_rate"
+PIT_RATE_EFFECTIVE_AT = "session_date"
+PIT_RATE_SESSION_MAPPING = "exact_formal_session_date"
+PIT_RATE_CUTOFF_SEMANTICS = "data_cutoff_at_not_after_session_open"
+PIT_RATE_CUTOFF_BOUNDARY = "data_cutoff_at_not_after_session_open"
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +97,21 @@ def _decimal(value: Decimal | int | str, field_name: str) -> Decimal:
     return normalized
 
 
+@contextmanager
+def _exact_context():
+    """Return the fixed analysis arithmetic context without mutating globals."""
+
+    # Construct a fresh context from Decimal's specification defaults.  Using
+    # ``localcontext()`` without an argument would inherit process-global
+    # exponent limits, flags and traps, making identical evidence dependent on
+    # unrelated code that previously changed ``getcontext()``.
+    with localcontext(Context(prec=50, rounding=ROUND_HALF_EVEN)) as context:
+        yield context
+
+
 def _aware(value: datetime, field_name: str) -> datetime:
+    if not isinstance(value, datetime):
+        raise DomainValidationError(f"{field_name} must be a datetime")
     if value.tzinfo is None or value.utcoffset() is None:
         raise DomainValidationError(f"{field_name} must be timezone-aware")
     return value
@@ -119,6 +143,17 @@ def _sequence_number(value: int, field_name: str) -> int:
     return value
 
 
+def _ordered_sequence(value: Any, field_name: str) -> Sequence[Any]:
+    """Require an explicitly ordered sequence, never a set or mapping."""
+
+    if (
+        not isinstance(value, Sequence)
+        or isinstance(value, (str, bytes, bytearray))
+    ):
+        raise DomainValidationError(f"{field_name} must be an ordered sequence")
+    return value
+
+
 def _optional_text(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
@@ -132,24 +167,78 @@ def _optional_text(value: str | None, field_name: str) -> str | None:
 def _frozen_mapping(
     value: Mapping[str, Any] | None, field_name: str
 ) -> Mapping[str, Any]:
-    """Deep-freeze a JSON-like mapping into read-only containers."""
+    """Validate and deep-freeze one canonical JSON-evidence mapping.
 
-    def freeze(item: Any) -> Any:
-        if isinstance(item, Mapping):
-            return MappingProxyType(
-                {str(key): freeze(inner) for key, inner in item.items()}
+    Mapping keys are normalized to their canonical JSON strings only after
+    collision detection.  Values use the same closed type vocabulary as
+    :func:`canonical_evidence_json`, so malformed evidence fails at DTO
+    construction rather than much later while computing a signature.
+    """
+
+    def freeze_key(key: Any, path: str) -> str:
+        if isinstance(key, bool) or isinstance(key, float):
+            raise DomainValidationError(
+                f"{path} contains an unsupported mapping key type "
+                f"{type(key).__name__}"
             )
+        if isinstance(key, str):
+            return key
+        if isinstance(key, int):
+            return str(key)
+        if isinstance(key, date) and not isinstance(key, datetime):
+            return key.isoformat()
+        if isinstance(key, UUID):
+            return str(key)
+        raise DomainValidationError(
+            f"{path} contains an unsupported mapping key type "
+            f"{type(key).__name__}"
+        )
+
+    def freeze(item: Any, path: str) -> Any:
+        if isinstance(item, Mapping):
+            frozen: dict[str, Any] = {}
+            for key, inner in item.items():
+                normalized_key = freeze_key(key, path)
+                if normalized_key in frozen:
+                    raise DomainValidationError(
+                        f"{path} contains mapping keys that collide after "
+                        f"canonical normalization: {normalized_key!r}"
+                    )
+                frozen[normalized_key] = freeze(
+                    inner, f"{path}[{normalized_key!r}]"
+                )
+            return MappingProxyType(frozen)
         if isinstance(item, (list, tuple)):
-            return tuple(freeze(entry) for entry in item)
-        return item
+            return tuple(
+                freeze(entry, f"{path}[{index}]")
+                for index, entry in enumerate(item)
+            )
+        if item is None or isinstance(item, (bool, str, UUID)):
+            return item
+        if isinstance(item, float):
+            raise DomainValidationError(
+                f"{path} must not contain binary floats"
+            )
+        if isinstance(item, Decimal):
+            if not item.is_finite():
+                raise DomainValidationError(f"{path} must contain finite decimals")
+            return item
+        if isinstance(item, datetime):
+            return _aware(item, path)
+        if isinstance(item, date):
+            return item
+        if isinstance(item, int):
+            return item
+        raise DomainValidationError(
+            f"{path} contains unsupported evidence type "
+            f"{type(item).__name__}"
+        )
 
     if value is None:
         return MappingProxyType({})
     if not isinstance(value, Mapping):
         raise DomainValidationError(f"{field_name} must be a mapping")
-    return MappingProxyType(
-        {str(key): freeze(item) for key, item in value.items()}
-    )
+    return freeze(value, field_name)
 
 
 # ---------------------------------------------------------------------------
@@ -178,9 +267,27 @@ def canonical_evidence_json(value: Any) -> str:
                 "canonical evidence payloads must not contain binary floats"
             )
         if isinstance(item, Decimal):
-            return format(item, "f")
+            # Decimal formatting must not consult the process context.  Strip
+            # insignificant trailing zeroes and canonicalize both +0 and -0
+            # so equivalent NUMERIC values hash identically.
+            if not item.is_finite():
+                raise DomainValidationError(
+                    "canonical evidence decimals must be finite"
+                )
+            if item == 0:
+                return "0"
+            rendered = format(item, "f")
+            if "." in rendered:
+                rendered = rendered.rstrip("0").rstrip(".")
+            return rendered
         if isinstance(item, datetime):
-            return item.isoformat()
+            if item.tzinfo is None or item.utcoffset() is None:
+                raise DomainValidationError(
+                    "canonical evidence datetimes must be timezone-aware"
+                )
+            utc_value = item.astimezone(timezone.utc)
+            rendered = utc_value.isoformat(timespec="microseconds")
+            return rendered[:-6] + "Z"
         if isinstance(item, date):
             return item.isoformat()
         if isinstance(item, UUID):
@@ -190,11 +297,12 @@ def canonical_evidence_json(value: Any) -> str:
         if isinstance(item, str):
             return item
         if isinstance(item, Mapping):
+            # Reuse the DTO boundary validator here because callers may hash
+            # ad-hoc payloads that have not already passed _frozen_mapping().
+            frozen = _frozen_mapping(item, "canonical evidence payload")
             return {
-                str(key): normalize(inner)
-                for key, inner in sorted(
-                    item.items(), key=lambda entry: str(entry[0])
-                )
+                key: normalize(inner)
+                for key, inner in sorted(frozen.items())
             }
         if isinstance(item, (list, tuple)):
             return [normalize(entry) for entry in item]
@@ -215,6 +323,81 @@ def evidence_digest(payload: CanonicalEvidenceValue) -> str:
     return f"{ANALYSIS_EVIDENCE_HASH_ALGORITHM}:{hashlib.sha256(rendered).hexdigest()}"
 
 
+def compute_formal_timeline_hash(sessions: Sequence[date]) -> str:
+    """Hash the exact ordered formal session sequence used by every analyzer."""
+
+    ordered = _ordered_sequence(sessions, "formal sessions")
+    normalized = tuple(_plain_date(day, "formal session") for day in ordered)
+    if not normalized:
+        raise DomainValidationError(
+            "formal session timeline must contain at least one session"
+        )
+    for index in range(1, len(normalized)):
+        if normalized[index] <= normalized[index - 1]:
+            raise DomainValidationError(
+                "formal sessions must be unique and strictly increasing"
+            )
+    return evidence_digest(
+        {
+            "contract": "formal_timeline_v1",
+            "sessions": normalized,
+        }
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class FormalSessionTimeline:
+    """Immutable ordered formal-session contract shared by all analyzers.
+
+    The session sequence and its digest are one admission input.  Keeping
+    them together prevents a caller from passing a list from one calendar
+    and a hash from another component, or from recording the timeline only
+    after analysis has already run.
+    """
+
+    sessions: Sequence[date]
+    timeline_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        ordered = _ordered_sequence(self.sessions, "formal timeline sessions")
+        normalized = tuple(
+            _plain_date(day, "formal timeline session") for day in ordered
+        )
+        if not normalized:
+            raise DomainValidationError(
+                "formal session timeline must contain at least one session"
+            )
+        for index in range(1, len(normalized)):
+            if normalized[index] <= normalized[index - 1]:
+                raise DomainValidationError(
+                    "formal session timeline must be unique and strictly increasing"
+                )
+        expected_hash = compute_formal_timeline_hash(normalized)
+        if self.timeline_hash is not None and self.timeline_hash != expected_hash:
+            raise DomainValidationError(
+                "formal session timeline hash does not match its sessions"
+            )
+        object.__setattr__(self, "sessions", normalized)
+        object.__setattr__(self, "timeline_hash", expected_hash)
+
+    @property
+    def first_session(self) -> date:
+        return self.sessions[0]
+
+    @property
+    def last_session(self) -> date:
+        return self.sessions[-1]
+
+    def as_payload(self) -> dict[str, Any]:
+        """Return the stable JSON-shaped representation used in summaries."""
+
+        return {
+            "contract": "formal_timeline_v1",
+            "sessions": tuple(day.isoformat() for day in self.sessions),
+            "timeline_hash": self.timeline_hash,
+        }
+
+
 def compute_rate_snapshot_hash(snapshot: "PitRateSnapshot") -> str:
     """Compute the frozen snapshot hash of a PIT rate snapshot."""
 
@@ -222,6 +405,12 @@ def compute_rate_snapshot_hash(snapshot: "PitRateSnapshot") -> str:
         "algorithm": ANALYSIS_EVIDENCE_HASH_ALGORITHM,
         "source_key": snapshot.source_key,
         "source_version": snapshot.source_version,
+        "rate_unit": snapshot.rate_unit,
+        "rate_convention": snapshot.rate_convention,
+        "effective_at": snapshot.effective_at,
+        "session_mapping": snapshot.session_mapping,
+        "data_cutoff_semantics": snapshot.data_cutoff_semantics,
+        "cutoff_boundary": snapshot.cutoff_boundary,
         "query_parameters": dict(snapshot.query_parameters),
         "coverage_start": (
             snapshot.coverage_start.isoformat()
@@ -234,17 +423,30 @@ def compute_rate_snapshot_hash(snapshot: "PitRateSnapshot") -> str:
             else None
         ),
         "rates": [
-            [day.isoformat(), format(rate, "f")]
+            [day.isoformat(), rate]
             for day, rate in sorted(snapshot.rates.items())
         ],
         "missing_ranges": [
-            [start.isoformat(), end.isoformat()]
+            {
+                "start_session": start.isoformat(),
+                "end_session": end.isoformat(),
+            }
             for start, end in snapshot.missing_ranges
         ],
+        # Per-fact provenance participates: identical rates with different
+        # knowledge times must never share a snapshot hash.
+        "fact_evidence": {
+            day_key: dict(provenance)
+            for day_key, provenance in sorted(
+                snapshot.fact_evidence.items()
+            )
+        },
     }
-    rendered = json.dumps(
-        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    # ``query_parameters`` and provenance are deep-frozen mappings and may
+    # contain Decimal/date/UUID values.  The shared canonical serializer
+    # handles those types deterministically; raw ``json.dumps`` would fail
+    # on nested query values or silently depend on caller container types.
+    rendered = canonical_evidence_json(payload).encode("utf-8")
     return (
         f"{ANALYSIS_EVIDENCE_HASH_ALGORITHM}:"
         f"{hashlib.sha256(rendered).hexdigest()}"
@@ -269,11 +471,21 @@ def compute_input_evidence_signature(
     payload = {
         "kind": "input_evidence_v1",
         "initial_equity": initial_equity_snapshot.evidence_payload(),
+        "formal_timeline": (
+            initial_equity_snapshot.formal_timeline.as_payload()
+            if initial_equity_snapshot.formal_timeline is not None
+            else None
+        ),
         "equity_observations": [
             observation.evidence_payload()
             for observation in equity_observations
         ],
-        "fill_facts": [fact.evidence_payload() for fact in fill_facts],
+        "fill_facts": [
+            fact.evidence_payload()
+            for fact in sorted(
+                fill_facts, key=lambda item: str(item.fact.fill_id)
+            )
+        ],
         "rate_snapshot_hash": rate_snapshot_hash,
     }
     return evidence_digest(payload)
@@ -286,12 +498,19 @@ def compute_input_evidence_signature(
 
 @dataclass(frozen=True, slots=True)
 class InitialHolding:
-    """One initial position with its strict-PIT raw close mark."""
+    """One initial position with its strict-PIT raw close mark.
+
+    ``mark_evidence`` carries the provenance of the selected source fact
+    (session, knowledge/observation times, source identity and revision)
+    so the input-evidence signature is derived from actual evidence rather
+    than a caller-declared hash.
+    """
 
     instrument_id: UUID
     quantity: Decimal | int | str
     currency: str
     close_price: Decimal | int | str
+    mark_evidence: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -311,6 +530,16 @@ class InitialHolding:
                 f"mark blocks the run with reason MISSING_INITIAL_MARK"
             )
         object.__setattr__(self, "close_price", price)
+        if self.mark_evidence is not None:
+            if not isinstance(self.mark_evidence, Mapping):
+                raise DomainValidationError(
+                    "mark_evidence must be a mapping when provided"
+                )
+            object.__setattr__(
+                self,
+                "mark_evidence",
+                _frozen_mapping(self.mark_evidence, "mark_evidence"),
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -335,6 +564,16 @@ class InitialEquitySnapshot:
     equity_e0: Decimal | int | str | None = None
     source_versions: Mapping[str, Any] | None = None
     evidence_hash: str | None = None
+    # Populated by the admission coordinator after comparing E0 with the
+    # authoritative starting portfolio.  These fields bind value to
+    # composition, not merely to the total equity denominator.
+    portfolio_snapshot_id: str | None = None
+    portfolio_snapshot_hash: str | None = None
+    formal_timeline: FormalSessionTimeline | None = None
+    # Compatibility aliases retained for callers that still pass primitive
+    # session/hash fields; they are normalized from ``formal_timeline``.
+    formal_sessions: Sequence[date] = ()
+    timeline_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.run_id, str) or not self.run_id.strip():
@@ -354,6 +593,14 @@ class InitialEquitySnapshot:
             raise DomainValidationError(
                 "valuation_as_of must be strictly earlier than market_open_at"
             )
+        # Look-ahead gate: the declared data cutoff must also sit strictly
+        # before the open; a post-open cutoff would admit facts the run
+        # could not have known at valuation time.
+        if self.data_cutoff_at >= self.market_open_at:
+            raise DomainValidationError(
+                "data_cutoff_at must be strictly earlier than market_open_at; "
+                "a cutoff at or after the open introduces look-ahead bias"
+            )
         object.__setattr__(
             self,
             "reporting_currency",
@@ -362,23 +609,24 @@ class InitialEquitySnapshot:
         cash = _decimal(self.cash, "cash")
         object.__setattr__(self, "cash", cash)
 
-        holdings = tuple(self.holdings)
+        holdings = tuple(_ordered_sequence(self.holdings, "holdings"))
         seen_instruments: set[UUID] = set()
         computed_market_value = Decimal("0")
-        for holding in holdings:
-            if holding.instrument_id in seen_instruments:
-                raise DomainValidationError(
-                    f"initial holdings declare instrument "
-                    f"{holding.instrument_id} twice"
-                )
-            seen_instruments.add(holding.instrument_id)
-            if holding.currency != self.reporting_currency:
-                raise DomainValidationError(
-                    f"initial holding {holding.instrument_id} carries currency "
-                    f"{holding.currency} but the reporting currency is "
-                    f"{self.reporting_currency}; no FX conversion exists"
-                )
-            computed_market_value += holding.quantity * holding.close_price
+        with _exact_context() as context:
+            for holding in holdings:
+                if holding.instrument_id in seen_instruments:
+                    raise DomainValidationError(
+                        f"initial holdings declare instrument "
+                        f"{holding.instrument_id} twice"
+                    )
+                seen_instruments.add(holding.instrument_id)
+                if holding.currency != self.reporting_currency:
+                    raise DomainValidationError(
+                        f"initial holding {holding.instrument_id} carries currency "
+                        f"{holding.currency} but the reporting currency is "
+                        f"{self.reporting_currency}; no FX conversion exists"
+                    )
+                computed_market_value += holding.quantity * holding.close_price
         object.__setattr__(self, "holdings", holdings)
 
         market_value = (
@@ -394,12 +642,12 @@ class InitialEquitySnapshot:
             )
         object.__setattr__(self, "market_value", market_value)
 
-        equity = (
-            cash + market_value
-            if self.equity_e0 is None
-            else _decimal(self.equity_e0, "equity_e0")
+        with _exact_context() as context:
+            computed_equity = cash + market_value
+        equity = computed_equity if self.equity_e0 is None else _decimal(
+            self.equity_e0, "equity_e0"
         )
-        if equity != cash + market_value:
+        if equity != computed_equity:
             raise DomainValidationError(
                 "equity_e0 must equal cash plus market_value"
             )
@@ -415,12 +663,90 @@ class InitialEquitySnapshot:
         object.__setattr__(
             self, "source_versions", _frozen_mapping(self.source_versions, "source_versions")
         )
-        object.__setattr__(
-            self, "evidence_hash", _optional_text(self.evidence_hash, "evidence_hash")
+        portfolio_id = _optional_text(
+            self.portfolio_snapshot_id, "portfolio_snapshot_id"
         )
+        portfolio_hash = _optional_text(
+            self.portfolio_snapshot_hash, "portfolio_snapshot_hash"
+        )
+        if (portfolio_id is None) != (portfolio_hash is None):
+            raise DomainValidationError(
+                "portfolio_snapshot_id and portfolio_snapshot_hash must be "
+                "provided together"
+            )
+        object.__setattr__(self, "portfolio_snapshot_id", portfolio_id)
+        object.__setattr__(self, "portfolio_snapshot_hash", portfolio_hash)
+        supplied_timeline = self.formal_timeline
+        if supplied_timeline is not None and not isinstance(
+            supplied_timeline, FormalSessionTimeline
+        ):
+            raise DomainValidationError(
+                "formal_timeline must be a FormalSessionTimeline"
+            )
+        ordered_sessions = _ordered_sequence(self.formal_sessions, "formal_sessions")
+        supplied_sessions = tuple(
+            _plain_date(day, "formal_sessions entry") for day in ordered_sessions
+        )
+        if supplied_timeline is None and supplied_sessions:
+            supplied_timeline = FormalSessionTimeline(
+                supplied_sessions, timeline_hash=self.timeline_hash
+            )
+        elif supplied_timeline is not None:
+            if supplied_sessions and supplied_sessions != supplied_timeline.sessions:
+                raise DomainValidationError(
+                    "formal_sessions does not match formal_timeline.sessions"
+                )
+            if self.timeline_hash is not None and self.timeline_hash != supplied_timeline.timeline_hash:
+                raise DomainValidationError(
+                    "timeline_hash does not match formal_timeline.timeline_hash"
+                )
+        if supplied_timeline is not None:
+            formal_sessions = supplied_timeline.sessions
+            if formal_sessions[0] != self.session_date:
+                raise DomainValidationError(
+                    "formal_sessions must start at the E0 session_date"
+                )
+            object.__setattr__(self, "formal_timeline", supplied_timeline)
+            object.__setattr__(self, "formal_sessions", formal_sessions)
+            object.__setattr__(self, "timeline_hash", supplied_timeline.timeline_hash)
+        else:
+            if self.timeline_hash is not None:
+                raise DomainValidationError(
+                    "timeline_hash requires a non-empty formal_sessions sequence"
+                )
+            object.__setattr__(self, "formal_timeline", None)
+            object.__setattr__(self, "formal_sessions", ())
+            object.__setattr__(self, "timeline_hash", None)
+        # The evidence hash is always recomputed from this DTO's full
+        # payload (holdings include per-mark provenance); a caller-supplied
+        # value that does not match is rejected instead of trusted.
+        # The digest is derived from the source facts, never from its own
+        # caller-supplied representation.  Including ``evidence_hash`` in
+        # the payload would make the value self-referential and would allow
+        # two equivalent source snapshots to acquire different signatures.
+        expected_hash = evidence_digest(self._evidence_payload_without_hash())
+        if self.evidence_hash is None:
+            object.__setattr__(self, "evidence_hash", expected_hash)
+        else:
+            supplied_hash = _optional_text(self.evidence_hash, "evidence_hash")
+            if supplied_hash != expected_hash:
+                raise DomainValidationError(
+                    "evidence_hash does not match the recomputed input-evidence "
+                    f"digest {expected_hash}"
+                )
+            object.__setattr__(self, "evidence_hash", supplied_hash)
 
     def evidence_payload(self) -> dict[str, Any]:
         """Canonical payload feeding the input-evidence signature."""
+
+        payload = self._evidence_payload_without_hash()
+        # Keep the derived digest visible to callers that persist the DTO,
+        # but it is deliberately not an input to the digest computation.
+        payload["evidence_hash"] = self.evidence_hash
+        return payload
+
+    def _evidence_payload_without_hash(self) -> dict[str, Any]:
+        """Return the complete source-evidence payload before its digest."""
 
         return {
             "run_id": self.run_id,
@@ -430,20 +756,33 @@ class InitialEquitySnapshot:
             "data_cutoff_at": self.data_cutoff_at,
             "reporting_currency": self.reporting_currency,
             "cash": self.cash,
+            "portfolio_snapshot_id": self.portfolio_snapshot_id,
+            "portfolio_snapshot_hash": self.portfolio_snapshot_hash,
+            "formal_timeline": (
+                self.formal_timeline.as_payload()
+                if self.formal_timeline is not None
+                else None
+            ),
+            "formal_sessions": self.formal_sessions,
+            "timeline_hash": self.timeline_hash,
+            "source_versions": dict(self.source_versions),
             "holdings": [
                 {
                     "instrument_id": holding.instrument_id,
                     "quantity": holding.quantity,
                     "currency": holding.currency,
                     "close_price": holding.close_price,
+                    "mark_evidence": (
+                        dict(holding.mark_evidence)
+                        if holding.mark_evidence is not None
+                        else None
+                    ),
                 }
                 for holding in self.holdings
             ],
-            # Full provenance participates: dropping any source-version or
-            # evidence field would let different underlying inputs produce
-            # the same input-evidence signature.
-            "source_versions": dict(self.source_versions),
-            "evidence_hash": self.evidence_hash,
+            # Source identity/revision/schema are carried by each selected
+            # holding's ``mark_evidence``.  The declared source-version map
+            # also participates so revisions cannot silently collide.
         }
 
 
@@ -491,6 +830,12 @@ class EquityObservation:
         object.__setattr__(
             self, "data_cutoff_at", _aware(self.data_cutoff_at, "data_cutoff_at")
         )
+        # Look-ahead gate: the cutoff declares what the source knew at
+        # valuation time and must never sit after the observation instant.
+        if self.data_cutoff_at > self.as_of:
+            raise DomainValidationError(
+                "data_cutoff_at must not be later than as_of"
+            )
         object.__setattr__(
             self,
             "reporting_currency",
@@ -519,12 +864,14 @@ class EquityObservation:
             equity = _decimal(self.equity, "equity")
             object.__setattr__(self, "equity", equity)
             if self.market_value is None:
-                object.__setattr__(
-                    self, "market_value", equity - self.cash
-                )
+                with _exact_context():
+                    derived_market_value = equity - self.cash
+                object.__setattr__(self, "market_value", derived_market_value)
             else:
                 market_value = _decimal(self.market_value, "market_value")
-                if market_value + self.cash != equity:
+                with _exact_context():
+                    recomputed_equity = market_value + self.cash
+                if recomputed_equity != equity:
                     raise DomainValidationError(
                         "market_value plus cash must equal equity on valid "
                         "observations"
@@ -590,7 +937,7 @@ class AppliedFillFact:
     currency: str
     reporting_currency: str
     fees: Decimal | int | str
-    gross_traded_notional: Decimal | int | str | None = None
+    gross_traded_notional: Decimal | int | str
     source_versions: Mapping[str, Any] | None = None
     evidence_hash: str | None = None
 
@@ -636,18 +983,17 @@ class AppliedFillFact:
         if fees < 0:
             raise DomainValidationError("fees must be non-negative")
         object.__setattr__(self, "fees", fees)
-        derived_notional = price * quantity * multiplier
-        if self.gross_traded_notional is None:
-            object.__setattr__(self, "gross_traded_notional", derived_notional)
-        else:
-            declared = _decimal(self.gross_traded_notional, "gross_traded_notional")
-            if declared != derived_notional:
-                raise DomainValidationError(
-                    f"declared gross_traded_notional {declared} does not match "
-                    f"fill_price x fill_quantity x contract_multiplier "
-                    f"({derived_notional})"
-                )
-            object.__setattr__(self, "gross_traded_notional", derived_notional)
+        # The accounting layer owns this confirmed amount.  The analyzer
+        # accepts and aggregates it as evidence; it must never derive a
+        # replacement value from price, quantity, or multiplier here.
+        declared_notional = _decimal(
+            self.gross_traded_notional, "gross_traded_notional"
+        )
+        if declared_notional < 0:
+            raise DomainValidationError(
+                "gross_traded_notional must be non-negative"
+            )
+        object.__setattr__(self, "gross_traded_notional", declared_notional)
         object.__setattr__(
             self, "source_versions", _frozen_mapping(self.source_versions, "source_versions")
         )
@@ -728,6 +1074,8 @@ class FillObservation:
             self.fact.timestamp,
             self.fact.reporting_currency,
             self.data_cutoff_at,
+            tuple(sorted(self.fact.source_versions.items())),
+            self.fact.evidence_hash,
         )
 
     def evidence_payload(self) -> dict[str, Any]:
@@ -749,18 +1097,30 @@ class PitRateSnapshot:
 
     The series covers the whole formal backtest window and is fetched once
     at run admission.  Missing sessions become deterministic contiguous
-    ``missing_ranges``; nothing is ever forward-filled or zero-filled.
+    ``missing_ranges``; nothing is ever forward-filled or zero-filled.  Each
+    retained fact also carries its source ``data_cutoff_at`` and that cutoff
+    is required not later than the corresponding formal session open.
     """
 
     rates: Mapping[date, Decimal | int | str]
     source_key: str
     source_version: int
+    rate_unit: str = PIT_RATE_VALUE_UNIT
+    rate_convention: str = PIT_RATE_CONVENTION
+    effective_at: str = PIT_RATE_EFFECTIVE_AT
+    session_mapping: str = PIT_RATE_SESSION_MAPPING
+    data_cutoff_semantics: str = PIT_RATE_CUTOFF_SEMANTICS
+    cutoff_boundary: str = PIT_RATE_CUTOFF_BOUNDARY
     query_parameters: Mapping[str, Any] | None = None
     coverage_start: date | None = None
     coverage_end: date | None = None
     expected_sessions: Sequence[date] = ()
     snapshot_hash: str | None = None
     missing_ranges: Sequence[tuple[date, date]] | None = None
+    # Per-session provenance of the selected source facts (known_at,
+    # observed_at, source revision, quality); part of the snapshot hash so
+    # identical rates with different PIT evidence produce different hashes.
+    fact_evidence: Mapping[date, Mapping[str, Any]] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.source_key, str) or not self.source_key.strip():
@@ -772,6 +1132,20 @@ class PitRateSnapshot:
             or self.source_version <= 0
         ):
             raise DomainValidationError("source_version must be a positive integer")
+        frozen_contract = {
+            "rate_unit": PIT_RATE_VALUE_UNIT,
+            "rate_convention": PIT_RATE_CONVENTION,
+            "effective_at": PIT_RATE_EFFECTIVE_AT,
+            "session_mapping": PIT_RATE_SESSION_MAPPING,
+            "data_cutoff_semantics": PIT_RATE_CUTOFF_SEMANTICS,
+            "cutoff_boundary": PIT_RATE_CUTOFF_BOUNDARY,
+        }
+        for field_name, expected_value in frozen_contract.items():
+            if getattr(self, field_name) != expected_value:
+                raise DomainValidationError(
+                    f"{field_name} must be the frozen Sharpe B value "
+                    f"{expected_value!r}"
+                )
         normalized_rates: dict[date, Decimal] = {}
         for day, raw_rate in dict(self.rates).items():
             day = _plain_date(day, "rate date key")
@@ -795,30 +1169,67 @@ class PitRateSnapshot:
             object.__setattr__(
                 self, "coverage_end", _plain_date(self.coverage_end, "coverage_end")
             )
+        ordered_expected = _ordered_sequence(
+            self.expected_sessions, "expected_sessions"
+        )
         expected = tuple(
             _plain_date(day, "expected_sessions entry")
-            for day in self.expected_sessions
+            for day in ordered_expected
         )
+        for index in range(1, len(expected)):
+            if expected[index] <= expected[index - 1]:
+                raise DomainValidationError(
+                    "expected_sessions must be unique and strictly increasing"
+                )
         object.__setattr__(self, "expected_sessions", expected)
-        if self.missing_ranges is None:
-            object.__setattr__(
-                self,
-                "missing_ranges",
-                tuple(deterministic_missing_ranges(expected, set(normalized_rates))),
-            )
-        else:
-            ranges = []
-            for start, end in self.missing_ranges:
-                start = _plain_date(start, "missing range start")
-                end = _plain_date(end, "missing range end")
+        if expected:
+            if self.coverage_start != expected[0] or self.coverage_end != expected[-1]:
+                raise DomainValidationError(
+                    "coverage_start/coverage_end must exactly bound the formal "
+                    "expected_sessions window"
+                )
+            unexpected_rates = set(normalized_rates) - set(expected)
+            if unexpected_rates:
+                raise DomainValidationError(
+                    "rates contain sessions outside expected_sessions"
+                )
+        frozen_fact_evidence = _frozen_mapping(self.fact_evidence, "fact_evidence")
+        normalized_evidence: dict[str, Any] = {}
+        for day_key, provenance in frozen_fact_evidence.items():
+            normalized_evidence[str(day_key)] = provenance
+        object.__setattr__(
+            self,
+            "fact_evidence",
+            MappingProxyType(normalized_evidence)
+            if normalized_evidence
+            else MappingProxyType({}),
+        )
+        # ``missing_ranges`` is a derived coverage fact.  Recompute it from
+        # the frozen expected/available dates and reject any caller-declared
+        # value that disagrees, rather than silently accepting or ignoring a
+        # malformed audit payload.
+        derived_missing_ranges = tuple(
+            deterministic_missing_ranges(expected, set(normalized_rates))
+        )
+        if self.missing_ranges is not None:
+            supplied_ranges: list[tuple[date, date]] = []
+            for item in self.missing_ranges:
+                if not isinstance(item, (tuple, list)) or len(item) != 2:
+                    raise DomainValidationError(
+                        "missing_ranges entries must be (start_date, end_date)"
+                    )
+                start = _plain_date(item[0], "missing range start")
+                end = _plain_date(item[1], "missing range end")
                 if end < start:
                     raise DomainValidationError(
                         "missing range end must not precede its start"
                     )
-                ranges.append((start, end))
-            object.__setattr__(
-                self, "missing_ranges", tuple(sorted(ranges))
-            )
+                supplied_ranges.append((start, end))
+            if tuple(supplied_ranges) != derived_missing_ranges:
+                raise DomainValidationError(
+                    "missing_ranges does not match the derived PIT coverage"
+                )
+        object.__setattr__(self, "missing_ranges", derived_missing_ranges)
         if self.snapshot_hash is None:
             object.__setattr__(
                 self, "snapshot_hash", compute_rate_snapshot_hash(self)
@@ -848,10 +1259,12 @@ def deterministic_missing_ranges(
 ) -> list[tuple[date, date]]:
     """Collapse expected-but-missing sessions into contiguous date ranges."""
 
-    missing = sorted(set(expected_sessions) - set(available_dates))
+    expected = tuple(expected_sessions)
+    missing = [day for day in expected if day not in available_dates]
+    expected_index = {day: index for index, day in enumerate(expected)}
     ranges: list[tuple[date, date]] = []
     for day in missing:
-        if ranges and (ranges[-1][1].toordinal() + 1) == day.toordinal():
+        if ranges and expected_index[day] == expected_index[ranges[-1][1]] + 1:
             start, _ = ranges[-1]
             ranges[-1] = (start, day)
         else:

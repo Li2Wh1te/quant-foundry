@@ -224,6 +224,8 @@ class PersistenceTestCase(unittest.TestCase):
             updated_at=now,
         )
         fields.update(overrides)
+        if status in ("final", "aborted"):
+            fields.setdefault("terminal_fingerprint", "sha256:" + "0" * 64)
         return BacktestAnalysisSummaryRecord(**fields)
 
     def test_summary_partial_upsert_and_progress_update(self):
@@ -314,16 +316,29 @@ class MigrationChainTestCase(unittest.TestCase):
             "app.db.migrations.versions.20260823_01_add_backtest_fill_audit_columns"
         )
         self.assertEqual(migration.down_revision, previous.revision)
+        retry_migration = importlib.import_module(
+            "app.db.migrations.versions.20260825_02_add_analysis_terminal_and_chunk_fingerprints"
+        )
+        widening_migration = importlib.import_module(
+            "app.db.migrations.versions.20260825_01_widen_metric_formula_version"
+        )
+        self.assertEqual(retry_migration.down_revision, widening_migration.revision)
+        timeline_migration = importlib.import_module(
+            "app.db.migrations.versions.20260825_04_add_formal_session_timeline"
+        )
+        self.assertEqual(timeline_migration.down_revision, "20260825_03")
 
         table = Base.metadata.tables["backtest_analysis_summaries"]
         expected = {
             "id", "run_id", "status", "analyzer_snapshot",
             "formula_signature", "input_evidence_signature",
-            "initial_equity", "valid_day_count", "fill_count",
+            "initial_equity", "valid_day_count", "candidate_return_count", "fill_count",
+            "formal_timeline",
             "gross_traded_notional", "cumulative_fees",
             "rate_snapshot", "rate_snapshot_hash",
             "rate_source_versions", "missing_ranges",
             "reporting_currency", "last_chunk_sequence",
+            "last_chunk_token", "terminal_fingerprint",
             "completed_through_session", "abort_reason",
             "failed_step_sequence", "created_at", "updated_at",
             "finalized_at",

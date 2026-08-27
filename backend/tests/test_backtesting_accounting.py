@@ -1,7 +1,7 @@
 """Tests for fill application, settlement, and daily mark-to-market rules."""
 
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, Overflow, localcontext
 import unittest
 from uuid import uuid4
 
@@ -96,6 +96,13 @@ class AccountingPolicyTestCase(unittest.TestCase):
         self.assertEqual(position.available_quantity, Decimal("1400"))
         self.assertEqual(policy.pending_batches(), ())
         self.assertEqual(len(policy.settled_batches()), 1)
+
+    def test_gross_notional_does_not_inherit_global_decimal_limits(self) -> None:
+        fill = make_buy(price="1e20", quantity="10")
+        with localcontext() as global_context:
+            global_context.Emax = 9
+            global_context.traps[Overflow] = True
+            self.assertEqual(fill.gross_notional, Decimal("1e21"))
 
     def test_sell_updates_cash_and_realized_pnl_then_removes_zero_position(self) -> None:
         portfolio = make_portfolio()

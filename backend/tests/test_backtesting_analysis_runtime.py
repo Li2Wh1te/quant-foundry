@@ -7,14 +7,17 @@ from __future__ import annotations
 import unittest
 from datetime import date, datetime, time, timezone
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from zoneinfo import ZoneInfo
 
 from app.backtesting.analysis_inputs import (
+    AppliedFillFact,
+    FillObservation,
     InitialEquitySnapshot,
     PitRateSnapshot,
 )
+from app.backtesting.analysis_admission import AdmissionBlockedError
 from app.backtesting.analyzers import (
     AnalyzerEngine,
     build_fee_summary_spec,
@@ -78,6 +81,7 @@ def e0_snapshot() -> InitialEquitySnapshot:
         data_cutoff_at=FIXED_CUTOFF,
         reporting_currency="CNY",
         cash="10000",
+        formal_sessions=SESSION_DATES,
     )
 
 
@@ -132,6 +136,33 @@ BUY_THEN_HOLD = {
 
 
 class TestFullRunAnalysis(unittest.TestCase):
+    def test_engine_with_preexisting_fills_is_rejected_by_admission(self):
+        engine = fresh_engine()
+        engine.observe_fill(
+            FillObservation(
+                fact=AppliedFillFact(
+                    fill_id=uuid4(),
+                    run_id=RUN_ID,
+                    session_date=SESSION_DATES[0],
+                    timestamp=shanghai_open(SESSION_DATES[0]),
+                    instrument_id=INSTRUMENT_ID,
+                    side="buy",
+                    fill_price="10",
+                    fill_quantity="1",
+                    contract_multiplier="1",
+                    currency="CNY",
+                    reporting_currency="CNY",
+                    fees="0",
+                    gross_traded_notional="10",
+                )
+            )
+        )
+        with self.assertRaises(AdmissionBlockedError):
+            build_wired_runner(
+                closes=FULL_CLOSES,
+                analysis_engine=engine,
+            )
+
     def test_full_run_finalizes_with_explicit_status(self):
         engine = fresh_engine()
         runner = build_wired_runner(
@@ -139,6 +170,9 @@ class TestFullRunAnalysis(unittest.TestCase):
         )
         result = runner.run()
         self.assertEqual(result.analysis_status, "final")
+        self.assertIsNotNone(
+            engine.snapshot().initial_equity_snapshot.portfolio_snapshot_hash
+        )
         self.assertEqual(result.completed_through_step_sequence, len(SESSION_DATES) - 1)
         self.assertIsNotNone(engine.finalized_status)
         self.assertEqual(len(result.analysis_metrics), 4)
@@ -186,6 +220,7 @@ class TestFullRunAnalysis(unittest.TestCase):
                 data_cutoff_at=FIXED_CUTOFF,
                 reporting_currency="CNY",
                 cash="10000",
+                formal_sessions=SESSION_DATES,
             ),
             build_analysis_specs(),
         )
@@ -284,11 +319,14 @@ class TestValuationFailure(unittest.TestCase):
             runner.run()
         # The original failure must remain a valuation block, whatever the
         # phase wrapper named it.
-        from app.backtesting.analysis_finalization import (
-            unwrap_valuation_blocked_error,
+        error = caught.exception
+        causes = []
+        while error is not None and len(causes) < 16:
+            causes.append(error)
+            error = error.__cause__
+        self.assertTrue(
+            any(isinstance(item, ValuationBlockedError) for item in causes)
         )
-
-        self.assertIsNotNone(unwrap_valuation_blocked_error(caught.exception))
         snapshot = engine.snapshot()
         self.assertTrue(snapshot.equity_observations)
         blocked = snapshot.equity_observations[-1]
@@ -301,6 +339,7 @@ class TestValuationFailure(unittest.TestCase):
         # The runner is permanently stopped (fail-fast preserved).
         with self.assertRaises(Exception):
             runner.run_steps(list(build_axis(SESSION_DATES))[2:])
+
 
 
 if __name__ == "__main__":

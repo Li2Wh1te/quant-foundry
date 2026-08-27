@@ -687,6 +687,22 @@ class BacktestMetricRecord(_RunBoundRecord):
             "(analyzer_key IS NULL) = (analyzer_version IS NULL)",
             name="analyzer_identity_pair",
         ),
+        CheckConstraint(
+            "length(metric_key) BETWEEN 1 AND 100",
+            name="metric_key_length",
+        ),
+        CheckConstraint(
+            "length(formula_version) BETWEEN 1 AND 64",
+            name="formula_version_length",
+        ),
+        CheckConstraint(
+            "unit IS NULL OR length(unit) BETWEEN 1 AND 32",
+            name="metric_unit_length",
+        ),
+        CheckConstraint(
+            "analyzer_key IS NULL OR length(analyzer_key) BETWEEN 1 AND 100",
+            name="analyzer_key_length",
+        ),
         Index(
             "uq_backtest_metrics_run_key_version",
             "run_id",
@@ -702,7 +718,7 @@ class BacktestMetricRecord(_RunBoundRecord):
         comment="Stable metric key.",
     )
     formula_version: Mapped[str] = mapped_column(
-        String(32),
+        String(64),
         nullable=False,
         comment="Version of the metric formula that produced the value.",
     )
@@ -763,7 +779,12 @@ class BacktestMetricRecord(_RunBoundRecord):
 
         from app.backtesting.result_models import resolve_analyzer_state
 
-        return resolve_analyzer_state(self.analyzer_key, self.analyzer_version).value
+        return resolve_analyzer_state(
+            self.analyzer_key,
+            self.analyzer_version,
+            self.metric_key,
+            self.formula_version,
+        ).value
 
 
 class BacktestDataPreflightResultRecord(_RunBoundRecord):
@@ -932,6 +953,11 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
         nullable=False,
         comment="Frozen AnalyzerSpec identities, parameters, and converter identity.",
     )
+    formal_timeline: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Immutable ordered formal sessions and their timeline hash.",
+    )
     formula_signature: Mapped[str] = mapped_column(
         String(128),
         nullable=False,
@@ -953,6 +979,11 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
         Integer,
         nullable=True,
         comment="Formal days with a valid positive end-of-day equity.",
+    )
+    candidate_return_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Contiguous return candidates available from E0 without splicing invalid days.",
     )
     fill_count: Mapped[int | None] = mapped_column(
         Integer,
@@ -1000,6 +1031,11 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
         nullable=True,
         comment="Latest completed or failed step sequence at the last update.",
     )
+    last_chunk_token: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Opaque digest binding the latest accepted partial chunk.",
+    )
     completed_through_session: Mapped[date | None] = mapped_column(
         Date(),
         nullable=True,
@@ -1014,6 +1050,11 @@ class BacktestAnalysisSummaryRecord(_RunBoundRecord):
         Integer,
         nullable=True,
         comment="Step whose failure aborted the run.",
+    )
+    terminal_fingerprint: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Frozen business-content fingerprint for terminal retries.",
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),

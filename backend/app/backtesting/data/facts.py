@@ -179,6 +179,31 @@ class FactEvidence:
     source_revision: str | None = None
 
     def __post_init__(self) -> None:
+        if not isinstance(self.source, str) or not self.source.strip():
+            raise ProviderContractViolationError("source must be non-blank text")
+        object.__setattr__(self, "source", self.source.strip())
+        for name in ("observed_at", "known_at"):
+            value = getattr(self, name)
+            if value is not None and (
+                not isinstance(value, datetime)
+                or
+                value.tzinfo is None or value.utcoffset() is None
+            ):
+                raise ProviderContractViolationError(
+                    f"{name} must be timezone-aware"
+                )
+        if not isinstance(self.quality_status, QualityStatus):
+            raise ProviderContractViolationError(
+                "quality_status must be a QualityStatus"
+            )
+        if self.source_revision is not None:
+            object.__setattr__(
+                self,
+                "source_revision",
+                _optional_text(self.source_revision, "source_revision"),
+            )
+
+    def __post_init__(self) -> None:
         object.__setattr__(self, "source", _non_blank_text(self.source, "source"))
         if not isinstance(self.quality_status, QualityStatus):
             raise ProviderContractViolationError(
@@ -546,6 +571,10 @@ class PitRateFact:
     session_date: date
     rate: Decimal | int | str
     evidence: FactEvidence
+    # The source-declared cutoff is separate from ``known_at``.  ``known_at``
+    # proves strict PIT provenance; this field states the actual cutoff used
+    # by the query and is the boundary checked against the session open.
+    data_cutoff_at: datetime
     schema: ContractRef | None = None
 
     def __post_init__(self) -> None:
@@ -556,3 +585,11 @@ class PitRateFact:
         if not isinstance(self.evidence, FactEvidence):
             raise ProviderContractViolationError("evidence must be a FactEvidence")
         object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))
+        if (
+            not isinstance(self.data_cutoff_at, datetime)
+            or self.data_cutoff_at.tzinfo is None
+            or self.data_cutoff_at.utcoffset() is None
+        ):
+            raise ProviderContractViolationError(
+                "data_cutoff_at must be timezone-aware"
+            )

@@ -129,12 +129,14 @@ class AnalysisApiTestCase(unittest.TestCase):
                 metric_key=f"metric_{index:03d}",
                 formula_version="v1",
                 value=Decimal(index),
-                analyzer_key="fee_summary",
-                analyzer_version=1,
             )
             for index in range(7)
         ]
-        self.repo.append_metrics(*many)
+        # These synthetic pagination rows model legacy metrics without an
+        # analyzer identity; new analyzer-aware writes are validated against
+        # their frozen registry output contracts.
+        for row in many:
+            self.repo.append("metrics", row)
         seen: list[str] = []
         cursor = None
         pages = 0
@@ -176,6 +178,7 @@ class AnalysisApiTestCase(unittest.TestCase):
             missing_ranges=[["2026-07-07", "2026-07-08"]],
             last_chunk_sequence=4,
             finalized_at=now,
+            terminal_fingerprint="sha256:" + "0" * 64,
             created_at=now,
             updated_at=now,
         )

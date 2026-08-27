@@ -331,6 +331,7 @@ def build_runner(
         DeterministicBacktestRunner,
         TargetWeightsInterpreter,
     )
+    from app.backtesting.analysis_admission import admit_analysis_run
     from app.backtesting.slippage import BpsSlippageModel
 
     if settlement_calendar is None:
@@ -379,6 +380,30 @@ def build_runner(
         ),
         as_of=session_open(date.fromisoformat(first_day)),
     )
+    analysis_admission = None
+    if analysis_engine is not None:
+        initial_snapshot = analysis_engine._initial_equity_snapshot
+        analysis_admission = admit_analysis_run(
+            run_id=run_id,
+            formal_sessions=tuple(
+                date.fromisoformat(step.metadata["session_date"]) for step in axis
+            ),
+            first_step_sequence=axis.at(0).sequence,
+            market_open_at=initial_snapshot.market_open_at,
+            valuation_as_of=initial_snapshot.valuation_as_of,
+            data_cutoff_at=initial_snapshot.data_cutoff_at,
+            reporting_currency=initial_snapshot.reporting_currency,
+            initial_cash=initial_snapshot.cash,
+            initial_portfolio_state=portfolio,
+            analyzer_specs=analysis_engine.specs,
+            close_facts=(),
+            pit_gateway=pit_data_gateway,
+            rate_session_open_at={
+                date.fromisoformat(step.metadata["session_date"]): step.start_time
+                for step in axis
+            },
+            analyzer_engine=analysis_engine,
+        )
     return DeterministicBacktestRunner(
         run_id=run_id,
         axis=axis,
@@ -396,7 +421,7 @@ def build_runner(
         settlement_calendar=settlement_calendar,
         corporate_actions=corporate_actions,
         component_parameters=component_parameters,
-        analysis_engine=analysis_engine,
+        analysis_admission=analysis_admission,
         pit_data_gateway=pit_data_gateway,
     )
 
