@@ -37,7 +37,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping, Protocol, Sequence
+from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID, uuid4
 
 from app.backtesting.data.errors import (
@@ -227,7 +227,10 @@ class InstrumentIdentityFact:
     """One immutable, point-in-time identity fact.
 
     Identity facts carry the asset protocol's identity-critical attributes;
-    they do not derive currency or calendar information from a source code.
+    they do not derive exchange, currency, or calendar information from a
+    source code.  ``exchange`` may be absent while an upstream fact is
+    incomplete; formal ETF resolution must reject that identity rather than
+    guessing a value.
     Corrections append a new version under the same ``logical_fact_key`` and
     reference the prior row through ``supersedes_fact_id``.  ``known_at`` is
     the only timestamp used for PIT visibility; ``observed_at`` remains an
@@ -244,6 +247,10 @@ class InstrumentIdentityFact:
     observed_at: datetime
     evidence: str
     valid_to: date | None = None
+    # Exchange is optional at ingestion time so incomplete historical facts
+    # can be persisted and explicitly blocked by formal resolution.  ETF
+    # specs require it; callers must never infer it from a source code.
+    exchange: str | None = None
     fact_id: UUID | None = None
     logical_fact_key: str | None = None
     supersedes_fact_id: UUID | None = None
@@ -262,6 +269,8 @@ class InstrumentIdentityFact:
             self, "fact_version", _positive_version(self.fact_version)
         )
         object.__setattr__(self, "asset_class", _required_label(self.asset_class, "asset_class"))
+        exchange = _optional_label(self.exchange, "exchange")
+        object.__setattr__(self, "exchange", exchange.upper() if exchange else None)
         object.__setattr__(self, "currency", _required_label(self.currency, "currency").upper())
         object.__setattr__(self, "calendar_id", _required_label(self.calendar_id, "calendar_id"))
         object.__setattr__(self, "evidence", _required_label(self.evidence, "evidence"))
@@ -823,6 +832,7 @@ def _identity_fact_evidence_summary(
         fields.update(
             {
                 "asset_class": getattr(fact, "asset_class", None),
+                "exchange": getattr(fact, "exchange", None),
                 "currency": getattr(fact, "currency", None),
                 "calendar_id": getattr(fact, "calendar_id", None),
             }
@@ -951,6 +961,12 @@ class InstrumentIdentityResolution:
         return self.identity_fact.asset_class if self.identity_fact else None
 
     @property
+    def exchange(self) -> str | None:
+        """Resolved exchange without deriving it from the source code."""
+
+        return self.identity_fact.exchange if self.identity_fact else None
+
+    @property
     def currency(self) -> str | None:
         """Resolved currency without guessing from a source code."""
 
@@ -1059,6 +1075,96 @@ def _frozen_capability_set(value: frozenset[str], field_name: str) -> frozenset[
     return frozen
 
 
+def _freeze_spec_value(value: Any, field_name: str) -> Any:
+    """Freeze a rule/calendar projection without inventing a value.
+
+    Rule facts are normalized by the rule resolver into immutable domain
+    objects (``VersionedReference``/``StrategyRuleDeclaration``), while
+    calendar providers may return nested mappings or session tuples.  This
+    boundary accepts those already-resolved values and recursively freezes
+    standard containers so a spec cannot be mutated through an alias.
+    """
+
+    if isinstance(value, Mapping):
+        frozen: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip():
+                raise DomainValidationError(f"{field_name} keys must be non-blank text")
+            normalized_key = key.strip()
+            if normalized_key in frozen:
+                raise DomainValidationError(
+                    f"{field_name} keys must be unique after normalization"
+                )
+            frozen[normalized_key] = _freeze_spec_value(
+                item, f"{field_name}[{key!r}]"
+            )
+        return MappingProxyType(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_spec_value(item, field_name) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze_spec_value(item, field_name) for item in value)
+    return value
+
+
+def _rule_declaration(value: Any, field_name: str) -> Any:
+    """Validate one strategy rule projection without creating a new type.
+
+    Importing ``StrategyRuleDeclaration`` at module load time would create a
+    cycle because the rule-contract module imports ``VersionedReference``
+    from this module.  A local import keeps the dependency one-way while
+    retaining an exact type check at construction time.
+    """
+
+    from app.instruments.rules.contracts import StrategyRuleDeclaration
+
+    if not isinstance(value, (VersionedReference, StrategyRuleDeclaration)):
+        raise DomainValidationError(
+            f"{field_name} must be a VersionedReference or StrategyRuleDeclaration"
+        )
+    return value
+
+
+def _trading_status_policy(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    """Normalize explicit required/not-applicable status declarations."""
+
+    from app.instruments.rules.contracts import (
+        CAPABILITY_DIMENSIONS,
+        TradingStatusRequirement,
+    )
+
+    if not isinstance(value, Mapping):
+        raise DomainValidationError("trading_status_policy must be a mapping")
+    normalized: dict[str, TradingStatusRequirement] = {}
+    for key, raw in value.items():
+        if not isinstance(key, str) or not key.strip():
+            raise DomainValidationError(
+                "trading_status_policy keys must be non-blank text"
+            )
+        try:
+            normalized_key = key.strip()
+            if normalized_key in normalized:
+                raise DomainValidationError(
+                    "trading_status_policy keys must be unique after normalization"
+                )
+            normalized[normalized_key] = TradingStatusRequirement(
+                getattr(raw, "value", raw)
+            )
+        except ValueError as exc:
+            allowed = [member.value for member in TradingStatusRequirement]
+            raise DomainValidationError(
+                f"trading_status_policy values must be one of {allowed}"
+            ) from exc
+    required_dimensions = set(CAPABILITY_DIMENSIONS)
+    if set(normalized) != required_dimensions:
+        missing = sorted(required_dimensions - set(normalized))
+        extra = sorted(set(normalized) - required_dimensions)
+        raise DomainValidationError(
+            "trading_status_policy must declare every status dimension "
+            f"(missing={missing}, extra={extra})"
+        )
+    return MappingProxyType({key: normalized[key] for key in sorted(normalized)})
+
+
 # ---------------------------------------------------------------------------
 # Fully resolved trading specification
 # ---------------------------------------------------------------------------
@@ -1070,9 +1176,11 @@ class InstrumentSpec:
 
     Every trading-critical field is required: there are intentionally no
     default values, so a "half-complete" spec cannot be constructed by
-    accident.  Only the nested display fields may be missing.  When a
-    provider cannot assemble all of these facts for the requested instant
-    it must return ``None`` (unresolvable) rather than degrade into Nones.
+    accident.  Only the nested display fields may be missing.  Rule values,
+    capability declarations, calendar hours, and package/exception pointers
+    are captured from the resolved facts and frozen at this boundary.  When
+    a provider cannot assemble all of these facts for the requested instant it
+    must return ``None`` (unresolvable) rather than degrade into Nones.
     """
 
     instrument_id: UUID
@@ -1088,9 +1196,22 @@ class InstrumentSpec:
     minimum_order_quantity: Decimal | int | str
     contract_multiplier: Decimal | int | str
     trading_session_template: VersionedReference
+    trading_hours: Any
+    settlement_rule_class: str
+    sellable_rule: Any
+    fee_categories: frozenset[str]
+    trading_status_policy: Mapping[str, Any]
+    order_types: frozenset[str]
+    price_limit_rule: Any
+    cash_availability_rule: Any
+    position_availability_rule: Any
+    capabilities: InstrumentCapabilities
+    rule_package_reference: VersionedReference
     valid_from: datetime
     valid_to: datetime | None
-    capabilities: InstrumentCapabilities
+    # No exception is a valid resolved outcome; the default only represents
+    # that absence and never supplies production rule values.
+    rule_exception_reference: VersionedReference | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -1157,6 +1278,56 @@ class InstrumentSpec:
         if not isinstance(self.trading_session_template, VersionedReference):
             raise DomainValidationError(
                 "trading_session_template must be a VersionedReference"
+            )
+        if self.trading_hours is None:
+            raise DomainValidationError(
+                "trading_hours must be resolved by the calendar provider"
+            )
+        object.__setattr__(
+            self,
+            "trading_hours",
+            _freeze_spec_value(self.trading_hours, "trading_hours"),
+        )
+        object.__setattr__(
+            self,
+            "settlement_rule_class",
+            _required_label(self.settlement_rule_class, "settlement_rule_class"),
+        )
+        for field_name in (
+            "sellable_rule",
+            "price_limit_rule",
+            "cash_availability_rule",
+            "position_availability_rule",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _rule_declaration(getattr(self, field_name), field_name),
+            )
+        object.__setattr__(
+            self,
+            "fee_categories",
+            _frozen_capability_set(self.fee_categories, "fee_categories"),
+        )
+        object.__setattr__(
+            self,
+            "order_types",
+            _frozen_capability_set(self.order_types, "order_types"),
+        )
+        object.__setattr__(
+            self,
+            "trading_status_policy",
+            _trading_status_policy(self.trading_status_policy),
+        )
+        if not isinstance(self.rule_package_reference, VersionedReference):
+            raise DomainValidationError(
+                "rule_package_reference must be a VersionedReference"
+            )
+        if self.rule_exception_reference is not None and not isinstance(
+            self.rule_exception_reference, VersionedReference
+        ):
+            raise DomainValidationError(
+                "rule_exception_reference must be a VersionedReference when provided"
             )
         object.__setattr__(
             self,

@@ -951,6 +951,9 @@ class BacktestRunResult:
     analysis_chunk_token: str | None = None
     completed_through_step_sequence: int | None = None
     analysis_metrics: tuple[Any, ...] = ()
+    # The verified run-level rule snapshot identity, when this runtime was
+    # admitted with a formal snapshot bundle.
+    rule_snapshot_hash: str | None = None
 
 
 class DeterministicBacktestRunner:
@@ -1002,6 +1005,8 @@ class DeterministicBacktestRunner:
         pit_data_gateway: Any | None = None,
         display_provider: Any | None = None,
         instrument_display_provider: Any | None = None,
+        rule_snapshot_bundle: Any | None = None,
+        snapshot_bundle: Any | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -1023,6 +1028,32 @@ class DeterministicBacktestRunner:
                 "pass only one of display_provider and "
                 "instrument_display_provider"
             )
+        if rule_snapshot_bundle is not None and snapshot_bundle is not None:
+            raise DomainValidationError(
+                "pass only one of rule_snapshot_bundle and snapshot_bundle"
+            )
+        selected_rule_snapshot = (
+            rule_snapshot_bundle
+            if rule_snapshot_bundle is not None
+            else snapshot_bundle
+        )
+        if selected_rule_snapshot is not None:
+            from app.instruments.rule_snapshots import RunRuleSnapshotBundle
+
+            if not isinstance(selected_rule_snapshot, RunRuleSnapshotBundle):
+                raise DomainValidationError(
+                    "rule_snapshot_bundle must be a RunRuleSnapshotBundle"
+                )
+            if selected_rule_snapshot.run_id is not None and str(
+                selected_rule_snapshot.run_id
+            ) != run_id:
+                raise DomainValidationError(
+                    "rule_snapshot_bundle is bound to a different run"
+                )
+            # Verify once at admission and again whenever a segment is read;
+            # this keeps a tampered in-memory or persisted bundle from being
+            # consumed by the execution loop.
+            selected_rule_snapshot.verify_hash()
         self._run_id = run_id
         self._axis = axis
         self._timing_policy = timing_policy
@@ -1040,6 +1071,9 @@ class DeterministicBacktestRunner:
         self._analyzers = tuple(analyzers)
         self._currency = currency.upper()
         self._settlement_calendar = settlement_calendar
+        self._rule_snapshot_bundle = selected_rule_snapshot
+        self._rule_policy_cache: dict[tuple[UUID, date], Any] = {}
+        self._used_rule_segments: dict[tuple[UUID, date], str] = {}
         if analysis_admission is not None:
             if analysis_engine is not None:
                 raise DomainValidationError(
@@ -1336,6 +1370,51 @@ class DeterministicBacktestRunner:
             NAMESPACE_URL, f"quant-foundry:backtest-run:{self._run_id}"
         )
 
+    @property
+    def rule_snapshot_hash(self) -> str | None:
+        """Return the immutable rule snapshot hash bound at admission."""
+
+        bundle = self._rule_snapshot_bundle
+        return bundle.snapshot_hash if bundle is not None else None
+
+    def execution_policy_for(
+        self, instrument_id: UUID, effective_at: date | datetime
+    ) -> Any:
+        """Resolve a runtime execution policy from the frozen snapshot only."""
+
+        bundle = self._rule_snapshot_bundle
+        if bundle is None:
+            raise DomainValidationError(
+                "this runner was not admitted with a rule snapshot bundle"
+            )
+        bundle.verify_hash()
+        effective_date = (
+            _aware_datetime(effective_at, "effective_at").date()
+            if isinstance(effective_at, datetime)
+            else effective_at
+        )
+        if not isinstance(effective_date, date):
+            raise DomainValidationError("effective_at must be a date or datetime")
+        cache_key = (instrument_id, effective_date)
+        policy = self._rule_policy_cache.get(cache_key)
+        if policy is not None:
+            return policy
+        segment = bundle.segment_for(instrument_id, effective_date)
+        from app.backtesting.execution_policy import InstrumentExecutionPolicy
+
+        policy = InstrumentExecutionPolicy.from_rule_snapshot(
+            segment,
+            package_reference=bundle.rule_package_reference,
+        )
+        if policy.currency != self._currency:
+            raise DomainValidationError(
+                f"instrument {instrument_id} rule snapshot currency "
+                f"{policy.currency!r} differs from run currency {self._currency!r}"
+            )
+        self._rule_policy_cache[cache_key] = policy
+        self._used_rule_segments[cache_key] = policy.resolution_hash
+        return policy
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -1548,6 +1627,7 @@ class DeterministicBacktestRunner:
             analysis_chunk_token=analysis_chunk_token,
             completed_through_step_sequence=ordered[-1].sequence,
             analysis_metrics=analysis_metrics,
+            rule_snapshot_hash=self.rule_snapshot_hash,
         )
 
     def build_analysis_failure_snapshot(self, exc: Exception) -> Any:
@@ -1802,6 +1882,39 @@ class DeterministicBacktestRunner:
         }
         if self._component_parameters:
             snapshot["parameters"] = dict(self._component_parameters)
+        if self._rule_snapshot_bundle is not None:
+            bundle = self._rule_snapshot_bundle
+            snapshot["rule_snapshot"] = {
+                "snapshot_hash": bundle.snapshot_hash,
+                "rule_package_reference": {
+                    "key": bundle.rule_package_reference.key,
+                    "version": bundle.rule_package_reference.version,
+                },
+                "rule_package_semantic_hash": bundle.rule_package_semantic_hash,
+                "parser_revision": bundle.parser_revision,
+                "exception_set_reference": (
+                    None
+                    if bundle.exception_set_reference is None
+                    else {
+                        "key": bundle.exception_set_reference.key,
+                        "version": bundle.exception_set_reference.version,
+                    }
+                ),
+                "exception_set_hash": bundle.exception_set_hash,
+                "data_cutoff": bundle.data_cutoff,
+                "segment_count": len(bundle.instrument_segments),
+                "used_segments": tuple(
+                    {
+                        "instrument_id": str(instrument_id),
+                        "effective_at": effective_at.isoformat(),
+                        "resolution_hash": resolution_hash,
+                    }
+                    for (instrument_id, effective_at), resolution_hash in sorted(
+                        self._used_rule_segments.items(),
+                        key=lambda item: (str(item[0][0]), item[0][1]),
+                    )
+                ),
+            }
         # The whole snapshot is deep-frozen: nested component records and
         # parameter structures must be as immutable as the events they
         # audit.
@@ -2141,12 +2254,49 @@ class DeterministicBacktestRunner:
         if not active:
             self._pending_fills = ()
             return []
+        policy_by_instrument: dict[UUID, Any] = {}
+        policy_rejections: list[tuple[UUID, str]] = []
+        if self._rule_snapshot_bundle is not None:
+            from app.backtesting.execution_policy import ExecutionPolicyError
+
+            eligible: list[Order] = []
+            for order in active:
+                try:
+                    policy = self.execution_policy_for(
+                        order.instrument_id, context.session_date
+                    )
+                except (DomainValidationError, ExecutionPolicyError):
+                    # Missing/ambiguous coverage is a run-level admission
+                    # failure, not an order-level no-fill outcome.
+                    raise
+                policy_by_instrument[order.instrument_id] = policy
+                reason = policy.validate_order(order)
+                if reason is None:
+                    eligible.append(order)
+                    continue
+                order.expire(reason)
+                policy_rejections.append((order.order_id, reason))
+            active = eligible
         market_states = {
-            order.instrument_id: view.market_state(
-                order.instrument_id, timestamp=context.decision_time
+            order.instrument_id: (
+                view.market_state(
+                    order.instrument_id, timestamp=context.decision_time
+                )
             )
             for order in active
         }
+        if policy_by_instrument:
+            from dataclasses import replace as dataclass_replace
+
+            # The market view supplies current session facts, while the
+            # trading-critical tick is frozen by the run rule snapshot.
+            market_states = {
+                instrument_id: dataclass_replace(
+                    state,
+                    price_tick=policy_by_instrument[instrument_id].price_tick,
+                )
+                for instrument_id, state in market_states.items()
+            }
         match_context = MatchContext.from_portfolio(
             self._portfolio, currency=self._currency
         )
@@ -2211,6 +2361,13 @@ class DeterministicBacktestRunner:
                 {"order_id": str(skip.order_id), "reason": skip.reason},
             )
             for skip in result.skipped_orders
+        )
+        emitted.extend(
+            self._emit_pair(
+                BacktestEventType.ORDER_EXPIRED,
+                {"order_id": str(order_id), "reason": reason},
+            )
+            for order_id, reason in policy_rejections
         )
         # Daily orders never roll over: anything the model left unprocessed
         # expires immediately with an explicit reason.
@@ -2690,6 +2847,24 @@ class DeterministicBacktestRunner:
             for instrument_id in instrument_ids
             if instrument_id in self._instrument_facts
         }
+        if self._rule_snapshot_bundle is not None:
+            from dataclasses import replace as dataclass_replace
+
+            # Sizing must use the frozen lot size.  Session facts remain the
+            # source of explicit status/calendar values, but a live rule row
+            # can never silently replace the run snapshot.
+            for instrument_id in instrument_ids:
+                policy = self.execution_policy_for(
+                    instrument_id, context.session_date
+                )
+                fact = facts.get(instrument_id)
+                if fact is None:
+                    raise DomainValidationError(
+                        f"instrument facts are missing for {instrument_id}"
+                    )
+                facts[instrument_id] = dataclass_replace(
+                    fact, board_lot=policy.lot_size
+                )
         intents = self._interpreter.interpret(
             decision,
             portfolio=self._portfolio,

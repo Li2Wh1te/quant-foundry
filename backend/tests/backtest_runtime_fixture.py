@@ -324,6 +324,7 @@ def build_runner(
     settlement_policy=None,
     analysis_engine=None,
     pit_data_gateway=None,
+    rule_snapshot_bundle=None,
 ):
     """Assemble a fully wired runner with zero slippage and zero fees.
 
@@ -446,6 +447,7 @@ def build_runner(
         component_parameters=component_parameters,
         analysis_admission=analysis_admission,
         pit_data_gateway=pit_data_gateway,
+        rule_snapshot_bundle=rule_snapshot_bundle,
     )
 
 

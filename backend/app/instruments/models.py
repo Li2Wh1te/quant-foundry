@@ -322,6 +322,10 @@ class InstrumentIdentityFactRecord(Base):
         Uuid, ForeignKey("instrument_identity_facts.id"), nullable=True
     )
     asset_class: Mapped[str] = mapped_column(String(32), nullable=False)
+    # Exchange is an explicit PIT identity attribute.  It remains nullable at
+    # ingestion so incomplete legacy rows can be retained and blocked by the
+    # formal ETF resolver instead of being guessed from a source code.
+    exchange: Mapped[str | None] = mapped_column(String(32), nullable=True)
     currency: Mapped[str] = mapped_column(String(16), nullable=False)
     calendar_id: Mapped[str] = mapped_column(String(64), nullable=False)
     valid_from: Mapped[date] = mapped_column(Date, nullable=False)

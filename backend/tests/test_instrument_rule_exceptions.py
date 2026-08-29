@@ -222,6 +222,38 @@ class AppendAndLoadTestCase(unittest.TestCase):
                 observed_at=datetime(2025, 12, 1, tzinfo=UTC),
             )
 
+    def test_append_rejects_invalid_provenance_before_staging_rows(self) -> None:
+        definition = make_set()
+        for kwargs in (
+            {
+                "source": " ",
+                "known_at": datetime(2025, 12, 1, tzinfo=UTC),
+                "observed_at": datetime(2025, 12, 1, tzinfo=UTC),
+            },
+            {
+                "source": "exchange_announcement",
+                "known_at": datetime(2025, 12, 1),
+                "observed_at": datetime(2025, 12, 1, tzinfo=UTC),
+            },
+            {
+                "source": "exchange_announcement",
+                "known_at": datetime(2025, 12, 1, tzinfo=UTC),
+                "observed_at": datetime(2025, 12, 1, tzinfo=UTC),
+                "quality_status": "complete",
+            },
+            {
+                "source": "exchange_announcement",
+                "known_at": datetime(2025, 12, 1, tzinfo=UTC),
+                "observed_at": datetime(2025, 12, 1, tzinfo=UTC),
+                "fixture_only": 1,
+            },
+        ):
+            session = FakeSession([[]])
+            repository = RuleExceptionSetsRepository(session)
+            with self.assertRaises(DomainValidationError):
+                repository.append_exception_set(definition, **kwargs)
+            self.assertEqual(session.added, [])
+
     def _load_session(self, definition: RuleExceptionSetDefinition) -> FakeSession:
         return FakeSession([[set_row(definition)], entry_rows(definition)])
 
@@ -265,6 +297,15 @@ class AppendAndLoadTestCase(unittest.TestCase):
         bad_row = SimpleNamespace(**{**entry_rows(definition)[0].__dict__})
         bad_row.exception_fact_version = 0  # corrupted version
         session = FakeSession([[row], [bad_row]])
+        repository = RuleExceptionSetsRepository(session)
+        with self.assertRaises(DomainValidationError):
+            repository.load_exception_set(SET_REF, data_cutoff=CUTOFF)
+
+    def test_load_rejects_unknown_quality_status_as_domain_error(self) -> None:
+        definition = make_set()
+        row = set_row(definition)
+        row.quality_status = "quarantined"
+        session = FakeSession([[row], entry_rows(definition)])
         repository = RuleExceptionSetsRepository(session)
         with self.assertRaises(DomainValidationError):
             repository.load_exception_set(SET_REF, data_cutoff=CUTOFF)

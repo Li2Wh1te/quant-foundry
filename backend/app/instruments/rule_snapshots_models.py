@@ -29,9 +29,20 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+
+# PostgreSQL enforces JSON object shape; SQLite test databases use the
+# standard JSON type and rely on the domain layer for the same check.
+SnapshotJSON = JSONB().with_variant(JSON(), "sqlite")
+
+
+def _postgresql_only(constraint: CheckConstraint) -> CheckConstraint:
+    constraint.ddl_if(dialect="postgresql")
+    return constraint
 
 
 class BacktestRunRuleSnapshotRecord(Base):
@@ -41,15 +52,15 @@ class BacktestRunRuleSnapshotRecord(Base):
     __table_args__ = (
         UniqueConstraint("run_id", name="uq_backtest_run_rule_snapshots_run_id"),
         CheckConstraint(
-            "length(btrim(rule_package_key)) > 0", name="package_key_not_blank"
+            "length(trim(rule_package_key)) > 0", name="package_key_not_blank"
         ),
         CheckConstraint("rule_package_version > 0", name="package_version_positive"),
         CheckConstraint(
-            "length(btrim(rule_package_semantic_hash)) > 0",
+            "length(trim(rule_package_semantic_hash)) > 0",
             name="semantic_hash_not_blank",
         ),
         CheckConstraint(
-            "length(btrim(parser_revision)) > 0", name="parser_revision_not_blank"
+            "length(trim(parser_revision)) > 0", name="parser_revision_not_blank"
         ),
         CheckConstraint(
             "(exception_set_key IS NULL AND exception_set_version IS NULL "
@@ -59,7 +70,7 @@ class BacktestRunRuleSnapshotRecord(Base):
             name="exception_set_paired",
         ),
         CheckConstraint(
-            "length(btrim(snapshot_hash)) > 0", name="snapshot_hash_not_blank"
+            "length(trim(snapshot_hash)) > 0", name="snapshot_hash_not_blank"
         ),
     )
 
@@ -102,19 +113,26 @@ class BacktestRunInstrumentRuleSnapshotRecord(Base):
             "(exception_fact_key IS NOT NULL AND exception_fact_version IS NOT NULL)",
             name="exception_fact_paired",
         ),
-        CheckConstraint(
-            "jsonb_typeof(normalized_values) = 'object'",
-            name="normalized_values_is_json_object",
+        _postgresql_only(
+            CheckConstraint(
+                "jsonb_typeof(normalized_values) = 'object'",
+                name="normalized_values_is_json_object",
+            )
+        ),
+        _postgresql_only(
+            CheckConstraint(
+                "jsonb_typeof(capability_declarations) = 'object'",
+                name="capability_declarations_is_json_object",
+            )
+        ),
+        _postgresql_only(
+            CheckConstraint(
+                "jsonb_typeof(provenance) = 'object'",
+                name="provenance_is_json_object",
+            )
         ),
         CheckConstraint(
-            "jsonb_typeof(capability_declarations) = 'object'",
-            name="capability_declarations_is_json_object",
-        ),
-        CheckConstraint(
-            "jsonb_typeof(provenance) = 'object'", name="provenance_is_json_object"
-        ),
-        CheckConstraint(
-            "length(btrim(resolution_hash)) > 0",
+            "length(trim(resolution_hash)) > 0",
             name="resolution_hash_not_blank",
         ),
         Index(
@@ -145,9 +163,9 @@ class BacktestRunInstrumentRuleSnapshotRecord(Base):
     exception_fact_key: Mapped[str | None] = mapped_column(Text)
     exception_fact_version: Mapped[int | None] = mapped_column(Integer)
 
-    normalized_values: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    capability_declarations: Mapped[dict] = mapped_column(JSONB, nullable=False)
-    provenance: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    normalized_values: Mapped[dict] = mapped_column(SnapshotJSON, nullable=False)
+    capability_declarations: Mapped[dict] = mapped_column(SnapshotJSON, nullable=False)
+    provenance: Mapped[dict] = mapped_column(SnapshotJSON, nullable=False)
     resolution_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()

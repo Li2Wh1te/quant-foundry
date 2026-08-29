@@ -32,9 +32,18 @@ from sqlalchemy import (
     func,
 )
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.types import JSON
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
+
+
+RuleFactJSON = JSONB().with_variant(JSON(), "sqlite")
+
+
+def _postgresql_only(constraint: CheckConstraint) -> CheckConstraint:
+    constraint.ddl_if(dialect="postgresql")
+    return constraint
 
 #: Quality statuses supported by the facts table.
 FACT_QUALITY_STATUSES: tuple[str, ...] = ("complete", "incomplete")
@@ -60,10 +69,12 @@ class InstrumentRuleFactRecord(Base):
             "valid_to IS NULL OR valid_to > valid_from",
             name="valid_interval_ordered",
         ),
-        CheckConstraint("length(btrim(fact_key)) > 0", name="fact_key_not_blank"),
-        CheckConstraint("length(btrim(source)) > 0", name="source_not_blank"),
-        CheckConstraint(
-            "jsonb_typeof(fields) = 'object'", name="fields_is_json_object"
+        CheckConstraint("length(trim(fact_key)) > 0", name="fact_key_not_blank"),
+        CheckConstraint("length(trim(source)) > 0", name="source_not_blank"),
+        _postgresql_only(
+            CheckConstraint(
+                "jsonb_typeof(fields) = 'object'", name="fields_is_json_object"
+            )
         ),
         CheckConstraint(
             "quality_status IN ('complete', 'incomplete')",
@@ -75,7 +86,7 @@ class InstrumentRuleFactRecord(Base):
             name="exception_reference_paired",
         ),
         CheckConstraint(
-            "length(btrim(content_hash)) > 0", name="content_hash_not_blank"
+            "length(trim(content_hash)) > 0", name="content_hash_not_blank"
         ),
         # Covers PIT listing queries by instrument and package window.
         Index(
@@ -107,7 +118,7 @@ class InstrumentRuleFactRecord(Base):
     valid_from: Mapped[date] = mapped_column(Date, nullable=False)
     valid_to: Mapped[date | None] = mapped_column(Date)
     # JSON object storage form only; decimal values use canonical strings.
-    fields: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    fields: Mapped[dict] = mapped_column(RuleFactJSON, nullable=False)
 
     source: Mapped[str] = mapped_column(Text, nullable=False)
     source_revision: Mapped[str | None] = mapped_column(Text)

@@ -19,7 +19,7 @@ concrete data-source client.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Mapping
 from uuid import UUID
 
@@ -70,6 +70,10 @@ class FactProvenance:
     known_at: datetime
     quality_status: str
     fixture_only: bool
+    # These fields are optional for backwards-compatible fixture construction;
+    # formal preflight always supplies both values from the persisted fact.
+    observed_at: datetime | None = None
+    content_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.fact_reference, VersionedReference):
@@ -82,12 +86,33 @@ class FactProvenance:
         if self.valid_to is not None:
             _validate_date(self.valid_to, "valid_to")
         object.__setattr__(
-            self, "known_at", _aware_datetime(self.known_at, "known_at")
+            self,
+            "known_at",
+            _aware_datetime(self.known_at, "known_at").astimezone(UTC),
         )
+        if self.observed_at is not None:
+            object.__setattr__(
+                self,
+                "observed_at",
+                _aware_datetime(self.observed_at, "observed_at").astimezone(UTC),
+            )
         if not isinstance(self.quality_status, str) or not self.quality_status:
             raise DomainValidationError("quality_status must be a non-empty string")
         if not isinstance(self.fixture_only, bool):
             raise DomainValidationError("fixture_only must be a boolean")
+        if self.content_hash is not None:
+            if not isinstance(self.content_hash, str) or not self.content_hash.strip():
+                raise DomainValidationError(
+                    "content_hash must be non-blank text when provided"
+                )
+            normalized_hash = self.content_hash.strip()
+            if len(normalized_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in normalized_hash
+            ):
+                raise DomainValidationError(
+                    "content_hash must be a lowercase SHA-256 hex digest"
+                )
+            object.__setattr__(self, "content_hash", normalized_hash)
 
     def to_payload(self) -> dict[str, Any]:
         """Canonical JSON-ready representation used in hashes and JSONB."""
@@ -104,8 +129,12 @@ class FactProvenance:
                 None if self.valid_to is None else self.valid_to.isoformat()
             ),
             "known_at": self.known_at.isoformat(),
+            "observed_at": (
+                None if self.observed_at is None else self.observed_at.isoformat()
+            ),
             "quality_status": self.quality_status,
             "fixture_only": self.fixture_only,
+            "content_hash": self.content_hash,
         }
 
 
@@ -265,7 +294,9 @@ class RunRuleSnapshotBundle:
                 "hash"
             )
         object.__setattr__(
-            self, "data_cutoff", _aware_datetime(self.data_cutoff, "data_cutoff")
+            self,
+            "data_cutoff",
+            _aware_datetime(self.data_cutoff, "data_cutoff").astimezone(UTC),
         )
         if self.run_id is not None and not isinstance(self.run_id, UUID):
             raise DomainValidationError("run_id must be a UUID when provided")
@@ -289,6 +320,73 @@ class RunRuleSnapshotBundle:
             self, "instrument_segments", tuple(ordered)
         )
         object.__setattr__(self, "snapshot_hash", self._compute_snapshot_hash())
+
+    def segment_for(
+        self, instrument_id: UUID, effective_at: date | datetime
+    ) -> InstrumentRuleSnapshotSegment:
+        """Return the single frozen segment covering ``effective_at``.
+
+        Runtime callers use this method instead of inspecting segment rows or
+        consulting live rule facts.  Missing coverage is a hard failure.
+        """
+
+        if not isinstance(instrument_id, UUID):
+            raise DomainValidationError("instrument_id must be a UUID")
+        if isinstance(effective_at, datetime):
+            effective_date = _aware_datetime(
+                effective_at, "effective_at"
+            ).date()
+        elif isinstance(effective_at, date):
+            effective_date = effective_at
+        else:
+            raise DomainValidationError("effective_at must be a date or datetime")
+        matches = [
+            segment
+            for segment in self.instrument_segments
+            if segment.instrument_id == instrument_id
+            and segment.effective_from <= effective_date
+            and (
+                segment.effective_to is None
+                or effective_date < segment.effective_to
+            )
+        ]
+        if not matches:
+            raise DomainValidationError(
+                "frozen rule snapshot has no unique segment for "
+                f"instrument {instrument_id} on {effective_date.isoformat()}"
+            )
+        # Legacy bundles may use an open-ended first segment as a sentinel;
+        # when such a bundle overlaps a later explicit segment, the segment
+        # with the latest start is the deterministic effective choice.
+        return max(matches, key=lambda segment: segment.effective_from)
+
+    def for_run(self, run_id: UUID) -> "RunRuleSnapshotBundle":
+        """Bind an unbound bundle to a run without changing its hash."""
+
+        if not isinstance(run_id, UUID):
+            raise DomainValidationError("run_id must be a UUID")
+        if self.run_id is not None and self.run_id != run_id:
+            raise DomainValidationError("snapshot bundle is already bound to another run")
+        return RunRuleSnapshotBundle(
+            rule_package_reference=self.rule_package_reference,
+            rule_package_semantic_hash=self.rule_package_semantic_hash,
+            parser_revision=self.parser_revision,
+            exception_set_reference=self.exception_set_reference,
+            exception_set_hash=self.exception_set_hash,
+            data_cutoff=self.data_cutoff,
+            instrument_segments=self.instrument_segments,
+            run_id=run_id,
+        )
+
+    def verify_hash(self) -> str:
+        """Recompute and verify the immutable snapshot hash."""
+
+        expected = self._compute_snapshot_hash()
+        if expected != self.snapshot_hash:
+            raise DomainValidationError(
+                "rule snapshot content does not match its snapshot_hash"
+            )
+        return expected
 
     def _compute_snapshot_hash(self) -> str:
         payload = {

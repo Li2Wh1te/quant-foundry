@@ -42,17 +42,17 @@ class InstrumentRuleExceptionSetRecord(Base):
         UniqueConstraint("set_key", "set_version", name="uq_exception_set_key_version"),
         CheckConstraint("set_version > 0", name="set_version_positive"),
         CheckConstraint("rule_package_version > 0", name="package_version_positive"),
-        CheckConstraint("length(btrim(set_key)) > 0", name="set_key_not_blank"),
+        CheckConstraint("length(trim(set_key)) > 0", name="set_key_not_blank"),
         CheckConstraint(
-            "length(btrim(rule_package_key)) > 0", name="package_key_not_blank"
+            "length(trim(rule_package_key)) > 0", name="package_key_not_blank"
         ),
-        CheckConstraint("length(btrim(source)) > 0", name="source_not_blank"),
+        CheckConstraint("length(trim(source)) > 0", name="source_not_blank"),
         CheckConstraint(
             "quality_status IN ('complete', 'incomplete')",
             name="quality_status_known",
         ),
         CheckConstraint(
-            "length(btrim(content_hash)) > 0", name="content_hash_not_blank"
+            "length(trim(content_hash)) > 0", name="content_hash_not_blank"
         ),
         Index(
             "ix_instrument_rule_exception_sets_package",
@@ -108,7 +108,7 @@ class InstrumentRuleExceptionEntryRecord(Base):
             "exception_fact_version > 0", name="exception_fact_version_positive"
         ),
         CheckConstraint(
-            "length(btrim(exception_fact_key)) > 0",
+            "length(trim(exception_fact_key)) > 0",
             name="exception_fact_key_not_blank",
         ),
         Index(

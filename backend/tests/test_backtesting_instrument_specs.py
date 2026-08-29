@@ -3,6 +3,7 @@
 import unittest
 from datetime import UTC, date, datetime, timezone
 from decimal import Decimal
+from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from app.backtesting.domain import DomainValidationError
@@ -15,12 +16,14 @@ from app.instruments.domain import (
     InstrumentCapabilities,
     InstrumentCodeMapping,
     InstrumentDisplay,
+    InstrumentIdentityFact,
     InstrumentSpec,
     MappingConflictError,
     MappingCoverageGapError,
     VersionedReference,
     order_mapping_segments,
 )
+from app.instruments.rules.contracts import StrategyRuleDeclaration, TradingStatusRequirement
 
 
 EFFECTIVE_AT = datetime(2026, 1, 5, tzinfo=timezone.utc)
@@ -60,9 +63,24 @@ def make_spec(instrument_id: UUID | None = None, **overrides) -> InstrumentSpec:
         "minimum_order_quantity": 100,
         "contract_multiplier": 1,
         "trading_session_template": VersionedReference(key="cn_equity", version=1),
+        "trading_hours": {"timezone": "Asia/Shanghai", "sessions": []},
+        "settlement_rule_class": "t1_before_open_match",
+        "sellable_rule": StrategyRuleDeclaration(("sell_limited_by_available_position",)),
+        "fee_categories": frozenset({"commission"}),
+        "trading_status_policy": {
+            "suspension": TradingStatusRequirement.REQUIRED,
+            "opening_availability": TradingStatusRequirement.REQUIRED,
+            "price_limit_tradability": TradingStatusRequirement.REQUIRED,
+        },
+        "order_types": frozenset({"limit"}),
+        "price_limit_rule": VersionedReference(key="cn_etf_price_limit_rule", version=1),
+        "cash_availability_rule": VersionedReference(key="cn_cash_availability_rule", version=1),
+        "position_availability_rule": VersionedReference(key="cn_position_availability_rule", version=1),
         "valid_from": EFFECTIVE_AT,
         "valid_to": None,
         "capabilities": make_capabilities(),
+        "rule_package_reference": VersionedReference(key="china_listed_etf_rules", version=1),
+        "rule_exception_reference": None,
         **overrides,
     }
     return InstrumentSpec(**fields)
@@ -152,6 +170,115 @@ class InstrumentIdentityTestCase(unittest.TestCase):
         spec = make_spec(currency=" cny ")
 
         self.assertEqual(spec.currency, "CNY")
+
+    def test_identity_fact_preserves_explicit_exchange_without_inference(self) -> None:
+        fact = InstrumentIdentityFact(
+            instrument_id=uuid4(),
+            fact_version=1,
+            asset_class="etf",
+            exchange=" sse ",
+            currency="cny",
+            calendar_id="XSHG",
+            valid_from=date(2026, 1, 1),
+            known_at=KNOWN_AT,
+            observed_at=KNOWN_AT,
+            evidence="registry://identity/1",
+        )
+        self.assertEqual(fact.exchange, "SSE")
+        # Missing exchange is retained as incomplete identity evidence; the
+        # formal resolver is responsible for blocking it, never guessing it
+        # from a source code.
+        incomplete = InstrumentIdentityFact(
+            instrument_id=fact.instrument_id,
+            fact_version=2,
+            asset_class="etf",
+            currency="CNY",
+            calendar_id="XSHG",
+            valid_from=date(2026, 1, 1),
+            known_at=KNOWN_AT,
+            observed_at=KNOWN_AT,
+            evidence="registry://identity/2",
+        )
+        self.assertIsNone(incomplete.exchange)
+
+    def test_spec_requires_rule_and_calendar_projections(self) -> None:
+        required = (
+            "trading_hours",
+            "settlement_rule_class",
+            "sellable_rule",
+            "fee_categories",
+            "trading_status_policy",
+            "order_types",
+            "price_limit_rule",
+            "cash_availability_rule",
+            "position_availability_rule",
+            "rule_package_reference",
+        )
+        # Dataclass construction must fail rather than synthesize any of the
+        # rule/calendar values when a caller omits one.
+        base = {
+            "instrument_id": uuid4(),
+            "display": make_display(),
+            "asset_class": "etf",
+            "exchange": "SSE",
+            "currency": "CNY",
+            "calendar_id": "XSHG",
+            "price_precision": 3,
+            "quantity_precision": 0,
+            "price_tick": "0.001",
+            "lot_size": 100,
+            "minimum_order_quantity": 100,
+            "contract_multiplier": 1,
+            "trading_session_template": VersionedReference(key="cn_equity", version=1),
+            "valid_from": EFFECTIVE_AT,
+            "valid_to": None,
+            "capabilities": make_capabilities(),
+        }
+        for field in required:
+            with self.subTest(field=field):
+                with self.assertRaises(TypeError):
+                    InstrumentSpec(**{key: value for key, value in base.items()})
+
+    def test_spec_freezes_rule_and_calendar_projections(self) -> None:
+        spec = make_spec(
+            trading_hours={"sessions": [{"start": "09:30", "end": "15:00"}]},
+            trading_status_policy={
+                "price_limit_tradability": "required",
+                "suspension": "not_applicable",
+                "opening_availability": "required",
+            },
+        )
+        self.assertIsInstance(spec.trading_hours, MappingProxyType)
+        self.assertIsInstance(spec.trading_hours["sessions"], tuple)
+        self.assertIsInstance(spec.trading_status_policy, MappingProxyType)
+        self.assertEqual(
+            spec.trading_status_policy["suspension"],
+            TradingStatusRequirement.NOT_APPLICABLE,
+        )
+        with self.assertRaises(TypeError):
+            spec.trading_hours["sessions"] = ()  # type: ignore[index]
+
+    def test_spec_rejects_missing_or_invalid_status_declaration(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            make_spec(trading_status_policy={"suspension": "required"})
+        with self.assertRaises(DomainValidationError):
+            make_spec(trading_status_policy={
+                "suspension": "required",
+                "opening_availability": "required",
+                "price_limit_tradability": "unknown",
+            })
+
+    def test_spec_requires_versioned_rule_references(self) -> None:
+        for field in (
+            "trading_session_template",
+            "price_limit_rule",
+            "cash_availability_rule",
+            "position_availability_rule",
+            "rule_package_reference",
+        ):
+            with self.subTest(field=field):
+                with self.assertRaises(DomainValidationError):
+                    make_spec(**{field: {"key": "not-a-reference", "version": 1}})
 
 
 class InstrumentNumericValidationTestCase(unittest.TestCase):

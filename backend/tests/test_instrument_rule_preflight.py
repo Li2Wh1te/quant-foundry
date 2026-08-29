@@ -297,6 +297,26 @@ class ReadyPathTestCase(unittest.TestCase):
             "not_applicable",
         )
 
+    def test_unregistered_package_is_a_structured_block(self) -> None:
+        instrument_id = uuid4()
+        service = FixedInstrumentRulePreflightService(
+            RulePackageRegistry(), FakeGateway({instrument_id: [make_fact(instrument_id)]})
+        )
+        report = service.run(
+            FixedInstrumentRulePreflightRequest(
+                instrument_ids=(instrument_id,),
+                start_date=START,
+                end_date=END,
+                data_cutoff=CUTOFF,
+                rule_package_reference=VersionedReference(
+                    key="china_listed_etf_rules", version=99
+                ),
+            )
+        )
+        self.assertIs(report.status, ResolutionStatus.BLOCKED)
+        self.assertIn("RULE_PACKAGE_MISMATCH", issue_codes(report))
+        self.assertIsNone(report.snapshot_bundle)
+
 
 class NamedExceptionTestCase(unittest.TestCase):
     """Example B: exceptions route to full alternate facts."""

@@ -152,6 +152,54 @@ class CandidateContractTestCase(unittest.TestCase):
         with self.assertRaises(DomainValidationError):
             make_candidate(content_hash="   ")
 
+    def test_candidate_requires_a_valid_interval_start(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            make_candidate(valid_from=None)
+
+    def test_candidate_rejects_malformed_content_hash(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            make_candidate(content_hash="z" * 64)
+
+    def test_decimal_spellings_share_one_content_hash(self) -> None:
+        first = make_candidate()
+        fields = complete_fields()
+        fields.update(
+            {
+                "lot_size": "1E+2",
+                "price_tick": "0.0010",
+                "contract_multiplier": 1,
+                "minimum_order_quantity": "100.00",
+            }
+        )
+        equivalent = make_candidate(
+            instrument_id=first.instrument_id,
+            fact_reference=first.fact_reference,
+            fields=fields,
+        )
+        self.assertEqual(first.content_hash, equivalent.content_hash)
+
+    def test_non_finite_decimal_is_rejected_before_hashing(self) -> None:
+        fields = complete_fields()
+        fields["price_tick"] = "NaN"
+        candidate = make_candidate(fields=fields, content_hash="a" * 64)
+        payload = dict(
+            fact_reference=candidate.fact_reference,
+            instrument_id=candidate.instrument_id,
+            package_reference=candidate.package_reference,
+            exception_fact_ref=candidate.exception_fact_ref,
+            valid_from=candidate.valid_from,
+            valid_to=candidate.valid_to,
+            fields=dict(candidate.fields),
+            source=candidate.source,
+            source_revision=candidate.source_revision,
+            known_at=candidate.known_at,
+            observed_at=candidate.observed_at,
+            quality_status=candidate.quality_status,
+            fixture_only=candidate.fixture_only,
+        )
+        with self.assertRaises(DomainValidationError):
+            rule_fact_content_hash(**payload)
+
     def test_content_hash_helper_is_stable_and_content_sensitive(self) -> None:
         first = make_candidate()
         payload = dict(
@@ -220,6 +268,21 @@ class GetFactTestCase(unittest.TestCase):
         # must fail the recomputed content hash at read time.
         row = make_row(self.candidate)
         row.fields = {**row.fields, "lot_size": "999"}
+        session = make_session([row])
+        repository = RuleFactsRepository(session)
+        with self.assertRaises(DomainValidationError):
+            repository.get_fact(FACT_REF, data_cutoff=CUTOFF)
+
+    def test_projection_wraps_malformed_storage_values(self) -> None:
+        row = make_row(self.candidate)
+        row.quality_status = "unknown"
+        session = make_session([row])
+        repository = RuleFactsRepository(session)
+        with self.assertRaises(DomainValidationError):
+            repository.get_fact(FACT_REF, data_cutoff=CUTOFF)
+
+        row = make_row(self.candidate)
+        row.fields = []
         session = make_session([row])
         repository = RuleFactsRepository(session)
         with self.assertRaises(DomainValidationError):

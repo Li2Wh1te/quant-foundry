@@ -55,6 +55,7 @@ from app.backtesting.data import (
     DataConsistencyEvidence,
     DateRange,
     EffectiveDateRange,
+    fixed_instrument_ids,
     ERROR_CODES,
     FactEvidence,
     HistoryIncompleteError,
@@ -600,6 +601,22 @@ class TestValueObjects(unittest.TestCase):
 
 
 class TestRequests(unittest.TestCase):
+    def test_fixed_instrument_union_includes_non_zero_positions(self):
+        self.assertEqual(
+            fixed_instrument_ids(
+                (ID_B, ID_A),
+                (ID_C,),
+                (ID_A,),
+            ),
+            tuple(sorted({ID_A, ID_B, ID_C}, key=str)),
+        )
+
+    def test_request_exposes_static_and_mandatory_fixed_union(self):
+        request = _preflight_request(
+            static_instrument_ids=(ID_B,), mandatory_instrument_ids=(ID_A,)
+        )
+        self.assertEqual(request.fixed_instrument_ids, tuple(sorted({ID_A, ID_B}, key=str)))
+
     def test_contract_version_one_fixes_run_limit_to_512(self):
         for bad, expected in (
             (511, Exception),

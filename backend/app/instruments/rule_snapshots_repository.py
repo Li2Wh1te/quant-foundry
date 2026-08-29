@@ -8,7 +8,9 @@ the snapshot hash, guaranteeing that later edits anywhere else cannot go
 unnoticed.
 """
 
+from datetime import UTC, date, datetime
 from uuid import UUID, uuid4
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 from sqlalchemy import select
@@ -50,6 +52,7 @@ class RunRuleSnapshotRepository:
             raise DomainValidationError(
                 "bundle.run_id must be bound before the snapshot is written"
             )
+        bundle.verify_hash()
         existing = (
             self.session.execute(
                 select(BacktestRunRuleSnapshotRecord.id).where(
@@ -118,6 +121,34 @@ class RunRuleSnapshotRepository:
             )
         return bundle.snapshot_hash
 
+    def snapshot_hash_for(self, run_id: UUID) -> str | None:
+        """Return the persisted run hash without loading segment payloads."""
+
+        if not isinstance(run_id, UUID):
+            raise DomainValidationError("run_id must be a UUID")
+        return self.session.scalar(
+            select(BacktestRunRuleSnapshotRecord.snapshot_hash).where(
+                BacktestRunRuleSnapshotRecord.run_id == run_id
+            )
+        )
+
+    def load_segment(
+        self,
+        run_id: UUID,
+        instrument_id: UUID,
+        effective_at: date | datetime,
+        *,
+        rule_package_definition: "RulePackageDefinition | None" = None,
+    ) -> InstrumentRuleSnapshotSegment | None:
+        """Load one date-selected segment from the verified run snapshot."""
+
+        bundle = self.load_bundle(
+            run_id, rule_package_definition=rule_package_definition
+        )
+        if bundle is None:
+            return None
+        return bundle.segment_for(instrument_id, effective_at)
+
     def load_bundle(
         self,
         run_id: UUID,
@@ -181,7 +212,7 @@ class RunRuleSnapshotRepository:
                 parser_revision=row.parser_revision,
                 exception_set_reference=exception_ref,
                 exception_set_hash=row.exception_set_hash,
-                data_cutoff=row.data_cutoff,
+                data_cutoff=_stored_aware(row.data_cutoff),
                 instrument_segments=segments,
             )
         except DomainValidationError as exc:
@@ -200,19 +231,20 @@ class RunRuleSnapshotRepository:
     def _segment_from_row(
         segment_row, rule_package_definition: "RulePackageDefinition | None"
     ) -> InstrumentRuleSnapshotSegment:
-        """Project one stored segment row into its immutable domain object.
+        """Project one stored segment row into its immutable domain object."""
 
-        When the run's rule-package definition is supplied, the canonical
-        JSON ``normalized_values`` are restored into domain types via the
-        resolver's own per-field normalization; the recomputed snapshot
-        hash is unaffected because hashing canonicalizes both forms to
-        identical payloads.
-        """
-
-        if rule_package_definition is not None:
-            from app.instruments.rules.resolver import (
-                restore_normalized_values,
+        if not isinstance(segment_row.normalized_values, Mapping):
+            raise DomainValidationError(
+                "stored normalized_values must be a JSON object"
             )
+        if not isinstance(segment_row.capability_declarations, Mapping):
+            raise DomainValidationError(
+                "stored capability_declarations must be a JSON object"
+            )
+        if not isinstance(segment_row.provenance, Mapping):
+            raise DomainValidationError("stored provenance must be a JSON object")
+        if rule_package_definition is not None:
+            from app.instruments.rules.resolver import restore_normalized_values
 
             normalized_values = restore_normalized_values(
                 rule_package_definition,
@@ -237,9 +269,15 @@ class RunRuleSnapshotRepository:
                 else None
             ),
             normalized_values=normalized_values,
-            capability_declarations=dict(
-                segment_row.capability_declarations
-            ),
+            capability_declarations=dict(segment_row.capability_declarations),
             provenance=dict(segment_row.provenance),
             resolution_hash=segment_row.resolution_hash,
         )
+
+
+def _stored_aware(value: datetime) -> datetime:
+    """Restore UTC on SQLite, whose DateTime type drops tzinfo on read."""
+
+    if not isinstance(value, datetime):
+        raise DomainValidationError("stored snapshot data_cutoff is not a datetime")
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)

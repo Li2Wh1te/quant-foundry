@@ -10,7 +10,11 @@ from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.orm import Session
 
 from app.backtesting.domain import DomainValidationError, _aware_datetime
-from app.backtesting.data.errors import IdentityMappingEvidenceMissingError
+from app.backtesting.data.errors import (
+    IdentityMappingConflictError,
+    IdentityMappingEvidenceMissingError,
+    IdentityMappingIncompleteError,
+)
 from app.instruments.domain import (
     InstrumentCodeMapping,
     order_mapping_segments,
@@ -51,6 +55,8 @@ class InstrumentCodeMappingRepository:
         ends on or before ``end_date``), and an empty result.
         """
 
+        if not isinstance(data_cutoff, datetime):
+            raise DomainValidationError("data_cutoff must be a datetime")
         cutoff = _aware_datetime(data_cutoff, "data_cutoff")
         if not isinstance(instrument_id, UUID):
             raise DomainValidationError("instrument_id must be a UUID")
@@ -98,6 +104,95 @@ class InstrumentCodeMappingRepository:
             )
             .order_by(InstrumentCodeMappingRecord.valid_from)
         ).scalars().all()
+        # A provider/session double must not be able to smuggle a row from a
+        # different identity or source past the SQL predicate.  Production
+        # databases enforce this through the WHERE clause; re-checking here
+        # keeps the public boundary deterministic for every adapter.
+        for row in rows:
+            row_instrument = getattr(row, "instrument_id", None)
+            row_source = getattr(row, "source", None)
+            if (
+                row_instrument != instrument_id
+                or not isinstance(row_source, str)
+                or row_source.strip().casefold() != source_lookup
+            ):
+                raise IdentityMappingIncompleteError(
+                    "stored mapping row does not belong to the queried instrument/source",
+                    details={
+                        "instrument_id": _mapping_detail_value(instrument_id),
+                        "source": normalized_source,
+                        "source_code": _mapping_detail_value(
+                            getattr(row, "source_code", None)
+                        ),
+                        "start_date": start_date.isoformat(),
+                        "end_date": end_date.isoformat(),
+                        "data_cutoff": _mapping_detail_value(cutoff),
+                        "expected": {
+                            "instrument_id": _mapping_detail_value(instrument_id),
+                            "source": normalized_source,
+                        },
+                        "actual": {
+                            "instrument_id": _mapping_detail_value(row_instrument),
+                            "source": _mapping_detail_value(row_source),
+                        },
+                        "fact_version": _mapping_detail_value(
+                            getattr(row, "fact_version", None)
+                        ),
+                    },
+                )
+        duplicate_versions: dict[tuple[str, int], list[object]] = {}
+        for row in rows:
+            logical_key = getattr(row, "logical_fact_key", None) or (
+                f"legacy:{getattr(row, 'id', id(row))}"
+            )
+            version = getattr(row, "fact_version", 1) or 1
+            duplicate_versions.setdefault((logical_key, version), []).append(row)
+        for (logical_key, version), duplicates in duplicate_versions.items():
+            if len(duplicates) < 2:
+                continue
+            first = duplicates[0]
+            fields = (
+                "id",
+                "instrument_id",
+                "source",
+                "source_code",
+                "trading_code",
+                "valid_from",
+                "valid_to",
+                "source_revision",
+                "mapping_source",
+                "evidence", "known_at", "observed_at", "fact_version",
+                "logical_fact_key",
+                "supersedes_fact_id",
+            )
+            same = all(
+                getattr(item, "id", None) == getattr(first, "id", None)
+                and all(
+                    getattr(item, field, None) == getattr(first, field, None)
+                    for field in fields
+                )
+                for item in duplicates[1:]
+            )
+            if same:
+                continue
+            raise IdentityMappingConflictError(
+                "duplicate immutable mapping fact version in one logical fact chain",
+                details={
+                    "instrument_id": _mapping_detail_value(instrument_id),
+                    "source": normalized_source,
+                    "start_date": start_date.isoformat(),
+                    "end_date": end_date.isoformat(),
+                    "data_cutoff": _mapping_detail_value(cutoff),
+                    "expected": "one immutable fact per logical_fact_key/fact_version",
+                    "actual": len(duplicates),
+                    "logical_fact_key": logical_key,
+                    "fact_version": version,
+                    "fact_ids": [
+                        _mapping_detail_value(getattr(item, "id", None))
+                        for item in duplicates
+                    ],
+                },
+            )
         # A correction appends a newer revision under the same logical key.
         # Resolve that chain before checking effective coverage; otherwise a
         # legitimate correction would look like an overlap with the fact it
@@ -125,8 +220,8 @@ class InstrumentCodeMappingRepository:
             if row.valid_from <= end_date
             and (row.valid_to is None or row.valid_to > start_date)
         ]
-        return order_mapping_segments(
-            [
+        try:
+            domains = [
                 _to_domain(
                     row,
                     instrument_id=instrument_id,
@@ -135,13 +230,26 @@ class InstrumentCodeMappingRepository:
                     data_cutoff=cutoff,
                 )
                 for row in candidates
-            ],
-            start_date=start_date,
-            end_date=end_date,
-            data_cutoff=cutoff,
-            instrument_id=instrument_id,
-            source=normalized_source,
-        )
+            ]
+            return order_mapping_segments(
+                domains,
+                start_date=start_date,
+                end_date=end_date,
+                data_cutoff=cutoff,
+                instrument_id=instrument_id,
+                source=normalized_source,
+            )
+        except (
+            IdentityMappingIncompleteError,
+            IdentityMappingConflictError,
+            IdentityMappingEvidenceMissingError,
+        ) as exc:
+            # Keep diagnostics machine-readable and include the full
+            # requested date window, not just the first failing session.
+            details = dict(getattr(exc, "details", {}) or {})
+            details.setdefault("start_date", start_date.isoformat())
+            details.setdefault("end_date", end_date.isoformat())
+            raise type(exc)(str(exc), details=details) from exc
 
     def add_mapping(self, mapping: InstrumentCodeMapping) -> UUID:
         """Append one mapping in strictly increasing knowledge order.

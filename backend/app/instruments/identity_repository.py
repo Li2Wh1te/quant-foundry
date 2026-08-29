@@ -338,6 +338,26 @@ def _stored_aware(value: datetime, field_name: str) -> datetime:
     return _aware_datetime(value, field_name)
 
 
+def _query_datetimes(
+    effective_at: object, data_cutoff: object
+) -> tuple[datetime, datetime]:
+    """Validate the two independent PIT coordinates before querying.
+
+    Keeping this check at the repository boundary prevents malformed strings,
+    ``None`` values, and naive timestamps from surfacing as incidental
+    ``AttributeError``/``TypeError`` exceptions in range folding.
+    """
+
+    if not isinstance(effective_at, datetime):
+        raise DomainValidationError("effective_at must be a datetime")
+    if not isinstance(data_cutoff, datetime):
+        raise DomainValidationError("data_cutoff must be a datetime")
+    return (
+        _aware_datetime(effective_at, "effective_at"),
+        _aware_datetime(data_cutoff, "data_cutoff"),
+    )
+
+
 def _identity_error_detail_value(value: object) -> object:
     """Render identity diagnostics as values accepted by stable errors."""
 
@@ -692,6 +712,7 @@ _FACT_VERSION_FIELDS = (
     "mapping_source",
     "source_revision",
     "asset_class",
+    "exchange",
     "currency",
     "calendar_id",
     "name",
@@ -853,6 +874,55 @@ class InstrumentIdentityRepository:
         if not isinstance(instrument_id, UUID):
             raise DomainValidationError("instrument_id must be a UUID")
         return self.session.get(Instrument, instrument_id)
+
+    def resolve_identity_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentIdentityFact | None:
+        """Resolve immutable identity attributes for this stable ID."""
+
+        return InstrumentIdentityFactRepository(self.session).resolve_identity_at(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
+
+    def resolve_display_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentDisplay | None:
+        """Resolve PIT display labels without reading the current catalogue."""
+
+        return InstrumentDisplayFactRepository(self.session).resolve_display_at(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
+
+    def resolve_code_mappings(
+        self,
+        instrument_id: UUID,
+        *,
+        source: str,
+        start_date: date,
+        end_date: date,
+        data_cutoff: datetime,
+    ) -> tuple[InstrumentCodeMapping, ...]:
+        """Resolve evidenced PIT source-code segments for this stable ID."""
+
+        return InstrumentCodeMappingRepository(self.session).resolve_code_mappings(
+            instrument_id,
+            source=source,
+            start_date=start_date,
+            end_date=end_date,
+            data_cutoff=data_cutoff,
+        )
 
     def transition_status(
         self,
@@ -1022,6 +1092,7 @@ class InstrumentIdentityFactRepository:
                 logical_fact_key=fact.logical_fact_key,
                 supersedes_fact_id=fact.supersedes_fact_id,
                 asset_class=fact.asset_class,
+                exchange=getattr(fact, "exchange", None),
                 currency=fact.currency,
                 calendar_id=fact.calendar_id,
                 valid_from=fact.valid_from,
@@ -1049,8 +1120,7 @@ class InstrumentIdentityFactRepository:
         """Return all visible effective facts for audit/conflict checking."""
 
         instrument_id = _require_instrument_id(instrument_id)
-        effective = _aware_datetime(effective_at, "effective_at")
-        cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+        effective, cutoff = _query_datetimes(effective_at, data_cutoff)
         rows = _visible_fact_rows(
             self.session,
             InstrumentIdentityFactRecord,
@@ -1082,9 +1152,8 @@ class InstrumentIdentityFactRepository:
         """Resolve one unique identity fact or block on authoritative conflict."""
 
         instrument_id = _require_instrument_id(instrument_id)
+        effective, cutoff = _query_datetimes(effective_at, data_cutoff)
         try:
-            effective = _aware_datetime(effective_at, "effective_at")
-            cutoff = _aware_datetime(data_cutoff, "data_cutoff")
             listed = tuple(
                 _identity_to_domain(
                     row,
@@ -1116,8 +1185,8 @@ class InstrumentIdentityFactRepository:
             raise
         facts = _visible_latest(
             listed,
-            effective_at=effective_at,
-            data_cutoff=data_cutoff,
+            effective_at=effective,
+            data_cutoff=cutoff,
         )
         if not facts:
             return None
@@ -1138,6 +1207,26 @@ class InstrumentIdentityFactRepository:
                     ),
             )
         return facts[0]  # type: ignore[return-value]
+
+    def resolve_identity_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentIdentityFact | None:
+        """Resolve the identity fact at separate effective/knowledge times.
+
+        The explicit name is the stable PIT query boundary exposed to
+        adapters.  Keep ``resolve`` as the implementation so existing
+        callers and the new contract share one validation path.
+        """
+
+        return self.resolve(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
 
 
 class InstrumentDisplayFactRepository:
@@ -1232,8 +1321,7 @@ class InstrumentDisplayFactRepository:
         """Return visible display facts, including unresolved review rows."""
 
         instrument_id = _require_instrument_id(instrument_id)
-        effective = _aware_datetime(effective_at, "effective_at")
-        cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+        effective, cutoff = _query_datetimes(effective_at, data_cutoff)
         rows = _visible_fact_rows(
             self.session,
             InstrumentDisplayFactRecord,
@@ -1274,12 +1362,7 @@ class InstrumentDisplayFactRepository:
         # translation below.  Otherwise a malformed timestamp can leave the
         # normalized locals undefined and mask the domain error with an
         # ``UnboundLocalError`` while constructing diagnostic details.
-        if not isinstance(effective_at, datetime):
-            raise DomainValidationError("effective_at must be a datetime")
-        if not isinstance(data_cutoff, datetime):
-            raise DomainValidationError("data_cutoff must be a datetime")
-        effective = _aware_datetime(effective_at, "effective_at")
-        cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+        effective, cutoff = _query_datetimes(effective_at, data_cutoff)
         try:
             listed = tuple(
                 _display_to_domain(
@@ -1324,8 +1407,8 @@ class InstrumentDisplayFactRepository:
             ) from exc
         facts = _visible_latest(
             listed,
-            effective_at=effective_at,
-            data_cutoff=data_cutoff,
+            effective_at=effective,
+            data_cutoff=cutoff,
             authoritative_only=True,
         )
         if not facts:
@@ -1371,6 +1454,21 @@ class InstrumentDisplayFactRepository:
         )
         return fact.as_display() if fact is not None else None
 
+    def resolve_display_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentDisplay | None:
+        """Resolve display labels at one market instant and cutoff."""
+
+        return self.resolve_display(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
+
 
 class InstrumentIdentityService:
     """Coordinate identity imports, explicit merges, and PIT resolution."""
@@ -1390,6 +1488,7 @@ class InstrumentIdentityService:
         asset_class: str,
         currency: str,
         calendar_id: str,
+        exchange: str | None = None,
         mapping_source: str,
         evidence: str,
         known_at: datetime,
@@ -1487,6 +1586,7 @@ class InstrumentIdentityService:
                         instrument_id=resolved_id,
                         fact_version=1,
                         asset_class=asset_class,
+                        exchange=exchange,
                         currency=currency,
                         calendar_id=calendar_id,
                         valid_from=effective_session,
@@ -1723,6 +1823,52 @@ class InstrumentIdentityService:
             data_cutoff=data_cutoff,
         )
 
+    # Explicit PIT names are part of the public service boundary.  They keep
+    # effective-at and data-cutoff semantics visible at call sites while
+    # retaining the existing compact aliases above for compatibility.
+    def resolve_identity_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentIdentityFact | None:
+        return self.identity_facts.resolve_identity_at(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
+
+    def resolve_display_at(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentDisplay | None:
+        return self.display_facts.resolve_display_at(
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
+
+    def resolve_code_mappings(
+        self,
+        instrument_id: UUID,
+        *,
+        source: str,
+        start_date: date,
+        end_date: date,
+        data_cutoff: datetime,
+    ) -> tuple[InstrumentCodeMapping, ...]:
+        return InstrumentCodeMappingRepository(self.session).resolve_code_mappings(
+            instrument_id,
+            source=source,
+            start_date=start_date,
+            end_date=end_date,
+            data_cutoff=data_cutoff,
+        )
+
 
 class MappingResolutionRepository:
     """Rebuildable mapping-head helper.
@@ -1947,6 +2093,7 @@ def _identity_to_domain(
             logical_fact_key=row.logical_fact_key,
             supersedes_fact_id=row.supersedes_fact_id,
             asset_class=row.asset_class,
+            exchange=getattr(row, "exchange", None),
             currency=row.currency,
             calendar_id=row.calendar_id,
             valid_from=row.valid_from,

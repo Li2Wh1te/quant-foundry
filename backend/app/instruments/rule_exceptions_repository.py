@@ -104,6 +104,19 @@ class RuleExceptionSetsRepository:
             raise DomainValidationError(
                 "definition must be a RuleExceptionSetDefinition"
             )
+        # Validate provenance and gate inputs before touching the session.  A
+        # malformed append must fail as a domain error, not as an AttributeError
+        # while reading ``quality_status.value`` or as a database constraint
+        # error after partially staging rows.
+        source = _required_label(source, "source")
+        known_at = _aware_datetime(known_at, "known_at")
+        observed_at = _aware_datetime(observed_at, "observed_at")
+        if not isinstance(quality_status, FactQualityStatus):
+            raise DomainValidationError(
+                "quality_status must be a FactQualityStatus"
+            )
+        if not isinstance(fixture_only, bool):
+            raise DomainValidationError("fixture_only must be a boolean")
         recomputed = exception_set_content_hash(definition)
         if content_hash is not None and content_hash != recomputed:
             # A wrong caller-supplied hash would make every later read
@@ -140,8 +153,8 @@ class RuleExceptionSetsRepository:
                 rule_package_version=definition.package_reference.version,
                 source=source,
                 source_revision=source_revision,
-                known_at=_aware_datetime(known_at, "known_at"),
-                observed_at=_aware_datetime(observed_at, "observed_at"),
+                known_at=known_at,
+                observed_at=observed_at,
                 quality_status=quality_status.value,
                 fixture_only=fixture_only,
                 content_hash=resolved_hash,
@@ -255,13 +268,27 @@ class RuleExceptionSetsRepository:
                 "match its entries; the set must be republished as a new "
                 "version instead of being edited in place"
             )
-        return PersistedExceptionSet(
-            definition=definition,
-            source=row.source,
-            source_revision=row.source_revision,
-            known_at=row.known_at,
-            observed_at=row.observed_at,
-            quality_status=FactQualityStatus(row.quality_status),
-            fixture_only=row.fixture_only,
-            content_hash=row.content_hash,
-        )
+        try:
+            quality_status = FactQualityStatus(row.quality_status)
+        except (TypeError, ValueError) as exc:
+            raise DomainValidationError(
+                f"stored instrument rule exception set "
+                f"{row.set_key}@{row.set_version} has unknown quality_status"
+            ) from exc
+        try:
+            return PersistedExceptionSet(
+                definition=definition,
+                source=row.source,
+                source_revision=row.source_revision,
+                known_at=row.known_at,
+                observed_at=row.observed_at,
+                quality_status=quality_status,
+                fixture_only=row.fixture_only,
+                content_hash=row.content_hash,
+            )
+        except DomainValidationError as exc:
+            raise DomainValidationError(
+                f"stored instrument rule exception set "
+                f"{row.set_key}@{row.set_version} violates the provenance "
+                f"contract: {exc}"
+            ) from exc

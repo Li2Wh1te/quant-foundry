@@ -55,6 +55,7 @@ __all__ = [
     "DataValueQuery",
     "DateRange",
     "EffectiveDateRange",
+    "fixed_instrument_ids",
     "InstrumentMappingQuery",
     "InstrumentQuery",
     "InstrumentScopeMode",
@@ -261,6 +262,41 @@ def _sorted_unique_ids(
         if not isinstance(instrument_id, UUID):
             raise InvalidDataRequestError(f"{field_name} entries must be UUIDs")
     return tuple(sorted(set(ids), key=str))
+
+
+def fixed_instrument_ids(
+    static_instrument_ids: Iterable[UUID] = (),
+    mandatory_instrument_ids: Iterable[UUID] = (),
+    non_zero_initial_position_instrument_ids: Iterable[UUID] = (),
+) -> tuple[UUID, ...]:
+    """Return the stable, order-independent fixed-instrument union.
+
+    The non-zero initial-position IDs are supplied by the run-spec layer;
+    keeping them as an explicit input prevents dynamic-universe selection
+    from accidentally skipping opening holdings.  Empty inputs are valid for
+    dynamic requests, but every supplied value must still be a UUID.
+    """
+
+    values: list[UUID] = []
+    for field_name, source in (
+        ("static_instrument_ids", static_instrument_ids),
+        ("mandatory_instrument_ids", mandatory_instrument_ids),
+        (
+            "non_zero_initial_position_instrument_ids",
+            non_zero_initial_position_instrument_ids,
+        ),
+    ):
+        if isinstance(source, (str, bytes)) or not isinstance(source, Iterable):
+            raise InvalidDataRequestError(
+                f"{field_name} must be an iterable of UUIDs"
+            )
+        for instrument_id in source:
+            if not isinstance(instrument_id, UUID):
+                raise InvalidDataRequestError(
+                    f"{field_name} entries must be UUIDs"
+                )
+            values.append(instrument_id)
+    return tuple(sorted(set(values), key=str))
 
 
 def _sorted_unique_refs(
@@ -714,6 +750,15 @@ class DataPreflightRequest:
         self._validate_version_pinned_fields()
         self._validate_scope_consistency()
 
+    @property
+    def fixed_instrument_ids(self) -> tuple[UUID, ...]:
+        """Return static and mandatory IDs in canonical fixed-scope order."""
+
+        return fixed_instrument_ids(
+            self.static_instrument_ids,
+            self.mandatory_instrument_ids,
+        )
+
     def _validate_version_pinned_fields(self) -> None:
         """Enforce every value frozen by data-contract version 1."""
 
@@ -910,6 +955,7 @@ class DataRequest(DataPreflightRequest):
         *,
         accepted_degraded: bool = False,
         rule_preflight_report: "RulePreflightReport",
+        non_zero_initial_position_instrument_ids: Iterable[UUID] = (),
     ) -> "DataRequest":
         """Freeze an official run request from a request/report pair.
 
@@ -928,7 +974,8 @@ class DataRequest(DataPreflightRequest):
         the report DTO itself guarantees that a READY report carries a
         consistent, non-forged bundle — and the report must match this
         request's rule package, exception set, window, knowledge cutoff,
-        and full fixed-instrument scope.  A blocked or foreign rule
+        and full fixed-instrument scope (including non-zero initial
+        positions).  A blocked or foreign rule
         preflight can never admit a formal run.
         """
 
@@ -1019,16 +1066,19 @@ class DataRequest(DataPreflightRequest):
         )
         if rule_preflight_report.data_cutoff != expected_rule_cutoff:
             rule_mismatches.append("knowledge_as_of")
-        required_instrument_ids = (
-            set(request.static_instrument_ids)
-            | set(request.mandatory_instrument_ids)
+        required_instrument_ids = set(
+            fixed_instrument_ids(
+                request.static_instrument_ids,
+                request.mandatory_instrument_ids,
+                non_zero_initial_position_instrument_ids,
+            )
         )
         checked_instrument_ids = {
             result.instrument_id
             for result in rule_preflight_report.checked_instruments
         }
-        if not required_instrument_ids <= checked_instrument_ids:
-            rule_mismatches.append("static_instrument_ids/mandatory_instrument_ids")
+        if checked_instrument_ids != required_instrument_ids:
+            rule_mismatches.append("fixed_instrument_ids")
         if rule_mismatches:
             raise _Invalid(
                 "rule preflight report does not belong to this request",

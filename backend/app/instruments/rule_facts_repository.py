@@ -11,6 +11,7 @@ issues.
 """
 
 from datetime import date, datetime
+from collections.abc import Mapping
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -232,7 +233,13 @@ def _to_domain(row: InstrumentRuleFactRecord) -> RuleFactCandidate:
     rejected as drifted.
     """
 
+    fact_key = getattr(row, "fact_key", "<missing>")
+    fact_version = getattr(row, "fact_version", "<missing>")
+    row_label = f"{fact_key}@{fact_version}"
     try:
+        raw_fields = getattr(row, "fields")
+        if not isinstance(raw_fields, Mapping):
+            raise DomainValidationError("fields must be a JSON object")
         exception_fact_ref = None
         if row.rule_exception_key is not None:
             if row.rule_exception_version is None:
@@ -257,7 +264,7 @@ def _to_domain(row: InstrumentRuleFactRecord) -> RuleFactCandidate:
             quality_status=FactQualityStatus(row.quality_status),
             fixture_only=row.fixture_only,
             content_hash=row.content_hash,
-            fields=dict(row.fields),
+            fields=dict(raw_fields),
             exception_fact_ref=exception_fact_ref,
             valid_from=row.valid_from,
             valid_to=row.valid_to,
@@ -285,8 +292,8 @@ def _to_domain(row: InstrumentRuleFactRecord) -> RuleFactCandidate:
                 "instead of being edited"
             )
         return candidate
-    except DomainValidationError as exc:
+    except (DomainValidationError, TypeError, ValueError, KeyError, AttributeError) as exc:
         raise DomainValidationError(
-            f"stored instrument rule fact {row.fact_key}@{row.fact_version} "
+            f"stored instrument rule fact {row_label} "
             f"violates the domain contract: {exc}"
         ) from exc

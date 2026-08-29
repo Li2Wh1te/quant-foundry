@@ -14,6 +14,7 @@ from app.instruments.rules import (
     ParseMode,
     ResolutionStatus,
     RuleExceptionEntry,
+    RuleExceptionPolicy,
     RuleExceptionSetDefinition,
     RuleFactCandidate,
     RuleFieldDefinition,
@@ -25,6 +26,7 @@ from app.instruments.rules import (
     RulePackageRegistry,
     RulePackageResolution,
     RulePackageResolver,
+    PARSE_ORDER,
     build_definition,
     canonical_decimal_string,
     register_china_listed_etf_rules,
@@ -285,6 +287,32 @@ class RegistryAndDefinitionTestCase(unittest.TestCase):
             self.definition.known_settlement_rule_classes,
         )
 
+    def test_exception_policy_rejects_non_identity_match_keys(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            RuleExceptionPolicy(("trading_code", "validity_interval"))
+
+    def test_exception_policy_order_is_canonical(self) -> None:
+        first = RuleExceptionPolicy(("instrument_id", "validity_interval"))
+        second = RuleExceptionPolicy(("validity_interval", "instrument_id"))
+        self.assertEqual(first, second)
+
+    def test_contract_collections_reject_scalar_text(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            RulePackageDefinition(
+                reference=PACKAGE_REF,
+                supported_asset_classes="etf",
+                field_definitions=self.definition.field_definitions,
+                capability_schema=self.definition.capability_schema,
+                known_settlement_rule_classes=(
+                    self.definition.known_settlement_rule_classes
+                ),
+                formal_settlement_rule_classes=(
+                    self.definition.formal_settlement_rule_classes
+                ),
+                exception_policy=self.definition.exception_policy,
+                parse_order=self.definition.parse_order,
+            )
+
 
 class ReadyPathTestCase(unittest.TestCase):
     """Example A: ordinary ETF without exceptions resolves ready."""
@@ -330,6 +358,23 @@ class ReadyPathTestCase(unittest.TestCase):
         self.assertEqual(first.semantic_hash, second.semantic_hash)
         self.assertEqual(first.parse_order, second.parse_order)
         self.assertEqual(first.normalized_values, second.normalized_values)
+
+    def test_resolver_exposes_the_frozen_parse_order(self) -> None:
+        resolution = resolve([make_fact()])
+        self.assertEqual(resolution.parse_order, PARSE_ORDER)
+
+    def test_fact_input_order_does_not_change_semantic_hash(self) -> None:
+        normal = make_fact()
+        exception = make_exception_fact()
+        first = resolve(
+            [normal, exception], exception_sets=[make_exception_set()]
+        )
+        second = resolve(
+            [exception, normal], exception_sets=[make_exception_set()]
+        )
+        self.assertEqual(first.status, ResolutionStatus.READY)
+        self.assertEqual(second.status, ResolutionStatus.READY)
+        self.assertEqual(first.semantic_hash, second.semantic_hash)
 
 
 class NamedExceptionTestCase(unittest.TestCase):
@@ -465,6 +510,44 @@ class NamedExceptionTestCase(unittest.TestCase):
             [ref.version for ref in combo_b.exception_set_references], [3, 4]
         )
         self.assertNotEqual(combo_a.semantic_hash, combo_b.semantic_hash)
+
+    def test_ordinary_and_exception_conflicts_block_together(self) -> None:
+        # A conflict in either side of the fixed parse order must not be
+        # hidden by the other side resolving successfully.
+        first = RuleExceptionEntry(
+            instrument_id=INSTRUMENT_ID,
+            exception_fact_ref=EXCEPTION_FACT_REF,
+            valid_from=date(2025, 1, 1),
+            valid_to=date(2027, 1, 1),
+        )
+        second = RuleExceptionEntry(
+            instrument_id=INSTRUMENT_ID,
+            exception_fact_ref=EXCEPTION_FACT_REF,
+            valid_from=date(2026, 1, 1),
+            valid_to=None,
+        )
+        resolution = resolve(
+            [
+                make_fact(),
+                make_fact(
+                    fact_reference=VersionedReference(
+                        key="etf_rule_fact", version=2
+                    ),
+                    source_revision="rev-2",
+                ),
+                make_exception_fact(),
+            ],
+            exception_sets=[make_exception_set(entries=(first, second))],
+        )
+        self.assertIs(resolution.status, ResolutionStatus.BLOCKED)
+        self.assertIn(
+            RulePackageIssueCode.RULE_FIELD_CONFLICT.value,
+            issue_codes(resolution),
+        )
+        self.assertIn(
+            RulePackageIssueCode.RULE_EXCEPTION_INTERVAL_CONFLICT.value,
+            issue_codes(resolution),
+        )
 
     def test_exception_set_bound_to_other_package_is_target_mismatch(self) -> None:
         mismatched = RuleExceptionSetDefinition(

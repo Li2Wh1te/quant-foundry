@@ -37,7 +37,7 @@ excludes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
@@ -71,15 +71,13 @@ from app.backtesting.data.requests import (
 )
 from app.backtesting.domain import _aware_datetime
 from app.instruments.domain import (
-    CorporateActionRequirement,
-    InstrumentCapabilities,
     InstrumentCodeMapping,
     InstrumentDisplay,
     InstrumentSpec,
+    InstrumentSpecProvider,
     MappingConflictError,
     MappingCoverageGapError,
 )
-from app.instruments.references import VersionedReference
 
 __all__ = [
     "ADJUSTMENT_SERIES_POLICY",
@@ -106,31 +104,10 @@ ETF_VALIDATION_RULE_KEY = "etf_raw_bar_validation"
 ETF_VALIDATION_RULE_VERSION = "etf_raw_bar_validation@1"
 
 ETF_RULE_PACKAGE = ("china_listed_etf_rules", 1)
-"""Versioned rule package whose frozen defaults back the spec projection."""
+"""Versioned rule package identifier used by the instrument domain."""
 
 ADJUSTMENT_SERIES_POLICY = ("tushare_adj_factor_native", 1)
 """First-version adjustment-series policy (key, version)."""
-
-_ETF_SESSION_TEMPLATE = VersionedReference(key="china_etf_full_day", version=1)
-"""Session template referenced by every projected ETF instrument spec."""
-
-# Frozen first-version trading parameters for China-listed ETFs under
-# china_listed_etf_rules@1.  They are contract constants of this adapter
-# version, not per-row data: the source tables carry no tick/lot columns.
-_ETF_SPEC_DEFAULTS: dict[str, object] = {
-    "price_precision": 3,
-    "quantity_precision": 0,
-    "price_tick": Decimal("0.001"),
-    "lot_size": Decimal("100"),
-    "minimum_order_quantity": Decimal("100"),
-    "contract_multiplier": Decimal("1"),
-}
-_ETF_CAPABILITIES = InstrumentCapabilities(
-    position_sides=frozenset({"long"}),
-    order_types=frozenset({"limit"}),
-    margin_supported=False,
-    corporate_action_requirement=CorporateActionRequirement.NOT_APPLICABLE,
-)
 
 # ---------------------------------------------------------------------------
 # Read-only ports (thin wrappers over the ingestion query repositories)
@@ -344,10 +321,30 @@ class EtfFactsAdapter:
     # InstrumentIdentityFact.calendar_id.  There is no adapter-level
     # exchange/calendar fallback.
     calendar_id_resolver: Callable[..., str | None] | None = None
+    # Trading rules are resolved by the instrument domain.  Keeping this
+    # port optional preserves the adapter's read-only bar APIs while making
+    # an ETF spec impossible to fabricate from the ingestion directory.
+    spec_provider: InstrumentSpecProvider | None = None
+    # Descriptive alias for callers that prefer the protocol's full name.
+    instrument_spec_provider: InstrumentSpecProvider | None = None
 
     def __post_init__(self) -> None:
         if self.calendar_id_resolver is not None and not callable(self.calendar_id_resolver):
             raise InvalidDataRequestError("calendar_id_resolver must be callable")
+        providers = tuple(
+            provider
+            for provider in (self.spec_provider, self.instrument_spec_provider)
+            if provider is not None
+        )
+        if len(providers) == 2 and providers[0] is not providers[1]:
+            raise InvalidDataRequestError(
+                "spec_provider and instrument_spec_provider must refer to one provider"
+            )
+        for provider in providers:
+            if not callable(getattr(provider, "resolve_spec", None)):
+                raise InvalidDataRequestError(
+                    "spec provider must expose a callable resolve_spec method"
+                )
         if self.adjustment_active and not (
             isinstance(self.adjustment_verification_evidence, str)
             and self.adjustment_verification_evidence.strip()
@@ -534,57 +531,73 @@ class EtfFactsAdapter:
     ) -> InstrumentSpec | None:
         """Project one ``etf_codes`` row onto a complete engine spec.
 
-        Trading-critical fields missing from the source table are frozen
-        defaults of :data:`ETF_RULE_PACKAGE` (``china_listed_etf_rules@1``).
-        Rows without the mandatory identity/exchange/listing facts yield
-        ``None`` or the stable ``instrument_calendar_unresolved`` error — the
-        provider contract forbids placeholders or exchange-based inference.
-        The validity window starts strictly at ``list_date``: falling back to
-        ``setup_date`` would admit funds that exist but are not listed yet.
+        The ingestion directory only supplies a stable identity/display
+        candidate.  A complete spec must come from the injected instrument
+        domain provider, which resolves PIT identity and versioned rule facts;
+        no adapter-level trading, currency, exchange, calendar, session, or
+        capability defaults are permitted.  The validity window starts
+        strictly at ``list_date``: falling back to ``setup_date`` would admit
+        funds that exist but are not listed yet.
         """
 
         display = self.project_display(row)
         if display is None:
             return None
-        exchange = getattr(row, "exchange", None)
         list_date = getattr(row, "list_date", None)
-        if not isinstance(exchange, str) or not exchange.strip():
-            return None
-        if not isinstance(list_date, date) or isinstance(list_date, datetime):
-            return None
-        effective_date = effective_date or list_date
+        if effective_date is None:
+            effective_date = list_date
         if not isinstance(effective_date, date) or isinstance(effective_date, datetime):
-            raise InvalidDataRequestError("effective_date must be a calendar date")
-        calendar_id = self._identity_calendar_id(
-            row,
-            display.instrument_id,
-            effective_date=effective_date,
-            data_cutoff=data_cutoff,
-        )
-        if calendar_id is None:
+            return None
+        provider = self.spec_provider or self.instrument_spec_provider
+        if provider is None:
+            # The directory row is not a rules fact.  Without the domain
+            # provider there is no safe projection, so fail closed with the
+            # stable calendar/spec-resolution contract error.  Rows that do
+            # not even expose the legacy exchange marker remain unresolvable
+            # ``None`` for compatibility with display-only callers.
+            if not isinstance(getattr(row, "exchange", None), str) or not getattr(
+                row, "exchange", ""
+            ).strip():
+                return None
             raise InstrumentCalendarUnresolvedError(
-                "ETF instrument has no point-in-time calendar_id",
-                details={"instrument_id": str(display.instrument_id), "ts_code": getattr(row, "ts_code", None)},
+                "ETF instrument spec requires an InstrumentSpecProvider",
+                details={
+                    "instrument_id": str(display.instrument_id),
+                    "ts_code": getattr(row, "ts_code", None),
+                },
             )
-        valid_from = datetime(list_date.year, list_date.month, list_date.day, tzinfo=UTC)
-        return InstrumentSpec(
-            instrument_id=display.instrument_id,
-            display=display,
-            asset_class="etf",
-            exchange=exchange.upper(),
-            currency="CNY",
-            calendar_id=calendar_id,
-            price_precision=_ETF_SPEC_DEFAULTS["price_precision"],
-            quantity_precision=_ETF_SPEC_DEFAULTS["quantity_precision"],
-            price_tick=_ETF_SPEC_DEFAULTS["price_tick"],
-            lot_size=_ETF_SPEC_DEFAULTS["lot_size"],
-            minimum_order_quantity=_ETF_SPEC_DEFAULTS["minimum_order_quantity"],
-            contract_multiplier=_ETF_SPEC_DEFAULTS["contract_multiplier"],
-            trading_session_template=_ETF_SESSION_TEMPLATE,
-            valid_from=valid_from,
-            valid_to=None,
-            capabilities=_ETF_CAPABILITIES,
+        if data_cutoff is None:
+            raise InvalidDataRequestError(
+                "data_cutoff is required for point-in-time ETF spec resolution"
+            )
+        try:
+            cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+        except Exception as exc:
+            raise InvalidDataRequestError(
+                "data_cutoff must be a timezone-aware datetime"
+            ) from exc
+        effective_at = datetime.combine(effective_date, datetime.min.time(), tzinfo=timezone.utc)
+        spec = provider.resolve_spec(
+            display.instrument_id,
+            effective_at=effective_at,
+            data_cutoff=cutoff,
         )
+        if spec is None:
+            return None
+        if not isinstance(spec, InstrumentSpec):
+            raise ProviderContractViolationError(
+                "instrument spec provider returned a non-InstrumentSpec value",
+                details={"instrument_id": str(display.instrument_id)},
+            )
+        if spec.instrument_id != display.instrument_id:
+            raise ProviderContractViolationError(
+                "instrument spec provider returned another instrument identity",
+                details={
+                    "requested_instrument_id": str(display.instrument_id),
+                    "returned_instrument_id": str(spec.instrument_id),
+                },
+            )
+        return spec
 
     # ------------------------------------------------------------------
     # Bar projection and segmented history

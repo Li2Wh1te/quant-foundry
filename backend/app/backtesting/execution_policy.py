@@ -84,6 +84,13 @@ def _non_negative_int(value: Any, field_name: str) -> int:
     return value
 
 
+def _respects_precision(value: Decimal, precision: int) -> bool:
+    """Return whether a quantity is exactly representable at a precision."""
+
+    exponent = value.normalize().as_tuple().exponent
+    return isinstance(exponent, int) and exponent >= -precision
+
+
 def _versioned_reference(value: Any, field_name: str) -> VersionedReference:
     """Coerce a resolved reference or its canonical ``{key, version}`` form."""
 
@@ -185,6 +192,18 @@ class InstrumentExecutionPolicy:
     # silently matching everything; a rule whose declared facts are not
     # provided here can never apply (fail closed).
     fee_applicability_context: Mapping[str, str] = field(default_factory=dict)
+
+    @property
+    def package_key(self) -> str:
+        """Stable rule-package key used by runtime audit records."""
+
+        return self.package_reference.key
+
+    @property
+    def package_version(self) -> int:
+        """Stable rule-package version used by runtime audit records."""
+
+        return self.package_reference.version
 
     @classmethod
     def from_rule_snapshot(
@@ -293,6 +312,62 @@ class InstrumentExecutionPolicy:
         if not isinstance(normalized, str) or normalized not in self.allowed_order_types:
             return "ORDER_TYPE_NOT_SUPPORTED"
         return None
+
+    def validate_order(self, order: Any) -> str | None:
+        """Validate one order against this frozen segment's declarations.
+
+        The method intentionally returns a stable reason instead of raising;
+        runtime can mark an invalid order terminal while preserving the
+        existing phase-loop audit semantics.
+        """
+
+        if getattr(order, "instrument_id", None) != self.instrument_id:
+            return "INSTRUMENT_POLICY_MISMATCH"
+        reason = self.validate_order_type(getattr(order, "order_type", None))
+        if reason is not None:
+            return reason
+        quantity = getattr(order, "remaining_quantity", None)
+        if not isinstance(quantity, Decimal):
+            try:
+                quantity = Decimal(str(quantity))
+            except Exception:
+                return "ORDER_QUANTITY_INVALID"
+        if quantity <= 0:
+            return "ORDER_QUANTITY_INVALID"
+        if not _respects_precision(quantity, self.quantity_precision):
+            return "ORDER_QUANTITY_PRECISION_INVALID"
+        if quantity < self.minimum_order_quantity:
+            return "ORDER_QUANTITY_BELOW_MINIMUM"
+        if quantity % self.lot_size != 0:
+            return "ORDER_QUANTITY_NOT_MULTIPLE_OF_LOT"
+        return None
+
+    def audit_payload(self) -> dict[str, Any]:
+        """Return the JSON-safe policy identity for result persistence."""
+
+        return {
+            "instrument_id": str(self.instrument_id),
+            "package_reference": {
+                "key": self.package_reference.key,
+                "version": self.package_reference.version,
+            },
+            "resolution_hash": self.resolution_hash,
+            "currency": self.currency,
+            "price_precision": self.price_precision,
+            "quantity_precision": self.quantity_precision,
+            "price_tick": self.price_tick,
+            "lot_size": self.lot_size,
+            "minimum_order_quantity": self.minimum_order_quantity,
+            "contract_multiplier": self.contract_multiplier,
+            "session_template_reference": {
+                "key": self.session_template_reference.key,
+                "version": self.session_template_reference.version,
+            },
+            "allowed_order_types": tuple(sorted(self.allowed_order_types)),
+            "fee_categories": tuple(sorted(self.fee_categories)),
+            "settlement_rule_class": self.settlement_rule_class,
+            "fee_applicability_context": dict(self.fee_applicability_context),
+        }
 
 
 @dataclass(frozen=True, slots=True)

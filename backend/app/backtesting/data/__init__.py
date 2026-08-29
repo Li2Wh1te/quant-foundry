@@ -235,6 +235,7 @@ _SUBMODULE_EXPORTS.update(
             # requests
             "DataPreflightRequest",
             "DataRequest",
+            "fixed_instrument_ids",
             # queries
             "InstrumentQuery",
             "InstrumentMappingQuery",
@@ -382,6 +383,7 @@ __all__ = [
     # requests
     "DataPreflightRequest",
     "DataRequest",
+    "fixed_instrument_ids",
     # queries
     "InstrumentQuery",
     "InstrumentMappingQuery",

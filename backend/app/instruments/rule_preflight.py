@@ -45,8 +45,17 @@ from app.instruments.rules.contracts import (
     reference_display,
     stable_hash,
 )
-from app.instruments.rules.registry import RulePackageRegistry
+from app.instruments.rules.registry import (
+    RulePackageNotRegisteredError,
+    RulePackageRegistry,
+)
 from app.instruments.rules.resolver import PARSER_REVISION, RulePackageResolver
+from app.instruments.spec_provider import (
+    InstrumentQualificationIssue,
+    InstrumentSpecQualification,
+    InstrumentSpecProvider,
+    resolve_instrument_qualification,
+)
 
 
 class RuleCheckStatus(StrEnum):
@@ -383,11 +392,42 @@ class FixedInstrumentRulePreflightService:
         self,
         registry: RulePackageRegistry,
         gateway: InstrumentRulePreflightGateway,
+        spec_provider: InstrumentSpecProvider | None = None,
     ) -> None:
         if not isinstance(registry, RulePackageRegistry):
             raise DomainValidationError("registry must be a RulePackageRegistry")
         self._registry = registry
         self._gateway = gateway
+        self._spec_provider = spec_provider
+
+    def qualify_instrument(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+        rule_package_reference: VersionedReference | None = None,
+        exception_set_reference: VersionedReference | None = None,
+    ) -> InstrumentSpecQualification:
+        """Expose the same single-instrument gate used by task package 15.
+
+        Fixed-window preflight remains responsible for the aggregate report;
+        this method only delegates one deterministic PIT qualification and
+        never evaluates a universe or mutates run state.
+        """
+
+        if self._spec_provider is None:
+            raise DomainValidationError(
+                "single-instrument qualification requires a spec_provider"
+            )
+        return resolve_instrument_qualification(
+            self._spec_provider,
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+            rule_package_reference=rule_package_reference,
+            exception_set_reference=exception_set_reference,
+        )
 
     def run(
         self, request: FixedInstrumentRulePreflightRequest
@@ -400,7 +440,52 @@ class FixedInstrumentRulePreflightService:
         blocking segment blocks the whole report.
         """
 
-        definition = self._registry.require(request.rule_package_reference)
+        try:
+            definition = self._registry.require(request.rule_package_reference)
+        except RulePackageNotRegisteredError as exc:
+            # A persisted/requested package version is data, not a caller
+            # crash: formal admission must return a stable blocked result and
+            # must not query facts under an unknown contract.
+            issue = _issue(
+                RulePackageIssueCode.RULE_PACKAGE_MISMATCH,
+                message=(
+                    "规则包 "
+                    f"{reference_display(request.rule_package_reference)}"
+                    " 未注册或版本不匹配，正式规则预检阻断"
+                ),
+                details={
+                    "rule_package": reference_display(
+                        request.rule_package_reference
+                    ),
+                    "reason": str(exc),
+                },
+            )
+            results = tuple(
+                InstrumentRulePreflightResult(
+                    instrument_id=instrument_id,
+                    status=ResolutionStatus.BLOCKED,
+                    rules_check_status=RuleCheckStatus.BLOCKED,
+                    capability_check_status=RuleCheckStatus.OK,
+                    resolved_segments=(),
+                    selected_fact_references=(),
+                    issues=(issue,),
+                )
+                for instrument_id in request.instrument_ids
+            )
+            return RulePreflightReport(
+                status=ResolutionStatus.BLOCKED,
+                rule_package_reference=request.rule_package_reference,
+                rule_package_semantic_hash="",
+                exception_set_reference=request.exception_set_reference,
+                exception_set_hash=None,
+                data_cutoff=request.data_cutoff,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                checked_instruments=results,
+                issues=(issue,),
+                snapshot_bundle=None,
+                snapshot_hash="",
+            )
 
         exception_persisted: PersistedExceptionSet | None = None
         top_issues: list[RulePackageIssue] = []
@@ -988,6 +1073,12 @@ def _build_segment(
             candidate.fixture_only if candidate is not None else summary.fixture_only
         )
         known_at = summary.known_at
+        observed_at = (
+            candidate.observed_at
+            if candidate is not None
+            else summary.observed_at
+        )
+        content_hash = candidate.content_hash if candidate is not None else None
         valid_from = summary.valid_from
         valid_to = summary.valid_to
         return FactProvenance(
@@ -999,6 +1090,8 @@ def _build_segment(
             known_at=known_at,
             quality_status=quality,
             fixture_only=fixture_only,
+            observed_at=observed_at,
+            content_hash=content_hash,
         ).to_payload()
 
     provenance: dict = {"normal_fact": _provenance(normal_summary)}
@@ -1041,8 +1134,11 @@ def _issue(
 __all__ = [
     "FixedInstrumentRulePreflightRequest",
     "FixedInstrumentRulePreflightService",
+    "InstrumentQualificationIssue",
     "InstrumentRulePreflightGateway",
     "InstrumentRulePreflightResult",
+    "InstrumentSpecQualification",
     "RuleCheckStatus",
     "RulePreflightReport",
+    "resolve_instrument_qualification",
 ]

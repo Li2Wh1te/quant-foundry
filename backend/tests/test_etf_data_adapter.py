@@ -45,12 +45,17 @@ from app.backtesting.result_records import RESULT_TABLE_NAMES, Base
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_schemas import BacktestDataPreflightItem
 from app.instruments.domain import (
+    CorporateActionRequirement,
+    InstrumentCapabilities,
     InstrumentCodeMapping,
+    InstrumentDisplay,
     InstrumentIdentityFact,
     InstrumentSpec,
     MappingConflictError,
     MappingCoverageGapError,
+    VersionedReference,
 )
+from app.instruments.rules.contracts import StrategyRuleDeclaration, TradingStatusRequirement
 
 INSTRUMENT_ID = uuid4()
 SOURCE = "tushare"
@@ -658,6 +663,7 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
                 instrument_id=INSTRUMENT_ID,
                 fact_version=1,
                 asset_class="etf",
+                exchange="SH",
                 currency="CNY",
                 calendar_id="XSHG",
                 valid_from=date(2012, 5, 28),
@@ -672,6 +678,68 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
     def setUp(self) -> None:
         self.adapter = make_adapter(FakeStores())
 
+        class Provider:
+            def __init__(self) -> None:
+                self.calls = []
+
+            def resolve_spec(self, instrument_id, *, effective_at, data_cutoff):
+                self.calls.append((instrument_id, effective_at, data_cutoff))
+                return InstrumentSpec(
+                    instrument_id=instrument_id,
+                    display=InstrumentDisplay(
+                        instrument_id=instrument_id,
+                        trading_code="510300",
+                        name="沪深300ETF",
+                    ),
+                    asset_class="etf",
+                    exchange="SH",
+                    currency="CNY",
+                    calendar_id="XSHG",
+                    price_precision=3,
+                    quantity_precision=0,
+                    price_tick="0.001",
+                    lot_size="100",
+                    minimum_order_quantity="100",
+                    contract_multiplier="1",
+                    trading_session_template=VersionedReference(
+                        key="cn_etf_session_template", version=1
+                    ),
+                    trading_hours={"timezone": "Asia/Shanghai", "sessions": []},
+                    settlement_rule_class="t1_before_open_match",
+                    sellable_rule=StrategyRuleDeclaration(
+                        ("sell_limited_by_available_position",)
+                    ),
+                    fee_categories=frozenset({"commission"}),
+                    trading_status_policy={
+                        "suspension": TradingStatusRequirement.REQUIRED,
+                        "opening_availability": TradingStatusRequirement.REQUIRED,
+                        "price_limit_tradability": TradingStatusRequirement.NOT_APPLICABLE,
+                    },
+                    order_types=frozenset({"limit"}),
+                    price_limit_rule=VersionedReference(
+                        key="cn_etf_price_limit_rule", version=1
+                    ),
+                    cash_availability_rule=VersionedReference(
+                        key="cn_cash_availability_rule", version=1
+                    ),
+                    position_availability_rule=VersionedReference(
+                        key="cn_position_availability_rule", version=1
+                    ),
+                    capabilities=InstrumentCapabilities(
+                        position_sides=frozenset({"long"}),
+                        order_types=frozenset({"limit"}),
+                        margin_supported=False,
+                        corporate_action_requirement=CorporateActionRequirement.NOT_APPLICABLE,
+                    ),
+                    rule_package_reference=VersionedReference(
+                        key="china_listed_etf_rules", version=1
+                    ),
+                    valid_from=datetime(2012, 5, 28, tzinfo=UTC),
+                    valid_to=None,
+                )
+
+        self.provider = Provider()
+
     def test_entity_row_projects_to_display(self) -> None:
         display = self.adapter.project_display(self.make_entity_row())
         self.assertEqual(display.instrument_id, INSTRUMENT_ID)
@@ -679,7 +747,8 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
         self.assertEqual(display.name, "沪深300ETF")
 
     def test_entity_row_projects_to_complete_spec(self) -> None:
-        spec = self.adapter.project_instrument_spec(
+        adapter = make_adapter(FakeStores(), spec_provider=self.provider)
+        spec = adapter.project_instrument_spec(
             self.make_entity_row(), data_cutoff=CUTOFF
         )
         self.assertIsInstance(spec, InstrumentSpec)
@@ -693,11 +762,58 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
         self.assertEqual(spec.contract_multiplier, Decimal("1"))
         self.assertEqual(spec.valid_from, datetime(2012, 5, 28, tzinfo=UTC))
         self.assertIsNone(spec.valid_to)
+        self.assertEqual(self.provider.calls[0][0], INSTRUMENT_ID)
+        self.assertEqual(
+            self.provider.calls[0][1], datetime(2012, 5, 28, tzinfo=UTC)
+        )
 
-    def test_default_adapter_blocks_missing_identity_calendar(self) -> None:
-        strict_adapter = make_adapter(FakeStores())
+    def test_provider_returning_none_does_not_create_a_half_spec(self) -> None:
+        class NullProvider:
+            def resolve_spec(self, instrument_id, *, effective_at, data_cutoff):
+                return None
+
+        adapter = make_adapter(FakeStores(), spec_provider=NullProvider())
+        self.assertIsNone(
+            adapter.project_instrument_spec(
+                self.make_entity_row(), data_cutoff=CUTOFF
+            )
+        )
+
+    def test_provider_identity_mismatch_is_rejected(self) -> None:
+        class WrongIdentityProvider:
+            def resolve_spec(self, instrument_id, *, effective_at, data_cutoff):
+                return self._provider.resolve_spec(
+                    uuid4(), effective_at=effective_at, data_cutoff=data_cutoff
+                )
+
+            _provider = None
+
+        wrong = WrongIdentityProvider()
+        wrong._provider = self.provider
+        adapter = make_adapter(FakeStores(), spec_provider=wrong)
+        with self.assertRaises(ProviderContractViolationError):
+            adapter.project_instrument_spec(
+                self.make_entity_row(), data_cutoff=CUTOFF
+            )
+
+    def test_explicit_effective_date_can_resolve_without_list_date(self) -> None:
+        adapter = make_adapter(FakeStores(), spec_provider=self.provider)
+        explicit_date = date(2012, 6, 1)
+        spec = adapter.project_instrument_spec(
+            self.make_entity_row(list_date=None),
+            effective_date=explicit_date,
+            data_cutoff=CUTOFF,
+        )
+        self.assertIsInstance(spec, InstrumentSpec)
+        self.assertEqual(
+            self.provider.calls[-1][1], datetime(2012, 6, 1, tzinfo=UTC)
+        )
+
+    def test_adapter_without_spec_provider_blocks_without_defaults(self) -> None:
         with self.assertRaises(InstrumentCalendarUnresolvedError):
-            strict_adapter.project_instrument_spec(self.make_entity_row())
+            self.adapter.project_instrument_spec(
+                self.make_entity_row(), data_cutoff=CUTOFF
+            )
 
     def test_rows_without_mandatory_facts_yield_none(self) -> None:
         # No entity binding: no stable identity to project.

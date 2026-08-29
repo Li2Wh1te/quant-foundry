@@ -18,6 +18,24 @@ branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
 
+def _json_storage_type() -> sa.types.TypeEngine:
+    """Use JSONB on PostgreSQL and portable JSON on SQLite smoke tests."""
+
+    return sa.JSON().with_variant(
+        postgresql.JSONB(astext_type=sa.Text()), "postgresql"
+    )
+
+
+def _json_object_check(column: str, name: str) -> sa.CheckConstraint:
+    """Build the object-shape check with the active database's JSON function."""
+
+    dialect = op.get_bind().dialect.name
+    function = "jsonb_typeof" if dialect == "postgresql" else "json_type"
+    return sa.CheckConstraint(
+        f"{function}({column}) = 'object'", name=name
+    )
+
+
 def upgrade() -> None:
     op.create_table(
         "instrument_rule_facts",
@@ -33,7 +51,7 @@ def upgrade() -> None:
         sa.Column("valid_to", sa.Date(), nullable=True, comment="First day (exclusive) after the fact stops being effective; NULL means open-ended."),
         # JSONB is a storage form only: the resolver keeps validating every
         # field; decimals are canonical strings so no JSON floats exist.
-        sa.Column("fields", postgresql.JSONB(astext_type=sa.Text()), nullable=False, comment="Raw rule fields as a JSON object with canonical decimal strings; validated by the rule package resolver."),
+        sa.Column("fields", _json_storage_type(), nullable=False, comment="Raw rule fields as a JSON object with canonical decimal strings; validated by the rule package resolver."),
         sa.Column("source", sa.Text(), nullable=False, comment="Source system that provided the fact."),
         sa.Column("source_revision", sa.Text(), nullable=True, comment="External source revision; never substitutes for fact_key + fact_version."),
         sa.Column("known_at", sa.DateTime(timezone=True), nullable=False, comment="Time at which the fact became known; PIT visibility boundary."),
@@ -42,12 +60,12 @@ def upgrade() -> None:
         sa.Column("fixture_only", sa.Boolean(), nullable=False, comment="True only for test fixtures; formal mode rejects them."),
         sa.Column("content_hash", sa.String(length=64), nullable=False, comment="SHA-256 over the row's canonical content for drift detection."),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False, comment="Time at which the row was stored."),
-        sa.CheckConstraint("length(btrim(fact_key)) > 0", name="fact_key_not_blank"),
-        sa.CheckConstraint("length(btrim(source)) > 0", name="source_not_blank"),
-        sa.CheckConstraint("length(btrim(content_hash)) > 0", name="content_hash_not_blank"),
+        sa.CheckConstraint("length(trim(fact_key)) > 0", name="fact_key_not_blank"),
+        sa.CheckConstraint("length(trim(source)) > 0", name="source_not_blank"),
+        sa.CheckConstraint("length(trim(content_hash)) > 0", name="content_hash_not_blank"),
         sa.CheckConstraint("fact_version > 0", name="fact_version_positive"),
         sa.CheckConstraint("valid_to IS NULL OR valid_to > valid_from", name="valid_interval_ordered"),
-        sa.CheckConstraint("jsonb_typeof(fields) = 'object'", name="fields_is_json_object"),
+        _json_object_check("fields", "fields_is_json_object"),
         sa.CheckConstraint("quality_status IN ('complete', 'incomplete')", name="quality_status_known"),
         sa.CheckConstraint(
             "(rule_exception_key IS NULL AND rule_exception_version IS NULL) "
@@ -83,10 +101,10 @@ def upgrade() -> None:
         sa.Column("fixture_only", sa.Boolean(), nullable=False, comment="True only for test fixtures; formal mode rejects them."),
         sa.Column("content_hash", sa.String(length=64), nullable=False, comment="Order-independent SHA-256 over the set reference and sorted entries."),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False, comment="Time at which the row was stored."),
-        sa.CheckConstraint("length(btrim(set_key)) > 0", name="set_key_not_blank"),
-        sa.CheckConstraint("length(btrim(rule_package_key)) > 0", name="package_key_not_blank"),
-        sa.CheckConstraint("length(btrim(source)) > 0", name="source_not_blank"),
-        sa.CheckConstraint("length(btrim(content_hash)) > 0", name="content_hash_not_blank"),
+        sa.CheckConstraint("length(trim(set_key)) > 0", name="set_key_not_blank"),
+        sa.CheckConstraint("length(trim(rule_package_key)) > 0", name="package_key_not_blank"),
+        sa.CheckConstraint("length(trim(source)) > 0", name="source_not_blank"),
+        sa.CheckConstraint("length(trim(content_hash)) > 0", name="content_hash_not_blank"),
         sa.CheckConstraint("set_version > 0", name="set_version_positive"),
         sa.CheckConstraint("rule_package_version > 0", name="package_version_positive"),
         sa.CheckConstraint("quality_status IN ('complete', 'incomplete')", name="quality_status_known"),
@@ -110,7 +128,7 @@ def upgrade() -> None:
         sa.Column("exception_fact_version", sa.Integer(), nullable=False, comment="Fact version of the exception fact."),
         sa.Column("valid_from", sa.Date(), nullable=False, comment="First day (inclusive) on which the routing applies."),
         sa.Column("valid_to", sa.Date(), nullable=True, comment="First day (exclusive) after the routing stops; NULL means open-ended."),
-        sa.CheckConstraint("length(btrim(exception_fact_key)) > 0", name="exception_fact_key_not_blank"),
+        sa.CheckConstraint("length(trim(exception_fact_key)) > 0", name="exception_fact_key_not_blank"),
         sa.CheckConstraint("exception_fact_version > 0", name="exception_fact_version_positive"),
         sa.CheckConstraint("valid_to IS NULL OR valid_to > valid_from", name="valid_interval_ordered"),
         sa.ForeignKeyConstraint(
@@ -150,11 +168,11 @@ def upgrade() -> None:
         sa.Column("data_cutoff", sa.DateTime(timezone=True), nullable=False, comment="Knowledge cutoff used while resolving all segments."),
         sa.Column("snapshot_hash", sa.String(length=64), nullable=False, comment="Total SHA-256 over the frozen run selection and all segments."),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False, comment="Time at which the snapshot was written."),
-        sa.CheckConstraint("length(btrim(rule_package_key)) > 0", name="package_key_not_blank"),
+        sa.CheckConstraint("length(trim(rule_package_key)) > 0", name="package_key_not_blank"),
         sa.CheckConstraint("rule_package_version > 0", name="package_version_positive"),
-        sa.CheckConstraint("length(btrim(rule_package_semantic_hash)) > 0", name="semantic_hash_not_blank"),
-        sa.CheckConstraint("length(btrim(parser_revision)) > 0", name="parser_revision_not_blank"),
-        sa.CheckConstraint("length(btrim(snapshot_hash)) > 0", name="snapshot_hash_not_blank"),
+        sa.CheckConstraint("length(trim(rule_package_semantic_hash)) > 0", name="semantic_hash_not_blank"),
+        sa.CheckConstraint("length(trim(parser_revision)) > 0", name="parser_revision_not_blank"),
+        sa.CheckConstraint("length(trim(snapshot_hash)) > 0", name="snapshot_hash_not_blank"),
         sa.CheckConstraint(
             "(exception_set_key IS NULL AND exception_set_version IS NULL "
             "AND exception_set_hash IS NULL) OR "
@@ -178,9 +196,9 @@ def upgrade() -> None:
         sa.Column("normal_fact_version", sa.Integer(), nullable=False, comment="Fact version of the ordinary fact actually used."),
         sa.Column("exception_fact_key", sa.Text(), nullable=True, comment="Fact key of the exception fact used, if an exception matched."),
         sa.Column("exception_fact_version", sa.Integer(), nullable=True, comment="Fact version of the exception fact used, if any."),
-        sa.Column("normalized_values", postgresql.JSONB(astext_type=sa.Text()), nullable=False, comment="Frozen normalized rule values; restorable verbatim."),
-        sa.Column("capability_declarations", postgresql.JSONB(astext_type=sa.Text()), nullable=False, comment="Frozen capability declarations including not_applicable entries."),
-        sa.Column("provenance", postgresql.JSONB(astext_type=sa.Text()), nullable=False, comment="Full fact provenance: keys, versions, sources, revisions, windows, knowledge times, quality and fixture flags."),
+        sa.Column("normalized_values", _json_storage_type(), nullable=False, comment="Frozen normalized rule values; restorable verbatim."),
+        sa.Column("capability_declarations", _json_storage_type(), nullable=False, comment="Frozen capability declarations including not_applicable entries."),
+        sa.Column("provenance", _json_storage_type(), nullable=False, comment="Full fact provenance: keys, versions, sources, revisions, windows, knowledge times, quality and fixture flags."),
         sa.Column("resolution_hash", sa.String(length=64), nullable=False, comment="Semantic hash of the resolver outcome frozen into this segment."),
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.func.now(), nullable=False, comment="Time at which the segment was written."),
         sa.CheckConstraint("effective_to IS NULL OR effective_to > effective_from", name="effective_interval_ordered"),
@@ -190,10 +208,10 @@ def upgrade() -> None:
             "(exception_fact_key IS NOT NULL AND exception_fact_version IS NOT NULL)",
             name="exception_fact_paired",
         ),
-        sa.CheckConstraint("jsonb_typeof(normalized_values) = 'object'", name="normalized_values_is_json_object"),
-        sa.CheckConstraint("jsonb_typeof(capability_declarations) = 'object'", name="capability_declarations_is_json_object"),
-        sa.CheckConstraint("jsonb_typeof(provenance) = 'object'", name="provenance_is_json_object"),
-        sa.CheckConstraint("length(btrim(resolution_hash)) > 0", name="resolution_hash_not_blank"),
+        _json_object_check("normalized_values", "normalized_values_is_json_object"),
+        _json_object_check("capability_declarations", "capability_declarations_is_json_object"),
+        _json_object_check("provenance", "provenance_is_json_object"),
+        sa.CheckConstraint("length(trim(resolution_hash)) > 0", name="resolution_hash_not_blank"),
         sa.ForeignKeyConstraint(
             ["instrument_id"],
             ["instruments.id"],

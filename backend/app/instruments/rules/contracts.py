@@ -25,7 +25,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 import hashlib
 import json
@@ -68,6 +68,8 @@ def canonical_payload(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, Decimal):
+        if not value.is_finite():
+            raise DomainValidationError("Decimal values must be finite")
         return canonical_decimal_string(value)
     if isinstance(value, VersionedReference):
         return {"key": value.key, "version": value.version}
@@ -141,6 +143,9 @@ def rule_fact_content_hash(
     drifted even though versions are append-only by contract.
     """
 
+    if not isinstance(fields, Mapping):
+        raise DomainValidationError("fields must be a mapping")
+
     payload = {
         "kind": "instrument_rule_fact",
         "fact_reference": fact_reference,
@@ -149,7 +154,11 @@ def rule_fact_content_hash(
         "exception_fact_ref": exception_fact_ref,
         "valid_from": valid_from,
         "valid_to": valid_to,
-        "fields": dict(fields),
+        # The package defines these four values as Decimal fields.  Normalize
+        # their accepted int/Decimal/string representations before hashing so
+        # equivalent values (for example ``"1.00"`` and ``"1"``) cannot
+        # create different fact identities.
+        "fields": _canonical_rule_fact_fields(fields),
         "source": source,
         "source_revision": source_revision,
         "known_at": known_at,
@@ -158,6 +167,46 @@ def rule_fact_content_hash(
         "fixture_only": fixture_only,
     }
     return stable_hash(canonical_payload(payload))
+
+
+# ``china_listed_etf_rules@1`` is the only rule package currently supported.
+# Keep this list next to the content hash rather than duplicating it in a
+# repository, so storage and resolver use exactly the same canonical payload.
+_DECIMAL_RULE_FACT_FIELDS = frozenset(
+    {"lot_size", "price_tick", "contract_multiplier", "minimum_order_quantity"}
+)
+
+
+def _canonical_rule_fact_fields(fields: Mapping[str, Any]) -> dict[str, Any]:
+    """Canonicalize the package's Decimal fields without hiding bad input.
+
+    Invalid values are left untouched and then rejected by ``canonical_payload``
+    or the rule resolver.  This keeps hashing deterministic while preserving
+    structured field-validation errors at the package boundary.
+    """
+
+    canonical: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key in _DECIMAL_RULE_FACT_FIELDS:
+            if isinstance(value, bool) or isinstance(value, float):
+                # Float values must never enter a production fact hash.
+                raise DomainValidationError(
+                    f"{key} must be Decimal, int, or decimal text"
+                )
+            if isinstance(value, (Decimal, int, str)):
+                try:
+                    decimal_value = value if isinstance(value, Decimal) else Decimal(str(value))
+                except (InvalidOperation, ValueError):
+                    # Preserve invalid text so the resolver can report the
+                    # field-level error instead of silently coercing it.
+                    canonical[key] = value
+                    continue
+                if not decimal_value.is_finite():
+                    raise DomainValidationError(f"{key} must be finite")
+                canonical[key] = canonical_decimal_string(decimal_value)
+                continue
+        canonical[key] = value
+    return canonical
 
 
 def exception_set_content_hash(
@@ -221,6 +270,21 @@ def deep_freeze(value: Any) -> Any:
     if isinstance(value, (set, frozenset)):
         return frozenset(deep_freeze(item) for item in value)
     return value
+
+
+def _contract_tuple(value: Any, field_name: str) -> tuple[Any, ...]:
+    """Coerce a contract collection while rejecting scalar text values."""
+
+    if isinstance(value, (str, bytes)):
+        raise DomainValidationError(
+            f"{field_name} must be an iterable, not text"
+        )
+    try:
+        return tuple(value)
+    except TypeError as exc:
+        raise DomainValidationError(
+            f"{field_name} must be an iterable"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +457,23 @@ class RuleExceptionPolicy:
     carries_production_values: bool = False
 
     def __post_init__(self) -> None:
-        keys = tuple(self.allowed_match_keys)
-        if not keys or any(not isinstance(key, str) or not key for key in keys):
+        keys = _contract_tuple(self.allowed_match_keys, "allowed_match_keys")
+        if any(not isinstance(key, str) or not key.strip() for key in keys):
             raise DomainValidationError(
-                "allowed_match_keys must be a non-empty tuple of strings"
+                "allowed_match_keys must contain non-blank strings"
             )
-        object.__setattr__(self, "allowed_match_keys", keys)
+        # v1 only permits stable identity plus an explicit validity interval;
+        # trading codes, names, exchanges, and wildcards are not matching
+        # keys.  Normalize the order so policy input order cannot alter the
+        # package semantic hash.
+        normalized = tuple(key.strip() for key in keys)
+        expected = ("instrument_id", "validity_interval")
+        if set(normalized) != set(expected) or len(normalized) != len(expected):
+            raise DomainValidationError(
+                "v1 exception policy must allow exactly instrument_id and "
+                "validity_interval"
+            )
+        object.__setattr__(self, "allowed_match_keys", expected)
         if not isinstance(self.carries_production_values, bool):
             raise DomainValidationError(
                 "carries_production_values must be a boolean"
@@ -432,18 +507,24 @@ class RulePackageDefinition:
     def __post_init__(self) -> None:
         if not isinstance(self.reference, VersionedReference):
             raise DomainValidationError("reference must be a VersionedReference")
-        asset_classes = frozenset(self.supported_asset_classes)
-        if not asset_classes or any(
-            not isinstance(item, str) or not item.strip()
-            for item in asset_classes
+        asset_items = _contract_tuple(
+            self.supported_asset_classes, "supported_asset_classes"
+        )
+        if not asset_items or any(
+            not isinstance(item, str) or not item.strip() for item in asset_items
         ):
             raise DomainValidationError(
                 "supported_asset_classes must be a non-empty set of labels"
             )
+        asset_classes = frozenset(asset_items)
         object.__setattr__(self, "supported_asset_classes", asset_classes)
 
+        field_definitions = _contract_tuple(
+            self.field_definitions, "field_definitions"
+        )
+        object.__setattr__(self, "field_definitions", field_definitions)
         names: list[str] = []
-        for field_definition in self.field_definitions:
+        for field_definition in field_definitions:
             if not isinstance(field_definition, RuleFieldDefinition):
                 raise DomainValidationError(
                     "field_definitions must contain RuleFieldDefinition instances"
@@ -456,19 +537,41 @@ class RulePackageDefinition:
         if not names:
             raise DomainValidationError("field_definitions must not be empty")
 
-        schema = tuple(self.capability_schema)
-        if len(set(schema)) != len(schema) or not schema:
+        schema = _contract_tuple(self.capability_schema, "capability_schema")
+        if not schema or any(
+            not isinstance(item, str) or not item.strip() for item in schema
+        ):
+            raise DomainValidationError(
+                "capability_schema must be a non-empty tuple of unique dimensions"
+            )
+        if len(set(schema)) != len(schema):
             raise DomainValidationError(
                 "capability_schema must be a non-empty tuple of unique dimensions"
             )
         object.__setattr__(self, "capability_schema", schema)
 
-        known = frozenset(self.known_settlement_rule_classes)
-        formal = frozenset(self.formal_settlement_rule_classes)
-        if not known:
+        known_items = _contract_tuple(
+            self.known_settlement_rule_classes,
+            "known_settlement_rule_classes",
+        )
+        formal_items = _contract_tuple(
+            self.formal_settlement_rule_classes,
+            "formal_settlement_rule_classes",
+        )
+        if not known_items or any(
+            not isinstance(item, str) or not item.strip() for item in known_items
+        ):
             raise DomainValidationError(
                 "known_settlement_rule_classes must not be empty"
             )
+        if any(
+            not isinstance(item, str) or not item.strip() for item in formal_items
+        ):
+            raise DomainValidationError(
+                "formal_settlement_rule_classes must contain non-blank strings"
+            )
+        known = frozenset(known_items)
+        formal = frozenset(formal_items)
         if not formal <= known:
             raise DomainValidationError(
                 "formal_settlement_rule_classes must be a subset of known classes"
@@ -481,7 +584,7 @@ class RulePackageDefinition:
                 "exception_policy must be a RuleExceptionPolicy"
             )
 
-        parse_order = tuple(self.parse_order)
+        parse_order = _contract_tuple(self.parse_order, "parse_order")
         if not parse_order or any(
             not isinstance(step, str) or not step.strip() for step in parse_order
         ):
@@ -670,9 +773,14 @@ class RuleFactCandidate:
             )
         if not isinstance(self.content_hash, str) or not self.content_hash.strip():
             raise DomainValidationError("content_hash must be non-blank text")
-        object.__setattr__(
-            self, "content_hash", self.content_hash.strip()
-        )
+        normalized_hash = self.content_hash.strip()
+        if len(normalized_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in normalized_hash
+        ):
+            raise DomainValidationError(
+                "content_hash must be a 64-character lowercase SHA-256 hex digest"
+            )
+        object.__setattr__(self, "content_hash", normalized_hash)
         if not isinstance(self.instrument_id, UUID):
             raise DomainValidationError(
                 "instrument_id must be a UUID (stable instrument identity)"
@@ -688,6 +796,17 @@ class RuleFactCandidate:
                 "exception_fact_ref must be a VersionedReference when provided"
             )
         object.__setattr__(self, "source", _required_label(self.source, "source"))
+        if self.source_revision is not None:
+            if not isinstance(self.source_revision, str):
+                raise DomainValidationError(
+                    "source_revision must be text when provided"
+                )
+            source_revision = self.source_revision.strip()
+            if not source_revision:
+                raise DomainValidationError(
+                    "source_revision must be non-blank when provided"
+                )
+            object.__setattr__(self, "source_revision", source_revision)
         _validate_interval(self.valid_from, self.valid_to, prefix="")
         if not isinstance(self.quality_status, FactQualityStatus):
             raise DomainValidationError(
