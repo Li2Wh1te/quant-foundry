@@ -2005,7 +2005,10 @@ def resolve_pit_mappings(
                 ),
             )
         chosen = covering[0]
-        if not chosen.evidence.strip():
+        # Guard corrupted provider materializations as well as the normal
+        # constructor invariant: a missing/non-text evidence value is a
+        # named mapping block, never an incidental AttributeError.
+        if not isinstance(chosen.evidence, str) or not chosen.evidence.strip():
             # InstrumentCodeMapping already rejects blank evidence at
             # construction; the check keeps corrupted providers from
             # bypassing that contract through exotic construction paths.

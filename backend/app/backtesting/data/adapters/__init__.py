@@ -9,6 +9,10 @@ model: they project repository rows through the PIT read path of
 
 from app.backtesting.data.adapters.etf import (
     ADJUSTMENT_SERIES_POLICY,
+    ETF_ADAPTER_KEY,
+    ETF_ADAPTER_VERSION,
+    ETF_VALIDATION_RULE_KEY,
+    ETF_VALIDATION_RULE_VERSION,
     ETF_PROVIDER_KEY,
     ETF_RULE_PACKAGE,
     EtfFactsAdapter,
@@ -17,6 +21,10 @@ from app.backtesting.data.adapters.etf import (
 
 __all__ = [
     "ADJUSTMENT_SERIES_POLICY",
+    "ETF_ADAPTER_KEY",
+    "ETF_ADAPTER_VERSION",
+    "ETF_VALIDATION_RULE_KEY",
+    "ETF_VALIDATION_RULE_VERSION",
     "ETF_PROVIDER_KEY",
     "ETF_RULE_PACKAGE",
     "EtfFactsAdapter",

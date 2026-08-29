@@ -21,6 +21,7 @@ from app.backtesting.data.errors import (
     HistoryBarsDuplicateError,
     HistoryBarsIncompleteError,
     IdentityMappingConflictError,
+    IdentityMappingEvidenceMissingError,
     IdentityMappingIncompleteError,
     InvalidDataRequestError,
     LookbackSessionsLimitExceededError,
@@ -295,6 +296,25 @@ class MappingGapAndConflictTestCase(FixtureTestCase):
                 boundary=QueryBoundary(data_cutoff=late_cutoff, include_cutoff_day=True),
                 data_cutoff=late_cutoff,
             )
+
+    def test_corrupted_non_text_mapping_evidence_is_named_failure(self) -> None:
+        mapping = make_mapping("NO-EVIDENCE.CODE", date(2025, 1, 1))
+        object.__setattr__(mapping, "evidence", None)
+        fixture = self.build_fixture(
+            mappings=[mapping],
+            bar_rows=[make_bar_row(date(2025, 1, 2), "NO-EVIDENCE.CODE")],
+        )
+
+        with self.assertRaises(IdentityMappingEvidenceMissingError) as context:
+            fixture.bars(
+                sessions=[date(2025, 1, 2)],
+                window=DateRange(
+                    start_date=date(2025, 1, 2), end_date=date(2025, 1, 2)
+                ),
+                boundary=BOUNDARY,
+                data_cutoff=CUTOFF,
+            )
+        self.assertIsNone(context.exception.details["actual"])
 
 
 class LookbackBoundaryTestCase(FixtureTestCase):

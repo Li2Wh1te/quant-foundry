@@ -1193,6 +1193,10 @@ class BarQuery:
     frequency: str
     boundary: QueryBoundary
     window: DateRange | LookbackWindow
+    # Price basis is explicit on every bar query.  Keeping the default at
+    # ``raw`` preserves compatibility with existing callers while preventing
+    # a provider from having to infer a basis from the selected series.
+    price_basis: PriceBasis = PriceBasis.RAW
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1205,6 +1209,8 @@ class BarQuery:
         )
         if not isinstance(self.boundary, QueryBoundary):
             raise InvalidDataRequestError("boundary must be a QueryBoundary")
+        if not isinstance(self.price_basis, PriceBasis):
+            raise InvalidDataRequestError("price_basis must be a PriceBasis")
         _require_single_window(self.window, "window")
         if isinstance(self.window, DateRange):
             self.boundary.require_not_past_cutoff(

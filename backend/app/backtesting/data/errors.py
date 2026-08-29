@@ -38,6 +38,8 @@ __all__ = [
     "HistoryBarsDuplicateError",
     "HistoryBarsIncompleteError",
     "HistoryIncompleteError",
+    "BarInvalidError",
+    "BarFieldMissingError",
     "IdentityMappingConflictError",
     "IdentityMappingEvidenceMissingError",
     "IdentityMappingIncompleteError",
@@ -222,6 +224,18 @@ class HistoryIncompleteError(DataContractError):
     """Required history facts are missing; gaps are never repaired."""
 
     code = "history_incomplete"
+
+
+class BarInvalidError(DataContractError):
+    """An ETF bar failed its versioned OHLC validity rules."""
+
+    code = "bar_invalid"
+
+
+class BarFieldMissingError(DataContractError):
+    """A required OHLC field is absent from an ETF bar."""
+
+    code = "bar_field_missing"
 
 
 class ConsistencyNotValidatedError(DataContractError):
@@ -448,6 +462,8 @@ ERROR_CODES: frozenset[str] = frozenset(
         IdentityMappingConflictError,
         IdentityMappingEvidenceMissingError,
         HistoryIncompleteError,
+        BarInvalidError,
+        BarFieldMissingError,
         HistoryBarsIncompleteError,
         HistoryBarsDuplicateError,
         HistoryBarInstrumentMismatchError,

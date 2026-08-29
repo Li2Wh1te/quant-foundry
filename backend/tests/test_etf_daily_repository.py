@@ -51,3 +51,23 @@ class EtfDailyBarRepositoryTestCase(unittest.TestCase):
             )
 
         session.execute.assert_not_called()
+
+    def test_list_bars_is_source_and_code_scoped_in_ascending_date_order(self) -> None:
+        session = Mock()
+        session.scalars.return_value.all.return_value = []
+
+        result = EtfDailyBarRepository(session).list_bars(
+            source="tushare",
+            ts_code="510330.SH",
+            start_date=date(2026, 8, 1),
+            end_date=date(2026, 8, 31),
+        )
+
+        self.assertEqual(result, ())
+        statement = session.scalars.call_args.args[0]
+        sql = str(statement.compile(dialect=postgresql.dialect()))
+        self.assertIn("etf_daily_bars.source = %(source_1)s", sql)
+        self.assertIn("etf_daily_bars.ts_code = %(ts_code_1)s", sql)
+        self.assertIn("etf_daily_bars.trade_date >= %(trade_date_1)s", sql)
+        self.assertIn("etf_daily_bars.trade_date <= %(trade_date_2)s", sql)
+        self.assertIn("ORDER BY etf_daily_bars.trade_date ASC", sql)

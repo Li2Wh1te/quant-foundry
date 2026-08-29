@@ -51,6 +51,7 @@ from app.backtesting.data.requests import (
     LookbackWindow,
     MAX_LOOKBACK_SESSIONS,
     PriceBasis,
+    QualityStatus,
     QueryBoundary,
     TradingRuleQuery,
     TradingStatusQuery,
@@ -372,6 +373,21 @@ class ChunkStrategyDataView:
                 raise InvalidProviderResultError(
                     "provider returned a bar with a non-raw price basis"
                 )
+            # Invalid/partial facts are useful to preflight, but they are
+            # never allowed across the strategy-consumption boundary.
+            if row.evidence.quality_status is not QualityStatus.COMPLETE:
+                raise InvalidProviderResultError(
+                    "provider returned an incomplete or invalid bar"
+                )
+            # Enforce the generic OHLC safety invariant at the last boundary;
+            # asset adapters may add stricter rules, but no strategy should
+            # ever receive an inverted range or an open/close outside it.
+            if row.high < row.low or not (row.low <= row.open <= row.high) or not (
+                row.low <= row.close <= row.high
+            ):
+                raise InvalidProviderResultError(
+                    "provider returned a bar with invalid OHLC relationships"
+                )
             if row.trade_date > cutoff_date:
                 raise InvalidProviderResultError(
                     f"provider returned bar {row.trade_date.isoformat()} "
@@ -402,6 +418,7 @@ class ChunkStrategyDataView:
                     {
                         field_name: Decimal(str(getattr(row, field_name)))
                         for field_name in _BAR_VALUE_FIELDS
+                        if getattr(row, field_name) is not None
                     }
                 ),
             )

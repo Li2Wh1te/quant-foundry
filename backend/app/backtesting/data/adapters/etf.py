@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
@@ -83,6 +83,10 @@ from app.instruments.references import VersionedReference
 
 __all__ = [
     "ADJUSTMENT_SERIES_POLICY",
+    "ETF_ADAPTER_KEY",
+    "ETF_ADAPTER_VERSION",
+    "ETF_VALIDATION_RULE_KEY",
+    "ETF_VALIDATION_RULE_VERSION",
     "ETF_PROVIDER_KEY",
     "ETF_RULE_PACKAGE",
     "EtfFactsAdapter",
@@ -92,6 +96,14 @@ __all__ = [
 
 ETF_PROVIDER_KEY = "etf_ingestion"
 """Stable provider key declared by the ETF ingestion data foundation."""
+
+# These identifiers are intentionally owned by the adapter rather than the
+# engine.  Persisting the identifiers in preflight evidence makes a replay
+# auditable when the ETF-specific legality rules evolve.
+ETF_ADAPTER_KEY = "etf_raw_bar_adapter"
+ETF_ADAPTER_VERSION = "etf_raw_bar_adapter@1"
+ETF_VALIDATION_RULE_KEY = "etf_raw_bar_validation"
+ETF_VALIDATION_RULE_VERSION = "etf_raw_bar_validation@1"
 
 ETF_RULE_PACKAGE = ("china_listed_etf_rules", 1)
 """Versioned rule package whose frozen defaults back the spec projection."""
@@ -175,12 +187,12 @@ class DailyBarRow(Protocol):
 
     ts_code: str
     trade_date: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    vol: Decimal
-    amount: Decimal
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    vol: Decimal | None
+    amount: Decimal | None
     updated_at: datetime
 
 
@@ -193,25 +205,121 @@ class AdjustmentFactorRow(Protocol):
     updated_at: datetime
 
 
+def _decimal_or_none(value: object) -> Decimal | None:
+    """Read a finite source value for validation without changing its value."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool) or isinstance(value, float):
+        # ``project_bar`` will reject these at the generic fact boundary.  A
+        # validation issue still gives preflight a useful, JSON-safe reason.
+        return None
+    try:
+        result = value if isinstance(value, Decimal) else Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return None
+    return result if result.is_finite() else None
+
+
+def _raw_value(value: object) -> str | None:
+    """Serialize one raw value without introducing binary floating point."""
+
+    if value is None:
+        return None
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    return str(value)
+
+
+def _bar_validation_issues(
+    row: DailyBarRow,
+    *,
+    instrument_id: UUID | None = None,
+    source: str = ETF_PROVIDER_KEY,
+    source_code: str | None = None,
+) -> tuple[dict[str, object], ...]:
+    """Return one JSON-safe issue per failed ETF v1 OHLC rule.
+
+    This function only observes source values.  It never repairs, drops, or
+    replaces an invalid value; callers may therefore retain the raw row for
+    an auditable preflight report while withholding it from execution.
+    """
+
+    code = source_code if source_code is not None else getattr(row, "ts_code", None)
+    common: dict[str, object] = {
+        "instrument_id": str(instrument_id) if instrument_id is not None else None,
+        "trade_date": (
+            row.trade_date.isoformat()
+            if isinstance(getattr(row, "trade_date", None), date)
+            else None
+        ),
+        "source": source,
+        "source_code": code,
+        "rule_key": ETF_VALIDATION_RULE_KEY,
+        "rule_version": ETF_VALIDATION_RULE_VERSION,
+        "adapter_key": ETF_ADAPTER_KEY,
+        "adapter_version": ETF_ADAPTER_VERSION,
+    }
+    issues: list[dict[str, object]] = []
+
+    def add(field: str, raw: object, reason: str, *, code_name: str) -> None:
+        issues.append(
+            {
+                **common,
+                "field": field,
+                "raw_value": _raw_value(raw),
+                "reason": reason,
+                "code": code_name,
+            }
+        )
+
+    values = {
+        field: getattr(row, field, None)
+        for field in ("open", "high", "low", "close")
+    }
+    parsed = {field: _decimal_or_none(value) for field, value in values.items()}
+    for field, value in values.items():
+        if value is None:
+            add(field, value, "missing_ohlc_field", code_name="bar_field_missing")
+            continue
+        numeric = parsed[field]
+        if numeric is None:
+            add(field, value, "invalid_decimal", code_name="bar_invalid")
+        elif numeric <= 0:
+            add(field, value, "non_positive_price", code_name="bar_invalid")
+
+    high, low = parsed["high"], parsed["low"]
+    if high is not None and low is not None and high < low:
+        add("high", values["high"], "high_below_low", code_name="bar_invalid")
+    for field in ("open", "close"):
+        value = parsed[field]
+        if (
+            value is not None
+            and value > 0
+            and low is not None
+            and high is not None
+            and low <= high
+            and not (low <= value <= high)
+        ):
+            add(field, values[field], "price_outside_low_high", code_name="bar_invalid")
+    return tuple(issues)
+
+
 def _bar_quality(row: DailyBarRow) -> QualityStatus:
     """Classify a raw bar row without repairing anything.
 
-    A row is consumable (``complete``) only when every price is strictly
-    positive and ``low <= high``; volume and amount must be non-negative.
+    A row is consumable (``complete``) only when every OHLC price is strictly
+    positive and satisfies the ETF range rules.  Volume and amount have no
+    business-validity rule in this task and are therefore preserved as-is.
     Everything else stays an explicit ``invalid`` fact with its original
     values so coverage and preflight can block on it.
     """
 
-    prices = (row.open, row.high, row.low, row.close)
-    if any(price is None or price <= 0 for price in prices):
-        return QualityStatus.INVALID
-    if row.low > row.high:
-        return QualityStatus.INVALID
-    if (row.vol is not None and row.vol < 0) or (
-        row.amount is not None and row.amount < 0
-    ):
-        return QualityStatus.INVALID
-    return QualityStatus.COMPLETE
+    return (
+        QualityStatus.INVALID
+        if _bar_validation_issues(row)
+        else QualityStatus.COMPLETE
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,6 +599,12 @@ class EtfFactsAdapter:
         """
 
         quality = _bar_quality(row)
+        source_code = getattr(row, "ts_code", None)
+        missing_reasons = {
+            ("volume" if field == "vol" else field): "source_field_missing"
+            for field in ("open", "high", "low", "close", "vol", "amount")
+            if getattr(row, field, None) is None
+        }
         return Bar(
             instrument_id=instrument_id,
             trade_date=row.trade_date,
@@ -508,6 +622,44 @@ class EtfFactsAdapter:
                 quality_status=quality,
                 known_at=None,
             ),
+            validation_rule_version=ETF_VALIDATION_RULE_VERSION,
+            attributes={
+                "source_code": source_code,
+                "field_units": {
+                    "open": "CNY",
+                    "high": "CNY",
+                    "low": "CNY",
+                    "close": "CNY",
+                    "volume": "lot",
+                    "amount": "thousand_CNY",
+                },
+                "missing_reasons": missing_reasons,
+                "adapter_key": ETF_ADAPTER_KEY,
+                "adapter_version": ETF_ADAPTER_VERSION,
+                "validation_rule_version": ETF_VALIDATION_RULE_VERSION,
+            },
+        )
+
+    def validate_bar(
+        self,
+        row: DailyBarRow | Bar,
+        instrument_id: UUID | None = None,
+        *,
+        source_code: str | None = None,
+    ) -> tuple[dict[str, object], ...]:
+        """Return JSON-safe ETF v1 legality issues for one raw/projection row."""
+
+        if isinstance(row, Bar):
+            instrument_id = instrument_id or row.instrument_id
+            source = row.evidence.source
+            source_code = source_code or getattr(row, "attributes", {}).get("source_code")
+        else:
+            source = self.source
+        return _bar_validation_issues(
+            row,
+            instrument_id=instrument_id,
+            source=source,
+            source_code=source_code,
         )
 
     @staticmethod
@@ -597,6 +749,113 @@ class EtfFactsAdapter:
             self._segment_bar_reader(instrument_id),
             allow_non_strict_facts=True,
         )
+
+    def preflight_bars(
+        self,
+        instrument_id: UUID,
+        *,
+        resolution: PITMappingResolution,
+    ) -> dict[str, object]:
+        """Read raw bars for admission checks, retaining invalid facts.
+
+        ``bars()`` deliberately applies the generic complete-quality gate
+        before formal consumption.  Admission preflight needs the opposite
+        view: an invalid source row must be visible as evidence, not silently
+        look like a missing row.  This method therefore performs only the
+        structural checks needed to build a report and never returns a row to
+        strategy code.
+        """
+
+        if resolution.instrument_id != instrument_id:
+            raise ProviderContractViolationError(
+                "bar preflight resolution belongs to another instrument",
+                details={
+                    "instrument_id": str(instrument_id),
+                    "resolution_instrument_id": str(resolution.instrument_id),
+                },
+            )
+        returned_dates: list[date] = []
+        out_of_window: list[date] = []
+        duplicate_dates: list[date] = []
+        seen: set[date] = set()
+        invalid_bars: list[dict[str, object]] = []
+        for segment in resolution.segments:
+            for raw in self.daily_bars(
+                segment.source_code,
+                segment.first_requested_session,
+                segment.last_requested_session,
+            ):
+                self.require_row_code(raw, segment.source_code)
+                bar = self.project_bar(raw, instrument_id)
+                returned_dates.append(bar.trade_date)
+                if bar.trade_date in seen:
+                    duplicate_dates.append(bar.trade_date)
+                seen.add(bar.trade_date)
+                if bar.trade_date not in segment.requested_sessions:
+                    out_of_window.append(bar.trade_date)
+                invalid_bars.extend(self.validate_bar(bar, instrument_id))
+        expected = list(resolution.requested_sessions)
+        missing = sorted(set(expected) - set(returned_dates))
+        structurally_complete = not (missing or duplicate_dates or out_of_window)
+        status = "ready" if structurally_complete and not invalid_bars else "blocked"
+        return {
+            "status": status,
+            "instrument_id": str(instrument_id),
+            "source": resolution.source,
+            "frequency": "1d",
+            "price_basis": PriceBasis.RAW.value,
+            "requested_range": {
+                "start_date": expected[0].isoformat() if expected else None,
+                "end_date": expected[-1].isoformat() if expected else None,
+            },
+            "expected_sessions": len(expected),
+            "returned_sessions": len(set(returned_dates)),
+            "missing_sessions": [day.isoformat() for day in missing],
+            "duplicate_sessions": sorted({day.isoformat() for day in duplicate_dates}),
+            "out_of_window_sessions": sorted({day.isoformat() for day in out_of_window}),
+            "mapping_segments": [
+                {
+                    "source_code": segment.source_code,
+                    "first_session": segment.first_requested_session.isoformat(),
+                    "last_session": segment.last_requested_session.isoformat(),
+                    "requested_sessions": [day.isoformat() for day in segment.requested_sessions],
+                    "fact_id": str(segment.fact_id) if segment.fact_id else None,
+                    "fact_version": segment.fact_version,
+                    "mapping_evidence": segment.mapping.evidence,
+                }
+                for segment in resolution.segments
+            ],
+            "invalid_bars": invalid_bars,
+            "adapter_key": ETF_ADAPTER_KEY,
+            "adapter_version": ETF_ADAPTER_VERSION,
+            "rule_key": ETF_VALIDATION_RULE_KEY,
+            "rule_version": ETF_VALIDATION_RULE_VERSION,
+        }
+
+    def bar_validity_summary(
+        self,
+        rows: Sequence[DailyBarRow | Bar],
+        *,
+        instrument_id: UUID | None = None,
+    ) -> dict[str, object]:
+        """Summarize ETF v1 validity without dropping raw source rows."""
+
+        invalid_bars: list[dict[str, object]] = []
+        for row in rows:
+            invalid_bars.extend(self.validate_bar(row, instrument_id))
+        return {
+            "status": "blocked" if invalid_bars else "ready",
+            "adapter_key": ETF_ADAPTER_KEY,
+            "adapter_version": ETF_ADAPTER_VERSION,
+            "rule_key": ETF_VALIDATION_RULE_KEY,
+            "rule_version": ETF_VALIDATION_RULE_VERSION,
+            "invalid_count": len({
+                (item.get("instrument_id"), item.get("trade_date"))
+                for item in invalid_bars
+            }),
+            "invalid_field_count": len(invalid_bars),
+            "invalid_bars": invalid_bars,
+        }
 
     # ------------------------------------------------------------------
     # Adjustment factors
@@ -793,6 +1052,9 @@ class EtfFactsAdapter:
         daily_rows: Sequence[DailyBarRow] = (),
         factor_rows: Sequence[AdjustmentFactorRow] = (),
         blocking_issues: Sequence[Mapping[str, object]] = (),
+        requested_range: Mapping[str, object] | None = None,
+        lookback_sessions: int | None = None,
+        max_lookback_sessions: int = 512,
     ) -> dict[str, object]:
         """Assemble the machine summary consumed by result records.
 
@@ -801,6 +1063,18 @@ class EtfFactsAdapter:
         changes when source revisions, coverage, mappings, or the
         adjustment-policy activation state change.
         """
+
+        # Keep one issue record per failed field.  This gives the report a
+        # precise raw value while ``bar_validity_summary`` below provides the
+        # bar-level counts operators need at a glance.
+        invalid_bars: list[dict[str, object]] = []
+        for row in daily_rows:
+            row_instrument_id = getattr(row, "instrument_id", None)
+            if row_instrument_id is None and len(instrument_ids) == 1:
+                row_instrument_id = instrument_ids[0]
+            invalid_bars.extend(
+                self.validate_bar(row, row_instrument_id)
+            )
 
         factor_coverage: dict[str, object] = {}
         if factors_by_instrument is not None:
@@ -832,9 +1106,42 @@ class EtfFactsAdapter:
                 ]
                 for instrument_id in instrument_ids
             }
+        expected_range = dict(requested_range or {})
+        if not expected_range and expected_sessions:
+            expected_range = {
+                "start_date": min(expected_sessions).isoformat(),
+                "end_date": max(expected_sessions).isoformat(),
+            }
+        issues_payload = [dict(issue) for issue in blocking_issues]
+        # Invalid bars are blocking issues, but remain separately indexed in
+        # ``invalid_bars`` so callers can render the original field/value.
+        issues_payload.extend(
+            {
+                "code": item.get("code", "bar_invalid"),
+                "instrument_id": item.get("instrument_id"),
+                "trade_date": item.get("trade_date"),
+                "field": item.get("field"),
+                "reason": item.get("reason"),
+            }
+            for item in invalid_bars
+        )
         summary: dict[str, object] = {
             "provider_key": ETF_PROVIDER_KEY,
+            "adapter_key": ETF_ADAPTER_KEY,
+            "adapter_version": ETF_ADAPTER_VERSION,
+            "validation_rule_version": ETF_VALIDATION_RULE_VERSION,
             "data_contract_version": 1,
+            "capability": "bars",
+            "frequency": "1d",
+            "price_basis": PriceBasis.RAW.value,
+            "requested_range": expected_range,
+            "lookback_sessions": lookback_sessions,
+            "max_lookback_sessions": max_lookback_sessions,
+            "expected_sessions": len(expected_sessions),
+            "returned_sessions": sum(
+                len(set(bars_by_instrument.get(instrument_id, ())))
+                for instrument_id in instrument_ids
+            ),
             "adjustment_series_policy": {
                 "key": ADJUSTMENT_SERIES_POLICY[0],
                 "version": ADJUSTMENT_SERIES_POLICY[1],
@@ -867,6 +1174,7 @@ class EtfFactsAdapter:
                     else {}
                 ),
             },
+            "mapping_segments": mapping_summary,
             "source_revisions": {
                 "daily_bars": {
                     "source": self.source,
@@ -877,8 +1185,33 @@ class EtfFactsAdapter:
                     "latest_observed_at": self.revision_stamp(factor_rows),
                 },
             },
-            "issues": [dict(issue) for issue in blocking_issues],
+            "invalid_bars": invalid_bars,
+            "bar_validity_summary": {
+                "adapter_key": ETF_ADAPTER_KEY,
+                "adapter_version": ETF_ADAPTER_VERSION,
+                "rule_key": ETF_VALIDATION_RULE_KEY,
+                "rule_version": ETF_VALIDATION_RULE_VERSION,
+                "invalid_count": len({
+                    (item.get("instrument_id"), item.get("trade_date"))
+                    for item in invalid_bars
+                }),
+                "invalid_field_count": len(invalid_bars),
+                "blocked": bool(invalid_bars),
+                "invalid_bars": invalid_bars,
+            },
+            "issues": issues_payload,
         }
+        coverage_values = [
+            self.coverage_summary(expected_sessions, bars_by_instrument.get(instrument_id, ()))
+            for instrument_id in instrument_ids
+        ]
+        summary["status"] = (
+            "blocked"
+            if invalid_bars
+            or blocking_issues
+            or any(item["status"] != "complete" for item in coverage_values)
+            else "ready"
+        )
         summary["report_hash"] = canonical_hash(summary)
         return summary
 
@@ -925,15 +1258,24 @@ def build_data_preflight_payloads(
         coverage_payload["adjustment_series_validation"] = summary[
             "adjustment_series_validation"
         ]
+    for field in ("bar_validity_summary", "invalid_bars"):
+        if summary.get(field) is not None:
+            coverage_payload[field] = summary[field]
     issues = summary.get("issues", [])
     failure_reason = None
     if issues:
         first = issues[0]
         failure_reason = str(first.get("code", "history_incomplete"))
+    elif summary.get("invalid_bars"):
+        first_invalid = summary["invalid_bars"][0]
+        failure_reason = str(first_invalid.get("code", "bar_invalid"))
     return {
         "capabilities": {
             "provider_key": summary.get("provider_key"),
             "data_contract_version": summary.get("data_contract_version"),
+            "adapter_key": summary.get("adapter_key"),
+            "adapter_version": summary.get("adapter_version"),
+            "validation_rule_version": summary.get("validation_rule_version"),
             "adjustment_series_policy": summary.get("adjustment_series_policy"),
         },
         "coverage": coverage_payload,

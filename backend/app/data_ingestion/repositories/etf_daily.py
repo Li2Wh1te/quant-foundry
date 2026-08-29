@@ -1,8 +1,9 @@
 """PostgreSQL persistence for current authoritative ETF daily bars."""
 
 from collections.abc import Iterable
+from datetime import date
 
-from sqlalchemy import func, or_
+from sqlalchemy import func, or_, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
@@ -68,6 +69,38 @@ class EtfDailyBarRepository:
         return EtfDailyBarUpsertResult(
             received=len(bars), changed=changed, unchanged=len(bars) - changed
         )
+
+    def list_bars(
+        self,
+        *,
+        source: str,
+        ts_code: str,
+        start_date: date | None = None,
+        end_date: date | None = None,
+    ) -> tuple[EtfDailyBar, ...]:
+        """Read source bars for one code without changing transaction state.
+
+        The source code is deliberately explicit here: PIT adapters call this
+        method for one resolved mapping segment and must never fall back to the
+        latest ``EtfCode`` association.  Date predicates are inclusive to
+        match the persisted daily-bar primary key and the generic DateRange
+        contract.
+        """
+
+        filters: list[object] = [
+            EtfDailyBar.source == source,
+            EtfDailyBar.ts_code == ts_code,
+        ]
+        if start_date is not None:
+            filters.append(EtfDailyBar.trade_date >= start_date)
+        if end_date is not None:
+            filters.append(EtfDailyBar.trade_date <= end_date)
+        statement = (
+            select(EtfDailyBar)
+            .where(*filters)
+            .order_by(EtfDailyBar.trade_date.asc())
+        )
+        return tuple(self.session.scalars(statement).all())
 
     @staticmethod
     def _reject_duplicate_keys(bars: list[EtfDailyBarInput]) -> None:

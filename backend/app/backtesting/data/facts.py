@@ -39,6 +39,7 @@ from app.instruments.domain import (
 __all__ = [
     "AdjustedSeriesPoint",
     "Bar",
+    "BarFact",
     "ClosePriceFact",
     "CorporateAction",
     "DataPoint",
@@ -321,16 +322,18 @@ class Bar:
     instrument_id: UUID
     trade_date: date
     frequency: str
-    open: Decimal | int | str
-    high: Decimal | int | str
-    low: Decimal | int | str
-    close: Decimal | int | str
-    volume: Decimal | int | str
-    amount: Decimal | int | str
-    price_basis: PriceBasis
-    evidence: FactEvidence
+    open: Decimal | int | str | None = None
+    high: Decimal | int | str | None = None
+    low: Decimal | int | str | None = None
+    close: Decimal | int | str | None = None
+    volume: Decimal | int | str | None = None
+    amount: Decimal | int | str | None = None
+    price_basis: PriceBasis = PriceBasis.RAW
+    evidence: FactEvidence | None = None
     schema: ContractRef | None = None
     attributes: Mapping[str, object] = MappingProxyType({})
+    validation_rule_version: ContractRef | str | None = None
+    open_interest: Decimal | int | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -345,29 +348,89 @@ class Bar:
             raise ProviderContractViolationError("evidence must be a FactEvidence")
         if not isinstance(self.price_basis, PriceBasis):
             raise ProviderContractViolationError("price_basis must be a PriceBasis")
-        # Consumability is decided by the declared quality: complete facts
-        # must be sane, everything else keeps its raw values for audit.
+        # Complete bars require usable OHLC; non-complete facts retain all
+        # source values (including missing and illegal numbers) for audit.
         consumable = self.evidence.quality_status is QualityStatus.COMPLETE
         for name in ("open", "high", "low", "close"):
             value = getattr(self, name)
             normalized = (
                 _positive_decimal(value, name)
                 if consumable
-                else _finite_decimal(value, name)
+                else (None if value is None else _finite_decimal(value, name))
             )
             object.__setattr__(self, name, normalized)
+        if consumable:
+            # A complete fact is safe for downstream consumption only when
+            # its OHLC interval is internally coherent.  Invalid source
+            # values use a non-complete quality and are preserved above.
+            if self.high < self.low:
+                raise ProviderContractViolationError("high must not be below low")
+            if self.open < self.low or self.open > self.high:
+                raise ProviderContractViolationError(
+                    "open must be within the [low, high] range"
+                )
+            if self.close < self.low or self.close > self.high:
+                raise ProviderContractViolationError(
+                    "close must be within the [low, high] range"
+                )
         for name in ("volume", "amount"):
             value = getattr(self, name)
+            # Missing volume/turnover is not a business-invalid condition;
+            # never turn it into a fabricated zero.
             normalized = (
-                _non_negative_decimal(value, name)
-                if consumable
-                else _finite_decimal(value, name)
+                None
+                if value is None
+                else (
+                    _non_negative_decimal(value, name)
+                    if consumable
+                    else _finite_decimal(value, name)
+                )
             )
             object.__setattr__(self, name, normalized)
+        if self.open_interest is not None:
+            object.__setattr__(
+                self,
+                "open_interest",
+                _finite_decimal(self.open_interest, "open_interest"),
+            )
         object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))
         object.__setattr__(
             self, "attributes", _frozen_attributes(self.attributes, "attributes")
         )
+        rule_version = self.validation_rule_version
+        if rule_version is not None:
+            if isinstance(rule_version, ContractRef):
+                pass
+            elif isinstance(rule_version, str) and rule_version.strip():
+                object.__setattr__(
+                    self, "validation_rule_version", rule_version.strip()
+                )
+            else:
+                raise ProviderContractViolationError(
+                    "validation_rule_version must be a ContractRef or non-blank text"
+                )
+
+    @property
+    def turnover(self) -> Decimal | None:
+        """Alias for the sole persisted turnover/amount value."""
+
+        return self.amount
+
+    @property
+    def validation_status(self) -> QualityStatus:
+        """Quality status exposed under the Bar protocol's field name."""
+
+        return self.evidence.quality_status
+
+    @property
+    def metadata(self) -> Mapping[str, object]:
+        """Audit metadata alias; ``attributes`` is the sole storage."""
+
+        return self.attributes
+
+
+# Semantic alias required by the task package; this is not a second model.
+BarFact = Bar
 
 
 @dataclass(frozen=True, slots=True)

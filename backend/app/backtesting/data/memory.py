@@ -2113,6 +2113,11 @@ class MemoryDataChunkSession:
         self._require_query_type(query, BarQuery, "bars")
         self._require_declared_fact_type(DataCapability.BARS, "bars")
         self._require_authorized_instruments(query.instrument_ids, "bars")
+        if query.price_basis is not PriceBasis.RAW:
+            raise UnsupportedCapabilityError(
+                "the memory provider only serves raw bars",
+                details={"price_basis": query.price_basis.value},
+            )
         boundary = query.boundary
         chunk_last_day = self._sessions[-1].session_date
         if isinstance(query.window, DateRange):
