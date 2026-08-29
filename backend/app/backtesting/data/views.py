@@ -32,6 +32,7 @@ from types import MappingProxyType
 from typing import Iterable, Protocol, runtime_checkable
 from uuid import UUID
 
+from app.backtesting.calendar_axis import normalize_calendar_id
 from app.backtesting.data.errors import (
     InvalidDataRequestError,
     UniverseCalendarNotPreflightedError,
@@ -254,7 +255,12 @@ class ChunkStrategyDataView:
             if lookback_sessions > MAX_LOOKBACK_SESSIONS:
                 # Fail before touching any data source.
                 raise LookbackLimitExceededError(
-                    lookback_sessions, MAX_LOOKBACK_SESSIONS
+                    lookback_sessions,
+                    MAX_LOOKBACK_SESSIONS,
+                    instrument_id=resolved_id,
+                    expected=f"<= {MAX_LOOKBACK_SESSIONS} sessions",
+                    actual=lookback_sessions,
+                    data_cutoff=self._ChunkStrategyDataView__data_cutoff,
                 )
         for field_name, value in (
             ("start_date", start_date),
@@ -264,7 +270,15 @@ class ChunkStrategyDataView:
                 if not isinstance(value, date) or isinstance(value, datetime):
                     raise ValueError(f"{field_name} must be a calendar date")
                 if value > cutoff_date:
-                    raise DataCutoffViolationError(value, cutoff_date)
+                    raise DataCutoffViolationError(
+                        value,
+                        cutoff_date,
+                        instrument_id=resolved_id,
+                        session_date=value,
+                        expected=f"<= {cutoff_date.isoformat()}",
+                        actual=value,
+                        data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+                    )
                 # The cutoff day itself stays invisible unless the caller
                 # proved whole-day completeness at construction; fail here
                 # with the stable strategy error instead of letting the
@@ -273,7 +287,15 @@ class ChunkStrategyDataView:
                     value == cutoff_date
                     and not self._ChunkStrategyDataView__include_cutoff_day
                 ):
-                    raise DataCutoffViolationError(value, cutoff_date)
+                    raise DataCutoffViolationError(
+                        value,
+                        cutoff_date,
+                        instrument_id=resolved_id,
+                        session_date=value,
+                        expected=f"< {cutoff_date.isoformat()} (cutoff day incomplete)",
+                        actual=value,
+                        data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+                    )
         if (
             lookback_sessions is not None
             and (start_date is not None or end_date is not None)
@@ -465,23 +487,26 @@ def require_preflighted_calendar_ids(
     ``universe_calendar_not_preflighted`` error instead.
     """
 
-    def _normalize(value: Iterable[str], field_name: str) -> frozenset[str]:
+    def _normalize(value: Iterable[str], field_name: str) -> dict[str, str]:
         if isinstance(value, (str, bytes)) or not isinstance(value, Iterable):
             raise InvalidDataRequestError(
                 f"{field_name} must be an iterable of strings"
             )
-        labels: set[str] = set()
+        # Compare canonical ids while retaining the caller's spelling for
+        # stable, backwards-compatible diagnostics in the blocking error.
+        labels: dict[str, str] = {}
         for item in value:
             if not isinstance(item, str) or not item.strip():
                 raise InvalidDataRequestError(
                     f"{field_name} entries must be non-blank strings"
                 )
-            labels.add(item)
-        return frozenset(labels)
+            labels.setdefault(normalize_calendar_id(item), item)
+        return labels
 
     requested = _normalize(candidate_calendar_ids, "candidate_calendar_ids")
     allowed = _normalize(allowed_calendar_ids, "allowed_calendar_ids")
-    offenders = sorted(requested - allowed)
+    offender_keys = sorted(requested.keys() - allowed.keys())
+    offenders = [requested[key] for key in offender_keys]
     if offenders:
         raise UniverseCalendarNotPreflightedError(
             "the dynamic candidate set introduces calendars that did not "

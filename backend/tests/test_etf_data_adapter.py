@@ -20,7 +20,6 @@ from sqlalchemy.orm import Session
 
 from app.backtesting.data.adapters import (
     ADJUSTMENT_SERIES_POLICY,
-    ETF_CALENDAR_ID,
     EtfFactsAdapter,
     build_data_preflight_payloads,
 )
@@ -29,6 +28,7 @@ from app.backtesting.data.errors import (
     DataCutoffExceededError,
     HistoryBarsIncompleteError,
     IdentityMappingIncompleteError,
+    InstrumentCalendarUnresolvedError,
     InvalidDataRequestError,
     ProviderContractViolationError,
     UnsupportedCapabilityError,
@@ -46,12 +46,8 @@ from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_schemas import BacktestDataPreflightItem
 from app.instruments.domain import (
     InstrumentCodeMapping,
+    InstrumentIdentityFact,
     InstrumentSpec,
-    MappingConflictError,
-    MappingCoverageGapError,
-)
-from app.instruments.domain import (
-    InstrumentCodeMapping,
     MappingConflictError,
     MappingCoverageGapError,
 )
@@ -176,7 +172,6 @@ def make_adapter(stores: FakeStores, **overrides) -> EtfFactsAdapter:
         daily_bars=stores.daily_bars,
         adjustment_factors=stores.adjustment_factors,
         trading_days=stores.trading_days,
-        clock=CUTOFF,
     )
     options.update(overrides)
     return EtfFactsAdapter(**options)
@@ -659,6 +654,17 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
             csname="华泰柏瑞沪深300ETF",
             exchange="SH",
             list_date=date(2012, 5, 28),
+            identity_fact=InstrumentIdentityFact(
+                instrument_id=INSTRUMENT_ID,
+                fact_version=1,
+                asset_class="etf",
+                currency="CNY",
+                calendar_id="XSHG",
+                valid_from=date(2012, 5, 28),
+                known_at=CUTOFF,
+                observed_at=CUTOFF,
+                evidence="test://identity",
+            ),
         )
         values.update(overrides)
         return FakeEtfRow(values)
@@ -673,18 +679,25 @@ class InstrumentSpecProjectionTestCase(unittest.TestCase):
         self.assertEqual(display.name, "沪深300ETF")
 
     def test_entity_row_projects_to_complete_spec(self) -> None:
-        spec = self.adapter.project_instrument_spec(self.make_entity_row())
+        spec = self.adapter.project_instrument_spec(
+            self.make_entity_row(), data_cutoff=CUTOFF
+        )
         self.assertIsInstance(spec, InstrumentSpec)
         self.assertEqual(spec.instrument_id, INSTRUMENT_ID)
         self.assertEqual(spec.asset_class, "etf")
         self.assertEqual(spec.exchange, "SH")
         self.assertEqual(spec.currency, "CNY")
-        self.assertEqual(spec.calendar_id, ETF_CALENDAR_ID)
+        self.assertEqual(spec.calendar_id, "XSHG")
         self.assertEqual(spec.price_tick, Decimal("0.001"))
         self.assertEqual(spec.lot_size, Decimal("100"))
         self.assertEqual(spec.contract_multiplier, Decimal("1"))
         self.assertEqual(spec.valid_from, datetime(2012, 5, 28, tzinfo=UTC))
         self.assertIsNone(spec.valid_to)
+
+    def test_default_adapter_blocks_missing_identity_calendar(self) -> None:
+        strict_adapter = make_adapter(FakeStores())
+        with self.assertRaises(InstrumentCalendarUnresolvedError):
+            strict_adapter.project_instrument_spec(self.make_entity_row())
 
     def test_rows_without_mandatory_facts_yield_none(self) -> None:
         # No entity binding: no stable identity to project.

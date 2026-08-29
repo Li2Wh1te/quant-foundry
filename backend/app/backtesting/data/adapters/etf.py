@@ -37,16 +37,17 @@ excludes.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, time
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Mapping, Protocol, Sequence
+from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
-from app.backtesting.calendar_axis import SessionPoint, SessionWindow
+from app.backtesting.calendar_axis import CalendarSnapshot, SessionPoint, normalize_calendar_id
 from app.backtesting.data.errors import (
     HistoryIncompleteError,
     IdentityMappingConflictError,
     IdentityMappingIncompleteError,
+    InstrumentCalendarUnresolvedError,
     InvalidDataRequestError,
     ProviderContractViolationError,
     UnsupportedCapabilityError,
@@ -82,7 +83,6 @@ from app.instruments.references import VersionedReference
 
 __all__ = [
     "ADJUSTMENT_SERIES_POLICY",
-    "ETF_CALENDAR_ID",
     "ETF_PROVIDER_KEY",
     "ETF_RULE_PACKAGE",
     "EtfFactsAdapter",
@@ -98,9 +98,6 @@ ETF_RULE_PACKAGE = ("china_listed_etf_rules", 1)
 
 ADJUSTMENT_SERIES_POLICY = ("tushare_adj_factor_native", 1)
 """First-version adjustment-series policy (key, version)."""
-
-ETF_CALENDAR_ID = "china_sse"
-"""Calendar id projected from the SSE trading-calendar facts."""
 
 _ETF_SESSION_TEMPLATE = VersionedReference(key="china_etf_full_day", version=1)
 """Session template referenced by every projected ETF instrument spec."""
@@ -122,10 +119,6 @@ _ETF_CAPABILITIES = InstrumentCapabilities(
     margin_supported=False,
     corporate_action_requirement=CorporateActionRequirement.NOT_APPLICABLE,
 )
-
-_SSE_DAY_SESSIONS = (SessionWindow(time(9, 30), time(11, 30), label="morning"),
-                     SessionWindow(time(13, 0), time(15, 0), label="afternoon"))
-
 
 # ---------------------------------------------------------------------------
 # Read-only ports (thin wrappers over the ingestion query repositories)
@@ -236,14 +229,17 @@ class EtfFactsAdapter:
     adjustment_factors: AdjustmentFactorsPort
     trading_days: TradingDaysPort
     source: str = "tushare"
-    calendar_exchange: str = "SSE"
-    clock: datetime | None = None
     adjustment_active: bool = False
     adjustment_verification_evidence: str | None = None
+    # Task-11 canonical identity hook: the resolver must receive the
+    # effective day and PIT cutoff so it can return
+    # InstrumentIdentityFact.calendar_id.  There is no adapter-level
+    # exchange/calendar fallback.
+    calendar_id_resolver: Callable[..., str | None] | None = None
 
     def __post_init__(self) -> None:
-        if self.clock is not None:
-            _aware_datetime(self.clock, "clock")
+        if self.calendar_id_resolver is not None and not callable(self.calendar_id_resolver):
+            raise InvalidDataRequestError("calendar_id_resolver must be callable")
         if self.adjustment_active and not (
             isinstance(self.adjustment_verification_evidence, str)
             and self.adjustment_verification_evidence.strip()
@@ -334,17 +330,109 @@ class EtfFactsAdapter:
             display_name=getattr(row, "csname", None),
         )
 
-    def project_instrument_spec(self, row: object) -> InstrumentSpec | None:
+    def _identity_calendar_id(
+        self,
+        row: object,
+        instrument_id: UUID,
+        *,
+        effective_date: date,
+        data_cutoff: datetime | None,
+    ) -> str | None:
+        """Read one PIT calendar from an identity fact or strict resolver.
+
+        A plain ``row.calendar_id`` attribute is intentionally not accepted:
+        an ETF code row is not an identity fact and does not carry the
+        effective-day/PIT evidence required by task 11.  Callers may provide
+        an already-resolved ``identity_fact`` sidecar, or production wiring
+        may inject a resolver with the explicit identity/PIT arguments.
+        """
+
+        # Identity resolution always uses the caller's frozen PIT cutoff;
+        # wall-clock fallbacks would make a replay non-deterministic.
+        cutoff = data_cutoff
+        if cutoff is None:
+            return None
+        try:
+            cutoff = _aware_datetime(cutoff, "data_cutoff")
+        except Exception as exc:
+            raise InstrumentCalendarUnresolvedError(
+                "ETF calendar resolution requires an aware data_cutoff",
+                details={"instrument_id": str(instrument_id)},
+            ) from exc
+
+        identity_fact = getattr(row, "identity_fact", None)
+        if identity_fact is not None:
+            if getattr(identity_fact, "instrument_id", instrument_id) != instrument_id:
+                raise InstrumentCalendarUnresolvedError(
+                    "ETF identity fact does not belong to the requested instrument",
+                    details={"instrument_id": str(instrument_id)},
+                )
+            valid_from = getattr(identity_fact, "valid_from", None)
+            valid_to = getattr(identity_fact, "valid_to", None)
+            known_at = getattr(identity_fact, "known_at", None)
+            if (
+                not isinstance(valid_from, date)
+                or isinstance(valid_from, datetime)
+                or (valid_to is not None and (not isinstance(valid_to, date) or isinstance(valid_to, datetime)))
+                or not isinstance(known_at, datetime)
+                or known_at.tzinfo is None
+                or known_at.utcoffset() is None
+                or known_at > cutoff
+                or effective_date < valid_from
+                or (valid_to is not None and effective_date >= valid_to)
+            ):
+                raise InstrumentCalendarUnresolvedError(
+                    "ETF identity fact is not visible for the requested effective day and PIT cutoff",
+                    details={
+                        "instrument_id": str(instrument_id),
+                        "effective_date": effective_date.isoformat(),
+                        "data_cutoff": cutoff.isoformat(),
+                    },
+                )
+            calendar_id = getattr(identity_fact, "calendar_id", None)
+        elif self.calendar_id_resolver is not None:
+            try:
+                calendar_id = self.calendar_id_resolver(
+                    instrument_id,
+                    effective_date=effective_date,
+                    data_cutoff=cutoff,
+                )
+            except TypeError as exc:
+                raise InstrumentCalendarUnresolvedError(
+                    "ETF calendar resolver must accept effective_date and data_cutoff",
+                    details={"instrument_id": str(instrument_id)},
+                ) from exc
+        else:
+            return None
+        if not isinstance(calendar_id, str) or not calendar_id.strip():
+            return None
+        try:
+            return normalize_calendar_id(calendar_id)
+        except Exception as exc:
+            raise InstrumentCalendarUnresolvedError(
+                "ETF identity fact returned an invalid calendar_id",
+                details={
+                    "instrument_id": str(instrument_id),
+                    "calendar_id": calendar_id,
+                },
+            ) from exc
+
+    def project_instrument_spec(
+        self,
+        row: object,
+        *,
+        effective_date: date | None = None,
+        data_cutoff: datetime | None = None,
+    ) -> InstrumentSpec | None:
         """Project one ``etf_codes`` row onto a complete engine spec.
 
         Trading-critical fields missing from the source table are frozen
         defaults of :data:`ETF_RULE_PACKAGE` (``china_listed_etf_rules@1``).
         Rows without the mandatory identity/exchange/listing facts yield
-        ``None`` — the provider contract forbids degrading into a spec
-        full of placeholders.  The validity window starts strictly at
-        ``list_date``: falling back to ``setup_date`` would admit funds
-        that exist but are not listed yet onto a tradable timeline, so a
-        missing ``list_date`` makes the spec unresolvable.
+        ``None`` or the stable ``instrument_calendar_unresolved`` error — the
+        provider contract forbids placeholders or exchange-based inference.
+        The validity window starts strictly at ``list_date``: falling back to
+        ``setup_date`` would admit funds that exist but are not listed yet.
         """
 
         display = self.project_display(row)
@@ -356,6 +444,20 @@ class EtfFactsAdapter:
             return None
         if not isinstance(list_date, date) or isinstance(list_date, datetime):
             return None
+        effective_date = effective_date or list_date
+        if not isinstance(effective_date, date) or isinstance(effective_date, datetime):
+            raise InvalidDataRequestError("effective_date must be a calendar date")
+        calendar_id = self._identity_calendar_id(
+            row,
+            display.instrument_id,
+            effective_date=effective_date,
+            data_cutoff=data_cutoff,
+        )
+        if calendar_id is None:
+            raise InstrumentCalendarUnresolvedError(
+                "ETF instrument has no point-in-time calendar_id",
+                details={"instrument_id": str(display.instrument_id), "ts_code": getattr(row, "ts_code", None)},
+            )
         valid_from = datetime(list_date.year, list_date.month, list_date.day, tzinfo=UTC)
         return InstrumentSpec(
             instrument_id=display.instrument_id,
@@ -363,7 +465,7 @@ class EtfFactsAdapter:
             asset_class="etf",
             exchange=exchange.upper(),
             currency="CNY",
-            calendar_id=ETF_CALENDAR_ID,
+            calendar_id=calendar_id,
             price_precision=_ETF_SPEC_DEFAULTS["price_precision"],
             quantity_precision=_ETF_SPEC_DEFAULTS["quantity_precision"],
             price_tick=_ETF_SPEC_DEFAULTS["price_tick"],
@@ -559,18 +661,51 @@ class EtfFactsAdapter:
     # Calendar projection
     # ------------------------------------------------------------------
 
-    def session_points(self, start_date: date, end_date: date) -> tuple[SessionPoint, ...]:
-        """Project stored open trading days onto named calendar sessions."""
+    def session_points(
+        self,
+        start_date: date,
+        end_date: date,
+        *,
+        calendar_id: str | None = None,
+        snapshot: CalendarSnapshot | None = None,
+        instrument_id: UUID | None = None,
+        data_cutoff: datetime | None = None,
+    ) -> tuple[SessionPoint, ...]:
+        """Project sessions from an immutable PIT calendar snapshot.
 
-        days = sorted(set(self.trading_days(self.calendar_exchange, start_date, end_date)))
-        return tuple(
-            SessionPoint(
-                session_date=day,
-                session_id=f"{ETF_CALENDAR_ID}@{day.isoformat()}",
-                timezone="Asia/Shanghai",
-                sessions=_SSE_DAY_SESSIONS,
+        Callers must supply the CalendarSnapshot opened for the
+        identity-derived calendar; it is the only source that can prove PIT
+        session definitions.
+        """
+
+        if snapshot is not None:
+            if start_date < snapshot.request.formal_start or end_date > snapshot.request.formal_end:
+                raise ProviderContractViolationError(
+                    "calendar snapshot does not cover requested session range"
+                )
+            points = tuple(
+                point for point in snapshot.resolution.resolved_sessions
+                if start_date <= point.session_date <= end_date
             )
-            for day in days
+            for point in points:
+                context = point.context
+                if context is None or not context.calendar_ids:
+                    raise ProviderContractViolationError(
+                        "ETF session points require instrument/calendar snapshot context"
+                    )
+                if instrument_id is not None and instrument_id not in context.instrument_ids:
+                    raise ProviderContractViolationError(
+                        "session point context does not include the requested instrument"
+                    )
+                if calendar_id is not None and normalize_calendar_id(calendar_id) not in context.calendar_ids:
+                    raise ProviderContractViolationError(
+                        "session point context does not include the requested calendar"
+                    )
+            return points
+        # Calendar windows and timezone are facts of the immutable snapshot;
+        # the adapter cannot synthesize them from an exchange or code.
+        raise ProviderContractViolationError(
+            "ETF session projection requires an immutable CalendarSnapshot"
         )
 
     # ------------------------------------------------------------------

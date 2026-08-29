@@ -815,6 +815,13 @@ class BacktestDataPreflightResultRecord(_RunBoundRecord):
         nullable=False,
         comment="Hash over the preflight report content.",
     )
+    hash_schema_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Canonical preflight hash payload version (1 legacy, 2 calendar evidence).",
+    )
     capabilities: Mapped[dict] = mapped_column(
         JsonType,
         nullable=False,

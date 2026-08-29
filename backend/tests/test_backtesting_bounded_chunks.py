@@ -115,6 +115,7 @@ def transitional_intent(
         strategy_price_bases=(PriceBasis.RAW,),
         consistency_mode=ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
         consistency_token_contract=token_contract,
+        query_boundary=QueryBoundary(data_cutoff=CUTOFF),
         static_instrument_ids=static,
         warmup_sessions=warmup,
     )

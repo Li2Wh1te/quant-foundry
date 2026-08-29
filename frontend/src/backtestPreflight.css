@@ -1,0 +1,30 @@
+/* Minimal task-11 preflight detail surface. */
+.page-content { min-width: 0; padding: 36px; }
+.page-header { margin-bottom: 22px; }
+.eyebrow { margin: 0 0 6px; color: var(--text-muted); font-size: 11px; letter-spacing: .12em; text-transform: uppercase; }
+.page-subtitle { color: var(--text-muted); margin: 7px 0 0; }
+.panel { min-width: 0; margin-bottom: 16px; padding: 20px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); box-shadow: 0 8px 26px var(--shadow); }
+.panel-header, .preflight-card__heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.panel-header h2, .preflight-card h3 { margin: 0; }
+.form-grid { display: grid; grid-template-columns: minmax(220px, 1fr) 180px auto; align-items: end; gap: 14px; }
+.form-grid label { display: grid; gap: 6px; color: var(--text-muted); font-size: 12px; }
+.form-grid input, .form-grid select { min-height: 38px; padding: 0 10px; border: 1px solid var(--border); border-radius: 7px; color: var(--text); background: var(--surface-subtle); }
+.button { min-height: 38px; padding: 0 14px; border: 1px solid var(--border); border-radius: 7px; cursor: pointer; font: inherit; }
+.button--primary { color: var(--accent-ink); border-color: var(--accent); background: var(--accent); }
+.button--secondary { color: var(--text); background: var(--surface-subtle); }
+.button:disabled { cursor: not-allowed; opacity: .55; }
+.alert--error { margin-bottom: 16px; padding: 12px 14px; border: 1px solid var(--danger); border-radius: 8px; color: var(--danger); background: var(--surface); }
+.status-badge { display: inline-flex; padding: 5px 9px; border-radius: 99px; font-size: 12px; }
+.status-badge--success { color: var(--accent); background: var(--accent-subtle); }
+.status-badge--warning { color: var(--danger); background: var(--danger-subtle); }
+.preflight-card { margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border); }
+.preflight-card__heading code { color: var(--text-muted); font-size: 11px; }
+.preflight-meta { display: flex; flex-wrap: wrap; gap: 12px 22px; margin: 14px 0; }
+.preflight-meta div { min-width: 180px; }
+.preflight-meta dt { color: var(--text-muted); font-size: 11px; }
+.preflight-meta dd { margin: 4px 0 0; word-break: break-all; }
+.preflight-card details { margin-top: 9px; }
+.preflight-card summary { cursor: pointer; color: var(--text-muted); font-size: 13px; }
+.preflight-card pre { max-height: 360px; overflow: auto; margin: 8px 0 0; padding: 12px; border-radius: 7px; color: var(--text); background: var(--surface-subtle); font-size: 11px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.muted { color: var(--text-muted); }
+@media (max-width: 760px) { .page-content { padding: 22px 14px; } .form-grid { grid-template-columns: 1fr; } }

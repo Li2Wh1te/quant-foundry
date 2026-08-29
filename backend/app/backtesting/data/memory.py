@@ -25,7 +25,8 @@ Key constraints implemented here (frozen by data-contract version 1):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+import json
 from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
@@ -34,8 +35,17 @@ from app.backtesting.calendar_axis import (
     POLICY_KEY_STRICT_COMPATIBLE,
     POLICY_VERSION_STRICT_COMPATIBLE,
     CalendarAxisStatus,
+    CalendarAxisDifference,
+    calendar_snapshot_usage,
+    CalendarAxisDifferenceField,
     CalendarDefinition,
     CalendarSessionFact,
+    CalendarSnapshot,
+    CalendarSnapshotRequest,
+    CalendarPITContext,
+    CAPABILITY_SUSPENSION,
+    CAPABILITY_OPENING_AVAILABILITY,
+    CAPABILITY_PRICE_LIMIT_TRADABILITY,
     InMemoryCalendarAxisDataProvider,
     SessionPoint,
     resolve_calendar_axis,
@@ -51,6 +61,8 @@ from app.backtesting.data.errors import (
     InvalidDataRequestError,
     ProviderContractViolationError,
     UnsupportedCapabilityError,
+    CalendarContractError,
+    CalendarPreflightResourceLimitExceededError,
 )
 from app.backtesting.data.facts import Bar, InstrumentSpec
 from app.backtesting.data.protocols import (
@@ -65,6 +77,7 @@ from app.backtesting.data.reports import (
     DataPreflightReport,
     PreflightIssue,
     canonical_hash,
+    canonical_json,
 )
 from app.backtesting.data.requests import (
     CALENDAR_AXIS_POLICY,
@@ -98,11 +111,15 @@ from app.backtesting.data.requests import (
     TradingStatusQuery,
     UniverseQuery,
 )
-from app.backtesting.data.sessions import DataSessionState
+from app.backtesting.data.sessions import (
+    DataSessionState,
+    evaluate_calendar_capability_gate,
+)
 from app.backtesting.data.warmup import (
     NO_FORMAL_SESSIONS,
     SCOPE_FORMAL,
     CoverageBoundedWarmupSessionResolver,
+    WarmupCoverageStatus,
     WarmupResolution,
     WarmupStatus,
     resolve_warmup_sessions,
@@ -142,6 +159,33 @@ ISSUE_UNSUPPORTED_TOKEN_CONTRACT = "unsupported_consistency_token_contract"
 ISSUE_INSTRUMENT_NOT_FOUND = "instrument_not_found"
 ISSUE_CALENDAR_AXIS_INCOMPATIBLE = "data_preflight_blocked"
 ISSUE_MANDATORY_BAR_COVERAGE_MISSING = "mandatory_bar_coverage_missing"
+
+
+def _calendar_issue_code(
+    code: str,
+    details: Mapping[str, object] | None = None,
+) -> str:
+    """Map a stable calendar exception code to its report issue spelling."""
+
+    # Snapshot preparation can prove an insufficient warmup span before the
+    # payload batch is read.  Preserve the existing warmup issue contract in
+    # that case instead of exposing the transport-level coverage-unknown
+    # wrapper as the primary report code.
+    if isinstance(details, Mapping) and details.get("cause_code") == "warmup_coverage_insufficient":
+        return "WARMUP_COVERAGE_INSUFFICIENT"
+    return {
+        "calendar_fact_missing": "CALENDAR_FACT_MISSING",
+        "calendar_fact_ambiguous": "CALENDAR_FACT_AMBIGUOUS",
+        "calendar_definition_missing": "CALENDAR_DEFINITION_MISSING",
+        "calendar_definition_ambiguous": "CALENDAR_DEFINITION_AMBIGUOUS",
+        "calendar_session_unresolved": "CALENDAR_SESSION_UNRESOLVED",
+        "calendar_pit_metadata_missing": "CALENDAR_PIT_METADATA_MISSING",
+        "data_cutoff_exceeded": "DATA_CUTOFF_EXCEEDED",
+        "data_cutoff_required": "DATA_CUTOFF_REQUIRED",
+        "calendar_timezone_inconsistent": "CALENDAR_TIMEZONE_INCONSISTENT",
+        "calendar_timezone_mismatch": "CALENDAR_TIMEZONE_MISMATCH",
+        "calendar_timezone_unsupported": "CALENDAR_TIMEZONE_UNSUPPORTED",
+    }.get(code, code.upper())
 
 _SERVABLE_CHUNK_FACT_TYPES = frozenset(
     {DataCapability.BARS, DataCapability.COVERAGE}
@@ -188,6 +232,12 @@ class MemoryDataSet:
     instruments: tuple[InstrumentSpec, ...]
     bars: tuple[Bar, ...]
     clock: datetime
+    # Optional canonical task-11 metadata.  Legacy task-02 fixtures leave
+    # these empty and continue through the compatibility calendar path.
+    calendar_registries: tuple[object, ...] = ()
+    calendar_bindings: tuple[object, ...] = ()
+    calendar_capabilities: tuple[object, ...] = ()
+    calendar_source_priorities: tuple[object, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -201,6 +251,13 @@ class MemoryDataSet:
         object.__setattr__(
             self, "clock", _aware_datetime(self.clock, "clock")
         )
+        for name in (
+            "calendar_registries",
+            "calendar_bindings",
+            "calendar_capabilities",
+            "calendar_source_priorities",
+        ):
+            object.__setattr__(self, name, tuple(getattr(self, name)))
 
         definitions = tuple(self.calendar_definitions)
         object.__setattr__(
@@ -208,21 +265,29 @@ class MemoryDataSet:
             "calendar_definitions",
             tuple(
                 sorted(
-                    set(definitions),
+                    definitions,
                     key=lambda item: (item.calendar_id, item.definition_version),
                 )
             ),
         )
         facts = tuple(self.calendar_facts)
-        seen_facts: set[tuple[str, date]] = set()
+        seen_facts: set[tuple[str, date, object]] = set()
+        seen_versions: set[tuple[str, int]] = set()
         for fact in facts:
-            key = (fact.calendar_id, fact.session_date)
+            key = (fact.calendar_id, fact.session_date, fact.fact_id)
             if key in seen_facts:
                 raise InvalidDataRequestError(
-                    "duplicate calendar fact for one calendar and date",
-                    details={"calendar_id": fact.calendar_id},
+                    "duplicate calendar fact identity",
+                    details={"calendar_id": fact.calendar_id, "session_date": fact.session_date.isoformat()},
+                )
+            version_key = (fact.logical_fact_key, fact.fact_version)
+            if version_key in seen_versions:
+                raise InvalidDataRequestError(
+                    "duplicate calendar fact logical version",
+                    details={"logical_fact_key": fact.logical_fact_key, "fact_version": fact.fact_version},
                 )
             seen_facts.add(key)
+            seen_versions.add(version_key)
         object.__setattr__(
             self,
             "calendar_facts",
@@ -310,7 +375,15 @@ class MemoryDataSet:
         object.__setattr__(
             self,
             "_calendar_axis_provider",
-            InMemoryCalendarAxisDataProvider(definitions, facts),
+            InMemoryCalendarAxisDataProvider(
+                definitions,
+                facts,
+                registries=self.calendar_registries,
+                bindings=self.calendar_bindings,
+                capabilities=self.calendar_capabilities,
+                source_priorities=self.calendar_source_priorities,
+                fixture_revision=self.fixture_revision,
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -374,9 +447,22 @@ class MemoryDataSet:
         return rows[0] if rows else None
 
     def calendar_fact_floor(self, calendar_id: str) -> date | None:
-        """Earliest date with an explicit fact for one calendar."""
+        """Earliest date with an explicit fact for one calendar.
 
-        return self._calendar_fact_floor.get(calendar_id)
+        Task-11 canonical IDs are ASCII-uppercase, while older deterministic
+        fixtures may retain a lower-case calendar label.  Resolve both forms
+        without changing the immutable dataset or guessing an exchange.
+        """
+
+        floor = self._calendar_fact_floor.get(calendar_id)
+        if floor is not None:
+            return floor
+        try:
+            from app.backtesting.calendar_axis import normalize_calendar_id
+
+            return self._calendar_fact_floor.get(normalize_calendar_id(calendar_id))
+        except Exception:
+            return None
 
 
 # ---------------------------------------------------------------------------
@@ -506,14 +592,32 @@ class MemoryDataProvider:
     # Preflight pipeline (shared by provider.preflight and session.preflight)
     # ------------------------------------------------------------------
 
-    def _build_preflight_report(
-        self,
-        request: DataPreflightRequest,
-        *,
-        frozen_calendar_ids: tuple[str, ...] | None = None,
-    ) -> DataPreflightReport:
-        issues: list[PreflightIssue] = []
+    def _has_canonical_calendar_metadata(self) -> bool:
+        """Identify a task-11 calendar dataset before touching its indexes."""
 
+        if self._dataset.calendar_registries:
+            return True
+        return bool(
+            any(
+                definition.valid_from is not None
+                or definition.registry_fact_id is not None
+                or definition.known_at is not None
+                for definition in self._dataset.calendar_definitions
+            )
+            or any(
+                fact.known_at is not None
+                or fact.registry_fact_id is not None
+                or fact.definition_fact_id is not None
+                for fact in self._dataset.calendar_facts
+            )
+        )
+
+    def _collect_common_preflight_issues(
+        self, request: DataPreflightRequest
+    ) -> tuple[list[PreflightIssue], tuple[UUID, ...]]:
+        """Run provider/request admission gates shared by both calendar paths."""
+
+        issues: list[PreflightIssue] = []
         if request.provider_key != self._dataset.provider_key:
             issues.append(
                 PreflightIssue(
@@ -559,8 +663,8 @@ class MemoryDataProvider:
             request.consistency_mode is ConsistencyMode.TRANSITIONAL_REPEATABLE_READ
             and request.consistency_token_contract is not None
         ):
-            # The transitional mode issues no logical tokens at all, so a
-            # configured token contract can never be honored.
+            # The transitional mode issues no logical tokens, so a configured
+            # token contract can never be honored.
             issues.append(
                 PreflightIssue(
                     code=ISSUE_UNSUPPORTED_TOKEN_CONTRACT,
@@ -586,9 +690,7 @@ class MemoryDataProvider:
                     )
                 )
         # Only the frozen fixed scope is supported: dynamic and hybrid runs
-        # depend on the universe capability this fixture does not serve, so
-        # they must produce a structured blocked report instead of an
-        # internally invalid one.
+        # depend on the universe capability this fixture does not serve.
         if request.instrument_scope_mode is not InstrumentScopeMode.FIXED:
             issues.append(
                 PreflightIssue(
@@ -609,9 +711,7 @@ class MemoryDataProvider:
                     code=ISSUE_UNSUPPORTED_FREQUENCY,
                     severity=IssueSeverity.ERROR,
                     scope="frequency",
-                    message=(
-                        f"请求频率 {request.frequency} 不受内存 Provider 支持"
-                    ),
+                    message=f"请求频率 {request.frequency} 不受内存 Provider 支持",
                     field="frequency",
                 )
             )
@@ -627,12 +727,12 @@ class MemoryDataProvider:
                     )
                 )
 
-        known_ids = {spec.instrument_id for spec in self._dataset.instruments}
-        scope_ids = list(
+        scope_ids = tuple(
             dict.fromkeys(
                 [*request.static_instrument_ids, *request.mandatory_instrument_ids]
             )
         )
+        known_ids = {spec.instrument_id for spec in self._dataset.instruments}
         for instrument_id in scope_ids:
             if instrument_id not in known_ids:
                 issues.append(
@@ -645,12 +745,47 @@ class MemoryDataProvider:
                         field="static_instrument_ids",
                     )
                 )
+        return issues, scope_ids
+
+    def _build_preflight_report(
+        self,
+        request: DataPreflightRequest,
+        *,
+        frozen_calendar_ids: tuple[str, ...] | None = None,
+    ) -> DataPreflightReport:
+        issues, scope_ids = self._collect_common_preflight_issues(request)
+
+        # Task-11's canonical PIT path is opt-in for datasets that carry the
+        # versioned calendar metadata (registry/definition/fact provenance).
+        # Legacy task-02 fixtures still carry an explicit QueryBoundary after
+        # the request-contract migration, but intentionally have no such
+        # metadata and therefore continue through the compatibility resolver.
+        # This keeps the migration boundary one-way without weakening the
+        # strict provider path for canonical datasets.
+        if self._has_canonical_calendar_metadata():
+            if request.query_boundary is None:
+                return self._build_cutoff_required_report(request)
+            return self._build_calendar_preflight_report(
+                request,
+                frozen_calendar_ids=frozen_calendar_ids,
+                initial_issues=issues,
+                scope_ids=scope_ids,
+            )
+        # A dataset that carries canonical task-11 metadata is a strict
+        # provider.  It must not silently fall back to the legacy UTC-date
+        # path when the single authority (query_boundary.data_cutoff) is
+        # absent.  The metadata check intentionally happens before any
+        # instrument/calendar lookup so a missing cutoff cannot trigger a
+        # hidden memory read or be inferred from ``knowledge_as_of``.
+        # ``_collect_common_preflight_issues`` is shared with the canonical
+        # snapshot path above; the legacy resolver continues below with the
+        # same request/provider admission gates.
 
         # The authoritative calendar set is the one frozen into an admitted
         # ``DataRequest``; a raw intent (provider-level preflight) has its
         # axis derived strictly from the in-scope instruments' named
         # calendars.  Callers never pick calendars freely.
-        if frozen_calendar_ids:
+        if frozen_calendar_ids is not None:
             calendar_ids = tuple(sorted(set(frozen_calendar_ids)))
         else:
             calendar_ids = tuple(
@@ -780,7 +915,7 @@ class MemoryDataProvider:
             resolved_sessions=formal_sessions,
             warmup_sessions=warmup_sessions,
             max_lookback_sessions=request.max_lookback_sessions,
-            knowledge_as_of=request.knowledge_as_of,
+            knowledge_as_of=request.query_boundary.knowledge_as_of,
             non_strict_pit_capabilities=(),
             consistency_mode=request.consistency_mode,
             consistency_token_capability=(
@@ -817,6 +952,353 @@ class MemoryDataProvider:
                 else None
             ),
             calendar_axis_differences=differences,
+            query_boundary=request.query_boundary,
+        )
+
+    def _build_cutoff_required_report(
+        self, request: DataPreflightRequest
+    ) -> DataPreflightReport:
+        """Return a pre-read @2 block for a missing strict data cutoff."""
+
+        issue = PreflightIssue(
+            code="DATA_CUTOFF_REQUIRED",
+            severity=IssueSeverity.ERROR,
+            scope=SCOPE_FORMAL,
+            message="严格日历预检必须显式提供 data_cutoff，系统不会使用墙上时钟推断。",
+            field="query_boundary.data_cutoff",
+            details={"cause_code": "data_cutoff_required"},
+        )
+        return DataPreflightReport(
+            status=PreflightStatus.BLOCKED,
+            generated_at=self._dataset.clock,
+            provider_key=request.provider_key,
+            capability_manifest_version=self._manifest_version,
+            requested_window=request.requested_window,
+            scope_mode=request.instrument_scope_mode,
+            resolved_calendar_ids=(),
+            resolved_calendar_definitions=(),
+            resolved_timezone=None,
+            calendar_axis_policy=request.calendar_axis_policy,
+            calendar_compatibility_status=CalendarAxisStatus.INCOMPATIBLE,
+            calendar_session_signature="",
+            resolved_sessions=(),
+            warmup_sessions=(),
+            max_lookback_sessions=request.max_lookback_sessions,
+            knowledge_as_of=request.query_boundary.knowledge_as_of,
+            non_strict_pit_capabilities=(),
+            consistency_mode=request.consistency_mode,
+            consistency_token_capability=False,
+            consistency_token_contract=None,
+            data_chunk_policy=request.data_chunk_policy,
+            data_chunk_size_sessions=request.data_chunk_size_sessions,
+            required_capabilities=request.required_capabilities,
+            rule_package=request.rule_package,
+            rule_exception_set=request.rule_exception_set,
+            static_instrument_ids=request.static_instrument_ids,
+            mandatory_instrument_ids=request.mandatory_instrument_ids,
+            strategy_price_bases=request.strategy_price_bases,
+            engine_price_basis=request.engine_price_basis,
+            data_contract_version=request.data_contract_version,
+            frequency=request.frequency,
+            warmup_sessions_count=request.warmup_sessions,
+            market_scope=request.market_scope,
+            universe_query_policy=request.universe_query_policy,
+            allowed_settlement_rule_class=request.allowed_settlement_rule_class,
+            adjustment_series_policy=request.adjustment_series_policy,
+            quality_mode=request.quality_mode,
+            issues=(issue,),
+            query_boundary=request.query_boundary,
+            hash_schema_version=1,
+        )
+
+    def _build_calendar_preflight_report(
+        self,
+        request: DataPreflightRequest,
+        *,
+        frozen_calendar_ids: tuple[str, ...] | None = None,
+        initial_issues: Sequence[PreflightIssue] = (),
+        scope_ids: Sequence[UUID] | None = None,
+    ) -> DataPreflightReport:
+        """Build the task-11 @2 report from one immutable snapshot attempt."""
+
+        scope_ids = tuple(
+            dict.fromkeys(
+                scope_ids
+                if scope_ids is not None
+                else (
+                    *request.static_instrument_ids,
+                    *request.mandatory_instrument_ids,
+                )
+            )
+        )
+        if frozen_calendar_ids is not None:
+            calendar_ids = tuple(sorted(set(frozen_calendar_ids)))
+        else:
+            calendar_ids = tuple(
+                sorted({
+                    spec.calendar_id
+                    for instrument_id in scope_ids
+                    if (spec := self._dataset.instrument(instrument_id)) is not None
+                })
+            )
+        issue_list: list[PreflightIssue] = list(initial_issues)
+        snapshot: CalendarSnapshot | None = None
+        axis = None
+        # Request/provider admission errors are proven from local metadata and
+        # must short-circuit the strict snapshot read.  This keeps the
+        # prepare+batch budget intact and prevents an invalid request from
+        # being accepted by the calendar-only branch.
+        if not issue_list:
+            try:
+                snapshot_request = CalendarSnapshotRequest(
+                    calendar_ids=calendar_ids,
+                    formal_start=request.requested_window.start_date,
+                    formal_end=request.requested_window.end_date,
+                    warmup_sessions=request.warmup_sessions,
+                    query_boundary=request.query_boundary,
+                    instrument_ids=scope_ids,
+                    provider_key=request.provider_key,
+                    package_key=request.rule_package.key,
+                    package_version=request.rule_package.version,
+                )
+                snapshot = self._dataset.calendar_axis_provider.open_calendar_snapshot(snapshot_request)
+                axis = snapshot.resolution
+            except CalendarPreflightResourceLimitExceededError:
+                # Resource overruns are creation-gate failures.  Let the
+                # coordinator project this stable error through
+                # resource_limited_preflight_failure(); never turn it into an
+                # ordinary blocked report that can be persisted or paged.
+                raise
+            except CalendarContractError as exc:
+                issue_list.append(
+                    PreflightIssue(
+                        code=_calendar_issue_code(
+                            getattr(exc, "code", "invalid_data_request"),
+                            getattr(exc, "details", None),
+                        ),
+                        severity=IssueSeverity.ERROR,
+                        scope=SCOPE_FORMAL,
+                        message=f"交易日历快照无法打开：{getattr(exc, 'code', 'invalid_data_request')}。",
+                        field="calendar_snapshot",
+                        details={"cause_code": getattr(exc, "code", "invalid_data_request"), **dict(getattr(exc, "details", {}) or {})},
+                    )
+                )
+
+        warmup_resolution: WarmupResolution | None = None
+        capability_evidence: tuple[Mapping[str, object], ...] = ()
+        if snapshot is not None and axis is not None:
+            capability_issues, capability_evidence = evaluate_calendar_capability_gate(
+                self._dataset.calendar_axis_provider,
+                request,
+                snapshot,
+            )
+            issue_list.extend(capability_issues)
+            if axis.status is CalendarAxisStatus.INCOMPATIBLE:
+                for difference in axis.differences:
+                    issue_list.append(
+                        PreflightIssue(
+                            code={
+                                "calendar_timezone_inconsistent": "CALENDAR_TIMEZONE_INCONSISTENT",
+                                "calendar_timezone_mismatch": "CALENDAR_TIMEZONE_MISMATCH",
+                                "calendar_timezone_unsupported": "CALENDAR_TIMEZONE_UNSUPPORTED",
+                            }.get(
+                                difference.error_code,
+                                "CALENDAR_SESSION_INCOMPATIBLE",
+                            ),
+                            severity=IssueSeverity.ERROR,
+                            scope=SCOPE_FORMAL,
+                            message=f"{difference.date.isoformat()} 的参与日历会话语义不兼容，已阻断回测。",
+                            field=difference.field.value,
+                            details=difference.evidence(),
+                        )
+                    )
+            elif not axis.resolved_sessions:
+                issue_list.append(
+                    PreflightIssue(
+                        code=NO_FORMAL_SESSIONS,
+                        severity=IssueSeverity.ERROR,
+                        scope=SCOPE_FORMAL,
+                        message="正式区间没有共同开市交易会话，无法启动回测。",
+                        field="resolved_sessions",
+                    )
+                )
+            elif request.warmup_sessions > 0:
+                points = tuple(snapshot.warmup_sessions)
+                if len(points) != request.warmup_sessions:
+                    issue_list.append(
+                        PreflightIssue(
+                            code="WARMUP_COVERAGE_INSUFFICIENT",
+                            severity=IssueSeverity.ERROR,
+                            scope=SCOPE_WARMUP,
+                            message=f"warmup 覆盖不足：请求 {request.warmup_sessions} 个会话，实际仅证明 {len(points)} 个。",
+                            field="warmup_sessions",
+                        )
+                    )
+                else:
+                    anchor = axis.resolved_sessions[0].session_date
+                    warmup_resolution = WarmupResolution(
+                        requested_sessions=request.warmup_sessions,
+                        first_formal_session=anchor,
+                        status=WarmupStatus.READY,
+                        coverage_status=WarmupCoverageStatus.PROVEN,
+                        resolved_sessions=points,
+                        # Preserve the immutable snapshot's complete natural-day
+                        # envelope, including closed/gap days between the
+                        # earliest warmup session and the formal anchor.
+                        history_window=DateRange(
+                            snapshot.envelope_start,
+                            anchor - timedelta(days=1),
+                        ),
+                    )
+            issue_list.extend(self._mandatory_coverage_issues(request, axis.resolved_sessions))
+
+        blocked = bool(issue_list)
+        if blocked:
+            # A blocked report may retain the warmup issue evidence in the
+            # outer issue list, but never mounts a ready warmup resolution.
+            warmup_resolution = None
+        formal = () if blocked or axis is None or axis.status is CalendarAxisStatus.INCOMPATIBLE else axis.resolved_sessions
+        warmup = () if blocked or warmup_resolution is None else warmup_resolution.resolved_sessions
+        pit_context = snapshot.pit_context if snapshot is not None else (
+            CalendarPITContext.from_query_boundary(request.query_boundary, "Asia/Shanghai")
+            if request.query_boundary is not None else None
+        )
+        calendar_session_signature = "" if axis is None or axis.status is CalendarAxisStatus.INCOMPATIBLE else axis.session_signature
+        revision_digest = axis.calendar_revision_digest if axis is not None else None
+        snapshot_fingerprint = snapshot.snapshot_fingerprint if snapshot is not None else None
+        semantic_signature = axis.calendar_semantic_signature if axis is not None else None
+        warmup_signature = axis.warmup_session_signature if axis is not None else None
+        usage = calendar_snapshot_usage(snapshot) if snapshot is not None else ()
+        calendar_summary = {
+            "policy": {"key": request.calendar_axis_policy.key, "version": request.calendar_axis_policy.version},
+            "calendar_ids": calendar_ids,
+            "requested_window": {
+                "start_date": request.requested_window.start_date,
+                "end_date": request.requested_window.end_date,
+            },
+            "pit_context": dict(pit_context.as_dict) if pit_context is not None else None,
+            "data_cutoff": pit_context.as_dict["data_cutoff"] if pit_context is not None else None,
+            "cutoff_local_date": pit_context.as_dict["cutoff_local_date"] if pit_context is not None else None,
+            "include_cutoff_day": pit_context.as_dict["include_cutoff_day"] if pit_context is not None else None,
+            "pit_profile": pit_context.as_dict["pit_profile"] if pit_context is not None else None,
+            "profile_version": pit_context.as_dict["profile_version"] if pit_context is not None else None,
+            "knowledge_as_of": pit_context.as_dict["knowledge_as_of"] if pit_context is not None else None,
+            "non_strict_pit": axis.non_strict_pit if axis is not None else False,
+            "non_strict_pit_capabilities": axis.non_strict_pit_capabilities if axis is not None else (),
+            "compatibility_status": axis.status.value if axis is not None else "incompatible",
+            "timezone": axis.timezone if axis is not None else None,
+            "calendar_revision_digest": revision_digest,
+            "revision_digest": revision_digest,
+            "calendar_session_signature": calendar_session_signature,
+            "warmup_session_signature": warmup_signature,
+            "snapshot_fingerprint": snapshot_fingerprint,
+            "resolved_calendar_bindings": dict(snapshot.resolved_calendar_bindings) if snapshot is not None else {},
+            "resolved_calendar_definitions": [
+                {
+                    "calendar_id": item.calendar_id,
+                    "registry_fact_id": item.registry_fact_id,
+                    "registry_version": item.registry_version,
+                    "definition_version": item.definition_version,
+                    "definition_fact_id": item.fact_id,
+                    "fact_version": item.fact_version,
+                    "source": item.source,
+                    "source_revision": item.source_revision,
+                }
+                for item in (snapshot.resolved_calendar_definitions if snapshot is not None else ())
+            ],
+            "differences": [difference.evidence() for difference in (axis.differences if axis is not None else ())],
+            "envelope": {
+                "start_date": snapshot.envelope_start if snapshot is not None else None,
+                "end_date_exclusive": snapshot.envelope_end_exclusive if snapshot is not None else None,
+            },
+            "definition_usage_by_date": usage,
+            "coverage": dict(snapshot.coverage) if snapshot is not None else None,
+            "capabilities": capability_evidence,
+        }
+        calendar_summary = json.loads(canonical_json(calendar_summary))
+        session_summary = {
+            "pit_context": dict(pit_context.as_dict) if pit_context is not None else None,
+            "formal_session_count": len(formal),
+            "warmup_session_count": len(warmup),
+            "formal_sessions": [
+                {
+                    "date": point.session_date,
+                    "session_id": point.session_id,
+                    "timezone": point.timezone,
+                    "sessions": [window.semantic_payload() for window in point.sessions],
+                }
+                for point in formal
+            ],
+            "warmup_sessions": [
+                {
+                    "date": point.session_date,
+                    "session_id": point.session_id,
+                    "timezone": point.timezone,
+                    "sessions": [window.semantic_payload() for window in point.sessions],
+                }
+                for point in warmup
+            ],
+            "calendar_session_signature": calendar_session_signature,
+            "warmup_session_signature": warmup_resolution.resolution_signature if warmup_resolution is not None else warmup_signature,
+            "snapshot_id": str(snapshot.snapshot_id) if snapshot is not None else None,
+            "snapshot_fingerprint": snapshot_fingerprint,
+        }
+        session_summary = json.loads(canonical_json(session_summary))
+        return DataPreflightReport(
+            status=PreflightStatus.BLOCKED if blocked else PreflightStatus.READY,
+            generated_at=self._dataset.clock,
+            provider_key=request.provider_key,
+            capability_manifest_version=self._manifest_version,
+            requested_window=request.requested_window,
+            scope_mode=request.instrument_scope_mode,
+            resolved_calendar_ids=calendar_ids,
+            resolved_calendar_definitions=(
+                snapshot.resolved_calendar_definitions if snapshot is not None else ()
+            ),
+            resolved_timezone=axis.timezone if axis is not None else None,
+            calendar_axis_policy=request.calendar_axis_policy,
+            calendar_compatibility_status=axis.status if axis is not None else CalendarAxisStatus.INCOMPATIBLE,
+            calendar_session_signature=calendar_session_signature,
+            resolved_sessions=formal,
+            warmup_sessions=warmup,
+            max_lookback_sessions=request.max_lookback_sessions,
+            knowledge_as_of=request.query_boundary.knowledge_as_of,
+            non_strict_pit_capabilities=(),
+            consistency_mode=request.consistency_mode,
+            consistency_token_capability=(request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN and request.consistency_token_contract is not None),
+            consistency_token_contract=request.consistency_token_contract if request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN else None,
+            data_chunk_policy=request.data_chunk_policy,
+            data_chunk_size_sessions=request.data_chunk_size_sessions,
+            required_capabilities=request.required_capabilities,
+            rule_package=request.rule_package,
+            rule_exception_set=request.rule_exception_set,
+            static_instrument_ids=request.static_instrument_ids,
+            mandatory_instrument_ids=request.mandatory_instrument_ids,
+            strategy_price_bases=request.strategy_price_bases,
+            engine_price_basis=request.engine_price_basis,
+            data_contract_version=request.data_contract_version,
+            frequency=request.frequency,
+            warmup_sessions_count=request.warmup_sessions,
+            market_scope=request.market_scope,
+            universe_query_policy=request.universe_query_policy,
+            allowed_settlement_rule_class=request.allowed_settlement_rule_class,
+            adjustment_series_policy=request.adjustment_series_policy,
+            quality_mode=request.quality_mode,
+            issues=tuple(issue_list),
+            warmup_resolution=warmup_resolution,
+            warmup_resolution_signature=warmup_resolution.resolution_signature if warmup_resolution is not None else None,
+            calendar_axis_differences=axis.differences if axis is not None else (),
+            query_boundary=request.query_boundary,
+            hash_schema_version=2 if snapshot is not None else 1,
+            pit_context=pit_context.as_dict if snapshot is not None and pit_context is not None else None,
+            calendar_revision_digest=revision_digest,
+            snapshot_fingerprint=snapshot_fingerprint,
+            non_strict_pit=False,
+            calendar_semantic_signature=semantic_signature,
+            warmup_session_signature=warmup_signature,
+            definition_usage_by_date=usage,
+            calendar_summary=calendar_summary,
+            session_summary=session_summary,
         )
 
     def _resolved_definitions(
@@ -1119,12 +1601,23 @@ class MemoryDataSession:
                     "the preflight request must match the frozen session "
                     "request on every shared business field"
                 )
-        report = self._provider._build_preflight_report(
-            self._request,
-            # The calendars frozen at admission are authoritative; the
-            # re-check must not silently re-derive a different axis.
-            frozen_calendar_ids=self._request.resolved_calendar_ids or None,
-        )
+        try:
+            report = self._provider._build_preflight_report(
+                self._request,
+                # The calendars frozen at admission are authoritative; the
+                # re-check must not silently re-derive a different axis.
+                frozen_calendar_ids=self._request.resolved_calendar_ids,
+            )
+        except CalendarPreflightResourceLimitExceededError:
+            # A session-level resource overrun has no report, cursor, or
+            # persistence lifecycle.  Keep the session terminal and bubble
+            # the stable error to the creation coordinator.
+            self._report = None
+            self._resolved_sessions = ()
+            self._warmup_sessions = ()
+            self._revision_snapshot = None
+            self._state = DataSessionState.BLOCKED
+            raise
         self._report = report
         self._resolved_sessions = report.resolved_sessions
         self._warmup_sessions = report.warmup_sessions

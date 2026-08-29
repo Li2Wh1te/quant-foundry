@@ -31,6 +31,7 @@ from app.backtesting.data.requests import ContractRef, PriceBasis, QualityStatus
 from app.backtesting.domain import _aware_datetime
 from app.instruments.domain import (
     InstrumentCodeMapping,
+    InstrumentCodeMappingFact,
     InstrumentDisplay,
     InstrumentSpec,
 )
@@ -43,6 +44,7 @@ __all__ = [
     "DataPoint",
     "FactEvidence",
     "InstrumentCodeMapping",
+    "InstrumentCodeMappingFact",
     "InstrumentDisplay",
     "InstrumentSpec",
     "PitRateSnapshotQuery",

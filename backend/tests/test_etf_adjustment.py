@@ -12,6 +12,7 @@ from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.repositories.etf_adjustment import (
     EtfAdjustmentFactorRepository,
 )
+from app.backtesting.data.errors import InstrumentCalendarUnresolvedError
 from app.data_ingestion.schemas.etf_adjustment import (
     EtfAdjustmentFactorInput,
     EtfAdjustmentFactorUpsertResult,
@@ -241,33 +242,13 @@ class WholeMarketEtfAdjustmentSyncTestCase(unittest.TestCase):
 
     @patch("app.data_ingestion.services.etf_adjustment._sync_market_dates")
     @patch("app.data_ingestion.services.etf_adjustment._load_checkpoint")
-    def test_incremental_resumes_after_the_single_market_cursor(
+    def test_no_cutoff_blocks_before_the_single_market_cursor(
         self, load_checkpoint_mock, sync_market_dates_mock
     ) -> None:
-        checkpoint = DataSyncCheckpointState(
-            sync_key=ETF_ADJUSTMENT_INCREMENTAL_SYNC_KEY,
-            scope_key=ETF_ADJUSTMENT_SCOPE_KEY,
-            cursor={"synced_through_date": "2026-08-13"},
-            cursor_version=1,
-            version=4,
-        )
-        load_checkpoint_mock.return_value = checkpoint
-        expected = EtfAdjustmentSyncResult(
-            days_completed=1,
-            received=1,
-            changed=1,
-            unchanged=0,
-            synced_through_date=date(2026, 8, 14),
-        )
-        sync_market_dates_mock.return_value = expected
+        with self.assertRaises(InstrumentCalendarUnresolvedError):
+            sync_etf_adjustment_incremental(
+                Mock(), as_of_date=date(2026, 8, 14)
+            )
 
-        result = sync_etf_adjustment_incremental(
-            Mock(), as_of_date=date(2026, 8, 14)
-        )
-
-        self.assertIs(result, expected)
-        load_checkpoint_mock.assert_called_once_with(ETF_ADJUSTMENT_INCREMENTAL_SYNC_KEY)
-        self.assertEqual(
-            sync_market_dates_mock.call_args.kwargs["start_date"], date(2026, 8, 14)
-        )
-        self.assertIs(sync_market_dates_mock.call_args.kwargs["checkpoint"], checkpoint)
+        load_checkpoint_mock.assert_not_called()
+        sync_market_dates_mock.assert_not_called()

@@ -48,6 +48,8 @@ from app.backtesting.domain import DomainValidationError
 __all__ = [
     "ALLOWED_CASH_FLOW_KINDS",
     "AnalysisAdmissionFailure",
+    "blocked_preflight_failure",
+    "resource_limited_preflight_failure",
     "AdmissionBlockedError",
     "AnalyzerRunAdmission",
     "FormalSessionTimeline",
@@ -83,6 +85,7 @@ class AnalysisAdmissionFailure:
 
     reason_code: str
     message: str
+    title: str = "数据预检未通过"
     run_id: str | None = None
     details: Mapping[str, Any] | None = None
     status: str = "blocked"
@@ -97,8 +100,11 @@ class AnalysisAdmissionFailure:
             raise DomainValidationError("reason_code must be non-blank text")
         if not isinstance(self.message, str) or not self.message.strip():
             raise DomainValidationError("message must be non-blank text")
+        if not isinstance(self.title, str) or not self.title.strip():
+            raise DomainValidationError("title must be non-blank text")
         object.__setattr__(self, "reason_code", self.reason_code.strip())
         object.__setattr__(self, "message", self.message.strip())
+        object.__setattr__(self, "title", self.title.strip())
         object.__setattr__(
             self,
             "details",
@@ -110,18 +116,148 @@ class AnalysisAdmissionFailure:
 
         import json
 
+        details = dict(self.details or {})
+        # Creation-gate responses are never queryable resources.  Keep the
+        # pagination/retention fields explicit even when the gate failed
+        # before a report or snapshot could be formed; clients must not infer
+        # that a null run id can be queried later.
+        details["cursor"] = None
+        details["next_cursor"] = None
+        details["truncated"] = False
+        details["retention"] = {
+            "kind": "response_only",
+            "persisted": False,
+            "queryable": False,
+        }
+        details["issues_complete"] = (
+            False
+            if self.reason_code == "calendar_preflight_resource_limit_exceeded"
+            else True
+        )
         return json.loads(
             canonical_evidence_json(
                 {
                     "status": self.status,
                     "run_id": self.run_id,
                     "reason_code": self.reason_code,
+                    "title": self.title,
                     "message": self.message,
-                    "details": dict(self.details or {}),
+                    "details": details,
                     "persisted": self.persisted,
                 }
             )
         )
+
+
+def blocked_preflight_failure(report: object) -> AnalysisAdmissionFailure:
+    """Build the synchronous no-run response from a blocked preflight report."""
+
+    if not getattr(report, "blocked", False):
+        raise DomainValidationError("only a blocked preflight report can build an admission failure")
+    details = report.as_dict() if callable(getattr(report, "as_dict", None)) else {}
+    nested = details.get("details") if isinstance(details, Mapping) else None
+    if not isinstance(nested, Mapping):
+        nested = {}
+    nested = dict(nested)
+    nested.setdefault("schema_version", 2)
+    nested.setdefault("issues_complete", True)
+    return AnalysisAdmissionFailure(
+        reason_code="data_preflight_blocked",
+        title="数据预检未通过",
+        message="交易日历与会话预检未通过，运行未创建。",
+        run_id=None,
+        details=nested,
+    )
+
+
+def resource_limited_preflight_failure(
+    *,
+    observed: Mapping[str, int],
+    requested_window: object | None = None,
+    warmup_sessions: int = 0,
+    pit_context: Mapping[str, object] | None = None,
+    calendar_ids: Sequence[str] = (),
+) -> AnalysisAdmissionFailure:
+    """Create the non-pageable response for a preflight resource overrun.
+
+    This helper is intentionally separate from :class:`DataPreflightReport`:
+    an over-limit aggregation must not be represented as an ordinary report
+    with silently dropped issues or a resumable cursor.  Callers may provide
+    only the counts when the request was rejected before a calendar snapshot
+    existed; all optional evidence remains explicit ``null``/empty data.
+    """
+
+    if not isinstance(observed, Mapping):
+        raise DomainValidationError("observed resource counts must be a mapping")
+    normalized_observed: dict[str, int] = {}
+    for name, value in observed.items():
+        if not isinstance(name, str) or not name.strip():
+            raise DomainValidationError("resource count names must be non-blank text")
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise DomainValidationError(f"resource count {name!r} must be a non-negative integer")
+        normalized_observed[name] = value
+    if isinstance(warmup_sessions, bool) or not isinstance(warmup_sessions, int) or warmup_sessions < 0:
+        raise DomainValidationError("warmup_sessions must be a non-negative integer")
+    if isinstance(calendar_ids, (str, bytes, bytearray)):
+        raise DomainValidationError("calendar_ids must be a sequence of ids")
+    from app.backtesting.calendar_axis import normalize_calendar_id
+
+    try:
+        normalized_calendar_ids = tuple(
+            sorted({normalize_calendar_id(item) for item in calendar_ids})
+        )
+    except (TypeError, DomainValidationError) as exc:
+        raise DomainValidationError("calendar_ids entries must be valid ids") from exc
+    normalized_observed.setdefault("calendar_ids", len(normalized_calendar_ids))
+    normalized_observed.setdefault("issue_groups", 0)
+    normalized_observed.setdefault("utf8_bytes", 0)
+    # A calendar-count overrun is rejected before aggregation.  Do not echo
+    # an unbounded request list in the synchronous response; the documented
+    # resource-protection payload carries only the observed count in that
+    # case.  IDs remain useful evidence for other overruns while the request
+    # itself is within the 32-calendar cap.
+    response_calendar_ids = (
+        () if len(normalized_calendar_ids) > 32 else normalized_calendar_ids
+    )
+    window: dict[str, object] | None = None
+    if requested_window is not None:
+        start = getattr(requested_window, "start_date", None)
+        end = getattr(requested_window, "end_date", None)
+        if start is None or end is None:
+            raise DomainValidationError("requested_window must expose start_date/end_date")
+        window = {"start_date": start.isoformat(), "end_date": end.isoformat()}
+    context = dict(pit_context) if isinstance(pit_context, Mapping) else None
+    details = {
+        "schema_version": 2,
+        "primary_issue_code": "CALENDAR_PREFLIGHT_RESOURCE_LIMIT_EXCEEDED",
+        "issues": (),
+        "issues_complete": False,
+        "requested_window": window,
+        "warmup": {"requested_sessions": warmup_sessions, "anchor": None},
+        "pit_context": context,
+        "calendar_ids": response_calendar_ids,
+        "coverage": None,
+        "report_hash": None,
+        "hash_schema_version": None,
+        "resource_limit": {
+            "max_calendar_ids": 32,
+            "max_issue_groups": 4096,
+            "max_utf8_bytes": 4 * 1024 * 1024,
+            "observed": normalized_observed,
+            "retry_hint": "缩小日期范围或 calendar_id 集合后重新预检",
+        },
+        "cursor": None,
+        "next_cursor": None,
+        "truncated": False,
+        "retention": {"kind": "response_only", "persisted": False, "queryable": False},
+    }
+    return AnalysisAdmissionFailure(
+        reason_code="calendar_preflight_resource_limit_exceeded",
+        title="预检资源超限",
+        message="交易日历预检结果超过单次响应资源上限，请缩小范围后重试。",
+        run_id=None,
+        details=details,
+    )
 
 
 class AdmissionBlockedError(DomainValidationError):

@@ -155,6 +155,7 @@ def _request_defaults() -> dict:
         required_capabilities=(DataCapability.BARS,),
         strategy_price_bases=(PriceBasis.RAW,),
         consistency_mode=ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+        query_boundary=_boundary(),
         static_instrument_ids=_static_ids(),
     )
 
@@ -200,7 +201,10 @@ def _rule_report_for(request: DataPreflightRequest):
         )
         for iid in ids
     )
-    cutoff = request.knowledge_as_of or datetime(2026, 8, 1, tzinfo=timezone.utc)
+    cutoff = (
+        request.query_boundary.knowledge_as_of
+        or request.query_boundary.data_cutoff
+    )
     request_start = request.requested_window.start_date
     segments = tuple(
         InstrumentRuleSnapshotSegment(
@@ -342,7 +346,8 @@ def _report_for(request: DataPreflightRequest, **overrides) -> DataPreflightRepo
         scope_mode=request.instrument_scope_mode,
         calendar_axis_policy=request.calendar_axis_policy,
         max_lookback_sessions=request.max_lookback_sessions,
-        knowledge_as_of=request.knowledge_as_of,
+        knowledge_as_of=request.query_boundary.knowledge_as_of,
+        query_boundary=request.query_boundary,
         consistency_mode=request.consistency_mode,
         consistency_token_capability=(
             request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN

@@ -15,6 +15,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from app.backtesting.data.errors import (
+    CalendarIdUnknownError,
     HistoryIncompleteError,
     InvalidDataRequestError,
     UniverseCalendarNotPreflightedError,
@@ -306,6 +307,11 @@ class TestAdjustmentAndConstruction(unittest.TestCase):
 
 
 class TestUniverseCalendarGate(unittest.TestCase):
+    def test_calendar_ids_are_normalized_before_comparison(self) -> None:
+        require_preflighted_calendar_ids(
+            [" sse "], allowed_calendar_ids=("SSE",)
+        )
+
     def test_preflighted_calendars_pass(self) -> None:
         require_preflighted_calendar_ids(
             ["cal-a", "cal-b"], allowed_calendar_ids={"cal-a", "cal-b"}
@@ -329,6 +335,11 @@ class TestUniverseCalendarGate(unittest.TestCase):
             require_preflighted_calendar_ids(["cal-a", 3], allowed_calendar_ids=["cal-a"])
         with self.assertRaises(InvalidDataRequestError):
             require_preflighted_calendar_ids("cal-a", allowed_calendar_ids=["cal-a"])
+
+    def test_invalid_calendar_id_reports_stable_error_code(self) -> None:
+        with self.assertRaises(CalendarIdUnknownError) as ctx:
+            require_preflighted_calendar_ids(["sse?"], allowed_calendar_ids=["SSE"])
+        self.assertEqual(ctx.exception.code, "calendar_id_unknown")
 
 
 # ---------------------------------------------------------------------------

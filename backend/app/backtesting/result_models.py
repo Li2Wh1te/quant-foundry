@@ -1288,6 +1288,7 @@ class BacktestDataPreflightRecord:
     phase: DataPhase
     status: str
     report_hash: str
+    hash_schema_version: int = 1
     capabilities: Mapping[str, Any] | None = None
     calendar_summary: Mapping[str, Any] | None = None
     session_summary: Mapping[str, Any] | None = None
@@ -1302,6 +1303,8 @@ class BacktestDataPreflightRecord:
         object.__setattr__(
             self, "report_hash", _required_text(self.report_hash, "report_hash")
         )
+        if isinstance(self.hash_schema_version, bool) or self.hash_schema_version not in (1, 2):
+            raise DomainValidationError("hash_schema_version must be 1 or 2")
         object.__setattr__(
             self, "pit_status", _optional_text(self.pit_status, "pit_status")
         )

@@ -80,11 +80,66 @@ class DataCutoffViolationError(DataCutoffExceededError, DataQueryContractError):
     Raised when a query would read past the strict ``data_cutoff``.
     """
 
-    def __init__(self, requested_end: object, cutoff: object) -> None:
+    def __init__(
+        self,
+        requested_end: object,
+        cutoff: object,
+        *,
+        instrument_id: object = None,
+        source: object = None,
+        source_code: object = None,
+        session_date: object = None,
+        expected: object = None,
+        actual: object = None,
+        data_cutoff: object = None,
+        fact_version: object = None,
+    ) -> None:
+        """Build a cutoff error with legacy and canonical query details.
+
+        ``requested_end`` and ``cutoff`` remain positional compatibility
+        fields for the original strategy protocol.  New callers can provide
+        the query coordinates explicitly so the unified data-contract error
+        details remain actionable even before a provider is touched.
+        """
+
+        def detail(value: object) -> object:
+            """Convert common typed query coordinates into JSON scalars."""
+
+            if value is None or type(value) in (str, bool, int, float):
+                return value
+            isoformat = getattr(value, "isoformat", None)
+            if callable(isoformat):
+                return isoformat()
+            return str(value)
+
+        resolved_session = requested_end if session_date is None else session_date
+        resolved_expected = (
+            expected
+            if expected is not None
+            else f"<= {detail(cutoff)}"
+        )
+        resolved_actual = requested_end if actual is None else actual
+        resolved_cutoff = cutoff if data_cutoff is None else data_cutoff
         DataContractError.__init__(
             self,
             f"query end {requested_end} is later than data_cutoff {cutoff}",
-            details={"requested_end": str(requested_end), "data_cutoff": str(cutoff)},
+            details={
+                # Original fields are retained for callers that persisted the
+                # legacy exception payload.
+                "requested_end": detail(requested_end),
+                "cutoff": detail(cutoff),
+                "instrument_id": detail(instrument_id),
+                "source": detail(source),
+                "source_code": detail(source_code),
+                "session_date": detail(resolved_session),
+                "session": detail(resolved_session),
+                "expected": detail(resolved_expected),
+                "expected_value": detail(resolved_expected),
+                "actual": detail(resolved_actual),
+                "actual_value": detail(resolved_actual),
+                "data_cutoff": detail(resolved_cutoff),
+                "fact_version": detail(fact_version),
+            },
         )
         self.requested_end = requested_end
         self.cutoff = cutoff
@@ -100,11 +155,45 @@ class LookbackLimitExceededError(
     partial reads.
     """
 
-    def __init__(self, requested: int, maximum: int = MAX_LOOKBACK_SESSIONS) -> None:
+    def __init__(
+        self,
+        requested: int,
+        maximum: int = MAX_LOOKBACK_SESSIONS,
+        *,
+        instrument_id: object = None,
+        source: object = None,
+        session_date: object = None,
+        expected: object = None,
+        actual: object = None,
+        data_cutoff: object = None,
+        fact_version: object = None,
+    ) -> None:
+        def detail(value: object) -> object:
+            """Convert common typed query coordinates into JSON scalars."""
+
+            if value is None or type(value) in (str, bool, int, float):
+                return value
+            isoformat = getattr(value, "isoformat", None)
+            if callable(isoformat):
+                return isoformat()
+            return str(value)
+
         DataContractError.__init__(
             self,
             f"lookback_sessions {requested} exceeds the maximum of {maximum}",
-            details={"requested": requested, "maximum": maximum},
+            details={
+                # Keep the original fields for compatibility while exposing
+                # the same query-coordinate shape as every other data error.
+                "requested": requested,
+                "maximum": maximum,
+                "instrument_id": detail(instrument_id),
+                "source": detail(source),
+                "session_date": detail(session_date),
+                "expected": detail(expected if expected is not None else maximum),
+                "actual": detail(actual if actual is not None else requested),
+                "data_cutoff": detail(data_cutoff),
+                "fact_version": detail(fact_version),
+            },
         )
         self.requested = requested
         self.maximum = maximum

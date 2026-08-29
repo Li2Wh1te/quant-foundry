@@ -36,9 +36,15 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
-from typing import Protocol, Sequence
-from uuid import UUID
+from types import MappingProxyType
+from typing import Mapping, Protocol, Sequence
+from uuid import UUID, uuid4
 
+from app.backtesting.data.errors import (
+    IdentityMappingConflictError,
+    IdentityMappingIncompleteError,
+    freeze_json,
+)
 from app.backtesting.domain import DomainValidationError, _aware_datetime
 
 
@@ -169,6 +175,127 @@ class InstrumentDisplay:
 
 
 # ---------------------------------------------------------------------------
+# Stable identity lifecycle and immutable identity facts
+# ---------------------------------------------------------------------------
+
+
+class InstrumentStatus(StrEnum):
+    """Lifecycle state of a stable economic instrument identity.
+
+    The status is deliberately independent from a source-code listing status.
+    A code may be delisted while the economic identity remains useful for
+    historical queries.  ``MERGED`` is terminal and points at the identity
+    selected by an explicit, evidenced reconciliation operation.
+    """
+
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+    MERGED = "merged"
+    # Synonyms preserve one persisted lifecycle value.
+    RETIRED = "deprecated"
+    INACTIVE = "deprecated"
+
+
+IdentityStatus = InstrumentStatus
+"""Backward-compatible alias for :class:`InstrumentStatus`."""
+InstrumentLifecycleState = InstrumentStatus
+"""Compatibility alias for lifecycle-oriented callers."""
+InstrumentIdentityStatus = InstrumentStatus
+"""Compatibility alias for the identity-row status enum."""
+
+
+def _positive_version(value: int, field_name: str = "fact_version") -> int:
+    """Validate an immutable fact version without accepting booleans."""
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise DomainValidationError(f"{field_name} must be a positive integer")
+    return value
+
+
+def _optional_uuid(value: UUID | None, field_name: str) -> UUID | None:
+    """Validate an optional immutable fact/identity reference."""
+
+    if value is None:
+        return None
+    if not isinstance(value, UUID):
+        raise DomainValidationError(f"{field_name} must be a UUID when provided")
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentIdentityFact:
+    """One immutable, point-in-time identity fact.
+
+    Identity facts carry the asset protocol's identity-critical attributes;
+    they do not derive currency or calendar information from a source code.
+    Corrections append a new version under the same ``logical_fact_key`` and
+    reference the prior row through ``supersedes_fact_id``.  ``known_at`` is
+    the only timestamp used for PIT visibility; ``observed_at`` remains an
+    ingestion audit timestamp.
+    """
+
+    instrument_id: UUID
+    fact_version: int
+    asset_class: str
+    currency: str
+    calendar_id: str
+    valid_from: date
+    known_at: datetime
+    observed_at: datetime
+    evidence: str
+    valid_to: date | None = None
+    fact_id: UUID | None = None
+    logical_fact_key: str | None = None
+    supersedes_fact_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise DomainValidationError("instrument_id must be a UUID")
+        # ``None`` requests service-side generation.  Do not use truthiness
+        # here: values such as ``False`` or ``""`` are invalid fact IDs and
+        # must be rejected instead of silently replaced by a new UUID.
+        fact_id = uuid4() if self.fact_id is None else _optional_uuid(
+            self.fact_id, "fact_id"
+        )
+        object.__setattr__(self, "fact_id", fact_id)
+        object.__setattr__(
+            self, "fact_version", _positive_version(self.fact_version)
+        )
+        object.__setattr__(self, "asset_class", _required_label(self.asset_class, "asset_class"))
+        object.__setattr__(self, "currency", _required_label(self.currency, "currency").upper())
+        object.__setattr__(self, "calendar_id", _required_label(self.calendar_id, "calendar_id"))
+        object.__setattr__(self, "evidence", _required_label(self.evidence, "evidence"))
+        if not isinstance(self.valid_from, date) or isinstance(self.valid_from, datetime):
+            raise DomainValidationError("valid_from must be a calendar date")
+        if self.valid_to is not None:
+            if not isinstance(self.valid_to, date) or isinstance(self.valid_to, datetime):
+                raise DomainValidationError("valid_to must be a calendar date")
+            if self.valid_to <= self.valid_from:
+                raise DomainValidationError("valid_to must be later than valid_from")
+        object.__setattr__(self, "known_at", _aware_datetime(self.known_at, "known_at"))
+        object.__setattr__(self, "observed_at", _aware_datetime(self.observed_at, "observed_at"))
+        object.__setattr__(
+            self,
+            "logical_fact_key",
+            _optional_label(self.logical_fact_key, "logical_fact_key")
+            or f"instrument:{self.instrument_id}",
+        )
+        object.__setattr__(
+            self,
+            "supersedes_fact_id",
+            _optional_uuid(self.supersedes_fact_id, "supersedes_fact_id"),
+        )
+
+    def covers(self, day: date) -> bool:
+        """Return whether the fact is effective on a session date."""
+
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise DomainValidationError("day must be a calendar date")
+        return self.valid_from <= day and (
+            self.valid_to is None or day < self.valid_to
+        )
+
+# ---------------------------------------------------------------------------
 # Evidenced PIT source-code mapping
 # ---------------------------------------------------------------------------
 
@@ -201,6 +328,13 @@ class InstrumentCodeMapping:
     observed_at: datetime
     valid_to: date | None = None
     source_revision: str | None = None
+    # ``fact_id`` is the immutable row id.  It is optional only for
+    # compatibility with the original domain constructor; a server-side UUID
+    # is generated when callers create a new fact.
+    fact_id: UUID | None = None
+    fact_version: int = 1
+    logical_fact_key: str | None = None
+    supersedes_fact_id: UUID | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -246,6 +380,37 @@ class InstrumentCodeMapping:
             "observed_at",
             _aware_datetime(self.observed_at, "observed_at"),
         )
+        # ``None`` requests service-side generation.  Falsey non-UUID values
+        # are malformed immutable IDs and must not be silently regenerated.
+        fact_id = uuid4() if self.fact_id is None else _optional_uuid(
+            self.fact_id, "fact_id"
+        )
+        object.__setattr__(self, "fact_id", fact_id)
+        object.__setattr__(
+            self, "fact_version", _positive_version(self.fact_version)
+        )
+        # A revision chain must be identified by an explicit, immutable key.
+        # For a new fact without a caller-supplied key, the generated fact id
+        # is the only safe fallback; mutable fields such as source_code and
+        # valid_from must never silently determine chain membership.
+        supersedes_fact_id = _optional_uuid(
+            self.supersedes_fact_id, "supersedes_fact_id"
+        )
+        object.__setattr__(self, "supersedes_fact_id", supersedes_fact_id)
+        logical_fact_key = _optional_label(
+            self.logical_fact_key, "logical_fact_key"
+        )
+        if logical_fact_key is None:
+            if self.fact_version != 1 or supersedes_fact_id is not None:
+                raise DomainValidationError(
+                    "logical_fact_key must be explicit for mapping revisions"
+                )
+            logical_fact_key = f"mapping:{self.fact_id}"
+        object.__setattr__(
+            self,
+            "logical_fact_key",
+            logical_fact_key,
+        )
 
     def covers(self, day: date) -> bool:
         """Return whether this mapping is effective on ``day`` (half-open)."""
@@ -255,12 +420,78 @@ class InstrumentCodeMapping:
         return self.valid_to is None or day < self.valid_to
 
 
-class MappingConflictError(DomainValidationError):
+# The task-10 contract names this fact ``InstrumentCodeMappingFact``.  Keep
+# one domain type and expose the terminology as an alias so persisted/API
+# consumers can import either name without creating a second model.
+InstrumentCodeMappingFact = InstrumentCodeMapping
+
+
+def _normalize_mapping_error_detail(value: object) -> object:
+    """Convert domain-native diagnostic values into stable JSON values.
+
+    Mapping errors are raised by repository/domain code as well as by the PIT
+    adapter.  Callers naturally include ``date``, ``datetime``, ``UUID``, or
+    ``Decimal`` objects in those diagnostics, while the stable error base
+    deliberately accepts JSON values only.  Normalize those domain values at
+    this boundary instead of weakening the global error serializer.
+    """
+
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {
+            str(key): _normalize_mapping_error_detail(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_normalize_mapping_error_detail(item) for item in value]
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None and enum_value is not value:
+        return _normalize_mapping_error_detail(enum_value)
+    return value
+
+
+def _normalize_mapping_error_details(
+    details: Mapping[str, object] | None,
+) -> Mapping[str, object] | None:
+    """Normalize one optional mapping-error diagnostic mapping."""
+
+    if details is None:
+        return None
+    return {
+        str(key): _normalize_mapping_error_detail(value)
+        for key, value in details.items()
+    }
+
+
+class MappingConflictError(IdentityMappingConflictError):
     """Raised when overlapping mappings cover the same validity instants."""
 
+    def __init__(
+        self, message: str, *, details: Mapping[str, object] | None = None
+    ) -> None:
+        super().__init__(
+            message,
+            details=_normalize_mapping_error_details(details),
+        )
 
-class MappingCoverageGapError(DomainValidationError):
+
+class MappingCoverageGapError(IdentityMappingIncompleteError):
     """Raised when mappings leave requested window dates uncovered."""
+
+    def __init__(
+        self, message: str, *, details: Mapping[str, object] | None = None
+    ) -> None:
+        super().__init__(
+            message,
+            details=_normalize_mapping_error_details(details),
+        )
 
 
 def order_mapping_segments(
@@ -268,6 +499,9 @@ def order_mapping_segments(
     *,
     start_date: date,
     end_date: date,
+    data_cutoff: datetime | None = None,
+    instrument_id: UUID | None = None,
+    source: str | None = None,
 ) -> tuple[InstrumentCodeMapping, ...]:
     """Sort mappings by ``valid_from`` and verify full window coverage.
 
@@ -292,6 +526,62 @@ def order_mapping_segments(
         raise DomainValidationError("end_date must be a calendar date")
     if start_date > end_date:
         raise DomainValidationError("start_date cannot be after end_date")
+    if data_cutoff is not None:
+        data_cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+
+    def detail_value(value: object) -> object:
+        """Render domain values into the JSON scalar types used by errors."""
+
+        if isinstance(value, UUID):
+            return str(value)
+        if isinstance(value, datetime):
+            return value.isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        if isinstance(value, Mapping):
+            return {str(key): detail_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [detail_value(item) for item in value]
+        if value is None or type(value) in (str, bool, int, float):
+            return value
+        enum_value = getattr(value, "value", None)
+        return detail_value(enum_value) if enum_value is not None else repr(value)
+
+    def error_details(
+        *,
+        source_code: object = None,
+        session_date: object = None,
+        expected: object = None,
+        actual: object = None,
+        **extra: object,
+    ) -> dict[str, object]:
+        """Build a stable diagnostic shape for mapping coverage failures."""
+
+        first = mappings[0] if mappings else None
+        resolved_instrument = (
+            instrument_id
+            if instrument_id is not None
+            else getattr(first, "instrument_id", None)
+        )
+        resolved_source = (
+            source if source is not None else getattr(first, "source", None)
+        )
+        result: dict[str, object] = {
+            "instrument_id": detail_value(resolved_instrument),
+            "source": detail_value(resolved_source),
+            "source_code": detail_value(source_code),
+            "session_date": detail_value(session_date),
+            "expected": detail_value(expected),
+            "actual": detail_value(actual),
+            "data_cutoff": detail_value(data_cutoff),
+            "fact_version": detail_value(
+                getattr(first, "fact_version", None) if first is not None else None
+            ),
+        }
+        if session_date is not None:
+            result["session"] = detail_value(session_date)
+        result.update({key: detail_value(value) for key, value in extra.items()})
+        return result
 
     segments = sorted(mappings, key=lambda mapping: mapping.valid_from)
     identities = {(mapping.instrument_id, mapping.source) for mapping in segments}
@@ -303,35 +593,392 @@ def order_mapping_segments(
     if not segments:
         raise MappingCoverageGapError(
             "no instrument code mappings cover the requested window "
-            f"[{start_date}, {end_date}]"
+            f"[{start_date}, {end_date}]",
+            details=error_details(
+                session_date=start_date,
+                expected="at least one mapping segment",
+                actual=0,
+            ),
         )
     first, last = segments[0], segments[-1]
     if first.valid_from > start_date:
         raise MappingCoverageGapError(
             "instrument code mappings start at "
             f"{first.valid_from}, leaving [{start_date}, {first.valid_from}) "
-            "of the requested window uncovered"
+            "of the requested window uncovered",
+            details=error_details(
+                source_code=first.source_code,
+                session_date=start_date,
+                expected=f"<= {start_date.isoformat()}",
+                actual=first.valid_from,
+                first_valid_from=first.valid_from,
+            ),
         )
     if last.valid_to is not None and last.valid_to <= end_date:
         raise MappingCoverageGapError(
             "instrument code mappings end at "
             f"{last.valid_to}, leaving [{last.valid_to}, {end_date}] "
-            "of the requested window uncovered"
+            "of the requested window uncovered",
+            details=error_details(
+                source_code=last.source_code,
+                session_date=end_date,
+                expected=f"> {end_date.isoformat()}",
+                actual=last.valid_to,
+                last_valid_to=last.valid_to,
+            ),
         )
     for earlier, later in zip(segments, segments[1:]):
         if earlier.valid_to is None or earlier.valid_to > later.valid_from:
             raise MappingConflictError(
                 "overlapping instrument code mappings for "
                 f"{earlier.source_code!r} ({earlier.valid_from}..{earlier.valid_to}) "
-                f"and {later.source_code!r} ({later.valid_from}..{later.valid_to})"
+                f"and {later.source_code!r} ({later.valid_from}..{later.valid_to})",
+                details=error_details(
+                    source_code=earlier.source_code,
+                    session_date=later.valid_from,
+                    expected="one covering mapping",
+                    actual=2,
+                    earlier_source_code=earlier.source_code,
+                    later_source_code=later.source_code,
+                    earlier_valid_from=earlier.valid_from,
+                    earlier_valid_to=earlier.valid_to,
+                    later_valid_from=later.valid_from,
+                    later_valid_to=later.valid_to,
+                    fact_versions=[
+                        getattr(earlier, "fact_version", None),
+                        getattr(later, "fact_version", None),
+                    ],
+                ),
             )
         if earlier.valid_to < later.valid_from:
             raise MappingCoverageGapError(
                 "instrument code mappings leave uncovered dates between "
                 f"{earlier.valid_to} and {later.valid_from} "
-                f"for instrument {earlier.instrument_id}"
+                f"for instrument {earlier.instrument_id}",
+                details=error_details(
+                    source_code=earlier.source_code,
+                    session_date=earlier.valid_to,
+                    expected=earlier.valid_to,
+                    actual=later.valid_from,
+                    earlier_source_code=earlier.source_code,
+                    later_source_code=later.source_code,
+                    earlier_valid_to=earlier.valid_to,
+                    later_valid_from=later.valid_from,
+                    fact_versions=[
+                        getattr(earlier, "fact_version", None),
+                        getattr(later, "fact_version", None),
+                    ],
+                ),
             )
     return tuple(segments)
+
+
+# ---------------------------------------------------------------------------
+# Versioned display facts and identity resolution
+# ---------------------------------------------------------------------------
+
+
+class AuthorityStatus(StrEnum):
+    """Review state of a display fact.
+
+    Only ``AUTHORITATIVE`` facts are eligible for formal PIT resolution.
+    Pending and rejected rows remain useful audit evidence but can never be
+    selected merely because they are newer.
+    """
+
+    AUTHORITATIVE = "authoritative"
+    PENDING = "pending"
+    REJECTED = "rejected"
+
+
+DisplayAuthorityStatus = AuthorityStatus
+"""Compatibility alias for callers using the longer enum name."""
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentDisplayFact:
+    """One immutable, evidenced display identity fact.
+
+    Display labels are intentionally nullable.  A source can know the
+    stable identity while not publishing one of the labels; resolution then
+    returns ``None`` for that field instead of reading the current ETF
+    snapshot as a historical fallback.
+    """
+
+    instrument_id: UUID
+    fact_version: int
+    valid_from: date
+    known_at: datetime
+    observed_at: datetime
+    source: str
+    evidence: str
+    trading_code: str | None = None
+    name: str | None = None
+    display_name: str | None = None
+    valid_to: date | None = None
+    source_revision: str | None = None
+    authority_rank: int = 0
+    authority_status: AuthorityStatus = AuthorityStatus.AUTHORITATIVE
+    fact_id: UUID | None = None
+    logical_fact_key: str | None = None
+    supersedes_fact_id: UUID | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise DomainValidationError("instrument_id must be a UUID")
+        # ``None`` requests service-side generation.  Preserve validation for
+        # every other value, including falsey values such as ``False``/"".
+        fact_id = uuid4() if self.fact_id is None else _optional_uuid(
+            self.fact_id, "fact_id"
+        )
+        object.__setattr__(self, "fact_id", fact_id)
+        object.__setattr__(self, "fact_version", _positive_version(self.fact_version))
+        if not isinstance(self.valid_from, date) or isinstance(self.valid_from, datetime):
+            raise DomainValidationError("valid_from must be a calendar date")
+        if self.valid_to is not None:
+            if not isinstance(self.valid_to, date) or isinstance(self.valid_to, datetime):
+                raise DomainValidationError("valid_to must be a calendar date")
+            if self.valid_to <= self.valid_from:
+                raise DomainValidationError("valid_to must be later than valid_from")
+        for field_name in ("trading_code", "name", "display_name"):
+            object.__setattr__(
+                self,
+                field_name,
+                _optional_label(getattr(self, field_name), field_name),
+            )
+        object.__setattr__(self, "source", _required_label(self.source, "source"))
+        object.__setattr__(self, "evidence", _required_label(self.evidence, "evidence"))
+        object.__setattr__(self, "source_revision", _optional_label(self.source_revision, "source_revision"))
+        if isinstance(self.authority_rank, bool) or not isinstance(self.authority_rank, int):
+            raise DomainValidationError("authority_rank must be an integer")
+        if self.authority_rank < 0:
+            raise DomainValidationError("authority_rank must be non-negative")
+        try:
+            status = AuthorityStatus(getattr(self.authority_status, "value", self.authority_status))
+        except ValueError as exc:
+            raise DomainValidationError("authority_status must be valid") from exc
+        object.__setattr__(self, "authority_status", status)
+        object.__setattr__(self, "known_at", _aware_datetime(self.known_at, "known_at"))
+        object.__setattr__(self, "observed_at", _aware_datetime(self.observed_at, "observed_at"))
+        object.__setattr__(
+            self,
+            "logical_fact_key",
+            _optional_label(self.logical_fact_key, "logical_fact_key")
+            or f"display:{self.instrument_id}",
+        )
+        object.__setattr__(
+            self,
+            "supersedes_fact_id",
+            _optional_uuid(self.supersedes_fact_id, "supersedes_fact_id"),
+        )
+
+    def covers(self, day: date) -> bool:
+        """Return whether this display fact is effective on ``day``."""
+
+        if not isinstance(day, date) or isinstance(day, datetime):
+            raise DomainValidationError("day must be a calendar date")
+        return self.valid_from <= day and (
+            self.valid_to is None or day < self.valid_to
+        )
+
+    def as_display(self) -> InstrumentDisplay:
+        """Project the immutable fact to the historical display DTO."""
+
+        return InstrumentDisplay(
+            instrument_id=self.instrument_id,
+            trading_code=self.trading_code,
+            name=self.name,
+            display_name=self.display_name,
+        )
+
+
+def _identity_fact_evidence_summary(
+    fact: object | None,
+    *,
+    kind: str,
+) -> dict[str, object] | None:
+    """Project one selected fact into a JSON-safe evidence summary.
+
+    Resolution objects are immutable snapshots.  Their evidence therefore
+    needs to retain the provenance and both PIT axes of every selected fact,
+    rather than reducing a source to a boolean such as ``display_present``.
+    ``kind`` is intentionally explicit so mapping/display-specific fields are
+    included without coupling the helper to ORM records.
+    """
+
+    if fact is None:
+        return None
+    fields: dict[str, object] = {
+        "fact_id": getattr(fact, "fact_id", None),
+        "fact_version": getattr(fact, "fact_version", None),
+        "logical_fact_key": getattr(fact, "logical_fact_key", None),
+        "instrument_id": getattr(fact, "instrument_id", None),
+        "evidence": getattr(fact, "evidence", None),
+        "valid_from": getattr(fact, "valid_from", None),
+        "valid_to": getattr(fact, "valid_to", None),
+        "known_at": getattr(fact, "known_at", None),
+        "observed_at": getattr(fact, "observed_at", None),
+    }
+    if kind == "identity":
+        fields.update(
+            {
+                "asset_class": getattr(fact, "asset_class", None),
+                "currency": getattr(fact, "currency", None),
+                "calendar_id": getattr(fact, "calendar_id", None),
+            }
+        )
+    elif kind == "mapping":
+        fields.update(
+            {
+                "source": getattr(fact, "source", None),
+                "source_revision": getattr(fact, "source_revision", None),
+                "source_code": getattr(fact, "source_code", None),
+                "trading_code": getattr(fact, "trading_code", None),
+                "mapping_source": getattr(fact, "mapping_source", None),
+            }
+        )
+    elif kind == "display":
+        fields.update(
+            {
+                "source": getattr(fact, "source", None),
+                "source_revision": getattr(fact, "source_revision", None),
+                "trading_code": getattr(fact, "trading_code", None),
+                "name": getattr(fact, "name", None),
+                "display_name": getattr(fact, "display_name", None),
+                "authority_rank": getattr(fact, "authority_rank", None),
+                "authority_status": getattr(fact, "authority_status", None),
+            }
+        )
+    else:  # pragma: no cover - private helper misuse guard
+        raise ValueError(f"unknown identity fact kind: {kind}")
+    return {
+        str(key): _normalize_mapping_error_detail(value)
+        for key, value in fields.items()
+    }
+
+
+def _identity_resolution_evidence_summary(
+    *,
+    instrument_id: UUID,
+    effective_at: datetime,
+    data_cutoff: datetime,
+    identity_fact: InstrumentIdentityFact | None = None,
+    display_fact: InstrumentDisplayFact | None = None,
+    mapping: InstrumentCodeMapping | None = None,
+    source: str | None = None,
+) -> dict[str, object]:
+    """Build the shared evidence summary used by pure and repository paths."""
+
+    effective = _aware_datetime(effective_at, "effective_at")
+    cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+    identity_summary = _identity_fact_evidence_summary(
+        identity_fact, kind="identity"
+    )
+    display_summary = _identity_fact_evidence_summary(display_fact, kind="display")
+    mapping_summary = _identity_fact_evidence_summary(mapping, kind="mapping")
+    summary: dict[str, object] = {
+        "instrument_id": str(instrument_id),
+        "effective_at": effective.isoformat(),
+        "data_cutoff": cutoff.isoformat(),
+        "source": source,
+        "identity_fact": identity_summary,
+        "display_fact": display_summary,
+        "mapping_fact": mapping_summary,
+    }
+    # Flat aliases preserve the original result shape for existing consumers;
+    # the nested summaries above are the canonical provenance representation.
+    for prefix, selected in (
+        ("identity", identity_summary),
+        ("display", display_summary),
+        ("mapping", mapping_summary),
+    ):
+        if selected is None:
+            continue
+        for field_name, value in selected.items():
+            summary[f"{prefix}_{field_name}"] = value
+    summary["display_present"] = display_summary is not None
+    return summary
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentIdentityResolution:
+    """PIT identity and display result used by result/candidate boundaries."""
+
+    instrument_id: UUID
+    identity_fact: InstrumentIdentityFact | None = None
+    display: InstrumentDisplay | None = None
+    mapping: InstrumentCodeMapping | None = None
+    evidence_summary: Mapping[str, object] = MappingProxyType({})
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise DomainValidationError("instrument_id must be a UUID")
+        if self.identity_fact is not None:
+            if not isinstance(self.identity_fact, InstrumentIdentityFact):
+                raise DomainValidationError("identity_fact must be an InstrumentIdentityFact")
+            if self.identity_fact.instrument_id != self.instrument_id:
+                raise DomainValidationError("identity_fact.instrument_id must match instrument_id")
+        if self.display is not None:
+            if not isinstance(self.display, InstrumentDisplay):
+                raise DomainValidationError("display must be an InstrumentDisplay")
+            if self.display.instrument_id != self.instrument_id:
+                raise DomainValidationError("display.instrument_id must match instrument_id")
+        if self.mapping is not None:
+            if not isinstance(self.mapping, InstrumentCodeMapping):
+                raise DomainValidationError("mapping must be an InstrumentCodeMapping")
+            if self.mapping.instrument_id != self.instrument_id:
+                raise DomainValidationError("mapping.instrument_id must match instrument_id")
+        if not isinstance(self.evidence_summary, Mapping):
+            raise DomainValidationError("evidence_summary must be a mapping")
+        # Keep resolution evidence detached from mutable repository values at
+        # every nesting level.  Evidence is persisted/serialized as JSON, so
+        # rejecting non-JSON values here also prevents a partially frozen
+        # object from reaching a result snapshot.
+        try:
+            frozen = freeze_json(self.evidence_summary, "evidence_summary")
+        except ValueError as exc:
+            raise DomainValidationError(
+                f"evidence_summary must contain only JSON values: {exc}"
+            ) from exc
+        if not isinstance(frozen, Mapping):
+            raise DomainValidationError("evidence_summary must be a mapping")
+        object.__setattr__(self, "evidence_summary", frozen)
+
+    @property
+    def asset_class(self) -> str | None:
+        """Resolved asset class, or ``None`` when its identity fact is absent."""
+
+        return self.identity_fact.asset_class if self.identity_fact else None
+
+    @property
+    def currency(self) -> str | None:
+        """Resolved currency without guessing from a source code."""
+
+        return self.identity_fact.currency if self.identity_fact else None
+
+    @property
+    def calendar_id(self) -> str | None:
+        """Resolved calendar reference without deriving a market timezone."""
+
+        return self.identity_fact.calendar_id if self.identity_fact else None
+
+    @property
+    def trading_code(self) -> str | None:
+        """Historical display code, if a display fact supplied one."""
+
+        return self.display.trading_code if self.display else None
+
+    @property
+    def name(self) -> str | None:
+        """Historical name, if a display fact supplied one."""
+
+        return self.display.name if self.display else None
+
+    @property
+    def display_name(self) -> str | None:
+        """Historical display name, if a display fact supplied one."""
+
+        return self.display.display_name if self.display else None
 
 
 # ---------------------------------------------------------------------------
@@ -594,12 +1241,22 @@ class InstrumentCodeMappingProvider(Protocol):
 
 
 __all__ = [
+    "AuthorityStatus",
     "CorporateActionRequirement",
+    "DisplayAuthorityStatus",
+    "IdentityStatus",
     "InstrumentCapabilities",
     "InstrumentCodeMapping",
+    "InstrumentCodeMappingFact",
     "InstrumentCodeMappingProvider",
     "InstrumentDisplay",
+    "InstrumentDisplayFact",
     "InstrumentDisplayProvider",
+    "InstrumentIdentityFact",
+    "InstrumentIdentityResolution",
+    "InstrumentLifecycleState",
+    "InstrumentIdentityStatus",
+    "InstrumentStatus",
     "InstrumentSpec",
     "InstrumentSpecProvider",
     "MappingConflictError",

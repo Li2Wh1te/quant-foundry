@@ -9,18 +9,24 @@ chunk policy, and consistency-validation-before-business-query.
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID
+from unittest.mock import patch
 
 from app.backtesting.calendar_axis import (
+    CalendarQualityStatus,
     CalendarDefinition,
+    CalendarRegistry,
     CalendarSessionFact,
+    CalendarSourcePriority,
 )
 from app.backtesting.data.errors import (
     ConsistencyCoverageIncompleteError,
     ConsistencyNotValidatedError,
     ConsistencyTokenExpiredError,
+    CalendarDefinitionMissingError,
     DataCutoffExceededError,
     DataPreflightBlockedError,
     DataSessionClosedError,
@@ -36,6 +42,9 @@ from app.backtesting.data.memory import (
     ISSUE_MANDATORY_BAR_COVERAGE_MISSING,
     ISSUE_PROVIDER_KEY_MISMATCH,
     ISSUE_UNSUPPORTED_CAPABILITY,
+    ISSUE_UNSUPPORTED_FREQUENCY,
+    ISSUE_UNSUPPORTED_PRICE_BASIS,
+    ISSUE_UNSUPPORTED_TOKEN_CONTRACT,
     MemoryDataSet,
     MemoryDataProvider,
 )
@@ -89,6 +98,7 @@ SESSION_WINDOWS = ((time(9, 30), time(11, 30)), (time(13, 0), time(15, 0)))
 TZ = timezone(timedelta(hours=8), "Asia/Shanghai")
 CLOCK = datetime(2026, 3, 15, 16, 0, tzinfo=timezone.utc)
 
+D26 = date(2025, 12, 26)
 D29 = date(2025, 12, 29)
 D30 = date(2025, 12, 30)
 D31 = date(2025, 12, 31)
@@ -250,6 +260,7 @@ def make_intent(
         strategy_price_bases=(PriceBasis.RAW,),
         consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
         consistency_token_contract=TOKEN_CONTRACT,
+        query_boundary=boundary(CUTOFF_A),
         static_instrument_ids=static,
         mandatory_instrument_ids=mandatory,
         warmup_sessions=warmup,
@@ -286,7 +297,10 @@ def _rule_report_for(intent: DataPreflightRequest):
         )
         for iid in ids
     )
-    cutoff = intent.knowledge_as_of or CUTOFF_A
+    cutoff = (
+        intent.query_boundary.knowledge_as_of
+        or intent.query_boundary.data_cutoff
+    )
     request_start = intent.requested_window.start_date
     segments = tuple(
         InstrumentRuleSnapshotSegment(
@@ -573,12 +587,208 @@ class TestProviderBasics(unittest.TestCase):
         codes = {issue.code for issue in report.issues}
         self.assertIn(ISSUE_PROVIDER_KEY_MISMATCH, codes)
 
+    def test_canonical_preflight_runs_common_admission_gates_before_snapshot(self) -> None:
+        """Canonical dispatch must not let invalid requests reach the snapshot API."""
+
+        provider = build_fixture_a()
+        base = make_intent(start=J5, end=J7)
+        cases = (
+            (
+                "provider key",
+                replace(base, provider_key="someone-else"),
+                ISSUE_PROVIDER_KEY_MISMATCH,
+            ),
+            (
+                "instrument",
+                replace(base, static_instrument_ids=(IID_B,)),
+                ISSUE_INSTRUMENT_NOT_FOUND,
+            ),
+            (
+                "frequency",
+                replace(base, frequency="1m"),
+                ISSUE_UNSUPPORTED_FREQUENCY,
+            ),
+            (
+                "price basis",
+                replace(base, strategy_price_bases=(PriceBasis.QFQ,)),
+                ISSUE_UNSUPPORTED_PRICE_BASIS,
+            ),
+            (
+                "consistency mode",
+                replace(
+                    base,
+                    consistency_mode=ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+                ),
+                ISSUE_UNSUPPORTED_TOKEN_CONTRACT,
+            ),
+            (
+                "capability",
+                replace(base, required_capabilities=(DataCapability.TICKS,)),
+                ISSUE_UNSUPPORTED_CAPABILITY,
+            ),
+            (
+                "scope",
+                replace(
+                    base,
+                    instrument_scope_mode=InstrumentScopeMode.DYNAMIC,
+                    static_instrument_ids=(),
+                    universe_query_policy=UniverseQueryPolicy(
+                        candidate_set_rules=(RULES,)
+                    ),
+                ),
+                ISSUE_UNSUPPORTED_CAPABILITY,
+            ),
+        )
+        calendar_provider = provider.dataset.calendar_axis_provider
+        with patch.object(
+            provider, "_has_canonical_calendar_metadata", return_value=True
+        ), patch.object(
+            calendar_provider,
+            "open_calendar_snapshot",
+            side_effect=AssertionError(
+                "invalid canonical requests must stop before snapshot"
+            ),
+        ):
+            for label, intent, expected_code in cases:
+                with self.subTest(label=label):
+                    report = provider.preflight(intent)
+                    self.assertIs(report.status, PreflightStatus.BLOCKED)
+                    self.assertIn(
+                        expected_code, {issue.code for issue in report.issues}
+                    )
+
     def test_unknown_instrument_blocked(self) -> None:
         intent = make_intent(start=J5, end=J7, static=(IID_B,))
         report = self.provider.preflight(intent)
         self.assertIs(report.status, PreflightStatus.BLOCKED)
         codes = {issue.code for issue in report.issues}
         self.assertIn(ISSUE_INSTRUMENT_NOT_FOUND, codes)
+
+    def test_strict_report_definitions_are_bounded_to_snapshot(self) -> None:
+        """The report must expose only definitions proven by the strict snapshot."""
+
+        known_at = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+        cutoff = datetime(2026, 1, 10, 12, 0, tzinfo=timezone.utc)
+        priority = CalendarSourcePriority(
+            source="official",
+            source_priority_version="v1",
+            source_priority=1,
+            source_revision_order=1,
+            source_revision="r1",
+            valid_from=date(2020, 1, 1),
+            known_at=known_at,
+            observed_at=known_at,
+            evidence={},
+            bootstrap_seed_hash="a" * 64,
+        )
+        common = {
+            "source": "official",
+            "source_revision": "r1",
+            "known_at": known_at,
+            "observed_at": known_at,
+            "source_priority_fact_id": priority.fact_id,
+            "source_priority_version": "v1",
+            "source_priority": 1,
+            "source_revision_order": 1,
+            "bootstrap_seed_id": "calendar-source-priority-bootstrap",
+            "bootstrap_seed_version": 1,
+            "bootstrap_seed_hash": "a" * 64,
+            "evidence": {},
+        }
+        registry = CalendarRegistry(
+            "SSE",
+            "Shanghai Stock Exchange",
+            registry_version=1,
+            valid_from=date(2020, 1, 1),
+            **common,
+        )
+        definition = CalendarDefinition(
+            "SSE",
+            "sse-v1",
+            "Asia/Shanghai",
+            ((time(9, 30), time(15, 0)),),
+            valid_from=date(2020, 1, 1),
+            registry_fact_id=registry.fact_id,
+            registry_version=1,
+            **common,
+        )
+        future = replace(
+            definition,
+            definition_version="sse-future",
+            valid_from=date(2030, 1, 1),
+            logical_fact_key="calendar_definition:SSE:future",
+            fact_id=None,
+            content_hash=None,
+        )
+        after_cutoff = replace(
+            definition,
+            definition_version="sse-after-cutoff",
+            known_at=datetime(2026, 1, 11, tzinfo=timezone.utc),
+            knowledge_from=datetime(2026, 1, 11, tzinfo=timezone.utc),
+            logical_fact_key="calendar_definition:SSE:after-cutoff",
+            fact_id=None,
+            content_hash=None,
+        )
+        quarantined = replace(
+            definition,
+            definition_version="sse-quarantined",
+            quality_status=CalendarQualityStatus.QUARANTINED,
+            logical_fact_key="calendar_definition:SSE:quarantined",
+            fact_id=None,
+            content_hash=None,
+        )
+        open_days = {D29, D30, D31, J2, J5, J6, J7}
+        facts = tuple(
+            CalendarSessionFact(
+                "SSE",
+                day,
+                day in open_days,
+                definition_version="sse-v1",
+                registry_fact_id=registry.fact_id,
+                registry_version=1,
+                definition_fact_id=definition.fact_id,
+                **common,
+            )
+            for day in every_day(D26, date(2026, 1, 8))
+        )
+        dataset = MemoryDataSet(
+            provider_key=PROVIDER_KEY,
+            fixture_revision="strict-fixture-v1",
+            calendar_definitions=(definition, future, after_cutoff, quarantined),
+            calendar_facts=facts,
+            instruments=(replace(make_spec(IID_A), calendar_id="SSE"),),
+            bars=(make_bar(IID_A, J2),),
+            clock=CLOCK,
+            calendar_registries=(registry,),
+            calendar_source_priorities=(priority,),
+        )
+        intent = replace(
+            make_intent(
+                start=J5,
+                end=J7,
+                warmup=2,
+                static=(IID_A,),
+                provider_key=PROVIDER_KEY,
+            ),
+            query_boundary=QueryBoundary(
+                data_cutoff=cutoff,
+                include_cutoff_day=True,
+            ),
+        )
+        report = MemoryDataProvider(dataset).preflight(intent)
+        self.assertIs(report.status, PreflightStatus.READY)
+        self.assertEqual(
+            [item.definition_version for item in report.resolved_calendar_definitions],
+            ["sse-v1"],
+        )
+        self.assertIsNotNone(report.warmup_resolution)
+        assert report.warmup_resolution is not None
+        # The history window covers every natural day in the snapshot envelope,
+        # including the closed Jan 1 holiday between warmup sessions.
+        self.assertEqual(
+            report.warmup_resolution.history_window,
+            DateRange(start_date=D31, end_date=J5 - timedelta(days=1)),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1165,6 +1375,36 @@ class TestChunksAndConsistency(unittest.TestCase):
         # The frozen calendar set from admission stays authoritative.
         self.assertEqual(report.resolved_calendar_ids, request.resolved_calendar_ids)
 
+    def test_canonical_session_preflight_passes_frozen_calendar_ids(self) -> None:
+        provider = build_fixture_b()
+        intent = make_intent(start=J5, end=J7)
+        request = admit(provider, intent)
+        session = provider.open_session(request)
+        observed_requests: list[object] = []
+
+        def fail_open(*args: object) -> None:
+            observed_requests.append(args[-1])
+            raise CalendarDefinitionMissingError("calendar lookup is intentionally blocked")
+
+        # Force this legacy fixture through the canonical dispatch branch.  If
+        # the builder re-derives IDs from instrument specs, this guard fails.
+        with patch.object(provider, "_has_canonical_calendar_metadata", return_value=True), patch.object(
+            MemoryDataSet,
+            "instrument",
+            side_effect=AssertionError("canonical preflight must use frozen IDs"),
+        ), patch.object(
+            type(provider.dataset.calendar_axis_provider),
+            "open_calendar_snapshot",
+            side_effect=fail_open,
+        ):
+            report = session.preflight()
+
+        self.assertIs(report.status, PreflightStatus.BLOCKED)
+        self.assertEqual(
+            observed_requests[0].calendar_ids,
+            tuple(calendar_id.upper() for calendar_id in request.resolved_calendar_ids),
+        )
+
     def test_blocked_report_with_ready_warmup_resolution_stays_valid(self) -> None:
         # Warmup resolves fine, but mandatory coverage fails afterwards:
         # the report must come out blocked instead of raising an internal
@@ -1237,6 +1477,7 @@ class TestChunksAndConsistency(unittest.TestCase):
             strategy_price_bases=(PriceBasis.RAW,),
             consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
             consistency_token_contract=TOKEN_CONTRACT,
+            query_boundary=boundary(CUTOFF_A),
         )
         report = provider.preflight(intent)
         self.assertIs(report.status, PreflightStatus.BLOCKED)

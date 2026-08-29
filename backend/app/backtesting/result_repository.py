@@ -937,6 +937,7 @@ def _preflight_record(dto: BacktestDataPreflightDto) -> dict[str, Any]:
         "phase": dto.phase.value,
         "status": dto.status,
         "report_hash": dto.report_hash,
+        "hash_schema_version": dto.hash_schema_version,
         "capabilities": _thaw_json(dict(dto.capabilities)),
         "calendar_summary": _thaw_json(dict(dto.calendar_summary)),
         "session_summary": _thaw_json(dict(dto.session_summary)),
@@ -1162,6 +1163,7 @@ def build_query_payload(
     run_id: UUID,
     limit: int,
     filters: Mapping[str, str],
+    query_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Canonical query description feeding the cursor digest.
 
@@ -1170,8 +1172,12 @@ def build_query_payload(
     the concrete limit requested by the client.
     """
 
-    return {
-        "kind": spec.kind,
+    # The persisted table name is an internal implementation detail.  The
+    # preflight API has one canonical cursor resource identifier so tokens
+    # remain valid across its legacy redirect and canonical path.
+    cursor_kind = "backtest_data_preflight" if spec.kind == "data_preflight" else spec.kind
+    payload = {
+        "kind": cursor_kind,
         "run_id": str(run_id),
         "filters": dict(sorted(filters.items())),
         "direction": "asc",
@@ -1179,6 +1185,13 @@ def build_query_payload(
         "page_size_policy": {"default": DEFAULT_PAGE_SIZE, "max": MAX_PAGE_SIZE},
         "limit": limit,
     }
+    if query_context is not None:
+        if not isinstance(query_context, Mapping):
+            raise ResultFilterError("query_context must be a mapping")
+        # Non-filter projections (for example section=calendar) still change
+        # the wire result and therefore must be bound into every cursor.
+        payload["query_context"] = dict(sorted(query_context.items()))
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -1532,6 +1545,7 @@ class BacktestResultRepository:
         run_id: UUID | str,
         limit: int = DEFAULT_PAGE_SIZE,
         cursor: str | None = None,
+        query_context: Mapping[str, Any] | None = None,
         **raw_filters: Any,
     ) -> CursorPage:
         """Return one stable page of results for a run.
@@ -1557,7 +1571,13 @@ class BacktestResultRepository:
             if normalized is not None:
                 filters[name] = normalized
 
-        payload = build_query_payload(spec, run_id=run_uuid, limit=checked_limit, filters=filters)
+        payload = build_query_payload(
+            spec,
+            run_id=run_uuid,
+            limit=checked_limit,
+            filters=filters,
+            query_context=query_context,
+        )
 
         if cursor is None:
             return self._read_first_page(spec, payload, run_uuid, filters, checked_limit)

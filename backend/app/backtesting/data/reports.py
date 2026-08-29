@@ -17,7 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone as dt_timezone
 from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
@@ -29,8 +29,13 @@ from app.backtesting.calendar_axis import (
     CalendarAxisStatus,
     CalendarDefinition,
     SessionPoint,
+    normalize_calendar_id,
 )
-from app.backtesting.data.errors import InvalidDataRequestError, freeze_json
+from app.backtesting.data.errors import (
+    CalendarPreflightResourceLimitExceededError,
+    InvalidDataRequestError,
+    freeze_json,
+)
 from app.backtesting.data.requests import (
     CALENDAR_AXIS_POLICY,
     CHUNK_POLICY,
@@ -61,6 +66,12 @@ __all__ = [
     "PreflightIssue",
     "canonical_hash",
     "canonical_json",
+    "calendar_semantic_signature",
+    "calendar_revision_digest",
+    "calendar_session_signature",
+    "warmup_session_signature",
+    "calendar_snapshot_fingerprint",
+    "data_preflight_hash_v2",
 ]
 
 
@@ -163,11 +174,12 @@ def _strict_version(value: object) -> int:
 
 @dataclass(frozen=True, slots=True)
 class PreflightIssue:
-    """One structured preflight finding.
+    """One structured preflight finding with complete calendar evidence.
 
-    ``code`` is a stable machine identifier; ``message`` is concise Chinese
-    display copy.  Only the machine fields participate in sorting and in
-    the report hash, so wording changes never change hashes.
+    ``title`` and ``message`` are display fields, while ``date_range``,
+    ``calendar_id`` and ``values_by_calendar`` make a blocked calendar issue
+    self-contained.  The machine evidence participates in report hashing;
+    wording remains intentionally excluded.
     """
 
     code: str
@@ -177,6 +189,11 @@ class PreflightIssue:
     instrument_id: UUID | None = None
     field: str | None = None
     details: Mapping[str, object] | None = None
+    title: str = "预检问题"
+    date: date | None = None
+    date_range: tuple[date, date] | None = None
+    calendar_id: str | None = None
+    values_by_calendar: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         if type(self.code) is not str or not self.code.strip():
@@ -187,6 +204,83 @@ class PreflightIssue:
             raise InvalidDataRequestError("issue scope must be non-blank text")
         if type(self.message) is not str or not self.message.strip():
             raise InvalidDataRequestError("issue message must be non-blank text")
+        if type(self.title) is not str or not self.title.strip():
+            raise InvalidDataRequestError("issue title must be non-blank text")
+        title = self.title.strip()
+        if title == "预检问题":
+            title = {
+                "CALENDAR_FACT_MISSING": "交易日事实缺失",
+                "CALENDAR_DEFINITION_MISSING": "日历定义缺失",
+                "CALENDAR_SESSION_INCOMPATIBLE": "日历会话不兼容",
+                "DATA_CUTOFF_REQUIRED": "缺少数据截止时间",
+                "DATA_CUTOFF_EXCEEDED": "超过数据截止时间",
+                "WARMUP_COVERAGE_INSUFFICIENT": "warmup 覆盖不足",
+                "CALENDAR_PREFLIGHT_RESOURCE_LIMIT_EXCEEDED": "预检资源超限",
+                "UNSUPPORTED_CAPABILITY": "能力声明不受支持",
+                "CALENDAR_DEFINITION_AMBIGUOUS": "日历定义有歧义",
+                "CALENDAR_DEFINITION_INVALID": "日历定义无效",
+                "CALENDAR_FACT_AMBIGUOUS": "交易日事实有歧义",
+                "CALENDAR_FACT_INVALID": "交易日事实无效",
+                "CALENDAR_SESSION_UNRESOLVED": "会话时段未解析",
+                "CALENDAR_SESSION_INVALID": "日历窗口无效",
+                "CALENDAR_TIMEZONE_INCONSISTENT": "日历时区跨日不一致",
+                "CALENDAR_TIMEZONE_MISMATCH": "参与日历时区不一致",
+                "CALENDAR_TIMEZONE_UNSUPPORTED": "首版时区不支持",
+                "CALENDAR_REGISTRY_FACT_MISSING": "日历注册事实缺失",
+                "CALENDAR_REGISTRY_REFERENCE_INVALID": "日历注册引用无效",
+                "CALENDAR_REGISTRY_AMBIGUOUS": "日历注册版本有歧义",
+                "CALENDAR_BINDING_UNKNOWN": "交易所绑定缺失",
+                "CALENDAR_BINDING_AMBIGUOUS": "交易所绑定有歧义",
+                "CALENDAR_PIT_METADATA_MISSING": "缺少历史认知证据",
+                "CALENDAR_SNAPSHOT_COVERAGE_UNKNOWN": "日历覆盖未知",
+                "CALENDAR_SOURCE_PRIORITY_MISSING": "来源优先级缺失",
+                "CALENDAR_SOURCE_PRIORITY_INVALID": "来源优先级无效",
+                "CALENDAR_SOURCE_PRIORITY_AMBIGUOUS": "来源优先级有歧义",
+                "CALENDAR_SOURCE_PRIORITY_CHAIN_BROKEN": "来源优先级版本链断裂",
+                "CALENDAR_SOURCE_REVISION_CONFLICT": "来源修订有冲突",
+                "CALENDAR_SNAPSHOT_REVISION_CHANGED": "日历快照版本发生变化",
+                "CALENDAR_SNAPSHOT_RETRY_EXHAUSTED": "日历快照重试失败",
+                "CALENDAR_SNAPSHOT_COVERAGE_UNKNOWN": "日历覆盖范围未知",
+                "CALENDAR_DATE_SPAN_LIMIT_EXCEEDED": "日历日期跨度超限",
+                "LOOKBACK_SESSIONS_LIMIT_EXCEEDED": "历史会话数量超限",
+                "CALENDAR_PREFLIGHT_RESOURCE_LIMIT_EXCEEDED": "预检资源超限",
+                "INSTRUMENT_CALENDAR_UNRESOLVED": "标的交易日历未解析",
+                "CALENDAR_ID_SET_EMPTY": "未解析到交易日历",
+                "CALENDAR_ID_UNKNOWN": "未知交易日历",
+                "UNIVERSE_CALENDAR_NOT_PREFLIGHTED": "动态日历未预检",
+                "UNSUPPORTED_CAPABILITY": "数据能力不支持",
+                "CAPABILITY_DECLARATION_AMBIGUOUS": "能力声明有歧义",
+                "CAPABILITY_DECLARATION_INVALID": "能力声明无效",
+                "DATA_PREFLIGHT_BLOCKED": "数据预检未通过",
+                "PROVIDER_CONTRACT_VIOLATION": "数据提供方契约错误",
+            }.get(self.code.upper(), title)
+        object.__setattr__(self, "title", title)
+        if self.date is not None and (
+            not isinstance(self.date, date) or isinstance(self.date, datetime)
+        ):
+            raise InvalidDataRequestError("issue date must be a calendar date")
+        if self.date_range is not None:
+            if not isinstance(self.date_range, (tuple, list)) or len(self.date_range) != 2:
+                raise InvalidDataRequestError("issue date_range must contain [start, end)")
+            start, end = self.date_range
+            if (
+                not isinstance(start, date) or isinstance(start, datetime)
+                or not isinstance(end, date) or isinstance(end, datetime)
+                or start >= end
+            ):
+                raise InvalidDataRequestError("issue date_range must be an ordered half-open date range")
+            object.__setattr__(self, "date_range", (start, end))
+        if self.calendar_id is not None:
+            try:
+                object.__setattr__(self, "calendar_id", normalize_calendar_id(self.calendar_id))
+            except Exception as exc:
+                raise InvalidDataRequestError("issue calendar_id must be canonical") from exc
+        if self.values_by_calendar is not None:
+            if not isinstance(self.values_by_calendar, Mapping):
+                raise InvalidDataRequestError("issue values_by_calendar must be a mapping")
+            frozen_values = freeze_json(dict(self.values_by_calendar), "issue values_by_calendar")
+            assert isinstance(frozen_values, MappingProxyType)
+            object.__setattr__(self, "values_by_calendar", frozen_values)
         if self.instrument_id is not None and not isinstance(
             self.instrument_id, UUID
         ):
@@ -205,7 +299,7 @@ class PreflightIssue:
             object.__setattr__(self, "details", frozen)
 
     @property
-    def sort_key(self) -> tuple[str, str, str, str, str, str]:
+    def sort_key(self) -> tuple[int, int, str, str, int, str, str]:
         """Stable ordering key built from all machine fields.
 
         ``details`` participates through its canonical JSON form so that
@@ -213,21 +307,44 @@ class PreflightIssue:
         input order under stable sorting and make hashes depend on it.
         """
 
+        fact_id = ""
+        if isinstance(self.details, Mapping):
+            for key in ("fact_id", "selected_fact_id", "definition_fact_id"):
+                value = self.details.get(key)
+                if value is not None:
+                    fact_id = str(value)
+                    break
         return (
+            _issue_stage_rank(self.code),
+            _issue_scope_rank(self.scope),
+            (self.date.isoformat() if self.date is not None else (self.date_range[0].isoformat() if self.date_range else "")),
+            self.calendar_id or "",
+            _issue_field_rank(self.field),
             self.code,
-            self.severity.value,
-            self.scope,
-            str(self.instrument_id) if self.instrument_id else "",
-            self.field or "",
-            (
-                canonical_json(dict(self.details))
-                if self.details is not None
-                else ""
-            ),
+            fact_id or (str(self.instrument_id) if self.instrument_id else ""),
         )
 
+    def as_dict(self) -> dict[str, object]:
+        """Return the complete wire projection for synchronous blocked APIs."""
+
+        payload: dict[str, object] = {
+            "code": self.code,
+            "title": self.title,
+            "message": self.message,
+            "scope": self.scope,
+            "field": self.field,
+            "calendar_id": self.calendar_id,
+            "instrument_id": str(self.instrument_id) if self.instrument_id else None,
+            "date": self.date,
+            "date_range": list(self.date_range) if self.date_range else None,
+            "values_by_calendar": self.values_by_calendar,
+        }
+        if self.details is not None:
+            payload["details"] = self.details
+        return payload
+
     def machine_fields(self) -> dict[str, object]:
-        """Hash-relevant content of this issue (message excluded)."""
+        """Hash-relevant content of this issue (message/title excluded)."""
 
         return {
             "code": self.code,
@@ -235,8 +352,84 @@ class PreflightIssue:
             "scope": self.scope,
             "instrument_id": str(self.instrument_id) if self.instrument_id else None,
             "field": self.field,
+            "date": self.date,
+            "date_range": list(self.date_range) if self.date_range else None,
+            "calendar_id": self.calendar_id,
+            "values_by_calendar": self.values_by_calendar,
             "details": self.details,
         }
+
+
+def _issue_stage_rank(code: str) -> int:
+    """Map issue codes to the fixed task-11 admission stage order."""
+
+    upper = code.upper()
+    if upper.startswith((
+        "DATA_",
+        "INVALID_",
+        "REQUEST_",
+        "CALENDAR_PIT_PROFILE",
+        "CALENDAR_DATE_SPAN",
+        "CALENDAR_PREFLIGHT_RESOURCE",
+        "LOOKBACK_SESSIONS",
+    )):
+        return 1
+    if upper.startswith(("IDENTITY_", "INSTRUMENT_", "CALENDAR_ID", "CALENDAR_BINDING", "CALENDAR_REGISTRY")):
+        return 2
+    if upper.startswith(("CALENDAR_SOURCE_PRIORITY", "SOURCE_PRIORITY")):
+        return 3
+    if upper.startswith(("CALENDAR_SESSION_INCOMPATIBLE", "CALENDAR_TIMEZONE", "NO_FORMAL_SESSIONS")):
+        return 5
+    if upper.startswith("WARMUP_"):
+        return 6
+    if upper.startswith((
+        "CALENDAR_COVERAGE",
+        "CALENDAR_SNAPSHOT_COVERAGE",
+        "CALENDAR_DEFINITION",
+        "CALENDAR_FACT",
+        "CALENDAR_SESSION_WINDOW",
+        "CALENDAR_SESSION_INVALID",
+        "CALENDAR_SESSION_UNRESOLVED",
+        "CALENDAR_JSON",
+        "CALENDAR_PIT_METADATA",
+    )):
+        return 4
+    if upper.startswith(("CAPABILITY", "UNSUPPORTED_CAPABILITY", "RULE_CAPABILITY")):
+        return 7
+    if upper.startswith(("PROVIDER_", "SNAPSHOT_", "CALENDAR_SNAPSHOT")):
+        return 8
+    return 9
+
+
+def _issue_scope_rank(scope: str) -> int:
+    """Return the canonical formal/warmup/global scope rank."""
+
+    normalized = scope.strip().lower()
+    # Warmup/formal scopes are exported with their explicit ``*_sessions``
+    # names by the request and warmup layers.  Keep the short aliases for
+    # callers constructing issues directly, while preserving the documented
+    # formal -> warmup -> global ordering for both spellings.
+    return {
+        "formal": 0,
+        "formal_sessions": 0,
+        "warmup": 1,
+        "warmup_sessions": 1,
+        "global": 2,
+    }.get(normalized, 2)
+
+
+def _issue_field_rank(field: str | None) -> int:
+    """Keep common issue fields deterministic without lexical semantics."""
+
+    return {
+        "data_cutoff": 1,
+        "calendar_id": 2,
+        "registry": 3,
+        "definition": 4,
+        "fact": 5,
+        "sessions": 6,
+        "timezone": 7,
+    }.get((field or "").strip().lower(), 99)
 
 
 def _sorted_issues(issues: Sequence[PreflightIssue]) -> tuple[PreflightIssue, ...]:
@@ -481,6 +674,22 @@ class DataPreflightReport:
     warmup_resolution_signature: str | None = None
     calendar_axis_differences: tuple[CalendarAxisDifference, ...] = ()
     warmup_axis_differences: tuple[CalendarAxisDifference, ...] = ()
+    # Canonical task-11 PIT input.  Legacy reports may omit it during the
+    # migration window; strict calendar providers reject that omission before
+    # reading facts.
+    query_boundary: object | None = None
+    # Task-11 report evidence.  Version 1 remains the legacy payload; version
+    # 2 is used only when calendar PIT evidence is present.
+    hash_schema_version: int = 1
+    pit_context: Mapping[str, object] | object | None = None
+    calendar_revision_digest: str | None = None
+    snapshot_fingerprint: str | None = None
+    non_strict_pit: bool | None = None
+    calendar_semantic_signature: str | None = None
+    warmup_session_signature: str | None = None
+    definition_usage_by_date: tuple[Mapping[str, object], ...] = ()
+    calendar_summary: Mapping[str, object] | None = None
+    session_summary: Mapping[str, object] | None = None
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     report_hash: str = ""
 
@@ -546,8 +755,8 @@ class DataPreflightReport:
             "resolved_calendar_definitions",
             tuple(
                 sorted(
-                    set(definitions),
-                    key=lambda d: (d.calendar_id, d.definition_version),
+                    definitions,
+                    key=lambda d: (d.calendar_id, d.definition_version, d.fact_version, str(d.fact_id)),
                 )
             ),
         )
@@ -933,9 +1142,236 @@ class DataPreflightReport:
             raise InvalidDataRequestError(
                 "blocked reports must carry at least one error issue"
             )
+        if len(issues) > 4096:
+            raise CalendarPreflightResourceLimitExceededError(
+                "preflight issue groups exceed the 4096 response limit",
+                details={"issue_groups": len(issues), "maximum": 4096},
+            )
         object.__setattr__(self, "issues", issues)
+        if self.query_boundary is not None:
+            from app.backtesting.data.requests import QueryBoundary
+            if not isinstance(self.query_boundary, QueryBoundary):
+                raise InvalidDataRequestError("query_boundary must be a QueryBoundary")
+            if self.knowledge_as_of is not None and self.knowledge_as_of != self.query_boundary.knowledge_as_of:
+                raise InvalidDataRequestError("report knowledge_as_of must match query_boundary")
+        hash_version = self.hash_schema_version
+        if isinstance(hash_version, bool) or not isinstance(hash_version, int) or hash_version not in (1, 2):
+            raise InvalidDataRequestError("hash_schema_version must be 1 or 2")
+        object.__setattr__(self, "hash_schema_version", hash_version)
+        if self.pit_context is not None and hasattr(self.pit_context, "as_dict"):
+            object.__setattr__(self, "pit_context", dict(self.pit_context.as_dict))
+        if hash_version == 2:
+            # @2 is never a cosmetic opt-in: it is the canonical calendar
+            # evidence payload and therefore requires the complete immutable
+            # PIT/snapshot envelope.  Pre-read failures use @1 with no fake
+            # snapshot hash.
+            if self.query_boundary is None or self.pit_context is None:
+                raise InvalidDataRequestError(
+                    "hash_schema_version=2 requires query_boundary and pit_context"
+                )
+            required_context = {
+                "data_cutoff", "cutoff_local_date", "include_cutoff_day",
+                "knowledge_as_of", "pit_profile", "profile_version",
+            }
+            if not required_context <= set(self.pit_context):
+                raise InvalidDataRequestError(
+                    "hash_schema_version=2 pit_context is incomplete"
+                )
+            expected_context = self.query_boundary
+            context_data_cutoff = self.pit_context.get("data_cutoff")
+            context_knowledge = self.pit_context.get("knowledge_as_of")
+            context_include = self.pit_context.get("include_cutoff_day")
+            expected_cutoff_text = expected_context.data_cutoff.astimezone(dt_timezone.utc).isoformat().replace("+00:00", "Z")
+            expected_knowledge_text = (
+                expected_context.knowledge_as_of.astimezone(dt_timezone.utc).isoformat().replace("+00:00", "Z")
+                if expected_context.knowledge_as_of is not None else None
+            )
+            if context_data_cutoff != expected_cutoff_text or context_knowledge != expected_knowledge_text or context_include != expected_context.include_cutoff_day:
+                raise InvalidDataRequestError("pit_context must be copied from query_boundary")
+            expected_profile = "strict_historical_cognition" if expected_context.knowledge_as_of is not None else "strict_calendar_cutoff"
+            if self.pit_context.get("pit_profile") != expected_profile or self.pit_context.get("profile_version") != "calendar_pit_profile@1:H":
+                raise InvalidDataRequestError("pit_context profile is not the fixed H profile")
+            for digest_name in (
+                "calendar_revision_digest",
+                "snapshot_fingerprint",
+                "calendar_semantic_signature",
+                "warmup_session_signature",
+            ):
+                digest = getattr(self, digest_name)
+                if not isinstance(digest, str) or len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
+                    raise InvalidDataRequestError(
+                        f"hash_schema_version=2 requires {digest_name}"
+                    )
+        capabilities = tuple(self.non_strict_pit_capabilities)
+        if self.non_strict_pit is None:
+            object.__setattr__(self, "non_strict_pit", bool(capabilities))
+        elif not isinstance(self.non_strict_pit, bool):
+            raise InvalidDataRequestError("non_strict_pit must be a boolean")
+        elif self.non_strict_pit != bool(capabilities):
+            raise InvalidDataRequestError("non_strict_pit must equal the non-strict capability tuple")
+        for name in ("calendar_revision_digest", "snapshot_fingerprint", "calendar_semantic_signature", "warmup_session_signature"):
+            value = getattr(self, name)
+            if value is not None and (not isinstance(value, str) or len(value) != 64 or any(ch not in "0123456789abcdef" for ch in value)):
+                raise InvalidDataRequestError(f"{name} must be a lowercase SHA-256 digest")
+        context = self.pit_context
+        if context is not None:
+            if hasattr(context, "as_dict"):
+                context = dict(context.as_dict)
+            elif not isinstance(context, Mapping):
+                raise InvalidDataRequestError("pit_context must be a JSON mapping")
+            frozen_context = freeze_json(dict(context), "pit_context")
+            assert isinstance(frozen_context, MappingProxyType)
+            object.__setattr__(self, "pit_context", frozen_context)
+        for name in ("calendar_summary", "session_summary"):
+            value = getattr(self, name)
+            if value is not None:
+                frozen = freeze_json(dict(value), name) if isinstance(value, Mapping) else None
+                if frozen is None or not isinstance(frozen, MappingProxyType):
+                    raise InvalidDataRequestError(f"{name} must be a JSON mapping")
+                object.__setattr__(self, name, frozen)
+        usage = tuple(self.definition_usage_by_date)
+        frozen_usage: list[Mapping[str, object]] = []
+        for item in usage:
+            if not isinstance(item, Mapping):
+                raise InvalidDataRequestError("definition_usage_by_date entries must be mappings")
+            frozen = freeze_json(dict(item), "definition_usage_by_date entry")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError("definition_usage_by_date entries must be JSON mappings")
+            frozen_usage.append(frozen)
+        object.__setattr__(self, "definition_usage_by_date", tuple(frozen_usage))
+        if hash_version == 2:
+            expected_ids = set(self.resolved_calendar_ids)
+            seen_usage: set[tuple[str, str]] = set()
+            for item in frozen_usage:
+                scope = item.get("scope")
+                usage_date = item.get("date")
+                values = item.get("values_by_calendar")
+                if scope not in {"formal", "warmup"} or not isinstance(usage_date, (str, date)):
+                    raise InvalidDataRequestError("calendar usage must contain scope and date")
+                if isinstance(usage_date, date):
+                    usage_date = usage_date.isoformat()
+                try:
+                    parsed_date = date.fromisoformat(usage_date)
+                except (TypeError, ValueError) as exc:
+                    raise InvalidDataRequestError("calendar usage date must be ISO YYYY-MM-DD") from exc
+                if not isinstance(values, Mapping) or set(values) != expected_ids:
+                    raise InvalidDataRequestError(
+                        "calendar usage must cover every resolved calendar"
+                    )
+                key = (str(scope), usage_date)
+                if key in seen_usage:
+                    raise InvalidDataRequestError("calendar usage must not repeat scope/date")
+                seen_usage.add(key)
+            if expected_ids and not frozen_usage:
+                raise InvalidDataRequestError("hash_schema_version=2 requires calendar usage evidence")
+            # Every natural day in the immutable snapshot envelope is an
+            # auditable usage row.  The envelope metadata is intentionally
+            # carried in calendar_summary rather than inferred from the first
+            # or last usage item.
+            envelope = self.calendar_summary.get("envelope") if isinstance(self.calendar_summary, Mapping) else None
+            if not isinstance(envelope, Mapping):
+                raise InvalidDataRequestError("hash_schema_version=2 requires calendar envelope evidence")
+            envelope_start = envelope.get("start_date")
+            envelope_end = envelope.get("end_date_exclusive")
+            try:
+                envelope_start_date = date.fromisoformat(str(envelope_start))
+                envelope_end_date = date.fromisoformat(str(envelope_end))
+            except (TypeError, ValueError) as exc:
+                raise InvalidDataRequestError("calendar envelope dates are invalid") from exc
+            if envelope_start_date >= envelope_end_date:
+                raise InvalidDataRequestError("calendar envelope must be non-empty")
+            expected_keys = {
+                ("formal" if self.requested_window.start_date <= day <= self.requested_window.end_date else "warmup", day.isoformat())
+                for offset in range((envelope_end_date - envelope_start_date).days)
+                for day in (envelope_start_date + timedelta(days=offset),)
+            }
+            if seen_usage != expected_keys:
+                raise InvalidDataRequestError("calendar usage must cover every natural day in the snapshot envelope")
         # Recompute defensively so a caller cannot forge a mismatched hash.
-        object.__setattr__(self, "report_hash", self._compute_hash())
+        # The response budget covers the complete canonical wire payload, not
+        # only hash-relevant machine fields: issue titles/messages are part of
+        # the synchronous blocked response and must count toward the 4 MiB
+        # UTF-8 limit as well.
+        report_hash = self._compute_hash()
+        object.__setattr__(self, "report_hash", report_hash)
+        if hash_version == 2:
+            encoded_size = len(canonical_json(self.as_dict()).encode("utf-8"))
+            if encoded_size > 4 * 1024 * 1024:
+                raise CalendarPreflightResourceLimitExceededError(
+                    "canonical preflight JSON exceeds the 4 MiB response limit",
+                    details={"utf8_bytes": encoded_size, "maximum": 4 * 1024 * 1024},
+                )
+
+    @property
+    def blocked(self) -> bool:
+        """Whether this report is a hard gate for run creation."""
+
+        return self.status is PreflightStatus.BLOCKED
+
+    @property
+    def primary_issue_code(self) -> str | None:
+        """Stable first issue code after canonical issue ordering."""
+
+        return self.issues[0].code if self.issues else None
+
+    def as_dict(self) -> dict[str, object]:
+        """Serialize the report for API/blocked-admission projection."""
+
+        context = self.pit_context
+        if hasattr(context, "as_dict"):
+            context = dict(context.as_dict)
+        details: dict[str, object] = {
+            "schema_version": 2 if self.hash_schema_version == 2 else 1,
+            "primary_issue_code": self.primary_issue_code,
+            "issues": [issue.as_dict() for issue in self.issues],
+            "requested_window": {
+                "start_date": self.requested_window.start_date,
+                "end_date": self.requested_window.end_date,
+            },
+            "warmup": {
+                "requested_sessions": self.warmup_sessions_count,
+                "anchor": self.resolved_sessions[0].session_date if self.resolved_sessions else None,
+            },
+            "pit_context": context,
+            "data_cutoff": context.get("data_cutoff") if isinstance(context, Mapping) else None,
+            "cutoff_local_date": context.get("cutoff_local_date") if isinstance(context, Mapping) else None,
+            "include_cutoff_day": context.get("include_cutoff_day") if isinstance(context, Mapping) else None,
+            "pit_profile": context.get("pit_profile") if isinstance(context, Mapping) else None,
+            "profile_version": context.get("profile_version") if isinstance(context, Mapping) else None,
+            "knowledge_as_of": context.get("knowledge_as_of") if isinstance(context, Mapping) else None,
+            "non_strict_pit": self.non_strict_pit,
+            "non_strict_pit_capabilities": self.non_strict_pit_capabilities,
+            "calendar_ids": self.resolved_calendar_ids,
+            "coverage": self.calendar_summary.get("coverage") if self.calendar_summary else None,
+            "report_hash": self.report_hash if self.hash_schema_version == 2 else None,
+            "hash_schema_version": self.hash_schema_version if self.hash_schema_version == 2 else None,
+            "issues_complete": True,
+            "cursor": None,
+            "next_cursor": None,
+            "truncated": False,
+            "retention": {"kind": "response_only", "persisted": False, "queryable": False},
+        }
+        if self.hash_schema_version == 2:
+            details.update({
+                "calendar_summary": self.calendar_summary,
+                "session_summary": self.session_summary,
+                "definition_usage_by_date": self.definition_usage_by_date,
+                "calendar_revision_digest": self.calendar_revision_digest,
+                "revision_digest": self.calendar_revision_digest,
+                "snapshot_fingerprint": self.snapshot_fingerprint,
+                "calendar_semantic_signature": self.calendar_semantic_signature,
+                "calendar_session_signature": self.calendar_session_signature,
+                "warmup_session_signature": self.warmup_session_signature,
+            })
+        return {
+            "status": self.status.value,
+            "run_id": None,
+            "persisted": False,
+            "reason_code": "data_preflight_blocked" if self.blocked else None,
+            "title": "数据预检未通过" if self.blocked else "数据预检",
+            "message": "交易日历与会话预检未通过，运行未创建。" if self.blocked else "交易日历与会话预检已通过。",
+            "details": details,
+        }
 
     def _hash_content(self) -> dict[str, object]:
         """Build the hash-relevant machine content of this report.
@@ -1032,6 +1468,16 @@ class DataPreflightReport:
                     "field": difference.field,
                     "actual_value": difference.actual_value,
                     "expected_value": difference.expected_value,
+                    # The legacy pair is retained for old clients, but the
+                    # complete multi-calendar evidence is hash relevant.
+                    "values_by_calendar": difference.values_by_calendar,
+                    "definition_versions_by_calendar": difference.definition_versions_by_calendar,
+                    "definition_fact_ids_by_calendar": difference.definition_fact_ids_by_calendar,
+                    "selected_fact_ids_by_calendar": difference.selected_fact_ids_by_calendar,
+                    "fact_versions_by_calendar": difference.fact_versions_by_calendar,
+                    "source_revisions_by_calendar": difference.source_revisions_by_calendar,
+                    "reference_calendar_id": difference.reference_calendar_id,
+                    "error_code": difference.error_code,
                 }
                 for difference in self.calendar_axis_differences
             ],
@@ -1042,6 +1488,14 @@ class DataPreflightReport:
                     "field": difference.field,
                     "actual_value": difference.actual_value,
                     "expected_value": difference.expected_value,
+                    "values_by_calendar": difference.values_by_calendar,
+                    "definition_versions_by_calendar": difference.definition_versions_by_calendar,
+                    "definition_fact_ids_by_calendar": difference.definition_fact_ids_by_calendar,
+                    "selected_fact_ids_by_calendar": difference.selected_fact_ids_by_calendar,
+                    "fact_versions_by_calendar": difference.fact_versions_by_calendar,
+                    "source_revisions_by_calendar": difference.source_revisions_by_calendar,
+                    "reference_calendar_id": difference.reference_calendar_id,
+                    "error_code": difference.error_code,
                 }
                 for difference in self.warmup_axis_differences
             ],
@@ -1069,6 +1523,105 @@ class DataPreflightReport:
             "source_revisions": self.source_revisions,
             "issues": [issue.machine_fields() for issue in self.issues],
         }
+        # Legacy @1 reports retain their historical payload exactly.  Calendar
+        # PIT evidence is opt-in @2 and is never silently folded into an old
+        # report merely because the Python object has compatibility defaults.
+        if self.hash_schema_version == 2:
+            payload.update({
+                "query_boundary": (
+                    {
+                        "data_cutoff": self.query_boundary.data_cutoff,
+                        "knowledge_as_of": self.query_boundary.knowledge_as_of,
+                        "include_cutoff_day": self.query_boundary.include_cutoff_day,
+                    }
+                    if self.query_boundary is not None
+                    else None
+                ),
+                "hash_schema_version": self.hash_schema_version,
+                "pit_context": self.pit_context,
+                "calendar_revision_digest": self.calendar_revision_digest,
+                "snapshot_fingerprint": self.snapshot_fingerprint,
+                "non_strict_pit": self.non_strict_pit,
+                "calendar_semantic_signature": self.calendar_semantic_signature,
+                "warmup_session_signature": self.warmup_session_signature,
+                "definition_usage_by_date": self.definition_usage_by_date,
+                "calendar_summary": self.calendar_summary,
+                "session_summary": self.session_summary,
+            })
+        return payload
 
     def _compute_hash(self) -> str:
         return canonical_hash(self._hash_content())
+
+
+def calendar_semantic_signature(
+    calendar_ids: Sequence[str],
+    days: Sequence[Mapping[str, object]],
+    *,
+    policy_key: str = "strict_compatible",
+    policy_version: int = 1,
+) -> str:
+    """Hash only the final daily calendar semantics for compatibility."""
+
+    return canonical_hash({
+        "policy": {"key": policy_key, "version": policy_version},
+        "calendar_ids": sorted(set(calendar_ids)),
+        "days": sorted((dict(day) for day in days), key=lambda item: str(item.get("date", ""))),
+    })
+
+
+def calendar_revision_digest(rows: Sequence[Mapping[str, object]]) -> str:
+    """Hash complete registry/fact/source revision evidence in stable order."""
+
+    return canonical_hash(sorted((dict(row) for row in rows), key=lambda item: (
+        str(item.get("calendar_id", "")),
+        str(item.get("date", "")),
+        str(item.get("scope_key", "")),
+        str(item.get("selected_fact_id", item.get("fact_id", ""))),
+    )))
+
+
+def calendar_session_signature(
+    semantic_signature: str,
+    formal_sessions: Sequence[Mapping[str, object]],
+    *,
+    pit_context: Mapping[str, object] | None = None,
+    revision_digest: str | None = None,
+) -> str:
+    """Hash formal session semantics plus selected version evidence."""
+
+    return canonical_hash({
+        "semantic_signature": semantic_signature,
+        "formal_sessions": [dict(item) for item in formal_sessions],
+        "pit_context": dict(pit_context or {}),
+        "revision_digest": revision_digest,
+    })
+
+
+def warmup_session_signature(
+    warmup_sessions: Sequence[Mapping[str, object]],
+    *,
+    requested_sessions: int,
+    anchor: date | None,
+    revision_digest: str | None = None,
+) -> str:
+    """Hash the isolated warmup tuple and its formal anchor."""
+
+    return canonical_hash({
+        "requested_sessions": requested_sessions,
+        "anchor": anchor,
+        "warmup_sessions": [dict(item) for item in warmup_sessions],
+        "revision_digest": revision_digest,
+    })
+
+
+def calendar_snapshot_fingerprint(payload: Mapping[str, object]) -> str:
+    """Canonical fingerprint for one immutable calendar snapshot envelope."""
+
+    return canonical_hash(dict(payload))
+
+
+def data_preflight_hash_v2(payload: Mapping[str, object]) -> str:
+    """Canonical @2 report hash; the @2 label is carried separately."""
+
+    return canonical_hash(dict(payload))

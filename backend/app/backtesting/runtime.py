@@ -95,6 +95,9 @@ from app.strategy_protocol.data_view import (
     UniverseQuery,
     UniverseQueryDTO,
 )
+from app.backtesting.result_models import (
+    InstrumentDisplaySnapshot,
+)
 
 __all__ = [
     "BacktestEventType",
@@ -276,6 +279,11 @@ class EventEnvelope:
     event_type: str
     event_time: datetime
     payload: Mapping[str, Any]
+    # A single-instrument event carries its immutable point-in-time display
+    # identity here in addition to the JSON-safe payload projection.  Events
+    # that mention several instruments use ``display_snapshots`` below.
+    display_snapshot: InstrumentDisplaySnapshot | None = None
+    display_snapshots: Mapping[UUID, InstrumentDisplaySnapshot] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         _aware_datetime(self.event_time, "event_time")
@@ -284,6 +292,29 @@ class EventEnvelope:
         ):
             raise DomainValidationError("event_sequence must be an integer")
         object.__setattr__(self, "payload", _freeze_payload(self.payload))
+        if self.display_snapshot is not None and not isinstance(
+            self.display_snapshot, InstrumentDisplaySnapshot
+        ):
+            raise DomainValidationError(
+                "display_snapshot must be an InstrumentDisplaySnapshot"
+            )
+        if not isinstance(self.display_snapshots, Mapping):
+            raise DomainValidationError("display_snapshots must be a mapping")
+        frozen_snapshots: dict[UUID, InstrumentDisplaySnapshot] = {}
+        for instrument_id, snapshot in self.display_snapshots.items():
+            if not isinstance(instrument_id, UUID):
+                raise DomainValidationError(
+                    "display_snapshots keys must be UUID instrument identities"
+                )
+            if not isinstance(snapshot, InstrumentDisplaySnapshot):
+                raise DomainValidationError(
+                    "display_snapshots values must be InstrumentDisplaySnapshot"
+                )
+            snapshot.require_matching_instrument(instrument_id, "display_snapshot")
+            frozen_snapshots[instrument_id] = snapshot
+        object.__setattr__(
+            self, "display_snapshots", MappingProxyType(frozen_snapshots)
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -527,6 +558,16 @@ class PhaseViewFactory(Protocol):
         """The candidate-set facade used to build decision contexts."""
         ...
 
+    def display_snapshot(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> Any:
+        """Resolve one immutable point-in-time display snapshot."""
+        ...
+
 
 class BacktestViewFactory:
     """First-version factory implementing the documented view rules.
@@ -545,10 +586,22 @@ class BacktestViewFactory:
         engine_market_data: EngineMarketData,
         scope_instrument_ids: Sequence[UUID],
         adjustment_gate: AdjustmentPolicyGate | None = None,
+        display_provider: Any | None = None,
+        instrument_display_provider: Any | None = None,
     ) -> None:
+        if display_provider is not None and instrument_display_provider is not None:
+            raise DomainValidationError(
+                "pass only one of display_provider and "
+                "instrument_display_provider"
+            )
         self._strategy_view = strategy_view
         self._engine_market_data = engine_market_data
         self._adjustment_gate = adjustment_gate
+        self._display_provider = (
+            display_provider
+            if display_provider is not None
+            else instrument_display_provider
+        )
         self._scope_instrument_ids = tuple(dict.fromkeys(scope_instrument_ids))
         self._universe_dto = UniverseQueryDTO(universe_query)
 
@@ -556,12 +609,52 @@ class BacktestViewFactory:
         return self._universe_dto
 
     def candidate_identities(self) -> dict[UUID, InstrumentCandidateDTO]:
-        """PIT candidate identity table keyed by stable instrument id."""
+        """Return the already-provided candidate DTOs by stable identity.
+
+        This method deliberately does not enrich candidates from the display
+        provider or from ``etf_codes``.  Candidate DTOs are a separate
+        strategy-facing contract; missing historical display facts must stay
+        missing rather than being replaced with today's catalogue snapshot.
+        """
 
         return {
             candidate.instrument_id: candidate
             for candidate in self._universe_dto.query()
         }
+
+    def display_snapshot(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> Any:
+        """Freeze display identity at the event's effective instant.
+
+        The optional provider is the only source for event display fields.
+        When it is absent, the result still records the stable identity with
+        all display fields explicitly missing; no candidate/current snapshot
+        is substituted.
+        """
+
+        from app.backtesting.result_models import (
+            InstrumentDisplaySnapshot,
+            resolve_display_snapshot,
+        )
+
+        provider = self._display_provider
+        if provider is None:
+            return InstrumentDisplaySnapshot(instrument_id=instrument_id)
+        if not callable(getattr(provider, "resolve_display", None)):
+            raise DomainValidationError(
+                "display_provider must expose resolve_display()"
+            )
+        return resolve_display_snapshot(
+            provider,
+            instrument_id,
+            effective_at=effective_at,
+            data_cutoff=data_cutoff,
+        )
 
     def for_phase(
         self,
@@ -907,6 +1000,8 @@ class DeterministicBacktestRunner:
         analysis_engine: Any | None = None,
         analysis_admission: Any | None = None,
         pit_data_gateway: Any | None = None,
+        display_provider: Any | None = None,
+        instrument_display_provider: Any | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -923,10 +1018,20 @@ class DeterministicBacktestRunner:
             raise DomainValidationError(
                 "timing_policy must satisfy the TimingPolicy protocol"
             )
+        if display_provider is not None and instrument_display_provider is not None:
+            raise DomainValidationError(
+                "pass only one of display_provider and "
+                "instrument_display_provider"
+            )
         self._run_id = run_id
         self._axis = axis
         self._timing_policy = timing_policy
         self._view_factory = view_factory
+        self._display_provider = (
+            display_provider
+            if display_provider is not None
+            else instrument_display_provider
+        )
         self._strategy = strategy
         self._interpreter = interpreter
         self._execution_model = execution_model
@@ -1219,6 +1324,14 @@ class DeterministicBacktestRunner:
         self._identities: dict[UUID, InstrumentCandidateDTO] = (
             view_factory.candidate_identities()
         )
+        if self._display_provider is None:
+            # The factory is an explicit dependency boundary.  Only a
+            # factory-provided resolver is considered; candidate identities
+            # and current catalogue snapshots are never used as historical
+            # display fallback data.
+            factory_display = getattr(view_factory, "display_snapshot", None)
+            if callable(factory_display):
+                self._display_provider = factory_display
         self._namespace = uuid5(
             NAMESPACE_URL, f"quant-foundry:backtest-run:{self._run_id}"
         )
@@ -1806,6 +1919,36 @@ class DeterministicBacktestRunner:
                     f"the runner has no handler for phase {instruction.phase!r}"
                 )
             payloads_events = handler(context)
+            envelopes: list[EventEnvelope] = []
+            for offset, (event_type, payload) in enumerate(payloads_events):
+                event_payload = dict(payload)
+                single_snapshot, snapshots = self._event_display_snapshots(
+                    event_payload, context
+                )
+                if single_snapshot is not None:
+                    event_payload["display"] = self._display_snapshot_payload(
+                        single_snapshot
+                    )
+                elif snapshots:
+                    event_payload["displays"] = tuple(
+                        self._display_snapshot_payload(snapshot)
+                        for snapshot in snapshots.values()
+                    )
+                envelopes.append(
+                    EventEnvelope(
+                        run_id=self._run_id,
+                        event_sequence=len(self._events) + offset + 1,
+                        step_sequence=context.step_sequence,
+                        phase_sequence=context.phase_sequence,
+                        phase_key=context.phase_key,
+                        event_type=event_type,
+                        event_time=context.decision_time,
+                        payload=event_payload,
+                        display_snapshot=single_snapshot,
+                        display_snapshots=snapshots,
+                    )
+                )
+            return tuple(envelopes)
         except PhaseExecutionError:
             raise
         except Exception as exc:
@@ -1817,19 +1960,118 @@ class DeterministicBacktestRunner:
                 error_type=type(exc).__name__,
                 message=str(exc),
             ) from exc
-        return tuple(
-            EventEnvelope(
-                run_id=self._run_id,
-                event_sequence=len(self._events) + offset + 1,
-                step_sequence=context.step_sequence,
-                phase_sequence=context.phase_sequence,
-                phase_key=context.phase_key,
-                event_type=event_type,
-                event_time=context.decision_time,
-                payload=payload,
-            )
-            for offset, (event_type, payload) in enumerate(payloads_events)
-        )
+
+    def _event_display_snapshots(
+        self, payload: Mapping[str, Any], context: PhaseContext
+    ) -> tuple[
+        InstrumentDisplaySnapshot | None,
+        Mapping[UUID, InstrumentDisplaySnapshot],
+    ]:
+        """Resolve display identity for every instrument in one event.
+
+        The event timestamp is the effective instant; the phase cutoff (or
+        the timestamp itself for engine phases) is the separate knowledge
+        cutoff.  Order-expiry and similar events carry only an order id, so
+        the runtime resolves that id back to its stable instrument key before
+        asking the display provider.  No trading code or candidate snapshot
+        participates in this lookup.
+        """
+
+        ids: list[UUID] = []
+
+        def add(value: object) -> None:
+            if isinstance(value, UUID):
+                candidate = value
+            elif isinstance(value, str):
+                try:
+                    candidate = UUID(value)
+                except ValueError:
+                    return
+            else:
+                return
+            if candidate not in ids:
+                ids.append(candidate)
+
+        add(payload.get("instrument_id"))
+        values = payload.get("instrument_ids")
+        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+            for value in values:
+                add(value)
+        targets = payload.get("targets")
+        if isinstance(targets, Mapping):
+            for value in targets:
+                add(value)
+        if not ids and payload.get("order_id") is not None:
+            order_id = payload.get("order_id")
+            for order in self._orders:
+                if str(order.order_id) == str(order_id):
+                    add(order.instrument_id)
+                    break
+        if not ids:
+            return None, MappingProxyType({})
+
+        provider = self._display_provider
+        factory_resolver = getattr(self._view_factory, "display_snapshot", None)
+        snapshots: dict[UUID, InstrumentDisplaySnapshot] = {}
+        data_cutoff = context.data_cutoff or context.decision_time
+        for instrument_id in ids:
+            if callable(provider):
+                # A runner-level callable is treated as a complete snapshot
+                # resolver.  This is useful for factories that already own
+                # the provider and keeps the result-model helper out of the
+                # runtime's provider-specific surface.
+                snapshot = provider(
+                    instrument_id,
+                    effective_at=context.decision_time,
+                    data_cutoff=data_cutoff,
+                )
+            elif provider is not None:
+                from app.backtesting.result_models import resolve_display_snapshot
+
+                snapshot = resolve_display_snapshot(
+                    provider,
+                    instrument_id,
+                    effective_at=context.decision_time,
+                    data_cutoff=data_cutoff,
+                )
+            elif callable(factory_resolver):
+                snapshot = factory_resolver(
+                    instrument_id,
+                    effective_at=context.decision_time,
+                    data_cutoff=data_cutoff,
+                )
+            else:
+                snapshot = InstrumentDisplaySnapshot(instrument_id=instrument_id)
+            if not isinstance(snapshot, InstrumentDisplaySnapshot):
+                raise DomainValidationError(
+                    "display resolver must return an InstrumentDisplaySnapshot"
+                )
+            snapshot.require_matching_instrument(instrument_id, "display_snapshot")
+            snapshots[instrument_id] = snapshot
+        # A payload carrying ``instrument_id`` is a single-instrument event;
+        # a payload carrying ``instrument_ids`` or target keys remains a
+        # batch event even when the batch happens to contain one item.
+        if (
+            len(snapshots) == 1
+            and "instrument_id" in payload
+            and "instrument_ids" not in payload
+            and not isinstance(payload.get("targets"), Mapping)
+        ):
+            return next(iter(snapshots.values())), MappingProxyType({})
+        return None, MappingProxyType(snapshots)
+
+    @staticmethod
+    def _display_snapshot_payload(
+        snapshot: InstrumentDisplaySnapshot,
+    ) -> Mapping[str, object]:
+        """Render the immutable snapshot into the event's JSON-safe view."""
+
+        return {
+            "instrument_id": str(snapshot.instrument_id),
+            "event_trading_code": snapshot.event_trading_code,
+            "event_name": snapshot.event_name,
+            "event_display_name": snapshot.event_display_name,
+        }
 
     def _emit_pair(
         self, event_type: str, payload: Mapping[str, Any]

@@ -4,8 +4,10 @@ import unittest
 from dataclasses import FrozenInstanceError
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
+from inspect import signature
 from uuid import uuid4
 
+from app.backtesting.data.errors import HistoryIncompleteError
 from app.strategy_protocol.contract import (
     MAX_LOOKBACK_SESSIONS,
     AdjustmentNotActiveError,
@@ -77,8 +79,18 @@ class DataBoundaryTestCase(unittest.TestCase):
     def test_query_past_data_cutoff_is_rejected_without_reading(self) -> None:
         view = _CountingView()
         facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
-        with self.assertRaises(DataCutoffViolationError):
-            facade.bars(INSTRUMENT_ID, end_date=AWARE_CUTOFF.date() + timedelta(days=1))
+        future = AWARE_CUTOFF.date() + timedelta(days=1)
+        with self.assertRaises(DataCutoffViolationError) as context:
+            facade.bars(INSTRUMENT_ID, end_date=future)
+        details = context.exception.details
+        self.assertEqual(details["instrument_id"], str(INSTRUMENT_ID))
+        self.assertIsNone(details["source"])
+        self.assertIsNone(details["source_code"])
+        self.assertEqual(details["session_date"], future.isoformat())
+        self.assertEqual(details["expected"], "<= 2026-08-21")
+        self.assertEqual(details["actual"], future.isoformat())
+        self.assertEqual(details["data_cutoff"], AWARE_CUTOFF.isoformat())
+        self.assertIsNone(details["fact_version"])
         with self.assertRaises(DataCutoffViolationError):
             facade.bars(INSTRUMENT_ID, start_date=AWARE_CUTOFF.date() + timedelta(days=1))
         self.assertEqual(view.reads, 0)
@@ -86,8 +98,21 @@ class DataBoundaryTestCase(unittest.TestCase):
     def test_lookback_over_512_fails_before_reading(self) -> None:
         view = _CountingView()
         facade = StrategyDataDTO(view, data_cutoff=AWARE_CUTOFF)
-        with self.assertRaises(LookbackLimitExceededError):
+        with self.assertRaises(LookbackLimitExceededError) as context:
             facade.bars(INSTRUMENT_ID, lookback_sessions=MAX_LOOKBACK_SESSIONS + 1)
+        self.assertEqual(
+            context.exception.details["instrument_id"], str(INSTRUMENT_ID)
+        )
+        self.assertIsNone(context.exception.details["source"])
+        self.assertIsNone(context.exception.details["session_date"])
+        self.assertEqual(
+            context.exception.details["expected"], "<= 512 sessions"
+        )
+        self.assertEqual(context.exception.details["actual"], 513)
+        self.assertEqual(
+            context.exception.details["data_cutoff"], AWARE_CUTOFF.isoformat()
+        )
+        self.assertIsNone(context.exception.details["fact_version"])
         self.assertEqual(view.reads, 0)
         with self.assertRaises(LookbackLimitExceededError):
             facade.adjusted_series(INSTRUMENT_ID, lookback_sessions=513)
@@ -98,6 +123,143 @@ class DataBoundaryTestCase(unittest.TestCase):
         bars = facade.bars(INSTRUMENT_ID, lookback_sessions=MAX_LOOKBACK_SESSIONS)
         self.assertEqual(len(bars), 1)
         self.assertEqual(bars[0].values["close"], Decimal("10"))
+
+    def test_pit_constructor_exposes_only_canonical_dependency_names(self) -> None:
+        parameters = signature(StrategyDataDTO).parameters
+        self.assertEqual(
+            {
+                "resolved_sessions",
+                "session_resolver",
+                "pit_reader",
+                "pit_source",
+            },
+            {
+                name
+                for name in parameters
+                if name
+                in {
+                    "resolved_sessions",
+                    "session_resolver",
+                    "pit_reader",
+                    "pit_source",
+                    "sessions",
+                    "sessions_resolver",
+                    "pit_history",
+                    "pit_adapter",
+                    "source",
+                }
+            },
+        )
+
+    def test_pit_date_ranges_support_each_boundary_shape(self) -> None:
+        sessions = tuple(date(2026, 8, day) for day in (18, 19, 20, 21))
+
+        class PitReader:
+            source = "provider-source"
+
+            def __init__(self):
+                self.resolve_calls = []
+
+            def resolve(self, instrument_id, *, source, sessions, data_cutoff):
+                self.resolve_calls.append(
+                    (instrument_id, source, tuple(sessions), data_cutoff)
+                )
+                return tuple(sessions)
+
+            def bars(self, instrument_id, *, resolution):
+                return tuple(
+                    BarDTO(
+                        instrument_id=instrument_id,
+                        trade_date=day,
+                        values={"close": Decimal("1")},
+                    )
+                    for day in resolution
+                )
+
+        reader = PitReader()
+        facade = StrategyDataDTO(
+            object(),
+            data_cutoff=AWARE_CUTOFF,
+            resolved_sessions=sessions,
+            pit_reader=reader,
+            pit_source="configured-source",
+        )
+        cases = (
+            ({"start_date": date(2026, 8, 20)}, sessions[2:]),
+            ({"end_date": date(2026, 8, 19)}, sessions[:2]),
+            (
+                {"start_date": date(2026, 8, 19), "end_date": date(2026, 8, 20)},
+                sessions[1:3],
+            ),
+        )
+        for kwargs, expected in cases:
+            with self.subTest(**kwargs):
+                bars = facade.bars(INSTRUMENT_ID, **kwargs)
+                self.assertEqual(
+                    tuple(bar.trade_date for bar in bars), expected
+                )
+        self.assertEqual(len(reader.resolve_calls), len(cases))
+        self.assertTrue(
+            all(call[1] == "configured-source" for call in reader.resolve_calls)
+        )
+
+    def test_pit_lookback_rejects_insufficient_resolved_sessions(self) -> None:
+        class PitReader:
+            def __init__(self):
+                self.resolve_calls = 0
+                self.bars_calls = 0
+
+            def resolve(self, instrument_id, *, sessions, data_cutoff):
+                self.resolve_calls += 1
+                return tuple(sessions)
+
+            def bars(self, instrument_id, *, resolution):
+                self.bars_calls += 1
+                return ()
+
+        reader = PitReader()
+        facade = StrategyDataDTO(
+            object(),
+            data_cutoff=AWARE_CUTOFF,
+            resolved_sessions=(date(2026, 8, 20), date(2026, 8, 21)),
+            pit_reader=reader,
+        )
+        with self.assertRaises(HistoryIncompleteError) as context:
+            facade.bars(INSTRUMENT_ID, lookback_sessions=3)
+        self.assertEqual(context.exception.code, "history_incomplete")
+        self.assertEqual(context.exception.details["requested"], 3)
+        self.assertEqual(context.exception.details["available"], 2)
+        self.assertEqual(context.exception.details["instrument_id"], str(INSTRUMENT_ID))
+        self.assertEqual(reader.resolve_calls, 0)
+        self.assertEqual(reader.bars_calls, 0)
+
+    def test_pit_sessions_past_cutoff_are_reported_as_cutoff_violation(self) -> None:
+        """A resolved session beyond the cutoff must not leak an indexing error."""
+
+        class PitReader:
+            def bars(self, instrument_id, *, resolution):
+                self.called = True
+                return ()
+
+        reader = PitReader()
+        future = AWARE_CUTOFF.date() + timedelta(days=1)
+        facade = StrategyDataDTO(
+            object(),
+            data_cutoff=AWARE_CUTOFF,
+            resolved_sessions=(future,),
+            pit_reader=reader,
+        )
+
+        with self.assertRaises(DataCutoffViolationError) as context:
+            facade.bars(INSTRUMENT_ID, lookback_sessions=1)
+
+        details = context.exception.details
+        self.assertEqual(details["instrument_id"], str(INSTRUMENT_ID))
+        self.assertEqual(details["session_date"], future.isoformat())
+        self.assertEqual(details["expected"], "<= 2026-08-21")
+        self.assertEqual(details["actual"], future.isoformat())
+        self.assertEqual(details["data_cutoff"], AWARE_CUTOFF.isoformat())
+        self.assertFalse(hasattr(reader, "called"))
 
     def test_bar_dto_values_are_read_only_and_float_free(self) -> None:
         bar = _bar(AWARE_CUTOFF.date())

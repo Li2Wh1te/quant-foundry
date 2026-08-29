@@ -22,10 +22,11 @@ Tushare imports.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime, timedelta
+import json
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 from app.backtesting.calendar_axis import (
     POLICY_KEY_STRICT_COMPATIBLE,
@@ -33,30 +34,47 @@ from app.backtesting.calendar_axis import (
     CalendarAxisDataProvider,
     CalendarAxisResolution,
     CalendarAxisStatus,
+    CalendarPITContext,
+    CalendarSnapshot,
+    CalendarSnapshotRequest,
     CalendarDefinition,
+    CapabilityApplicability,
+    CapabilityResolution,
+    CapabilityValue,
+    CAPABILITY_OPENING_AVAILABILITY,
+    CAPABILITY_PRICE_LIMIT_TRADABILITY,
+    CAPABILITY_SUSPENSION,
+    InMemoryCalendarAxisDataProvider,
     SessionPoint,
     resolve_calendar_axis,
+    calendar_snapshot_usage,
 )
 from app.backtesting.data.errors import (
     DataSessionClosedError,
     InvalidDataRequestError,
     UnsupportedCapabilityError,
+    CalendarContractError,
+    CalendarPreflightResourceLimitExceededError,
+    ProviderContractViolationError,
 )
 from app.backtesting.data.protocols import DataConsistencyContext
-from app.backtesting.data.reports import DataPreflightReport, PreflightIssue
+from app.backtesting.data.reports import DataPreflightReport, PreflightIssue, canonical_json
 from app.backtesting.data.requests import (
     ConsistencyMode,
     ContractRef,
     DataChunkQuery,
     DataPreflightRequest,
     DataRequest,
+    DateRange,
     IssueSeverity,
     PreflightStatus,
+    DataCapability,
 )
 from app.backtesting.data.warmup import (
     NO_FORMAL_SESSIONS,
     SCOPE_FORMAL,
     SCOPE_WARMUP,
+    WarmupCoverageStatus,
     WarmupResolution,
     WarmupSessionResolver,
     WarmupStatus,
@@ -67,7 +85,579 @@ from app.backtesting.data.warmup import (
 __all__ = [
     "AuthoritativeDataSession",
     "DataSessionState",
+    "evaluate_calendar_capability_gate",
 ]
+
+
+def _calendar_difference_issue_code(difference: object) -> str:
+    """Map axis evidence to the second-layer report machine code.
+
+    Timezone failures carry a dedicated domain error code so callers can
+    distinguish an unsupported timezone from cross-day inconsistency and
+    same-day cross-calendar mismatch.  The field fallback keeps older
+    providers readable when they omit ``error_code``.
+    """
+
+    error_code = getattr(difference, "error_code", None)
+    if isinstance(error_code, str) and error_code:
+        explicit = {
+            "calendar_timezone_inconsistent": "CALENDAR_TIMEZONE_INCONSISTENT",
+            "calendar_timezone_mismatch": "CALENDAR_TIMEZONE_MISMATCH",
+            "calendar_timezone_unsupported": "CALENDAR_TIMEZONE_UNSUPPORTED",
+        }.get(error_code)
+        if explicit is not None:
+            return explicit
+    field = getattr(difference, "field", difference)
+    value = getattr(field, "value", str(field))
+    return {
+        "missing_fact": "CALENDAR_FACT_MISSING",
+        "missing_definition": "CALENDAR_DEFINITION_MISSING",
+        "unresolved_session": "CALENDAR_SESSION_UNRESOLVED",
+        "registry": "CALENDAR_REGISTRY_REFERENCE_INVALID",
+        "pit_metadata": "CALENDAR_PIT_METADATA_MISSING",
+        "timezone": "CALENDAR_SESSION_INCOMPATIBLE",
+    }.get(value, "CALENDAR_SESSION_INCOMPATIBLE")
+
+
+def _provider_has_canonical_calendar_metadata(
+    provider: object,
+    calendar_ids: Sequence[str],
+) -> bool:
+    """Return whether the provider exposes the atomic strict-snapshot API.
+
+    Strict-path detection is a capability check, not a metadata probe.  Calling
+    ``registries()`` or ``definitions()`` here performs out-of-band reads for
+    SQL providers before ``open_calendar_snapshot()`` can pin its transaction,
+    breaking the fixed one-prepare/one-batch-read budget.  Only the built-in
+    in-memory fixture may continue through the legacy resolver; a formal
+    session rejects every other provider without the atomic entry point
+    before it can issue per-day reads.
+    """
+
+    # Keep the argument for compatibility with callers that pass the resolved
+    # calendar set; capability detection must not inspect that set's rows.
+    del calendar_ids
+    if not callable(getattr(provider, "open_calendar_snapshot", None)):
+        return False
+
+    # SQL and third-party providers declare the strict operation through the
+    # atomic method itself.  Only the built-in in-memory fixture needs a
+    # compatibility distinction: its immutable tuples are already materialized
+    # and can be inspected without issuing a provider read.
+    if not isinstance(provider, InMemoryCalendarAxisDataProvider):
+        return True
+    if tuple(getattr(provider, "_registries", ())):
+        return True
+    definitions = tuple(getattr(provider, "_definitions", ()))
+    if any(
+        getattr(definition, field, None) is not None
+        for definition in definitions
+        for field in ("valid_from", "registry_fact_id", "known_at", "source_priority_fact_id")
+    ):
+        return True
+    facts = tuple(getattr(provider, "_facts", ()))
+    return any(
+        getattr(fact, field, None) is not None
+        for fact in facts
+        for field in ("known_at", "registry_fact_id", "definition_fact_id", "source_priority_fact_id")
+    )
+
+
+_CALENDAR_STATUS_CAPABILITIES = (
+    CAPABILITY_SUSPENSION,
+    CAPABILITY_OPENING_AVAILABILITY,
+    CAPABILITY_PRICE_LIMIT_TRADABILITY,
+)
+
+
+def evaluate_calendar_capability_gate(
+    provider: object,
+    request: DataPreflightRequest,
+    snapshot: CalendarSnapshot,
+) -> tuple[tuple[PreflightIssue, ...], tuple[Mapping[str, object], ...]]:
+    """Evaluate the v1 status-capability declaration gate once per snapshot.
+
+    ``DataCapability.STATUS`` is a family requirement.  Its three canonical
+    declarations are resolved against the same PIT context and frozen
+    calendar set.  A missing declaration resolves to ``unknown`` evidence;
+    it never becomes support merely because a provider manifest lists the
+    broad ``status`` capability.  A declaration with missing applicability is
+    a contract error.  Only ``required`` plus a non-supported value blocks a
+    request; ``not_applicable`` is an explicit, independently supplied
+    statement and is not inferred from ``unknown``.
+    """
+
+    ids = tuple(snapshot.calendar_ids)
+    # The canonical snapshot scope is the union of both fixed-id sets.  Using
+    # ``or`` here would drop mandatory ids whenever static ids are present.
+    instruments = tuple(
+        dict.fromkeys(
+            (*request.static_instrument_ids, *request.mandatory_instrument_ids)
+        )
+    )
+    status_required = DataCapability.STATUS in request.required_capabilities
+    issues: list[PreflightIssue] = []
+    evidence: list[Mapping[str, object]] = []
+    resolver = getattr(provider, "resolve_capability", None)
+    effective_day = request.requested_window.start_date
+    # Resolve per participating calendar.  This preserves calendar-scope
+    # specificity for multi-calendar requests while still allowing a
+    # provider/rule-package fallback declaration to be selected by its
+    # canonical selector.
+    scopes: tuple[str | None, ...] = ids or (None,)
+    instrument_scopes: tuple[object | None, ...] = instruments or (None,)
+    manifest_method = getattr(provider, "capability_manifest", None)
+    manifest = None
+    manifest_error: Exception | None = None
+    if callable(manifest_method):
+        try:
+            manifest = manifest_method()
+        except Exception as exc:
+            # A manifest is a provider trust boundary just like the resolver;
+            # preserve a stable blocked issue instead of leaking its exception.
+            manifest_error = exc
+    if status_required and manifest_error is not None:
+        issues.append(
+            PreflightIssue(
+                code="PROVIDER_CONTRACT_VIOLATION",
+                severity=IssueSeverity.ERROR,
+                scope=SCOPE_FORMAL,
+                message="Provider 能力 manifest 读取失败，已阻断回测。",
+                field="capability_manifest",
+                details={
+                    "cause_code": "provider_contract_violation",
+                    "error_type": type(manifest_error).__name__,
+                },
+            )
+        )
+    if status_required and manifest is not None:
+        declared_capabilities = tuple(getattr(manifest, "capabilities", ()))
+        if DataCapability.STATUS not in declared_capabilities:
+            issues.append(
+                PreflightIssue(
+                    code="UNSUPPORTED_CAPABILITY",
+                    severity=IssueSeverity.ERROR,
+                    scope=SCOPE_FORMAL,
+                    message="Provider 能力 manifest 未声明交易状态能力，已阻断回测。",
+                    field="required_capabilities",
+                    details={
+                        "cause_code": "rule_capability_unsupported",
+                        "manifest_version": getattr(manifest, "manifest_version", None),
+                        "capability": DataCapability.STATUS.value,
+                    },
+                )
+            )
+    for calendar_id in scopes:
+        for instrument_id in instrument_scopes:
+            for capability_key in _CALENDAR_STATUS_CAPABILITIES:
+                resolution: CapabilityResolution
+                resolution_error: str | None = None
+                try:
+                    if callable(resolver):
+                        result = resolver(
+                            capability_key,
+                            effective_day=effective_day,
+                            pit_context=snapshot.pit_context,
+                            provider_key=request.provider_key,
+                            package_key=request.rule_package.key,
+                            package_version=request.rule_package.version,
+                            calendar_id=calendar_id,
+                            instrument_id=instrument_id,
+                        )
+                        if not isinstance(result, CapabilityResolution):
+                            raise ProviderContractViolationError(
+                                "calendar capability resolver returned an invalid result"
+                            )
+                        resolution = result
+                    else:
+                        resolution = CapabilityResolution(
+                            capability_key,
+                            CapabilityValue.UNKNOWN,
+                            None,
+                            None,
+                            missing=True,
+                        )
+                except CalendarContractError as exc:
+                    resolution_error = getattr(exc, "code", "provider_contract_violation")
+                    resolution = CapabilityResolution(
+                        capability_key,
+                        CapabilityValue.UNKNOWN,
+                        None,
+                        None,
+                        missing=True,
+                    )
+                    if status_required:
+                        issues.append(
+                            PreflightIssue(
+                                code=(
+                                    "CAPABILITY_DECLARATION_AMBIGUOUS"
+                                    if getattr(exc, "code", "")
+                                    == "capability_declaration_ambiguous"
+                                    else getattr(exc, "code", "provider_contract_violation").upper()
+                                ),
+                                severity=IssueSeverity.ERROR,
+                                scope=SCOPE_FORMAL,
+                                message=f"交易状态能力声明无法确定：{capability_key}。",
+                                field=f"capabilities.{capability_key}",
+                                details={
+                                    "cause_code": getattr(exc, "code", "provider_contract_violation"),
+                                    "calendar_id": calendar_id,
+                                    "instrument_id": str(instrument_id) if instrument_id is not None else None,
+                                },
+                            )
+                        )
+                except Exception as exc:
+                    # A third-party resolver is a trust boundary.  Convert an
+                    # unexpected implementation failure into a stable blocked
+                    # issue instead of letting preflight escape with a raw
+                    # provider exception.
+                    resolution_error = "provider_contract_violation"
+                    resolution = CapabilityResolution(
+                        capability_key,
+                        CapabilityValue.UNKNOWN,
+                        None,
+                        None,
+                        missing=True,
+                    )
+                    if status_required:
+                        issues.append(
+                            PreflightIssue(
+                                code="PROVIDER_CONTRACT_VIOLATION",
+                                severity=IssueSeverity.ERROR,
+                                scope=SCOPE_FORMAL,
+                                message=f"交易状态能力声明读取失败：{capability_key}。",
+                                field=f"capabilities.{capability_key}",
+                                details={
+                                    "cause_code": "provider_contract_violation",
+                                    "calendar_id": calendar_id,
+                                    "instrument_id": str(instrument_id) if instrument_id is not None else None,
+                                    "error_type": type(exc).__name__,
+                                },
+                            )
+                        )
+                declaration = resolution.declaration
+                evidence.append(
+                    {
+                        "calendar_id": calendar_id,
+                        "instrument_id": str(instrument_id) if instrument_id is not None else None,
+                        "capability": capability_key,
+                        "value": resolution.value,
+                        "applicability": resolution.applicability,
+                        "specificity": resolution.specificity,
+                        "missing": resolution.missing,
+                        "selected_fact_id": declaration.fact_id if declaration is not None else None,
+                        "fact_version": declaration.fact_version if declaration is not None else None,
+                        "scope_kind": declaration.scope_kind if declaration is not None else None,
+                        "scope_key": declaration.scope_key if declaration is not None else None,
+                        "source": declaration.source if declaration is not None else None,
+                        "source_revision": declaration.source_revision if declaration is not None else None,
+                        "content_hash": declaration.content_hash if declaration is not None else None,
+                    }
+                )
+                if not status_required:
+                    continue
+                applicability = resolution.applicability
+                if applicability is None and resolution_error is None:
+                    issues.append(
+                        PreflightIssue(
+                            code="CAPABILITY_DECLARATION_INVALID",
+                            severity=IssueSeverity.ERROR,
+                            scope=SCOPE_FORMAL,
+                            message=f"交易状态能力 {capability_key} 缺少 applicability 声明。",
+                            field=f"capabilities.{capability_key}.applicability",
+                            details={
+                                "cause_code": "capability_applicability_missing",
+                                "calendar_id": calendar_id,
+                                "instrument_id": str(instrument_id) if instrument_id is not None else None,
+                                "value": resolution.value.value,
+                            },
+                        )
+                    )
+                elif (
+                    applicability is CapabilityApplicability.REQUIRED
+                    and resolution.value is not CapabilityValue.SUPPORTED
+                ):
+                    issues.append(
+                        PreflightIssue(
+                            code="UNSUPPORTED_CAPABILITY",
+                            severity=IssueSeverity.ERROR,
+                            scope=SCOPE_FORMAL,
+                            message=f"规则要求的交易状态能力 {capability_key} 未由 Provider 明确支持。",
+                            field=f"capabilities.{capability_key}",
+                            details={
+                                "cause_code": "rule_capability_unsupported",
+                                "calendar_id": calendar_id,
+                                "instrument_id": str(instrument_id) if instrument_id is not None else None,
+                                "value": resolution.value.value,
+                                "applicability": applicability.value,
+                            },
+                        )
+                    )
+    return tuple(issues), tuple(evidence)
+
+
+def _snapshot_report(
+    request: DataRequest,
+    snapshot: CalendarSnapshot,
+    *,
+    capability_manifest_version: int,
+    extra_issues: Sequence[PreflightIssue] = (),
+    capability_evidence: Sequence[Mapping[str, object]] = (),
+) -> DataPreflightReport:
+    """Project one immutable snapshot into the canonical @2 report."""
+
+    axis = snapshot.resolution
+    issues = list(extra_issues)
+    if axis.status is CalendarAxisStatus.INCOMPATIBLE:
+        issues.extend(
+            PreflightIssue(
+                code=_calendar_difference_issue_code(difference),
+                severity=IssueSeverity.ERROR,
+                scope=SCOPE_FORMAL,
+                message=f"{difference.date.isoformat()} 的日历会话不兼容，已阻断回测。",
+                field=difference.field.value,
+                date=difference.date,
+                date_range=(difference.date, difference.date + timedelta(days=1)),
+                calendar_id=difference.calendar_id,
+                values_by_calendar=difference.values_by_calendar,
+                details=difference.evidence(),
+            )
+            for difference in axis.differences
+        )
+    elif not axis.resolved_sessions:
+        issues.append(
+            PreflightIssue(
+                code=NO_FORMAL_SESSIONS,
+                severity=IssueSeverity.ERROR,
+                scope=SCOPE_FORMAL,
+                message="正式区间没有共同开市会话，无法启动回测。",
+                field="resolved_sessions",
+            )
+        )
+    warmup_resolution = None
+    if request.warmup_sessions > 0 and axis.resolved_sessions:
+        warmup = tuple(snapshot.warmup_sessions)
+        if len(warmup) != request.warmup_sessions:
+            issues.append(
+                PreflightIssue(
+                    code="WARMUP_COVERAGE_INSUFFICIENT",
+                    severity=IssueSeverity.ERROR,
+                    scope=SCOPE_WARMUP,
+                    message=f"warmup 覆盖不足：请求 {request.warmup_sessions} 个会话，实际证明 {len(warmup)} 个。",
+                    field="warmup_sessions",
+                )
+            )
+        else:
+            anchor = axis.resolved_sessions[0].session_date
+            warmup_resolution = WarmupResolution(
+                requested_sessions=request.warmup_sessions,
+                first_formal_session=anchor,
+                status=WarmupStatus.READY,
+                coverage_status=WarmupCoverageStatus.PROVEN,
+                resolved_sessions=warmup,
+                # Keep the complete envelope used by the immutable snapshot,
+                # including closed/non-session days between the earliest
+                # warmup point and the formal anchor.  Trimming this to the
+                # selected open dates would erase the very coverage range
+                # needed to audit contiguous historical proof.
+                history_window=DateRange(
+                    snapshot.envelope_start,
+                    anchor - timedelta(days=1),
+                ),
+            )
+    errors = [item for item in issues if item.severity is IssueSeverity.ERROR]
+    blocked = bool(errors)
+    formal = () if blocked else axis.resolved_sessions
+    warmup = () if blocked or warmup_resolution is None else warmup_resolution.resolved_sessions
+    context = snapshot.pit_context
+    usage = calendar_snapshot_usage(snapshot)
+    calendar_summary = {
+        "policy": {"key": axis.policy_key, "version": int(axis.policy_version)},
+        "calendar_ids": axis.calendar_ids,
+        "requested_window": {
+            "start_date": request.requested_window.start_date,
+            "end_date": request.requested_window.end_date,
+        },
+        "pit_context": dict(context.as_dict),
+        "data_cutoff": context.as_dict["data_cutoff"],
+        "cutoff_local_date": context.as_dict["cutoff_local_date"],
+        "include_cutoff_day": context.as_dict["include_cutoff_day"],
+        "pit_profile": context.as_dict["pit_profile"],
+        "profile_version": context.as_dict["profile_version"],
+        "knowledge_as_of": context.as_dict["knowledge_as_of"],
+        "non_strict_pit": axis.non_strict_pit,
+        "non_strict_pit_capabilities": axis.non_strict_pit_capabilities,
+        "compatibility_status": axis.status.value,
+        "timezone": axis.timezone,
+        "coverage": dict(snapshot.coverage),
+        "resolved_calendar_bindings": dict(snapshot.resolved_calendar_bindings),
+        "resolved_calendar_definitions": [
+            {
+                "calendar_id": item.calendar_id,
+                "registry_fact_id": item.registry_fact_id,
+                "registry_version": item.registry_version,
+                "definition_version": item.definition_version,
+                "definition_fact_id": item.fact_id,
+                "fact_version": item.fact_version,
+                "source": item.source,
+                "source_revision": item.source_revision,
+            }
+            for item in snapshot.resolved_calendar_definitions
+        ],
+        "calendar_revision_digest": snapshot.calendar_revision_digest,
+        "revision_digest": snapshot.calendar_revision_digest,
+        "calendar_session_signature": snapshot.calendar_session_signature,
+        "warmup_session_signature": snapshot.warmup_session_signature,
+        "snapshot_fingerprint": snapshot.snapshot_fingerprint,
+        "differences": [difference.evidence() for difference in axis.differences],
+        "envelope": {
+            "start_date": snapshot.envelope_start,
+            "end_date_exclusive": snapshot.envelope_end_exclusive,
+        },
+        "definition_usage_by_date": usage,
+        "capabilities": tuple(capability_evidence),
+    }
+    # Canonical JSON round-tripping converts UUID/date/enums to the exact wire
+    # representation before DataPreflightReport freezes the payload.
+    calendar_summary = json.loads(canonical_json(calendar_summary))
+    session_summary = {
+        "pit_context": dict(context.as_dict),
+        "formal_session_count": len(formal),
+        "warmup_session_count": len(warmup),
+        "formal_sessions": [
+            {
+                "date": point.session_date,
+                "session_id": point.session_id,
+                "timezone": point.timezone,
+                "sessions": [window.semantic_payload() for window in point.sessions],
+            }
+            for point in formal
+        ],
+        "warmup_sessions": [
+            {
+                "date": point.session_date,
+                "session_id": point.session_id,
+                "timezone": point.timezone,
+                "sessions": [window.semantic_payload() for window in point.sessions],
+            }
+            for point in warmup
+        ],
+        "calendar_session_signature": snapshot.calendar_session_signature,
+        "warmup_session_signature": snapshot.warmup_session_signature,
+        "snapshot_id": str(snapshot.snapshot_id),
+        "snapshot_fingerprint": snapshot.snapshot_fingerprint,
+    }
+    # Keep nested report evidence JSON-native before DataPreflightReport
+    # freezes it; dates and enums are canonicalized exactly like the calendar
+    # summary above.
+    session_summary = json.loads(canonical_json(session_summary))
+    return DataPreflightReport(
+        status=PreflightStatus.BLOCKED if blocked else PreflightStatus.READY,
+        generated_at=datetime.now(context.data_cutoff.tzinfo),
+        provider_key=request.provider_key,
+        capability_manifest_version=capability_manifest_version,
+        requested_window=request.requested_window,
+        scope_mode=request.instrument_scope_mode,
+        resolved_calendar_ids=axis.calendar_ids,
+        resolved_calendar_definitions=snapshot.resolved_calendar_definitions,
+        resolved_timezone=axis.timezone,
+        calendar_axis_policy=request.calendar_axis_policy,
+        calendar_compatibility_status=axis.status,
+        calendar_session_signature=snapshot.calendar_session_signature if axis.status is CalendarAxisStatus.COMPATIBLE else "",
+        resolved_sessions=formal,
+        warmup_sessions=warmup,
+        max_lookback_sessions=request.max_lookback_sessions,
+        knowledge_as_of=request.query_boundary.knowledge_as_of,
+        non_strict_pit_capabilities=tuple(axis.non_strict_pit_capabilities),
+        consistency_mode=request.consistency_mode,
+        consistency_token_capability=request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
+        consistency_token_contract=request.consistency_token_contract if request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN else None,
+        data_chunk_policy=request.data_chunk_policy,
+        data_chunk_size_sessions=request.data_chunk_size_sessions,
+        required_capabilities=request.required_capabilities,
+        rule_package=request.rule_package,
+        rule_exception_set=request.rule_exception_set,
+        static_instrument_ids=request.static_instrument_ids,
+        mandatory_instrument_ids=request.mandatory_instrument_ids,
+        strategy_price_bases=request.strategy_price_bases,
+        engine_price_basis=request.engine_price_basis,
+        data_contract_version=request.data_contract_version,
+        frequency=request.frequency,
+        warmup_sessions_count=request.warmup_sessions,
+        market_scope=request.market_scope,
+        universe_query_policy=request.universe_query_policy,
+        allowed_settlement_rule_class=request.allowed_settlement_rule_class,
+        adjustment_series_policy=request.adjustment_series_policy,
+        quality_mode=request.quality_mode,
+        issues=tuple(issues),
+        warmup_resolution=warmup_resolution if not blocked else None,
+        warmup_resolution_signature=warmup_resolution.resolution_signature if warmup_resolution is not None and not blocked else None,
+        calendar_axis_differences=axis.differences,
+        warmup_axis_differences=(),
+        query_boundary=request.query_boundary,
+        hash_schema_version=2,
+        pit_context=context.as_dict,
+        calendar_revision_digest=snapshot.calendar_revision_digest,
+        snapshot_fingerprint=snapshot.snapshot_fingerprint,
+        non_strict_pit=axis.non_strict_pit,
+        calendar_semantic_signature=axis.calendar_semantic_signature,
+        warmup_session_signature=snapshot.warmup_session_signature,
+        definition_usage_by_date=usage,
+        calendar_summary=calendar_summary,
+        session_summary=session_summary,
+    )
+
+
+def _snapshot_failure_report(
+    request: DataRequest,
+    *,
+    capability_manifest_version: int,
+    issues: Sequence[PreflightIssue],
+) -> DataPreflightReport:
+    """Create an evidence-only blocked report after a pre-read snapshot gate."""
+
+    return DataPreflightReport(
+        status=PreflightStatus.BLOCKED,
+        generated_at=datetime.now().astimezone(),
+        provider_key=request.provider_key,
+        capability_manifest_version=capability_manifest_version,
+        requested_window=request.requested_window,
+        scope_mode=request.instrument_scope_mode,
+        resolved_calendar_ids=request.resolved_calendar_ids,
+        resolved_calendar_definitions=(),
+        resolved_timezone=None,
+        calendar_axis_policy=request.calendar_axis_policy,
+        calendar_compatibility_status=CalendarAxisStatus.INCOMPATIBLE,
+        calendar_session_signature="",
+        resolved_sessions=(),
+        warmup_sessions=(),
+        max_lookback_sessions=request.max_lookback_sessions,
+        knowledge_as_of=request.query_boundary.knowledge_as_of,
+        non_strict_pit_capabilities=(),
+        consistency_mode=request.consistency_mode,
+        consistency_token_capability=False,
+        consistency_token_contract=None,
+        data_chunk_policy=request.data_chunk_policy,
+        data_chunk_size_sessions=request.data_chunk_size_sessions,
+        required_capabilities=request.required_capabilities,
+        rule_package=request.rule_package,
+        rule_exception_set=request.rule_exception_set,
+        static_instrument_ids=request.static_instrument_ids,
+        mandatory_instrument_ids=request.mandatory_instrument_ids,
+        strategy_price_bases=request.strategy_price_bases,
+        engine_price_basis=request.engine_price_basis,
+        data_contract_version=request.data_contract_version,
+        frequency=request.frequency,
+        warmup_sessions_count=request.warmup_sessions,
+        market_scope=request.market_scope,
+        universe_query_policy=request.universe_query_policy,
+        allowed_settlement_rule_class=request.allowed_settlement_rule_class,
+        adjustment_series_policy=request.adjustment_series_policy,
+        quality_mode=request.quality_mode,
+        issues=tuple(issues),
+        query_boundary=request.query_boundary,
+        hash_schema_version=1,
+    )
 
 
 class DataSessionState(StrEnum):
@@ -118,6 +708,7 @@ class AuthoritativeDataSession:
         self._on_close = on_close
         self._state = DataSessionState.CREATED
         self._axis: CalendarAxisResolution | None = None
+        self._snapshot: CalendarSnapshot | None = None
         self._resolved_sessions: tuple[SessionPoint, ...] | None = None
         self._warmup_sessions: tuple[SessionPoint, ...] | None = None
         self._warmup_resolution: WarmupResolution | None = None
@@ -194,6 +785,12 @@ class AuthoritativeDataSession:
         return self._warmup_resolution
 
     @property
+    def snapshot(self) -> CalendarSnapshot | None:
+        """Immutable calendar snapshot opened by the strict calendar path."""
+
+        return self._snapshot
+
+    @property
     def report(self) -> DataPreflightReport | None:
         """The immutable preflight report, or ``None`` before preflight."""
 
@@ -256,15 +853,193 @@ class AuthoritativeDataSession:
         frozen_request = self._request
         issues: list[PreflightIssue] = []
 
-        # 1-2. Resolve the formal window strictly through strict_compatible@1.
-        axis = resolve_calendar_axis(
+        # Task-11 providers expose one atomic snapshot operation.  Do not
+        # re-use a page handle or fall back to separate formal/warmup reads.
+        open_snapshot = getattr(self._calendar_provider, "open_calendar_snapshot", None)
+        use_strict_snapshot = callable(open_snapshot) and _provider_has_canonical_calendar_metadata(
             self._calendar_provider,
-            policy_key=POLICY_KEY_STRICT_COMPATIBLE,
-            policy_version=POLICY_VERSION_STRICT_COMPATIBLE,
-            start_date=frozen_request.requested_window.start_date,
-            end_date=frozen_request.requested_window.end_date,
-            calendar_ids=frozen_request.resolved_calendar_ids,
+            frozen_request.resolved_calendar_ids,
         )
+        if not use_strict_snapshot and not isinstance(
+            self._calendar_provider, InMemoryCalendarAxisDataProvider
+        ):
+            # Legacy definitions()/fact() providers are retained for direct
+            # resolver diagnostics only.  A formal DataSession must not turn
+            # per-day reads into an unversioned strict run.
+            legacy_issue = PreflightIssue(
+                code="unsupported_capability",
+                severity=IssueSeverity.ERROR,
+                scope=SCOPE_FORMAL,
+                message="日历提供方不支持正式会话所需的 PIT 批量快照能力，已阻断回测。",
+                field="calendar_provider",
+                details={
+                    "cause_code": "calendar_provider_legacy",
+                    "provider_type": type(self._calendar_provider).__name__,
+                },
+            )
+            self._report = _snapshot_failure_report(
+                frozen_request,
+                capability_manifest_version=self._capability_manifest_version,
+                issues=(legacy_issue,),
+            )
+            self._resolved_sessions = ()
+            self._warmup_sessions = ()
+            self._preflight_done = True
+            self._state = DataSessionState.BLOCKED
+            return self._report
+        if use_strict_snapshot and frozen_request.query_boundary is None:
+            # A provider exposing the task-11 snapshot protocol is never
+            # allowed to fall back to the legacy per-day resolver.  The
+            # missing cutoff is a pre-read gate and must not touch facts.
+            cutoff_issue = PreflightIssue(
+                code="DATA_CUTOFF_REQUIRED",
+                severity=IssueSeverity.ERROR,
+                scope=SCOPE_FORMAL,
+                message="严格日历会话必须显式提供 data_cutoff，系统不会使用墙上时钟推断。",
+                field="query_boundary.data_cutoff",
+                details={"cause_code": "data_cutoff_required"},
+            )
+            self._report = _snapshot_failure_report(
+                frozen_request,
+                capability_manifest_version=self._capability_manifest_version,
+                issues=(cutoff_issue,),
+            )
+            self._resolved_sessions = ()
+            self._warmup_sessions = ()
+            self._preflight_done = True
+            self._state = DataSessionState.BLOCKED
+            return self._report
+        if use_strict_snapshot and frozen_request.query_boundary is not None:
+            try:
+                snapshot = open_snapshot(
+                    CalendarSnapshotRequest(
+                        calendar_ids=frozen_request.resolved_calendar_ids,
+                        formal_start=frozen_request.requested_window.start_date,
+                        formal_end=frozen_request.requested_window.end_date,
+                        warmup_sessions=frozen_request.warmup_sessions,
+                        query_boundary=frozen_request.query_boundary,
+                        instrument_ids=tuple(
+                            dict.fromkeys(
+                                (
+                                    *frozen_request.static_instrument_ids,
+                                    *frozen_request.mandatory_instrument_ids,
+                                )
+                            )
+                        ),
+                        provider_key=frozen_request.provider_key,
+                        package_key=frozen_request.rule_package.key,
+                        package_version=frozen_request.rule_package.version,
+                    )
+                )
+            except CalendarPreflightResourceLimitExceededError:
+                # A resource overrun is a creation-gate response, not a
+                # report issue.  Re-wrapping it as a blocked @1 report would
+                # falsely advertise a pageable/persistable result to the
+                # coordinator.  Mark this session terminal while preserving
+                # the stable domain error for the caller to project through
+                # resource_limited_preflight_failure().
+                self._snapshot = None
+                self._axis = None
+                self._resolved_sessions = ()
+                self._warmup_sessions = ()
+                self._warmup_resolution = None
+                self._report = None
+                self._preflight_done = True
+                self._state = DataSessionState.BLOCKED
+                raise
+            except CalendarContractError as exc:
+                exc_details = dict(getattr(exc, "details", {}) or {})
+                issue_code = getattr(exc, "code", "provider_contract_violation")
+                if exc_details.get("cause_code") == "warmup_coverage_insufficient":
+                    issue_code = "WARMUP_COVERAGE_INSUFFICIENT"
+                issues.append(
+                    PreflightIssue(
+                        code=issue_code.upper(),
+                        severity=IssueSeverity.ERROR,
+                        scope=SCOPE_FORMAL,
+                        message="交易日历快照无法打开，已阻断回测。",
+                        field="calendar_snapshot",
+                        details={"cause_code": getattr(exc, "code", "provider_contract_violation"), **exc_details},
+                    )
+                )
+                snapshot = None
+            if snapshot is not None:
+                self._snapshot = snapshot
+                self._axis = snapshot.resolution
+                try:
+                    capability_issues, capability_evidence = evaluate_calendar_capability_gate(
+                        self._calendar_provider,
+                        frozen_request,
+                        snapshot,
+                    )
+                    self._report = _snapshot_report(
+                        frozen_request,
+                        snapshot,
+                        capability_manifest_version=self._capability_manifest_version,
+                        extra_issues=(*issues, *capability_issues),
+                        capability_evidence=capability_evidence,
+                    )
+                except CalendarPreflightResourceLimitExceededError:
+                    # Report construction performs the issue/JSON resource
+                    # checks after the immutable snapshot is available.  It
+                    # still belongs to the same non-pageable creation gate.
+                    self._snapshot = None
+                    self._axis = None
+                    self._resolved_sessions = ()
+                    self._warmup_sessions = ()
+                    self._warmup_resolution = None
+                    self._report = None
+                    self._preflight_done = True
+                    self._state = DataSessionState.BLOCKED
+                    raise
+                self._resolved_sessions = self._report.resolved_sessions
+                self._warmup_sessions = self._report.warmup_sessions
+                self._warmup_resolution = self._report.warmup_resolution
+                self._preflight_done = True
+                self._state = DataSessionState.BLOCKED if self._report.status is PreflightStatus.BLOCKED else DataSessionState.READY
+                if self._state is DataSessionState.READY and self._on_ready is not None:
+                    self._on_ready(self)
+                return self._report
+            # Snapshot failures are represented as a blocked report below;
+            # no legacy resolver is allowed to read around a strict error.
+            self._report = _snapshot_failure_report(
+                frozen_request,
+                capability_manifest_version=self._capability_manifest_version,
+                issues=issues,
+            )
+            self._resolved_sessions = ()
+            self._warmup_sessions = ()
+            self._preflight_done = True
+            self._state = DataSessionState.BLOCKED
+            return self._report
+
+        # 1-2. Resolve the formal window strictly through strict_compatible@1.
+        try:
+            axis = resolve_calendar_axis(
+                self._calendar_provider,
+                policy_key=POLICY_KEY_STRICT_COMPATIBLE,
+                policy_version=POLICY_VERSION_STRICT_COMPATIBLE,
+                start_date=frozen_request.requested_window.start_date,
+                end_date=frozen_request.requested_window.end_date,
+                calendar_ids=frozen_request.resolved_calendar_ids,
+                # The compatibility resolver predates canonical registry/PIT
+                # metadata.  Its behavior is intentionally preserved for such
+                # providers; strict providers never reach this branch.
+                query_boundary=None,
+            )
+        except CalendarPreflightResourceLimitExceededError:
+            # The compatibility resolver also enforces the calendar-count
+            # guard.  Keep its creation-gate semantics identical to the
+            # atomic snapshot path above instead of returning a report.
+            self._snapshot = None
+            self._axis = None
+            self._resolved_sessions = ()
+            self._warmup_sessions = ()
+            self._warmup_resolution = None
+            self._report = None
+            self._preflight_done = True
+            self._state = DataSessionState.BLOCKED
+            raise
         self._axis = axis
 
         warmup_resolution: WarmupResolution | None = None
@@ -308,6 +1083,19 @@ class AuthoritativeDataSession:
                 first_formal_session=axis.resolved_sessions[0].session_date,
                 requested_sessions=frozen_request.warmup_sessions,
                 resolver=self._warmup_resolver,
+                query_boundary=(
+                    frozen_request.query_boundary
+                    if use_strict_snapshot
+                    else None
+                ),
+                pit_context=(
+                    CalendarPITContext.from_query_boundary(
+                        frozen_request.query_boundary,
+                        "Asia/Shanghai",
+                    )
+                    if use_strict_snapshot and frozen_request.query_boundary is not None
+                    else None
+                ),
             )
             issues.extend(warmup_resolution.issues)
 
@@ -351,7 +1139,7 @@ class AuthoritativeDataSession:
             resolved_sessions=formal_sessions,
             warmup_sessions=warmup_sessions,
             max_lookback_sessions=frozen_request.max_lookback_sessions,
-            knowledge_as_of=frozen_request.knowledge_as_of,
+            knowledge_as_of=frozen_request.query_boundary.knowledge_as_of,
             non_strict_pit_capabilities=(),
             consistency_mode=frozen_request.consistency_mode,
             consistency_token_capability=bool(
@@ -395,6 +1183,11 @@ class AuthoritativeDataSession:
                 if warmup_resolution is not None
                 else ()
             ),
+            # Even the compatibility report carries the canonical request
+            # boundary so admission compares the exact request semantics.
+            # It remains hash-schema v1 because this provider has no strict
+            # calendar snapshot evidence.
+            query_boundary=frozen_request.query_boundary,
         )
         self._resolved_sessions = formal_sessions
         self._warmup_sessions = warmup_sessions

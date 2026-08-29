@@ -1,0 +1,129 @@
+import { useCallback, useEffect, useState } from "react";
+
+import {
+  BacktestPreflightError,
+  BacktestPreflightItem,
+  fetchBacktestPreflight,
+  PreflightSection
+} from "../api/backtestPreflight";
+import { useAuth } from "../auth/AuthContext";
+import "../backtestPreflight.css";
+
+function jsonText(value: unknown): string {
+  return JSON.stringify(value, null, 2);
+}
+
+function reportTitle(item: BacktestPreflightItem): string {
+  return item.status === "ready" ? "数据预检已通过" : "数据预检未通过";
+}
+
+/**
+ * Minimal run-detail surface for the canonical data-preflight resource.
+ * It deliberately renders machine evidence and the server-provided Chinese
+ * issue text; it does not infer a calendar, retry a blocked run, or expose a
+ * legacy endpoint.
+ */
+export function BacktestPreflightPage() {
+  const { logout } = useAuth();
+  const [runId, setRunId] = useState("");
+  const [activeRunId, setActiveRunId] = useState("");
+  const [section, setSection] = useState<PreflightSection | undefined>();
+  const [page, setPage] = useState<{ items: BacktestPreflightItem[]; next_cursor: string | null; has_more: boolean; truncated: boolean } | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async (nextRunId: string, nextSection?: PreflightSection, cursor?: string) => {
+    if (!nextRunId.trim()) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const result = await fetchBacktestPreflight(nextRunId.trim(), { section: nextSection, limit: nextSection ? 100 : 100, cursor });
+      setActiveRunId(nextRunId.trim());
+      setSection(nextSection);
+      setPage(result);
+    } catch (caught) {
+      if (caught instanceof BacktestPreflightError && caught.status === 401) {
+        logout();
+        return;
+      }
+      setError(caught instanceof Error ? caught.message : "预检详情加载失败。");
+    } finally {
+      setLoading(false);
+    }
+  }, [logout]);
+
+  useEffect(() => () => undefined, []);
+
+  return (
+    <main className="page-content" aria-labelledby="backtest-preflight-title">
+      <header className="page-header">
+        <div>
+          <p className="eyebrow">回测运行详情</p>
+          <h1 id="backtest-preflight-title">交易日历与会话预检</h1>
+          <p className="page-subtitle">仅展示已创建运行的冻结预检证据；阻断创建不会生成可查询运行。</p>
+        </div>
+      </header>
+
+      <section className="panel" aria-label="查询回测预检">
+        <form className="form-grid" onSubmit={(event) => { event.preventDefault(); void load(runId, section); }}>
+          <label>
+            运行 ID
+            <input value={runId} onChange={(event) => setRunId(event.target.value)} placeholder="输入 UUID" />
+          </label>
+          <label>
+            详情区段
+            <select value={section ?? ""} onChange={(event) => setSection((event.target.value || undefined) as PreflightSection | undefined)}>
+              <option value="">报告列表</option>
+              <option value="calendar">日历详情</option>
+              <option value="sessions">会话详情</option>
+            </select>
+          </label>
+          <button className="button button--primary" type="submit" disabled={loading || !runId.trim()}>
+            {loading ? "加载中…" : "查询预检"}
+          </button>
+        </form>
+      </section>
+
+      {error && <div className="alert alert--error" role="alert">{error}</div>}
+      {page && (
+        <section className="panel" aria-live="polite">
+          <div className="panel-header">
+            <div>
+              <p className="eyebrow">{activeRunId}</p>
+              <h2>{section ? `${section === "calendar" ? "日历" : "会话"}详情` : "预检报告"}</h2>
+            </div>
+            <span className={page.items.some((item) => item.status !== "ready") ? "status-badge status-badge--warning" : "status-badge status-badge--success"}>
+              {page.items.some((item) => item.status !== "ready") ? "存在阻断或降级" : "已通过"}
+            </span>
+          </div>
+          {page.items.length === 0 && <p className="empty-state">没有可查询的预检报告。</p>}
+          {page.items.map((item) => (
+            <article className="preflight-card" key={`${item.phase}-${item.report_hash}`}>
+              <div className="preflight-card__heading">
+                <h3>{reportTitle(item)}</h3>
+                <code>{item.phase} · hash schema {item.hash_schema_version}</code>
+              </div>
+              <dl className="preflight-meta">
+                <div><dt>report_hash</dt><dd><code>{item.report_hash}</code></dd></div>
+                <div><dt>PIT 状态</dt><dd>{item.pit_status ?? (item.pit_profile ?? "未提供")}</dd></div>
+                <div><dt>data_cutoff</dt><dd><code>{item.data_cutoff ?? "未提供"}</code></dd></div>
+                <div><dt>日历修订摘要</dt><dd><code>{item.calendar_revision_digest ?? "未提供"}</code></dd></div>
+                <div><dt>snapshot fingerprint</dt><dd><code>{item.snapshot_fingerprint ?? "未提供"}</code></dd></div>
+              </dl>
+              {item.calendar_summary && <details open={section === "calendar"}><summary>日历与覆盖证据</summary><pre>{jsonText(item.calendar_summary)}</pre></details>}
+              {item.session_summary && <details open={section === "sessions"}><summary>formal / warmup 会话证据</summary><pre>{jsonText(item.session_summary)}</pre></details>}
+              {item.coverage && <details><summary>数据覆盖</summary><pre>{jsonText(item.coverage)}</pre></details>}
+              {item.source_revisions && <details><summary>来源修订</summary><pre>{jsonText(item.source_revisions)}</pre></details>}
+            </article>
+          ))}
+          {page.has_more && page.next_cursor && (
+            <button className="button button--secondary" type="button" onClick={() => void load(activeRunId, section, page.next_cursor ?? undefined)} disabled={loading}>
+              下一页
+            </button>
+          )}
+          {page.truncated && <p className="muted">当前结果仍有分页内容，请继续加载。</p>}
+        </section>
+      )}
+    </main>
+  );
+}

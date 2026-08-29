@@ -9,7 +9,15 @@ from app.data_ingestion.models import (
     EtfDailyBar,
     TradingCalendarDay,
 )
-from app.instruments.models import Instrument, InstrumentCodeMappingRecord
+from app.instruments.models import (
+    Instrument,
+    InstrumentCodeMappingRecord,
+    InstrumentDisplayFactRecord,
+    DisplayResolutionHead,
+    InstrumentIdentityMergeAuditRecord,
+    InstrumentIdentityFactRecord,
+    MappingResolutionHead,
+)
 from app.instruments.rule_exceptions_models import (
     InstrumentRuleExceptionEntryRecord,
     InstrumentRuleExceptionSetRecord,
@@ -22,6 +30,16 @@ from app.instruments.rule_snapshots_models import (
 from app.scheduling.models import ScheduledTask, TaskRun
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.backtesting.models import BacktestAccountProfileRecord
+from app.backtesting.calendar_models import (
+    CalendarRegistryRecord,
+    CalendarSourcePriorityRecord,
+    CalendarDefinitionRecord,
+    CalendarSessionFactRecord,
+    CalendarExchangeBindingRecord,
+    CalendarCapabilityDeclarationRecord,
+    CalendarResolutionHeadRecord,
+    CalendarReconciliationRangeRecord,
+)
 from app.backtesting.result_records import (
     RESULT_TABLE_NAMES,
     BacktestAnalysisSummaryRecord,
@@ -60,6 +78,11 @@ __all__ = [
     "EtfEntity",
     "Instrument",
     "InstrumentCodeMappingRecord",
+    "InstrumentDisplayFactRecord",
+    "DisplayResolutionHead",
+    "InstrumentIdentityMergeAuditRecord",
+    "InstrumentIdentityFactRecord",
+    "MappingResolutionHead",
     "InstrumentRuleExceptionEntryRecord",
     "InstrumentRuleExceptionSetRecord",
     "InstrumentRuleFactRecord",
@@ -71,4 +94,12 @@ __all__ = [
     "StrategyRevision",
     "TaskRun",
     "TradingCalendarDay",
+    "CalendarRegistryRecord",
+    "CalendarSourcePriorityRecord",
+    "CalendarDefinitionRecord",
+    "CalendarSessionFactRecord",
+    "CalendarExchangeBindingRecord",
+    "CalendarCapabilityDeclarationRecord",
+    "CalendarResolutionHeadRecord",
+    "CalendarReconciliationRangeRecord",
 ]

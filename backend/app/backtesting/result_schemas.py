@@ -214,6 +214,7 @@ class AnalysisAdmissionFailureItem(BaseModel):
 
     status: str = "blocked"
     run_id: str | None = None
+    title: str = "数据预检未通过"
     reason_code: str
     message: str
     details: dict = Field(default_factory=dict)
@@ -224,10 +225,22 @@ class BacktestDataPreflightItem(_ResultItem):
     phase: str
     status: str
     report_hash: str
+    hash_schema_version: int = 1
+    section: str | None = None
     capabilities: dict | None = None
     calendar_summary: dict | None = None
     session_summary: dict | None = None
     pit_status: str | None = None
+    data_cutoff: str | None = None
+    cutoff_local_date: date | None = None
+    include_cutoff_day: bool | None = None
+    knowledge_as_of: str | None = None
+    pit_profile: str | None = None
+    profile_version: str | None = None
+    non_strict_pit: bool | None = None
+    non_strict_pit_capabilities: list[str] | None = None
+    calendar_revision_digest: str | None = None
+    snapshot_fingerprint: str | None = None
     coverage: dict | None = None
     source_revisions: dict | None = None
 
@@ -254,6 +267,9 @@ class ResultCursorPage(BaseModel, Generic[ItemT]):
     items: list[ItemT]
     next_cursor: str | None = None
     has_more: bool = False
+    # ``truncated`` is the task-11 wire spelling; ``has_more`` remains for
+    # existing result clients and is always the same boolean.
+    truncated: bool = False
 
 
 __all__ = [

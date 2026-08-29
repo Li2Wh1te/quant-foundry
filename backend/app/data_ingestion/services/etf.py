@@ -59,14 +59,31 @@ def sync_etf_basics(
     )
     checkpoint = _load_checkpoint()
     completed_at = refreshed_at or datetime.now(SHANGHAI_TIMEZONE)
+    checkpoint_before = (
+        checkpoint.cursor.get("refreshed_at") if checkpoint is not None else None
+    )
     logger.info(
         "etf_basic_sync_started",
         message=(
             "开始采集 ETF 基础信息：全部上市状态，适用日期不适用，"
-            f"请求间隔 {effective_interval_ms} 毫秒。"
+            "拉取 0 条，变更 0 条，未变更 0 条，失败 0 条，checkpoint 未推进。"
         ),
+        title="开始 ETF 基础信息采集",
+        data_type="etf_basic",
+        calendar_id=None,
         start_date=None,
         end_date=None,
+        fetched_count=0,
+        changed_count=0,
+        unchanged_count=0,
+        failed_count=0,
+        checkpoint_scope=ETF_BASIC_SCOPE_KEY,
+        checkpoint_before=checkpoint_before,
+        checkpoint_after=checkpoint_before,
+        checkpoint_advanced=False,
+        source=TUSHARE_SOURCE,
+        source_revision=None,
+        reconciliation_range=None,
         request_interval_ms=effective_interval_ms,
     )
     try:
@@ -82,9 +99,26 @@ def sync_etf_basics(
     except Exception:
         logger.exception(
             "etf_basic_sync_failed",
-            message="采集 ETF 基础信息失败：全部上市状态，适用日期不适用。",
+            message=(
+                "采集 ETF 基础信息失败：全部上市状态，适用日期不适用，拉取 0 条，"
+                "变更 0 条，未变更 0 条，失败 1 条，checkpoint 未推进。"
+            ),
+            title="ETF 基础信息采集失败",
+            data_type="etf_basic",
+            calendar_id=None,
             start_date=None,
             end_date=None,
+            fetched_count=0,
+            changed_count=0,
+            unchanged_count=0,
+            failed_count=1,
+            checkpoint_scope=ETF_BASIC_SCOPE_KEY,
+            checkpoint_before=checkpoint_before,
+            checkpoint_after=checkpoint_before,
+            checkpoint_advanced=False,
+            source=TUSHARE_SOURCE,
+            source_revision=None,
+            reconciliation_range=None,
         )
         raise
     logger.info(
@@ -92,11 +126,25 @@ def sync_etf_basics(
         message=(
             "完成采集 ETF 基础信息：全部上市状态，适用日期不适用，"
             f"拉取 {write_result.received} 条，入库变更 {write_result.changed} 条，"
-            f"未变更 {write_result.unchanged} 条，游标已推进至 "
-            f"{updated_checkpoint.cursor['refreshed_at']}。"
+            f"未变更 {write_result.unchanged} 条，checkpoint 已推进至 "
+            f"{updated_checkpoint.cursor['refreshed_at']}，失败 0 条。"
         ),
+        title="ETF 基础信息采集完成",
+        data_type="etf_basic",
+        calendar_id=None,
         start_date=None,
         end_date=None,
+        fetched_count=write_result.received,
+        changed_count=write_result.changed,
+        unchanged_count=write_result.unchanged,
+        failed_count=0,
+        checkpoint_scope=ETF_BASIC_SCOPE_KEY,
+        checkpoint_before=checkpoint_before,
+        checkpoint_after=updated_checkpoint.cursor["refreshed_at"],
+        checkpoint_advanced=True,
+        source=TUSHARE_SOURCE,
+        source_revision=None,
+        reconciliation_range=None,
         received=write_result.received,
         changed=write_result.changed,
         unchanged=write_result.unchanged,

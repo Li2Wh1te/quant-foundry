@@ -37,9 +37,17 @@ from app.backtesting.calendar_axis import (
     CalendarAxisDifferenceField,
     CalendarAxisStatus,
     SessionPoint,
+    MAX_WARMUP_SESSIONS,
+    MAX_WARMUP_SEARCH_SPAN,
+    normalize_calendar_id,
     resolve_calendar_axis,
+    CalendarPITContext,
 )
-from app.backtesting.data.errors import InvalidDataRequestError
+from app.backtesting.data.errors import (
+    CalendarDateSpanLimitExceededError,
+    InvalidDataRequestError,
+    LookbackSessionsLimitExceededError,
+)
 from app.backtesting.data.reports import (
     PreflightIssue,
     _sorted_issues,
@@ -361,7 +369,13 @@ class CoverageBoundedWarmupSessionResolver:
                 raise InvalidDataRequestError(
                     "coverage_floor keys must be non-blank calendar ids"
                 )
-            normalized[calendar_id] = _plain_date(floor, "coverage_floor value")
+            try:
+                canonical_id = normalize_calendar_id(calendar_id)
+            except Exception as exc:
+                raise InvalidDataRequestError(
+                    "coverage_floor keys must be canonical calendar ids"
+                ) from exc
+            normalized[canonical_id] = _plain_date(floor, "coverage_floor value")
         self._coverage_floor: Mapping[str, date] = dict(normalized)
 
     def history_window(
@@ -416,6 +430,8 @@ def resolve_warmup_sessions(
     first_formal_session: date,
     requested_sessions: int,
     resolver: WarmupSessionResolver | None = None,
+    query_boundary: object | None = None,
+    pit_context: CalendarPITContext | None = None,
 ) -> WarmupResolution:
     """Resolve warmup sessions strictly before ``first_formal_session``.
 
@@ -428,6 +444,15 @@ def resolve_warmup_sessions(
     requested = _strict_int(requested_sessions, "requested_sessions")
     if requested < 0:
         raise InvalidDataRequestError("requested_sessions must not be negative")
+    if requested > MAX_WARMUP_SESSIONS:
+        raise LookbackSessionsLimitExceededError(
+            "warmup sessions exceed 512",
+            details={
+                "requested": requested,
+                "maximum": MAX_WARMUP_SESSIONS,
+                "cause_code": "calendar_warmup_limit_exceeded",
+            },
+        )
     anchor = _plain_date(first_formal_session, "first_formal_session")
     if isinstance(calendar_ids, (str, bytes)) or not isinstance(
         calendar_ids, Iterable
@@ -441,7 +466,12 @@ def resolve_warmup_sessions(
             raise InvalidDataRequestError(
                 "calendar_ids entries must be non-blank strings"
             )
-        collected.append(calendar_id)
+        try:
+            collected.append(normalize_calendar_id(calendar_id))
+        except Exception as exc:
+            raise InvalidDataRequestError(
+                "calendar_ids entries must be canonical calendar ids"
+            ) from exc
     ids = tuple(sorted(set(collected)))
     if not ids:
         raise InvalidDataRequestError("calendar_ids must not be empty")
@@ -515,7 +545,22 @@ def resolve_warmup_sessions(
                 ),
             ),
         )
+    if (anchor - window.start_date).days > MAX_WARMUP_SEARCH_SPAN:
+        raise CalendarDateSpanLimitExceededError(
+            "warmup search span exceeds 10,000 natural days",
+            details={
+                "first_formal_session": anchor.isoformat(),
+                "history_start_date": window.start_date.isoformat(),
+                "maximum": MAX_WARMUP_SEARCH_SPAN,
+            },
+        )
 
+    if query_boundary is not None and pit_context is not None:
+        derived_context = CalendarPITContext.from_query_boundary(query_boundary)
+        if derived_context != pit_context:
+            raise InvalidDataRequestError(
+                "pit_context must be derived from query_boundary"
+            )
     axis = resolve_calendar_axis(
         provider,
         policy_key=POLICY_KEY_STRICT_COMPATIBLE,
@@ -523,6 +568,8 @@ def resolve_warmup_sessions(
         start_date=window.start_date,
         end_date=window.end_date,
         calendar_ids=ids,
+        query_boundary=query_boundary,
+        pit_context=pit_context,
     )
 
     def blocked(

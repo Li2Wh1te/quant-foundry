@@ -21,9 +21,11 @@ from datetime import date, datetime
 from enum import StrEnum
 from typing import Iterable
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.backtesting.data.errors import (
     DataCutoffExceededError,
+    DataCutoffRequiredError,
     DataPreflightBlockedError,
     DataPreflightConfirmationMismatchError,
     InvalidDataRequestError,
@@ -64,6 +66,7 @@ __all__ = [
     "QualityMode",
     "QualityStatus",
     "QueryBoundary",
+    "derive_cutoff_local_date",
     "TickQuery",
     "TradingRuleQuery",
     "TradingStatusQuery",
@@ -193,6 +196,29 @@ class DataCapability(StrEnum):
 # ---------------------------------------------------------------------------
 # Shared validation helpers
 # ---------------------------------------------------------------------------
+
+
+def derive_cutoff_local_date(data_cutoff: datetime, timezone_name: str) -> date:
+    """Derive a market-local cutoff date from a timezone-aware instant."""
+
+    if not isinstance(data_cutoff, datetime) or data_cutoff.tzinfo is None or data_cutoff.utcoffset() is None:
+        raise InvalidDataRequestError("data_cutoff must be timezone-aware")
+    try:
+        zone = ZoneInfo(timezone_name)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        raise InvalidDataRequestError("timezone must be a resolvable IANA timezone") from exc
+    return data_cutoff.astimezone(zone).date()
+
+
+def __getattr__(name: str):
+    """Lazily expose the calendar PIT context without an import cycle."""
+
+    if name == "CalendarPITContext":
+        from app.backtesting.calendar_axis import CalendarPITContext
+
+        globals()[name] = CalendarPITContext
+        return CalendarPITContext
+    raise AttributeError(name)
 
 
 def _plain_date(value: object, field_name: str) -> date:
@@ -403,13 +429,29 @@ class QueryBoundary:
                 )
             object.__setattr__(self, "knowledge_as_of", known)
 
+    def derive_cutoff_local_date(self, timezone_name: str) -> date:
+        """Derive the frozen cutoff date in one confirmed IANA timezone."""
+
+        try:
+            zone = ZoneInfo(timezone_name)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise InvalidDataRequestError(
+                "timezone must be a resolvable IANA timezone"
+            ) from exc
+        return self.data_cutoff.astimezone(zone).date()
+
     @property
     def cutoff_date(self) -> date:
-        """The latest calendar date a query may touch."""
+        """Legacy UTC-surface date retained only for diagnostics."""
 
         return self.data_cutoff.date()
 
-    def require_not_past_cutoff(self, day: date, field_name: str) -> None:
+    def require_not_past_cutoff(
+        self,
+        day: date,
+        timezone_or_field: str,
+        field_name: str | None = None,
+    ) -> None:
         """Reject a date beyond the boundary instead of trimming it.
 
         A date strictly after ``data_cutoff``'s day always fails.  The
@@ -417,30 +459,31 @@ class QueryBoundary:
         whole day complete.
         """
 
-        day = _plain_date(day, field_name)
-        if day > self.cutoff_date:
+        if field_name is None:
+            timezone_name = None
+            resolved_field_name = timezone_or_field
+            cutoff_date = self.cutoff_date
+        else:
+            timezone_name = timezone_or_field
+            resolved_field_name = field_name
+            cutoff_date = self.derive_cutoff_local_date(timezone_name)
+        day = _plain_date(day, resolved_field_name)
+        details = {
+            "requested": day.isoformat(),
+            "data_cutoff": self.data_cutoff.isoformat(),
+            "include_cutoff_day": self.include_cutoff_day,
+            "timezone": timezone_name,
+            "cutoff_local_date": cutoff_date.isoformat(),
+        }
+        if day > cutoff_date:
             raise DataCutoffExceededError(
-                f"{field_name} {day.isoformat()} is later than data_cutoff "
-                f"{self.data_cutoff.isoformat()}",
-                details={
-                    "requested": day.isoformat(),
-                    "data_cutoff": self.data_cutoff.isoformat(),
-                },
+                f"{resolved_field_name} {day.isoformat()} is later than data_cutoff local date {cutoff_date.isoformat()}",
+                details=details,
             )
-        if (
-            day == self.cutoff_date
-            and not self.include_cutoff_day
-        ):
+        if day == cutoff_date and not self.include_cutoff_day:
             raise DataCutoffExceededError(
-                f"{field_name} {day.isoformat()} touches the incomplete "
-                f"cutoff day (data_cutoff {self.data_cutoff.isoformat()}); "
-                "the caller must confirm whole-day completion via "
-                "include_cutoff_day",
-                details={
-                    "requested": day.isoformat(),
-                    "data_cutoff": self.data_cutoff.isoformat(),
-                    "include_cutoff_day": False,
-                },
+                f"{resolved_field_name} {day.isoformat()} touches the incomplete cutoff day",
+                details=details,
             )
 
     def require_instant_not_past_cutoff(
@@ -539,6 +582,10 @@ class DataPreflightRequest:
     required_capabilities: tuple[DataCapability, ...]
     strategy_price_bases: tuple[PriceBasis, ...]
     consistency_mode: ConsistencyMode
+    # The calendar PIT boundary is the sole request-level visibility input.
+    # It deliberately appears before all optional fields so dataclass
+    # construction requires callers to make the cutoff decision explicitly.
+    query_boundary: QueryBoundary
     static_instrument_ids: tuple[UUID, ...] = ()
     mandatory_instrument_ids: tuple[UUID, ...] = ()
     warmup_sessions: int = 0
@@ -546,7 +593,6 @@ class DataPreflightRequest:
     allowed_settlement_rule_class: str | None = None
     adjustment_series_policy: ContractRef | None = None
     consistency_token_contract: ContractRef | None = None
-    knowledge_as_of: datetime | None = None
     data_contract_version: int = DATA_CONTRACT_VERSION
     max_lookback_sessions: int = MAX_LOOKBACK_SESSIONS
     calendar_axis_policy: ContractRef = CALENDAR_AXIS_POLICY
@@ -554,6 +600,15 @@ class DataPreflightRequest:
     quality_mode: QualityMode = QualityMode.STRICT
     data_chunk_policy: ContractRef = CHUNK_POLICY
     data_chunk_size_sessions: int = 20
+    def require_query_boundary(self) -> QueryBoundary:
+        """Return the sole calendar PIT boundary.
+
+        ``query_boundary`` is required by the generated constructor and is
+        validated in ``__post_init__``; keeping this helper makes call sites
+        explicit and provides a stable guard for facade objects.
+        """
+
+        return self.query_boundary
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -609,6 +664,16 @@ class DataPreflightRequest:
         warmup = _strict_int(self.warmup_sessions, "warmup_sessions")
         if warmup < 0:
             raise InvalidDataRequestError("warmup_sessions must not be negative")
+        if warmup > MAX_LOOKBACK_SESSIONS:
+            raise LookbackSessionsLimitExceededError(
+                f"warmup_sessions {warmup} exceeds the maximum of "
+                f"{MAX_LOOKBACK_SESSIONS}",
+                details={
+                    "requested": warmup,
+                    "maximum": MAX_LOOKBACK_SESSIONS,
+                    "cause_code": "calendar_warmup_limit_exceeded",
+                },
+            )
         object.__setattr__(self, "warmup_sessions", warmup)
         if self.rule_exception_set is not None and not isinstance(
             self.rule_exception_set, ContractRef
@@ -644,12 +709,8 @@ class DataPreflightRequest:
                 "chunked_logical_token consistency requires a "
                 "consistency_token_contract"
             )
-        if self.knowledge_as_of is not None:
-            object.__setattr__(
-                self,
-                "knowledge_as_of",
-                _aware_datetime(self.knowledge_as_of, "knowledge_as_of"),
-            )
+        if not isinstance(self.query_boundary, QueryBoundary):
+            raise InvalidDataRequestError("query_boundary must be a QueryBoundary")
         self._validate_version_pinned_fields()
         self._validate_scope_consistency()
 
@@ -948,10 +1009,15 @@ class DataRequest(DataPreflightRequest):
             request.requested_window.start_date
         ) or rule_preflight_report.end_date != request.requested_window.end_date:
             rule_mismatches.append("requested_window")
-        if (
-            request.knowledge_as_of is not None
-            and rule_preflight_report.data_cutoff != request.knowledge_as_of
-        ):
+        # The request's immutable QueryBoundary is the only PIT input.  The
+        # rule report still exposes ``data_cutoff`` as its historical field,
+        # so compare it with the boundary's cognition cutoff when present (or
+        # the physical cutoff for the calendar-cutoff profile).
+        expected_rule_cutoff = (
+            request.query_boundary.knowledge_as_of
+            or request.query_boundary.data_cutoff
+        )
+        if rule_preflight_report.data_cutoff != expected_rule_cutoff:
             rule_mismatches.append("knowledge_as_of")
         required_instrument_ids = (
             set(request.static_instrument_ids)

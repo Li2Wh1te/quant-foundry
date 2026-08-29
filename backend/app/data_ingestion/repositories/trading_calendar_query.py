@@ -83,7 +83,12 @@ class TradingCalendarQueryRepository:
             )
         ).all()
         for checkpoint in persisted_checkpoints:
-            exchange = checkpoint.scope_key.removeprefix("exchange=")
+            scope = checkpoint.scope_key
+            exchange = (
+                scope.removeprefix("calendar_id=")
+                if scope.startswith("calendar_id=")
+                else scope.removeprefix("exchange=")
+            )
             synced_through_date = checkpoint.cursor.get("synced_through_date")
             if exchange and isinstance(synced_through_date, str):
                 try:

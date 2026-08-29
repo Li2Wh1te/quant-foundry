@@ -40,6 +40,7 @@ from app.backtesting.data import (
     NO_FORMAL_SESSIONS,
     PriceBasis,
     PreflightStatus,
+    QueryBoundary,
     UnsupportedCapabilityError,
     UniverseQueryPolicy,
     WARMUP_CALENDAR_INCOMPATIBLE,
@@ -77,6 +78,10 @@ J5 = date(2026, 1, 5)
 J6 = date(2026, 1, 6)
 J7 = date(2026, 1, 7)
 
+QUERY_BOUNDARY = QueryBoundary(
+    data_cutoff=datetime(2026, 1, 10, 15, 0, tzinfo=timezone.utc)
+)
+
 
 def base_days(open_days: set[date]) -> dict[date, bool]:
     """Every shared day with an explicit open/closed fact."""
@@ -113,10 +118,16 @@ def make_fact(
     )
 
 
-class MutableFakeCalendarProvider:
-    """In-memory calendar provider whose backing store can be mutated."""
+class MutableFakeCalendarProvider(InMemoryCalendarAxisDataProvider):
+    """Legacy-resolver fixture backed by the canonical in-memory provider."""
 
     def __init__(self, schedule: dict[str, dict[date, bool]]) -> None:
+        # Keep the fixture explicitly inside the supported in-memory escape
+        # hatch.  Formal sessions reject every external provider that lacks
+        # the atomic snapshot operation; this test double only exercises the
+        # compatibility resolver and intentionally keeps mutable dictionaries
+        # for post-preflight immutability checks.
+        super().__init__()
         self._definitions = {
             calendar_id: make_definition(calendar_id) for calendar_id in schedule
         }
@@ -131,11 +142,17 @@ class MutableFakeCalendarProvider:
         definition = self._definitions.get(calendar_id)
         return () if definition is None else (definition,)
 
-    def fact(self, calendar_id: str, day: date) -> CalendarSessionFact | None:
+    def fact_candidates(
+        self, calendar_id: str, day: date
+    ) -> tuple[CalendarSessionFact, ...]:
         self.fact_calls += 1
         if (calendar_id, day) not in self._facts:
-            return None
-        return make_fact(calendar_id, day, self._facts[(calendar_id, day)])
+            return ()
+        return (make_fact(calendar_id, day, self._facts[(calendar_id, day)]),)
+
+    def fact(self, calendar_id: str, day: date) -> CalendarSessionFact | None:
+        candidates = self.fact_candidates(calendar_id, day)
+        return candidates[-1] if candidates else None
 
 
 def build_provider(
@@ -172,6 +189,7 @@ def make_request(
         required_capabilities=(DataCapability.BARS,),
         strategy_price_bases=(PriceBasis.RAW,),
         consistency_mode=ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+        query_boundary=QUERY_BOUNDARY,
         static_instrument_ids=(instrument_id or uuid4(),),
         warmup_sessions=warmup,
         resolved_calendar_ids=calendar_ids,
@@ -224,6 +242,7 @@ class TestRequestValidation(unittest.TestCase):
             required_capabilities=(DataCapability.BARS,),
             strategy_price_bases=(PriceBasis.RAW,),
             consistency_mode=ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,
+            query_boundary=QUERY_BOUNDARY,
             static_instrument_ids=(__import__("uuid").uuid4(),),
             warmup_sessions=warmup,
         )

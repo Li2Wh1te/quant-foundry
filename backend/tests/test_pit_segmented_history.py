@@ -6,6 +6,7 @@ missing evidence, per-segment bar coverage, and calendar-based lookback
 windows across weekends.
 """
 
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 import unittest
@@ -20,15 +21,20 @@ from app.backtesting.data.errors import (
     IdentityMappingConflictError,
     IdentityMappingEvidenceMissingError,
     IdentityMappingIncompleteError,
+    ProviderContractViolationError,
 )
 from app.backtesting.data.facts import Bar, FactEvidence
 from app.backtesting.data.pit_history import (
     PITMappingCoverage,
+    SegmentBarEvidence,
     read_segmented_history,
     resolve_pit_mappings,
 )
 from app.backtesting.data.requests import PriceBasis, QualityStatus
-from app.instruments.domain import InstrumentCodeMapping
+from app.instruments.domain import (
+    InstrumentCodeMapping,
+    MappingConflictError,
+)
 
 INSTRUMENT_ID = uuid4()
 SOURCE = "tushare"
@@ -104,6 +110,36 @@ class FakeReader:
 class ResolutionTestCase(unittest.TestCase):
     """Session-to-source-code binding rules."""
 
+    def test_segment_evidence_rejects_blank_mapping_evidence(self) -> None:
+        """A segment cannot claim complete coverage without provenance."""
+
+        for evidence in ("", "   "):
+            with self.subTest(evidence=repr(evidence)):
+                with self.assertRaises(IdentityMappingEvidenceMissingError) as ctx:
+                    SegmentBarEvidence(
+                        source=SOURCE,
+                        source_code="510300.SH",
+                        first_session=date(2026, 8, 20),
+                        last_session=date(2026, 8, 20),
+                        requested_count=1,
+                        returned_dates=(date(2026, 8, 20),),
+                        mapping_evidence=evidence,
+                    )
+                self.assertEqual(ctx.exception.details["source"], SOURCE)
+                self.assertEqual(ctx.exception.details["source_code"], "510300.SH")
+                self.assertEqual(
+                    ctx.exception.details["expected"], "non-blank mapping evidence"
+                )
+                self.assertEqual(ctx.exception.details["actual"], evidence)
+
+    def test_mapping_fact_alias_is_exported_from_data_package(self) -> None:
+        """The task-10 mapping-fact name remains available at the package root."""
+
+        import app.backtesting.data as data
+
+        self.assertIn("InstrumentCodeMappingFact", data.__all__)
+        self.assertIs(data.InstrumentCodeMappingFact, InstrumentCodeMapping)
+
     def test_single_code_full_window_binds_every_session(self) -> None:
         sessions = [date(2026, 8, 18), date(2026, 8, 19)]
         mapping = make_mapping("OLD.CODE", date(2026, 1, 1))
@@ -145,6 +181,19 @@ class ResolutionTestCase(unittest.TestCase):
             resolution.segments[1].requested_sessions,
             (date(2026, 8, 20), date(2026, 8, 21)),
         )
+
+    def test_equal_fact_instances_share_one_segment(self) -> None:
+        first = make_mapping("OLD.CODE", date(2026, 8, 17))
+        # Simulate two repository materializations of the same immutable fact.
+        second = replace(first)
+        resolution = resolve_pit_mappings(
+            INSTRUMENT_ID,
+            source=SOURCE,
+            sessions=[date(2026, 8, 18), date(2026, 8, 19)],
+            mappings=[first, second],
+            data_cutoff=CUTOFF,
+        )
+        self.assertEqual(len(resolution.segments), 1)
 
     def test_mapping_gap_blocks_instead_of_shortening_window(self) -> None:
         # No mapping covers 2026-08-20 at all.
@@ -257,6 +306,123 @@ class ResolutionTestCase(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "identity_mapping_evidence_missing")
 
 
+class MappingProviderAdapterTestCase(unittest.TestCase):
+    """Mapping-provider failures retain complete PIT diagnostics."""
+
+    def _read_with_provider(self, provider):
+        """Invoke the sessions-only compatibility shape used by adapters."""
+
+        return read_segmented_history(
+            INSTRUMENT_ID,
+            SOURCE,
+            [date(2026, 8, 20)],
+            CUTOFF,
+            provider,
+            FakeReader(),
+        )
+
+    def test_empty_provider_result_has_public_pit_details(self) -> None:
+        class EmptyProvider:
+            def resolve_code_mappings(self, *args, **kwargs):
+                return ()
+
+        with self.assertRaises(IdentityMappingIncompleteError) as ctx:
+            self._read_with_provider(EmptyProvider())
+
+        details = ctx.exception.details
+        self.assertEqual(details["instrument_id"], str(INSTRUMENT_ID))
+        self.assertEqual(details["source"], SOURCE)
+        self.assertIsNone(details["source_code"])
+        self.assertEqual(details["session_date"], "2026-08-20")
+        self.assertEqual(details["expected"], "one visible mapping covering session")
+        self.assertEqual(details["actual"], "no covering mapping")
+        self.assertEqual(details["data_cutoff"], CUTOFF.isoformat())
+        self.assertIsNone(details["fact_version"])
+
+    def test_conflict_provider_error_preserves_source_details(self) -> None:
+        session = date(2026, 8, 20)
+
+        class ConflictProvider:
+            def resolve_code_mappings(self, *args, **kwargs):
+                raise MappingConflictError(
+                    "provider found overlapping mapping facts",
+                    details={
+                        "source_code": "OLD.CODE",
+                        "session_date": session,
+                        "expected": "one covering mapping",
+                        "actual": 2,
+                        "fact_version": 7,
+                    },
+                )
+
+        with self.assertRaises(IdentityMappingConflictError) as ctx:
+            self._read_with_provider(ConflictProvider())
+
+        details = ctx.exception.details
+        self.assertEqual(details["instrument_id"], str(INSTRUMENT_ID))
+        self.assertEqual(details["source"], SOURCE)
+        self.assertEqual(details["source_code"], "OLD.CODE")
+        self.assertEqual(details["session_date"], "2026-08-20")
+        self.assertEqual(details["expected"], "one covering mapping")
+        self.assertEqual(details["actual"], 2)
+        self.assertEqual(details["data_cutoff"], CUTOFF.isoformat())
+        self.assertEqual(details["fact_version"], 7)
+        self.assertIn("provider found overlapping", details["reason"])
+
+    def test_sessions_only_reader_requires_source_code_envelope(self) -> None:
+        session = date(2026, 8, 20)
+        mapping = make_mapping("ONE.CODE", date(2026, 1, 1))
+
+        class Provider:
+            def resolve_code_mappings(self, *args, **kwargs):
+                return (mapping,)
+
+        class BareReader:
+            def read_bars(self, source_code, start_date, end_date):
+                return [make_bar(session)]
+
+        with self.assertRaises(ProviderContractViolationError) as ctx:
+            read_segmented_history(
+                INSTRUMENT_ID,
+                SOURCE,
+                [session],
+                CUTOFF,
+                Provider(),
+                BareReader(),
+            )
+        self.assertEqual(ctx.exception.details["expected"], "SegmentBarEnvelope")
+
+    def test_sessions_only_reader_accepts_source_code_envelope(self) -> None:
+        from app.backtesting.data.pit_history import SegmentBarEnvelope
+
+        session = date(2026, 8, 20)
+        mapping = make_mapping("ONE.CODE", date(2026, 1, 1))
+
+        class Provider:
+            def resolve_code_mappings(self, *args, **kwargs):
+                return (mapping,)
+
+        class EnvelopeReader:
+            def read_bars(self, source_code, start_date, end_date):
+                return SegmentBarEnvelope(
+                    INSTRUMENT_ID,
+                    SOURCE,
+                    source_code,
+                    bars=(make_bar(session),),
+                    requested_sessions=(session,),
+                )
+
+        history = read_segmented_history(
+            INSTRUMENT_ID,
+            SOURCE,
+            [session],
+            CUTOFF,
+            Provider(),
+            EnvelopeReader(),
+        )
+        self.assertEqual(tuple(bar.trade_date for bar in history.bars), (session,))
+
+
 class SegmentedReadTestCase(unittest.TestCase):
     """Per-segment bar coverage and stitching rules."""
 
@@ -314,6 +480,27 @@ class SegmentedReadTestCase(unittest.TestCase):
 
         with self.assertRaises(HistoryBarsDuplicateError) as ctx:
             read_segmented_history(self._resolution(), DuplicatedReader(self.bars))
+        self.assertEqual(ctx.exception.code, "history_bars_duplicate")
+
+    def test_duplicate_date_across_segments_keeps_duplicate_error_code(self) -> None:
+        class CrossSegmentDuplicateReader(FakeReader):
+            def read_bars(self, source_code, start_date, end_date):
+                rows = super().read_bars(source_code, start_date, end_date)
+                if source_code == "NEW.CODE":
+                    # The second segment deliberately repeats a date already
+                    # returned by OLD.CODE.  This must remain a duplicate
+                    # error even though the date is outside NEW.CODE's own
+                    # expected session set.
+                    return [
+                        self._bars[("OLD.CODE", date(2026, 8, 18))],
+                        *rows,
+                    ]
+                return rows
+
+        with self.assertRaises(HistoryBarsDuplicateError) as ctx:
+            read_segmented_history(
+                self._resolution(), CrossSegmentDuplicateReader(self.bars)
+            )
         self.assertEqual(ctx.exception.code, "history_bars_duplicate")
 
     def test_out_of_range_bar_blocks(self) -> None:

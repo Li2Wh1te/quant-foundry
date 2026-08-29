@@ -32,3 +32,6 @@ class EtfAdjustmentSyncResult:
     changed: int
     unchanged: int
     synced_through_date: date | None
+    start_date: date | None = None
+    end_date: date | None = None
+    calendar_ids: tuple[str, ...] = ()
