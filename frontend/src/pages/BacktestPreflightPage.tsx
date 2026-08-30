@@ -15,7 +15,7 @@ function jsonText(value: unknown): string {
 }
 
 function reportTitle(item: BacktestPreflightItem): string {
-  return item.status === "ready" ? "数据预检已通过" : "数据预检未通过";
+  return item.title ?? (item.status === "ready" ? "数据预检已通过" : "数据预检未通过");
 }
 
 function revisionSummary(item: BacktestPreflightItem): Record<string, any> | null {
@@ -124,8 +124,11 @@ export function BacktestPreflightPage() {
                 <h3>{reportTitle(item)}</h3>
                 <code>{item.phase} · hash schema {item.hash_schema_version}</code>
               </div>
+              <p className="page-subtitle">{item.message ?? "预检结果。"}</p>
               <dl className="preflight-meta">
+                <div><dt>运行类型</dt><dd>{item.run_kind === "internal_link_acceptance" ? "内部链路验收" : "正式回测"} · {item.preflight_profile ?? "formal@1"}</dd></div>
                 <div><dt>report_hash</dt><dd><code>{item.report_hash}</code></dd></div>
+                {(item.admission_report_hash || item.session_report_hash) && <div><dt>页面 / 会话 hash</dt><dd><code>{item.admission_report_hash ?? "未提供"}</code> / <code>{item.session_report_hash ?? "未提供"}</code>{item.hash_match === false ? "（不一致，已阻断）" : item.hash_match === true ? "（匹配）" : ""}</dd></div>}
                 <div><dt>PIT 状态</dt><dd>{item.pit_status ?? (item.pit_profile ?? "未提供")}</dd></div>
                 <div><dt>data_cutoff</dt><dd><code>{item.data_cutoff ?? "未提供"}</code></dd></div>
                 <div><dt>日历修订摘要</dt><dd><code>{item.calendar_revision_digest ?? "未提供"}</code></dd></div>

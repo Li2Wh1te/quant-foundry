@@ -33,6 +33,19 @@ __all__ = [
     "DataCutoffRequiredError",
     "DataPreflightBlockedError",
     "DataPreflightConfirmationMismatchError",
+    "FormalPreflightProfileMismatchError",
+    "FormalCapabilityGateBlockedError",
+    "FormalDataCorrectnessGateBlockedError",
+    "FormalAccountingGateBlockedError",
+    "FormalInitialPositionPreflightBlockedError",
+    "FormalDegradedConfirmationRequiredError",
+    "FormalDegradedConfirmationMismatchError",
+    "FormalRunCreationBlockedError",
+    "FormalFixtureNotAllowedError",
+    "FormalUnavailableCapabilityError",
+    "FormalPitEvidenceMissingError",
+    "FormalSourceRevisionConflictError",
+    "FormalConsistencyContractUnavailableError",
     "TradingStatusCapabilityRequirementMismatchError",
     "DataSessionClosedError",
     "HistoryBarInstrumentMismatchError",
@@ -188,6 +201,61 @@ class DataPreflightConfirmationMismatchError(DataContractError):
     """A degraded preflight was accepted with a hash other than the report's."""
 
     code = "data_preflight_confirmation_mismatch"
+
+
+# Formal-run admission codes are kept distinct from the legacy generic
+# preflight errors so API callers can classify production gate failures
+# without parsing display messages.
+class FormalPreflightProfileMismatchError(DataContractError):
+    code = "formal_preflight_profile_mismatch"
+
+
+class FormalCapabilityGateBlockedError(DataContractError):
+    code = "formal_capability_gate_blocked"
+
+
+class FormalDataCorrectnessGateBlockedError(DataContractError):
+    code = "formal_data_correctness_gate_blocked"
+
+
+class FormalAccountingGateBlockedError(DataContractError):
+    code = "formal_accounting_gate_blocked"
+
+
+class FormalInitialPositionPreflightBlockedError(DataContractError):
+    code = "formal_initial_position_preflight_blocked"
+
+
+class FormalDegradedConfirmationRequiredError(DataContractError):
+    code = "formal_degraded_confirmation_required"
+
+
+class FormalDegradedConfirmationMismatchError(DataContractError):
+    code = "formal_degraded_confirmation_mismatch"
+
+
+class FormalRunCreationBlockedError(DataContractError):
+    code = "formal_run_creation_blocked"
+
+
+class FormalFixtureNotAllowedError(DataContractError):
+    code = "formal_fixture_not_allowed"
+
+
+class FormalUnavailableCapabilityError(DataContractError):
+    code = "formal_unavailable_capability"
+
+
+class FormalPitEvidenceMissingError(DataContractError):
+    code = "formal_pit_evidence_missing"
+
+
+class FormalSourceRevisionConflictError(DataContractError):
+    code = "formal_source_revision_conflict"
+
+
+class FormalConsistencyContractUnavailableError(DataContractError):
+    code = "formal_consistency_contract_unavailable"
 
 
 class DataCutoffExceededError(DataContractError):
@@ -582,6 +650,19 @@ ERROR_CODES: frozenset[str] = frozenset(
         UnsupportedCapabilityError,
         DataPreflightBlockedError,
         DataPreflightConfirmationMismatchError,
+        FormalPreflightProfileMismatchError,
+        FormalCapabilityGateBlockedError,
+        FormalDataCorrectnessGateBlockedError,
+        FormalAccountingGateBlockedError,
+        FormalInitialPositionPreflightBlockedError,
+        FormalDegradedConfirmationRequiredError,
+        FormalDegradedConfirmationMismatchError,
+        FormalRunCreationBlockedError,
+        FormalFixtureNotAllowedError,
+        FormalUnavailableCapabilityError,
+        FormalPitEvidenceMissingError,
+        FormalSourceRevisionConflictError,
+        FormalConsistencyContractUnavailableError,
         DataCutoffExceededError,
         DataCutoffRequiredError,
         LookbackSessionsLimitExceededError,

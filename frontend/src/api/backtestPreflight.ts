@@ -17,6 +17,10 @@ export interface PreflightIssue {
 
 export interface BacktestPreflightItem {
   run_id: string;
+  run_kind?: "backtest_run" | "internal_link_acceptance" | string;
+  preflight_profile?: string;
+  preflight_profile_key?: string;
+  preflight_profile_version?: number;
   phase: string;
   status: string;
   report_hash: string;
@@ -39,6 +43,13 @@ export interface BacktestPreflightItem {
   coverage?: Record<string, unknown> | null;
   source_revisions?: Record<string, unknown> | null;
   data_revision_summary?: Record<string, unknown> | null;
+  admission_report_hash?: string | null;
+  session_report_hash?: string | null;
+  hash_match?: boolean | null;
+  report_diff?: Array<Record<string, unknown>> | null;
+  failure_phase?: string | null;
+  title?: string;
+  message?: string;
 }
 
 /**

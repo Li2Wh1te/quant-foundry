@@ -1130,6 +1130,52 @@ def _source_revision_audit_issues(
     return (_issue("source_revision_audit_missing", "来源修订审计证据缺失，且未提供合格 source_revision_audit@1 fixture，已阻断回测。", field="source_revisions", details={"fixture_failures": fixture_failures}),)
 
 
+def _formal_capability_issues(
+    report: DataPreflightReport,
+    request: DataPreflightRequest,
+) -> tuple[PreflightIssue, ...]:
+    """Enforce production-only gates for ``formal@1``.
+
+    The orchestration layer consumes declarations produced by the provider;
+    it never creates token or fact records itself.  Transitional repeatable
+    read is intentionally rejected for formal runs because it cannot provide
+    the block-level consistency evidence required by the production profile.
+    """
+
+    issues: list[PreflightIssue] = []
+    if request.consistency_mode is not ConsistencyMode.CHUNKED_LOGICAL_TOKEN:
+        issues.append(
+            _issue(
+                "formal_consistency_contract_unavailable",
+                "formal@1 必须使用一致性 token 模式，生产一致性能力不可用，已阻断回测。",
+                field="consistency_mode",
+            )
+        )
+    elif not report.consistency_token_capability or report.consistency_token_contract is None:
+        issues.append(
+            _issue(
+                "formal_consistency_contract_unavailable",
+                "formal@1 的一致性 token 契约或覆盖能力缺失，已阻断回测。",
+                field="consistency_token_capability",
+            )
+        )
+    # Production source-revision and capability-21 evidence is represented by
+    # the provider's structured summary.  Missing summaries remain blocked;
+    # no empty/default payload is treated as proof.
+    summary = report.session_summary if isinstance(report.session_summary, Mapping) else None
+    if summary is not None:
+        production = summary.get("production_capabilities")
+        if production is not None and (not isinstance(production, Mapping) or production.get("status") != "complete"):
+            issues.append(
+                _issue(
+                    "formal_unavailable_capability",
+                    "正式生产能力清单未完成，已阻断回测。",
+                    field="capability_manifest",
+                )
+            )
+    return tuple(issues)
+
+
 def _fixture_session_scope_issues(
     report: DataPreflightReport,
     fixtures: Sequence[InternalFixture],
@@ -2016,15 +2062,6 @@ class DataPreflightService:
         else:
             dynamic_scope, scope_issues, dynamic_resolution = self._resolve_scope(ctx, provider)
             pre_read_issues.extend(scope_issues)
-        if profile.reference == FORMAL_PROFILE and not pre_read_issues:
-            pre_read_issues.append(
-                _issue(
-                    "internal_preflight_profile_mismatch",
-                    "formal@1 生产能力尚未完成，Phase 2a 仅允许内部链路验收 profile。",
-                    field="preflight_profile",
-                    details={"preflight_profile": _profile_text(profile), "run_kind": profile.run_kind},
-                )
-            )
         if pre_read_issues:
             report = _minimal_blocked_report(request, tuple(pre_read_issues))
             report = _attach_scope_evidence(
@@ -2088,6 +2125,8 @@ class DataPreflightService:
             resolution=dynamic_resolution,
         )
         report_gate_issues = _post_report_gate_issues(report, request, fixtures)
+        if profile.reference == FORMAL_PROFILE:
+            report_gate_issues += _formal_capability_issues(report, request)
         report_gate_issues += _source_revision_audit_issues(report, request, profile, fixtures)
         if report_gate_issues:
             report = _with_report_issues(report, report_gate_issues)
@@ -2232,8 +2271,32 @@ class DataPreflightService:
         """Apply admission and, when supplied, exact hash confirmation."""
 
         decision = self.admission(context, **overrides)
-        if not decision.allowed:
+        if decision.outcome.status is PreflightStatus.BLOCKED:
             return decision
+        if decision.outcome.status is PreflightStatus.DEGRADED:
+            required_code = (
+                "formal_degraded_confirmation_required"
+                if decision.run_kind == "backtest_run"
+                else "data_preflight_confirmation_mismatch"
+            )
+            mismatch_code = (
+                "formal_degraded_confirmation_mismatch"
+                if decision.run_kind == "backtest_run"
+                else "data_preflight_confirmation_mismatch"
+            )
+            if confirmed_report_hash is None:
+                return AdmissionDecision(
+                    allowed=False,
+                    outcome=decision.outcome,
+                    reason_code=required_code,
+                )
+            if confirmed_report_hash != decision.report_hash:
+                return AdmissionDecision(
+                    allowed=False,
+                    outcome=decision.outcome,
+                    reason_code=mismatch_code,
+                )
+            return AdmissionDecision(allowed=True, outcome=decision.outcome)
         if confirmed_report_hash is not None and confirmed_report_hash != decision.report_hash:
             return AdmissionDecision(
                 allowed=False,
@@ -2291,30 +2354,25 @@ class DataPreflightService:
                     }
                 ),
             )
-            report = _with_report_issues(
-                outcome.report,
-                (
-                    _issue(
-                        "data_preflight_report_hash_mismatch",
-                        "会话权威预检与页面准入报告不一致，已阻断回测。",
-                        field="report_hash",
-                        details=dict(report_diff[0]),
-                    ),
-                ),
-            )
-            outcome = PreflightOutcome(
-                report=report,
-                profile=outcome.profile,
-                fixed_instrument_ids=outcome.fixed_instrument_ids,
-                dynamic_scope=outcome.dynamic_scope,
-                fixtures=outcome.fixtures,
-                initial_position_report=outcome.initial_position_report,
-                admission_report_hash=admission_hash,
-                session_report_hash=session_hash_before_block,
-                hash_match=False,
-                report_diff=report_diff,
-                failure_phase="data_preflight",
-            )
+            # A hash change is informational when the authoritative session
+            # is ready (the session report is the final source of truth).
+            # It is a hard failure only when the session remains degraded and
+            # therefore requires the page's exact degraded confirmation.
+            if outcome.status is PreflightStatus.DEGRADED:
+                report = _with_report_issues(
+                    outcome.report,
+                    (_issue("data_preflight_report_hash_mismatch", "会话权威预检与页面准入报告不一致，已阻断回测。", field="report_hash", details=dict(report_diff[0])),),
+                )
+                outcome = PreflightOutcome(
+                    report=report, profile=outcome.profile,
+                    fixed_instrument_ids=outcome.fixed_instrument_ids,
+                    dynamic_scope=outcome.dynamic_scope, fixtures=outcome.fixtures,
+                    initial_position_report=outcome.initial_position_report,
+                    admission_report_hash=admission_hash,
+                    session_report_hash=session_hash_before_block,
+                    hash_match=False, report_diff=report_diff,
+                    failure_phase="data_preflight",
+                )
         else:
             outcome = PreflightOutcome(
                 report=outcome.report,
@@ -2328,7 +2386,15 @@ class DataPreflightService:
                 hash_match=hash_match,
                 failure_phase="data_preflight" if outcome.blocked else None,
             )
-        allowed = outcome.status is PreflightStatus.READY and hash_match is not False
+        # A degraded report is executable only when the page explicitly
+        # confirmed the exact same hash; ready remains executable regardless
+        # of a hash change because the session report is authoritative.
+        page_degraded = page_outcome is not None and page_outcome.status is PreflightStatus.DEGRADED
+        allowed = (
+            outcome.status in (PreflightStatus.READY, PreflightStatus.DEGRADED)
+            and (hash_match is not False or outcome.status is PreflightStatus.READY)
+            and (outcome.status is PreflightStatus.READY or hash_match is True)
+        )
         return SessionPreflightDecision(
             allowed=allowed,
             outcome=outcome,

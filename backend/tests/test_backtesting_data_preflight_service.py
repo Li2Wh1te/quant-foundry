@@ -477,12 +477,15 @@ class PreflightServiceTestCase(unittest.TestCase):
         )
         self.assertEqual(outcome.report.fixture_sources, ())
 
-    def test_formal_profile_is_blocked_before_provider_read(self) -> None:
+    def test_formal_profile_checks_production_capability_after_provider_read(self) -> None:
         provider = FakeProvider(self.base_report)
         outcome = DataPreflightService(provider, profile="formal@1").preflight(intent())
         self.assertEqual(outcome.status, PreflightStatus.BLOCKED)
-        self.assertEqual(provider.preflight_calls, 0)
-        self.assertEqual(outcome.report.primary_issue_code, "internal_preflight_profile_mismatch")
+        self.assertEqual(provider.preflight_calls, 1)
+        self.assertEqual(
+            outcome.report.primary_issue_code,
+            "provider_contract_violation",
+        )
 
     def test_dynamic_scope_without_task15_resolution_is_blocked_before_provider_read(self) -> None:
         provider = FakeProvider(self.base_report)
