@@ -497,6 +497,57 @@ class UniverseScopeResolution:
             raise InvalidDataRequestError(
                 "a ready dynamic or hybrid scope requires named calendar ids"
             )
+        if status is UniverseScopeStatus.READY and self.scope_mode in (
+            InstrumentScopeMode.DYNAMIC,
+            InstrumentScopeMode.HYBRID,
+        ):
+            # A scope object constructed outside the shared resolver must be
+            # just as fail-closed as one returned by a provider.  The five
+            # core dimensions are the minimum proof needed before optional
+            # action/status dimensions can be evaluated from the request.
+            aliases = {
+                "universe": {"universe", "universe_query", "pit_universe", "candidate_universe"},
+                "identity": {"identity", "pit_identity", "instrument_identity", "instrument_spec"},
+                "mapping": {"mapping", "mappings", "pit_mapping", "instrument_mapping"},
+                "rules": {"rule", "rules", "rule_package", "rule_qualification", "qualification"},
+                "market_data": {"bar", "bars", "market_data", "raw_bars", "coverage", "coverage_qualification", "history"},
+            }
+            declared = {
+                str(key).strip().lower().replace("-", "_").replace(".", "_")
+                for key in self.capability_summary
+            }
+            missing = sorted(
+                bucket
+                for bucket, names in aliases.items()
+                if not declared.intersection(names)
+            )
+            if missing:
+                status = UniverseScopeStatus.BLOCKED
+                issues = tuple(issues) + (
+                    UniverseScopeIssue(
+                        code="universe_capability_missing",
+                        message="动态范围缺少必要资格能力声明，已阻断预检。",
+                        field="capability_summary",
+                        details={"missing_capabilities": missing},
+                    ),
+                )
+                object.__setattr__(self, "status", status)
+                object.__setattr__(
+                    self,
+                    "issues",
+                    tuple(
+                        sorted(
+                            issues,
+                            key=lambda issue: (
+                                issue.code,
+                                issue.field or "",
+                                canonical_hash(dict(issue.details))
+                                if canonical_hash
+                                else "",
+                            ),
+                        )
+                    ),
+                )
         if self.current_snapshot_hash is not None:
             current_hash = _non_blank(self.current_snapshot_hash, "current_snapshot_hash")
             if len(current_hash) != 64 or any(

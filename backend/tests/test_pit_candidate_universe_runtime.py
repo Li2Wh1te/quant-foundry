@@ -11,7 +11,13 @@ from app.backtesting.result_models import (
     BacktestDecisionRecord,
     DecisionValidationStatus,
 )
+from app.backtesting.data.universe import (
+    CandidateEligibilityContext,
+    CandidateInput,
+    evaluate_candidate,
+)
 from app.backtesting.runtime import PhaseExecutionError
+from app.strategy_protocol.data_view import InstrumentCandidateDTO
 from app.backtesting.data.requests import InstrumentScopeMode
 from tests.backtest_runtime_fixture import (
     CountingStrategyView,
@@ -139,6 +145,46 @@ def _runner(*, target_id: UUID = INSTRUMENT_ID):
 
 
 class FinalQualificationRuntimeTests(unittest.TestCase):
+    def test_dto_only_pure_evaluator_adapter_fails_closed_without_metadata(self) -> None:
+        runner = _runner()
+        candidate = InstrumentCandidateDTO(
+            instrument_id=INSTRUMENT_ID,
+            trading_code="510300",
+            name="沪深300ETF",
+            display_name="沪深300ETF",
+            asset_class="etf",
+            exchange="SSE",
+        )
+
+        adapted = runner._prepare_evaluator_candidate(
+            candidate,
+            evaluate_candidate,
+            calendar_id="XSHG",
+        )
+
+        # A strategy DTO may contribute only its six public fields.  It cannot
+        # smuggle qualification evidence through a removed metadata field.
+        self.assertIsInstance(adapted, CandidateInput)
+        self.assertEqual(adapted.instrument_id, INSTRUMENT_ID)
+        self.assertEqual(adapted.calendar_id, "XSHG")
+        self.assertEqual(adapted.identity_evidence, {})
+        self.assertEqual(adapted.mapping_evidence, {})
+        self.assertEqual(adapted.rule_evidence, {})
+        self.assertEqual(adapted.market_data_evidence, {})
+        self.assertEqual(adapted.metadata, {})
+        self.assertFalse(hasattr(candidate, "metadata"))
+
+        result = evaluate_candidate(
+            adapted,
+            CandidateEligibilityContext(
+                effective_date=D0,
+                data_cutoff=datetime(2026, 8, 3, 15, tzinfo=timezone.utc),
+                resolved_calendar_ids=("XSHG",),
+                scope_mode=InstrumentScopeMode.DYNAMIC,
+            ),
+        )
+        self.assertFalse(result.eligible)
+
     def test_ineligible_selected_candidate_fails_before_order_creation(self) -> None:
         runner = _runner()
 

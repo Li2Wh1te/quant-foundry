@@ -1128,6 +1128,7 @@ def _profile_is_internal(profile: object | None) -> bool:
     version = getattr(profile, "version", None)
     if isinstance(profile, str) and "@" in profile:
         key, raw_version = profile.rsplit("@", 1)
+        key = key.strip()
         try:
             version = int(raw_version)
         except ValueError:
@@ -1739,6 +1740,22 @@ def resolve_dynamic_universe_scope(
                         details=axis_evidence,
                     )
                 )
+            if (
+                resolution.calendar_session_signature
+                and axis_signature
+                and resolution.calendar_session_signature != axis_signature
+            ):
+                extra_issues.append(
+                    scope_issue(
+                        "universe_preflight_hash_mismatch",
+                        "Provider 返回的日历会话签名与 strict resolver 结果不一致。",
+                        field="calendar_session_signature",
+                        details={
+                            "provider_signature": resolution.calendar_session_signature,
+                            "resolver_signature": axis_signature,
+                        },
+                    )
+                )
             session_signature = axis_signature
             source_evidence["calendar_axis"] = axis_evidence
         except (UniverseScopeUnresolvedError, UniverseCapabilityMissingError) as exc:
@@ -1778,6 +1795,22 @@ def resolve_dynamic_universe_scope(
                         "参与日历未通过正式区间严格兼容性校验。",
                         field="calendar_axis",
                         details=axis_evidence,
+                    )
+                )
+            if (
+                resolution.calendar_session_signature
+                and axis_signature
+                and resolution.calendar_session_signature != axis_signature
+            ):
+                extra_issues.append(
+                    scope_issue(
+                        "universe_preflight_hash_mismatch",
+                        "Provider 返回的日历会话签名与 strict resolver 结果不一致。",
+                        field="calendar_session_signature",
+                        details={
+                            "provider_signature": resolution.calendar_session_signature,
+                            "resolver_signature": axis_signature,
+                        },
                     )
                 )
             session_signature = axis_signature
@@ -1944,6 +1977,12 @@ def _fixed_report_covers_union(
     status = _fixed_report_value(report, "status")
     status_text = getattr(status, "value", status)
     blocked_flag = _fixed_report_value(report, "blocked", False)
+    if status is None:
+        return False, {
+            "expected_instrument_ids": [str(item) for item in expected],
+            "report_status": None,
+            "reason": "missing_report_status",
+        }
     if bool(blocked_flag) or str(status_text).lower() in {
         "blocked",
         "incomplete",
@@ -1969,7 +2008,13 @@ def _fixed_report_covers_union(
         record_status = _fixed_report_value(record, "status")
         record_status = getattr(record_status, "value", record_status)
         issues = _fixed_report_value(record, "issues", ())
-        if str(record_status).lower() in {
+        if str(record_status).lower() not in {
+            "ready",
+            "ok",
+            "complete",
+            "eligible",
+            "not_applicable",
+        } or str(record_status).lower() in {
             "blocked",
             "incomplete",
             "failed",

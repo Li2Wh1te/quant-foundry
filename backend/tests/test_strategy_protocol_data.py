@@ -1,7 +1,7 @@
 """Tests for the strategy data-query contract and its boundaries."""
 
 import unittest
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, fields
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from inspect import signature
@@ -693,10 +693,43 @@ class UniverseQueryTestCase(unittest.TestCase):
         self.assertEqual(row.exchange, "SSE")
         with self.assertRaises(FrozenInstanceError):
             row.name = "改写"
-        with self.assertRaises(TypeError):
-            row.metadata["x"] = "y"
+        # Strategy candidates expose only the frozen six-field projection;
+        # provider evidence never travels through a hidden metadata mapping.
+        self.assertFalse(hasattr(row, "metadata"))
         # Filtering by another exchange returns nothing.
         self.assertEqual(facade.query(exchanges=["SZSE"]), ())
+
+    def test_candidate_has_only_the_frozen_six_fields(self) -> None:
+        self.assertEqual(
+            tuple(field.name for field in fields(InstrumentCandidateDTO)),
+            (
+                "instrument_id",
+                "trading_code",
+                "name",
+                "display_name",
+                "asset_class",
+                "exchange",
+            ),
+        )
+        candidate = InstrumentCandidateDTO(
+            instrument_id=uuid4(),
+            trading_code="SYN.A",
+            name="合成标的 A",
+            display_name="Synthetic A",
+            asset_class="etf",
+            exchange="SSE",
+        )
+        self.assertFalse(hasattr(candidate, "metadata"))
+        with self.assertRaises(TypeError):
+            InstrumentCandidateDTO(
+                instrument_id=uuid4(),
+                trading_code="SYN.A",
+                name="合成标的 A",
+                display_name="Synthetic A",
+                asset_class="etf",
+                exchange="SSE",
+                metadata={},  # type: ignore[call-arg]
+            )
 
     def test_candidate_identity_fields_are_validated(self) -> None:
         base = dict(
@@ -714,61 +747,8 @@ class UniverseQueryTestCase(unittest.TestCase):
             with self.assertRaises(ValueError, msg=blank_field):
                 InstrumentCandidateDTO(instrument_id=uuid4(), **{**base, blank_field: "  "})
 
-    def test_candidate_metadata_is_deep_frozen_and_json_only(self) -> None:
-        candidate = InstrumentCandidateDTO(
-            instrument_id=uuid4(),
-            trading_code="SYN.A",
-            name="合成标的 A",
-            display_name="Synthetic A",
-            asset_class="etf",
-            exchange="SSE",
-            metadata={"tags": ["a", "b"], "meta": {"k": [1, 2]}},
-        )
-        with self.assertRaises((TypeError, AttributeError)):
-            candidate.metadata["tags"].append("c")  # type: ignore[attr-defined]
-        with self.assertRaises((TypeError, AttributeError)):
-            candidate.metadata["meta"]["k"].append(3)  # type: ignore[index]
-
-        base = dict(
-            trading_code="SYN.A",
-            name="合成标的 A",
-            display_name="Synthetic A",
-            asset_class="etf",
-            exchange="SSE",
-        )
-        # Non-JSON values such as sets are rejected outright.
-        with self.assertRaises(ValueError):
-            InstrumentCandidateDTO(
-                instrument_id=uuid4(), **base, metadata={"tags": {"a"}}
-            )
-        # Non-string keys are rejected instead of silently stringified.
-        with self.assertRaises(ValueError):
-            InstrumentCandidateDTO(
-                instrument_id=uuid4(), **base, metadata={1: "one"}
-            )
-        # Non-finite floats are not valid JSON numbers.
-        for bad_float in (float("nan"), float("inf"), float("-inf")):
-            with self.assertRaises(ValueError, msg=repr(bad_float)):
-                InstrumentCandidateDTO(
-                    instrument_id=uuid4(), **base, metadata={"weight": bad_float}
-                )
-        # Finite floats stay accepted.
-        ok = InstrumentCandidateDTO(
-            instrument_id=uuid4(), **base, metadata={"weight": 0.5}
-        )
-        self.assertEqual(ok.metadata["weight"], 0.5)
-        # Regression: scalar subclasses can carry mutable attributes, so only
-        # exact JSON scalar types pass through.
-        class _MutableInt(int):
-            pass
-
-        smuggled = _MutableInt(1)
-        object.__setattr__(smuggled, "payload", [])
-        with self.assertRaises(ValueError):
-            InstrumentCandidateDTO(
-                instrument_id=uuid4(), **base, metadata={"x": smuggled}
-            )
-
+        # Scalar subclasses can carry mutable attributes, so only exact
+        # strings are accepted at the strategy boundary.
         class _MutableStr(str):
             pass
 
@@ -813,9 +793,19 @@ class UniverseQueryTestCase(unittest.TestCase):
             [row.trading_code for row in result], expected_order
         )
 
-        # Duplicate identities are rejected instead of handed to strategies.
-        with self.assertRaises(InvalidProviderResultError):
-            UniverseQueryDTO(make_provider([(first_id, "A"), (first_id, "B")])).query()
+        # Duplicate identities use the task-15 stable projection contract:
+        # choose the lexicographically smallest six-field projection, and do
+        # so independently of provider input order (QUERY-07/A23).
+        duplicate_forward = UniverseQueryDTO(
+            make_provider([(first_id, "B"), (first_id, "A")])
+        ).query()
+        duplicate_reverse = UniverseQueryDTO(
+            make_provider([(first_id, "A"), (first_id, "B")])
+        ).query()
+        self.assertEqual(
+            [row.trading_code for row in duplicate_forward], ["A"]
+        )
+        self.assertEqual(duplicate_forward, duplicate_reverse)
 
         class _BrokenUniverse:
             def query(self, *, exchanges=None, asset_classes=None):

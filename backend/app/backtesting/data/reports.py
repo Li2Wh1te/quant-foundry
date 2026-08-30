@@ -1154,6 +1154,38 @@ class DataPreflightReport:
                     "preflight_profile", "formal@1"
                 )
                 if str(profile) != "internal_link_acceptance@1":
+                    fixture_capabilities: list[str] = []
+                    for capability_key, capability_value in resolution.capability_summary.items():
+                        source = None
+                        status_value = capability_value
+                        if isinstance(capability_value, Mapping):
+                            source = capability_value.get("source")
+                            status_value = capability_value.get(
+                                "status",
+                                capability_value.get(
+                                    "availability",
+                                    capability_value.get(
+                                        "supported", capability_value.get("complete")
+                                    ),
+                                ),
+                            )
+                        source = getattr(source, "value", source)
+                        status_value = getattr(status_value, "value", status_value)
+                        if str(source).lower() in {
+                            "fixture",
+                            "internal_fixture",
+                            "transitional",
+                        } or str(status_value).lower() in {
+                            "fixture",
+                            "internal_fixture",
+                            "transitional",
+                        }:
+                            fixture_capabilities.append(str(capability_key))
+                    if fixture_capabilities:
+                        raise InvalidDataRequestError(
+                            "a ready formal dynamic report cannot use fixture-backed capability evidence",
+                            details={"fixture_capabilities": sorted(fixture_capabilities)},
+                        )
                     formal_gate_aliases = {
                         "formal_preflight": {
                             "formal_preflight",

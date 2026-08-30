@@ -1018,6 +1018,11 @@ class _RuntimeCandidateEligibilityContext:
     qualification_policy_version: Any | None = None
     frozen_calendar_ids: tuple[str, ...] = ()
     scope_mode: Any | None = None
+    required_capabilities: tuple[Any, ...] = ()
+    requested_window: Any | None = None
+    query_boundary: Any | None = None
+    universe_scope_snapshot_hash: str | None = None
+    provider_capability_summary: Mapping[str, Any] = MappingProxyType({})
     candidate: Any | None = None
 
 
@@ -3033,8 +3038,15 @@ class DeterministicBacktestRunner:
             "frozen_calendar_ids": frozen_calendar_ids,
             "resolved_calendar_ids": frozen_calendar_ids,
             "frozen_resolved_calendar_ids": frozen_calendar_ids,
-            "scope_mode": getattr(source, "scope_mode", None),
+            "scope_mode": getattr(source, "scope_mode", None)
+            or getattr(scope, "scope_mode", None),
             "decision_time": context.decision_time,
+            "required_capabilities": tuple(
+                getattr(source, "required_capabilities", None)
+                or getattr(scope, "required_capabilities", ())
+                or ()
+            ),
+            "requested_window": getattr(scope, "requested_window", None),
             "universe_scope_snapshot_hash": getattr(
                 source, "universe_scope_snapshot_hash", None
             )
@@ -3081,6 +3093,11 @@ class DeterministicBacktestRunner:
             qualification_policy_version=values["qualification_policy_version"],
             frozen_calendar_ids=tuple(values["frozen_calendar_ids"] or ()),
             scope_mode=values["scope_mode"],
+            required_capabilities=tuple(values["required_capabilities"] or ()),
+            requested_window=values["requested_window"],
+            query_boundary=values["query_boundary"],
+            universe_scope_snapshot_hash=values["universe_scope_snapshot_hash"],
+            provider_capability_summary=values["provider_capability_summary"] or {},
             candidate=candidate,
         )
 
@@ -3164,13 +3181,15 @@ class DeterministicBacktestRunner:
         *,
         calendar_id: str | None = None,
     ) -> Any | None:
-        """Restore only JSON-safe candidate evidence for the pure evaluator.
+        """Adapt a strategy DTO without importing hidden provider evidence.
 
         ``InstrumentCandidateDTO`` deliberately hides the provider's full
-        ``InstrumentSpec`` from strategy code.  When a caller relies on the
-        canonical pure evaluator, a DTO's optional metadata is copied into
-        its existing ``CandidateInput`` adapter; no rules or facts are
-        reimplemented in runtime.
+        ``InstrumentSpec`` from strategy code.  When the canonical pure
+        evaluator receives a DTO-only fallback, preserve only its six public
+        display fields and the explicitly supplied calendar.  The resulting
+        ``CandidateInput`` has empty qualification evidence, so required
+        checks fail closed instead of treating strategy-visible identity as
+        proof of provider facts.
         """
 
         if candidate is None:
@@ -3183,7 +3202,6 @@ class DeterministicBacktestRunner:
             from app.backtesting.data.universe import CandidateInput
         except (ImportError, AttributeError):
             return candidate
-        metadata = candidate.metadata
         kwargs: dict[str, Any] = {
             "instrument_id": candidate.instrument_id,
             "trading_code": candidate.trading_code,
@@ -3192,31 +3210,13 @@ class DeterministicBacktestRunner:
             "asset_class": candidate.asset_class,
             "exchange": candidate.exchange,
         }
-        if isinstance(metadata, Mapping):
-            for name in (
-                "calendar_id",
-                "currency",
-                "known_at",
-                "effective_date",
-                "eligible",
-                "reason_codes",
-                "identity_evidence",
-                "mapping_evidence",
-                "rule_evidence",
-                "market_data_evidence",
-                "corporate_action_evidence",
-                "quantity_action_coverage_evidence",
-                "status_evidence",
-            ):
-                if name in metadata:
-                    kwargs[name] = metadata[name]
-        if calendar_id is not None and "calendar_id" not in kwargs:
+        if calendar_id is not None:
             kwargs["calendar_id"] = calendar_id
         try:
             return CandidateInput(**kwargs)
         except Exception:
-            # A malformed optional metadata field is reported by the
-            # evaluator/provider contract, never repaired with a default.
+            # A malformed adapter value is reported by the evaluator/provider
+            # contract, never repaired with a guessed default.
             return candidate
 
     @staticmethod
@@ -3552,7 +3552,11 @@ class DeterministicBacktestRunner:
         # Status is required when the run explicitly declares that dimension;
         # full rule policies may also carry a required declaration.
         mode_source = self._universe_scope_resolution
+        bound = self._step_universes.get(context.step_sequence)
+        source = self._source_universe_query(bound) if bound is not None else None
         required_caps = self._resolve_attr(
+            source, ("required_capabilities",)
+        ) or self._resolve_attr(
             mode_source, ("required_capabilities",)
         ) or ()
         required_status = any(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, time, timezone
 import unittest
+from types import SimpleNamespace
 from uuid import uuid4
 
 from app.backtesting.calendar_axis import (
@@ -32,7 +33,8 @@ from app.backtesting.data.universe import (
     evaluate_candidate,
     filter_candidates,
 )
-from app.backtesting.preflight import resolve_dynamic_universe_scope
+from app.backtesting.data.errors import InvalidDataRequestError
+from app.backtesting.preflight import UniversePreflightService, resolve_dynamic_universe_scope
 
 
 UTC = timezone.utc
@@ -184,6 +186,98 @@ class CandidateContractTests(unittest.TestCase):
         resolution = resolve_dynamic_universe_scope(_request())
         self.assertIs(resolution.status, UniverseScopeStatus.BLOCKED)
         self.assertEqual(resolution.primary_issue_code, "universe_capability_missing")
+
+    def test_signature_without_task11_axis_is_not_a_scope_proof(self) -> None:
+        request = _request()
+
+        class Provider:
+            def resolve_dynamic_universe_scope(self, value):
+                return {
+                    "resolved_calendar_ids": ("SSE",),
+                    "calendar_session_signature": "forged-signature",
+                    "capability_summary": {
+                        "universe": "available",
+                        "identity": "available",
+                        "mapping": "available",
+                        "rules": "available",
+                        "market_data": "available",
+                    },
+                }
+
+        result = resolve_dynamic_universe_scope(
+            request, Provider(), profile="internal_link_acceptance@1"
+        )
+        self.assertIs(result.status, UniverseScopeStatus.BLOCKED)
+        self.assertIn(
+            "universe_scope_unresolved", {issue.code for issue in result.issues}
+        )
+        self.assertIsNone(result.calendar_session_signature)
+
+    def test_required_dynamic_evidence_empty_mapping_filters_candidate(self) -> None:
+        context = CandidateEligibilityContext(
+            effective_date=date(2026, 1, 5),
+            data_cutoff=datetime(2026, 1, 6, tzinfo=UTC),
+            resolved_calendar_ids=("SSE",),
+            market_scope=MarketScope(exchanges=("SSE",), asset_classes=("etf",)),
+            scope_mode=InstrumentScopeMode.DYNAMIC,
+            required_capabilities=(DataCapability.BARS,),
+        )
+        candidate = CandidateInput(
+            instrument_id=uuid4(),
+            calendar_id="SSE",
+            trading_code="510300",
+            name="ETF",
+            display_name="ETF",
+            asset_class="etf",
+            exchange="SSE",
+        )
+        result = evaluate_candidate(candidate, context)
+        self.assertFalse(result.eligible)
+        self.assertIn("candidate_market_data_incomplete", result.reason_codes)
+        self.assertIn("candidate_rule_incomplete", result.reason_codes)
+
+    def test_universe_audit_rejects_sensitive_evidence_keys(self) -> None:
+        with self.assertRaises(InvalidDataRequestError):
+            CandidateInput(
+                instrument_id=uuid4(),
+                calendar_id="SSE",
+                trading_code="510300",
+                name="ETF",
+                display_name="ETF",
+                asset_class="etf",
+                exchange="SSE",
+                metadata={"nested": [{"password": "must-not-enter-audit"}]},
+            )
+
+    def test_fixed_preflight_requires_each_member_of_the_fixed_union(self) -> None:
+        request = _request(InstrumentScopeMode.FIXED)
+        fixed_id = request.static_instrument_ids[0]
+        complete = SimpleNamespace(
+            status="ready",
+            resolved_calendar_ids=("SSE",),
+            calendar_session_signature="axis-signature",
+            checked_instruments=(
+                SimpleNamespace(instrument_id=fixed_id, status="ready", issues=()),
+            ),
+        )
+        result = UniversePreflightService().run(
+            request,
+            fixed_preflight_report=complete,
+        )
+        self.assertIs(result.status, UniverseScopeStatus.READY)
+
+        incomplete = SimpleNamespace(
+            status="ready",
+            resolved_calendar_ids=("SSE",),
+            calendar_session_signature="axis-signature",
+            checked_instruments=(),
+        )
+        blocked = UniversePreflightService().run(
+            request,
+            fixed_preflight_report=incomplete,
+        )
+        self.assertIs(blocked.status, UniverseScopeStatus.BLOCKED)
+        self.assertEqual(blocked.issues[0].field, "fixed_preflight_report")
 
 
 if __name__ == "__main__":  # pragma: no cover

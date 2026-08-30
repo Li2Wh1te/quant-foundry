@@ -1656,6 +1656,16 @@ class UniverseQueryDTO(_ReadOnlyFacade):
         return self.__queried
 
     @property
+    def candidate_ids(self) -> frozenset[UUID]:
+        """Stable identities returned by this facade's successful queries."""
+
+        return frozenset(
+            candidate.instrument_id
+            for rows in self.__cache.values()
+            for candidate in rows
+        )
+
+    @property
     def effective_date(self):
         """Read-only effective date when the provider exposes one."""
 
@@ -1666,6 +1676,21 @@ class UniverseQueryDTO(_ReadOnlyFacade):
         """Read-only QueryBoundary when the provider exposes one."""
 
         return getattr(self.__query, "boundary", None)
+
+    @property
+    def scope_mode(self):
+        """Read-only fixed/dynamic/hybrid mode when declared by the provider."""
+
+        value = getattr(self.__query, "scope_mode", None)
+        if value is not None:
+            return value
+        # Runtime's immutable step snapshot may wrap the original bound
+        # query in a private engine object.  Inspect only the structural
+        # source/mode marker; do not invoke a query or enumerate candidates.
+        source = getattr(self.__query, "source", None)
+        if source is None:
+            source = getattr(self.__query, "_source", None)
+        return getattr(source, "scope_mode", None)
 
     @property
     def scope_snapshot_hash(self):

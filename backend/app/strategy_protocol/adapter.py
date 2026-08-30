@@ -175,9 +175,22 @@ def known_instrument_ids(context: DecisionContext) -> set[UUID]:
         raise StrategyProtocolError(
             "strategy decision context must expose a bound universe query"
         )
-    # The query facade is step-bound and internally cached.  Calling it here
-    # validates that every target is either a current PIT candidate or an
-    # independently held position; it never scans a run-wide catalogue.
+    # The adapter runs after the strategy function.  For dynamic/hybrid
+    # contexts, only an earlier strategy-owned query may authorize candidate
+    # ids.  Calling ``query()`` here would make a hard-coded target appear
+    # legal even when the strategy never consulted its current universe.
+    scope_mode = getattr(universe, "scope_mode", None)
+    has_queried = getattr(universe, "has_queried", None)
+    dynamic = getattr(scope_mode, "value", scope_mode) in {"dynamic", "hybrid"}
+    if dynamic and has_queried is not True:
+        return ids
+    # Static/legacy facades have no per-step authorization state, so retain
+    # their historical query behavior.  A dynamic facade without a query
+    # state remains fail-closed below rather than being eagerly queried.
+    if dynamic and not callable(query):
+        raise StrategyProtocolError(
+            "strategy decision context must expose a bound universe query"
+        )
     for candidate in tuple(query()):
         instrument_id = getattr(candidate, "instrument_id", None)
         if not isinstance(instrument_id, UUID):

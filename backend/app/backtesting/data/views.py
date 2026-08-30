@@ -209,6 +209,12 @@ class _ChunkUniverseQuery:
         return self.__query.universe_query_policy
 
     @property
+    def scope_mode(self):
+        """The immutable fixed/dynamic/hybrid mode of this query."""
+
+        return self.__query.scope_mode
+
+    @property
     def scope_snapshot_hash(self):
         """Optional immutable admission hash carried by the bound query."""
 
@@ -411,6 +417,16 @@ class _ChunkUniverseQuery:
         """Whether this bound query has served at least one result."""
 
         return self.__queried
+
+    @property
+    def candidate_ids(self) -> frozenset[UUID]:
+        """Stable ids returned by this query's narrowed result cache."""
+
+        return frozenset(
+            candidate.instrument_id
+            for rows in self.__cache.values()
+            for candidate in rows
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -26,7 +26,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
-from collections import Counter
 import json
 import inspect
 from types import MappingProxyType
@@ -358,13 +357,14 @@ class MemoryDataSet:
         )
 
         instruments = tuple(self.instruments)
+        pit_instruments = tuple(self.pit_instruments)
         # Keep all non-overlapping PIT versions for one stable identity.  A
         # duplicate interval is ambiguous and remains a fixture contract
         # violation; unlike the old one-row map this representation can
         # answer historical identity/display queries without current-row
         # fallback.
         grouped_instruments: dict[UUID, list[InstrumentSpec]] = {}
-        for spec in instruments:
+        for spec in (*instruments, *pit_instruments):
             instrument_id = getattr(spec, "instrument_id", None)
             if not isinstance(instrument_id, UUID):
                 raise InvalidDataRequestError(
@@ -773,6 +773,7 @@ class MemoryDataProvider:
                         "qualify_instrument",
                         "qualify",
                         "coverage_qualification",
+                        "resolve_qualification",
                     )
                 )
                 else None
@@ -909,23 +910,6 @@ class MemoryDataProvider:
         )
 
     @staticmethod
-    def _has_qualification_method(source: object | None) -> bool:
-        """Return whether ``source`` consumes a single-candidate port."""
-
-        if source is None:
-            return False
-        return any(
-            callable(getattr(source, name, None))
-            for name in (
-                "qualify_candidate",
-                "qualify_instrument",
-                "qualify",
-                "coverage_qualification",
-                "resolve_qualification",
-            )
-        )
-
-    @staticmethod
     def _has_coverage_qualification_method(source: object | None) -> bool:
         """Return whether ``source`` exposes the typed 16A coverage port."""
 
@@ -937,6 +921,7 @@ class MemoryDataProvider:
                 "qualify_instrument",
                 "coverage_qualification",
                 "qualify",
+                "resolve_qualification",
             )
         )
 
@@ -1319,7 +1304,7 @@ class MemoryDataProvider:
                 "the configured universe provider returned text instead of candidate rows"
             )
         try:
-            return tuple(result)
+            rows = tuple(result)
         except (UniverseCapabilityMissingError, UniverseScopeUnresolvedError):
             raise
         except Exception as exc:
@@ -1329,6 +1314,51 @@ class MemoryDataProvider:
                 else "the configured universe provider failed while iterating rows",
                 details={"provider_type": type(source).__name__, "error_type": type(exc).__name__},
             ) from exc
+        # An explicit PIT source may enumerate stable ids while a separate
+        # task-13 spec provider resolves the versioned identity/display/spec.
+        # Materialize only through that injected resolver; never use the
+        # legacy dataset instrument table as a historical fallback.
+        if self._pit_spec_provider is not None:
+            materialized: list[object] = []
+            for row in rows:
+                row_spec = (
+                    row
+                    if isinstance(row, InstrumentSpec)
+                    else getattr(row, "spec", None)
+                )
+                if isinstance(row_spec, InstrumentSpec):
+                    materialized.append(row)
+                    continue
+                instrument_id = (
+                    row if isinstance(row, UUID) else getattr(row, "instrument_id", None)
+                )
+                if not isinstance(instrument_id, UUID):
+                    materialized.append(row)
+                    continue
+                try:
+                    resolved = self.resolve_pit_spec(
+                        instrument_id,
+                        effective_at=datetime.combine(
+                            query.effective_date,
+                            time.min,
+                            tzinfo=UTC,
+                        ),
+                        data_cutoff=query.boundary.data_cutoff,
+                    )
+                except Exception as exc:
+                    raise UniverseProviderContractViolationError(
+                        "the PIT spec provider failed while resolving a universe row",
+                        details={
+                            "instrument_id": str(instrument_id),
+                            "error_type": type(exc).__name__,
+                        },
+                    ) from exc
+                if resolved is not None:
+                    materialized.append((resolved, row))
+                else:
+                    materialized.append(row)
+            rows = tuple(materialized)
+        return rows
 
     def capability_manifest(self) -> DataCapabilityManifest:
         """Return the static structured capability manifest."""
@@ -4514,10 +4544,24 @@ class MemoryDataChunkSession:
             # model in the memory adapter.
             left, right = row
             if isinstance(left, InstrumentSpec):
-                right_spec, right_reasons = MemoryDataChunkSession._extract_universe_candidate(right)
+                if isinstance(right, (str, bytes, UUID)):
+                    return left, ()
+                try:
+                    right_spec, right_reasons = MemoryDataChunkSession._extract_universe_candidate(right)
+                except UniverseProviderContractViolationError:
+                    # The right value can be a stable id used only as a
+                    # resolver hint; it contributes no qualification reason.
+                    return left, ()
+                del right_spec
                 return left, right_reasons
             if isinstance(right, InstrumentSpec):
-                left_spec, left_reasons = MemoryDataChunkSession._extract_universe_candidate(left)
+                if isinstance(left, (str, bytes, UUID)):
+                    return right, ()
+                try:
+                    left_spec, left_reasons = MemoryDataChunkSession._extract_universe_candidate(left)
+                except UniverseProviderContractViolationError:
+                    return right, ()
+                del left_spec
                 return right, left_reasons
         # Task-13's immutable qualification result intentionally remains the
         # source of truth.  Duck typing avoids importing that provider module
@@ -4555,6 +4599,28 @@ class MemoryDataChunkSession:
         """Build a value-only tie-break for duplicate stable identities."""
 
         display = getattr(spec, "display", None)
+        reason_codes = tuple(
+            sorted(
+                str(value)
+                for value in (getattr(row, "reason_codes", ()) or ())
+            )
+        )
+        evidence = tuple(
+            (
+                name,
+                str(getattr(row, name, "")),
+            )
+            for name in (
+                "identity_evidence",
+                "mapping_evidence",
+                "rule_evidence",
+                "market_data_evidence",
+                "corporate_action_evidence",
+                "quantity_action_coverage_evidence",
+                "status_evidence",
+            )
+            if hasattr(row, name)
+        )
         values = (
             getattr(display, "trading_code", "") if display is not None else "",
             getattr(display, "name", "") if display is not None else "",
@@ -4565,6 +4631,9 @@ class MemoryDataChunkSession:
             str(getattr(spec, "valid_to", "")),
             str(getattr(row, "known_at", "")),
             str(getattr(row, "effective_date", "")),
+            str(getattr(row, "eligible", "")),
+            str(reason_codes),
+            str(evidence),
         )
         return tuple(str(value) for value in values)
 
@@ -4678,10 +4747,11 @@ class MemoryDataChunkSession:
     def _qualification_report_evidence(report: object) -> Mapping[str, object]:
         """Project one existing coverage report into evaluator evidence."""
 
-        quality = getattr(report, "quality_status", None)
+        get = report.get if isinstance(report, Mapping) else lambda name, default=None: getattr(report, name, default)
+        quality = get("quality_status")
         quality_value = getattr(quality, "value", quality)
-        expected = getattr(report, "expected_count", None)
-        complete_count = getattr(report, "complete_count", None)
+        expected = get("expected_count")
+        complete_count = get("complete_count")
         complete = quality_value == "complete"
         if (
             not complete
@@ -4695,10 +4765,10 @@ class MemoryDataChunkSession:
             "quality_status": quality_value,
             "expected_count": expected,
             "complete_count": complete_count,
-            "partial_count": getattr(report, "partial_count", None),
-            "invalid_count": getattr(report, "invalid_count", None),
-            "unavailable_count": getattr(report, "unavailable_count", None),
-            "missing_ranges": getattr(report, "missing_ranges", ()),
+            "partial_count": get("partial_count"),
+            "invalid_count": get("invalid_count"),
+            "unavailable_count": get("unavailable_count"),
+            "missing_ranges": get("missing_ranges", ()),
         }
 
     @classmethod
@@ -4711,9 +4781,18 @@ class MemoryDataChunkSession:
         """Map a port result to the evaluator's named evidence dimensions."""
 
         evidence: dict[str, Mapping[str, object]] = {}
-        reports = tuple(getattr(result, "coverage_reports", ()) or ())
+        reports_value = (
+            result.get("coverage_reports", ())
+            if isinstance(result, Mapping)
+            else getattr(result, "coverage_reports", ())
+        )
+        reports = tuple(reports_value or ())
         for report in reports:
-            capability = getattr(report, "capability", None)
+            capability = (
+                report.get("capability")
+                if isinstance(report, Mapping)
+                else getattr(report, "capability", None)
+            )
             capability_value = getattr(capability, "value", capability)
             projected = cls._qualification_report_evidence(report)
             if capability_value in ("bars", "coverage"):
@@ -4728,7 +4807,11 @@ class MemoryDataChunkSession:
             elif capability_value == "mappings":
                 evidence["mapping_evidence"] = projected
 
-        summary = getattr(result, "evidence_summary", None)
+        summary = (
+            result.get("evidence_summary")
+            if isinstance(result, Mapping)
+            else getattr(result, "evidence_summary", None)
+        )
         if isinstance(summary, Mapping):
             for name in (
                 "identity_evidence",
@@ -4780,12 +4863,20 @@ class MemoryDataChunkSession:
         """Read stable reason codes from an existing qualification result."""
 
         values: list[str] = []
-        for item in getattr(result, "reason_codes", ()) or ():
+        result_reason_codes = (
+            result.get("reason_codes", ())
+            if isinstance(result, Mapping)
+            else getattr(result, "reason_codes", ())
+        )
+        for item in result_reason_codes or ():
             value = getattr(item, "value", item)
             if isinstance(value, str) and value.strip():
                 values.append(value.strip())
-        for issue in getattr(result, "issues", ()) or ():
-            value = getattr(issue, "code", None)
+        result_issues = (
+            result.get("issues", ()) if isinstance(result, Mapping) else getattr(result, "issues", ())
+        )
+        for issue in result_issues or ():
+            value = issue.get("code") if isinstance(issue, Mapping) else getattr(issue, "code", None)
             if isinstance(value, str) and value.strip():
                 values.append(value.strip())
         return tuple(sorted(set(values)))
@@ -4801,6 +4892,18 @@ class MemoryDataChunkSession:
 
         reasons: set[str] = set()
         required = set(request.required_capabilities)
+        capabilities = getattr(spec, "capabilities", None)
+        action_requirement = getattr(
+            capabilities, "corporate_action_requirement", None
+        )
+        if getattr(action_requirement, "value", action_requirement) == "required":
+            required.add(DataCapability.ACTIONS)
+        status_policy = getattr(spec, "trading_status_policy", None)
+        if isinstance(status_policy, Mapping) and any(
+            getattr(value, "value", value) == "required"
+            for value in status_policy.values()
+        ):
+            required.add(DataCapability.STATUS)
 
         def proven(value: Mapping[str, object] | None) -> bool:
             if not isinstance(value, Mapping):
@@ -4865,6 +4968,17 @@ class MemoryDataChunkSession:
                 inspect.Parameter.POSITIONAL_OR_KEYWORD,
             ):
                 return method(qualification_request)
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                return method(request=qualification_request)
+        if "qualification_request" in parameters:
+            parameter = parameters["qualification_request"]
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                return method(qualification_request)
+            if parameter.kind is inspect.Parameter.KEYWORD_ONLY:
+                return method(qualification_request=qualification_request)
         values = {
             name: getattr(qualification_request, name)
             for name in CoverageQualificationRequest.__dataclass_fields__
@@ -4936,6 +5050,15 @@ class MemoryDataChunkSession:
             if self._provider.fixtures
             else FORMAL_PROFILE
         )
+        qualification_policy = query.qualification_policy_version
+        if isinstance(qualification_policy, str):
+            key, separator, version = qualification_policy.rpartition("@")
+            if separator and key.strip() and version.isdigit():
+                qualification_policy = ContractRef(key.strip(), int(version))
+            else:
+                raise InvalidDataRequestError(
+                    "qualification_policy_version must be an exact key@version reference"
+                )
         return CoverageQualificationRequest(
             instrument_id=instrument_id,
             effective_date=query.effective_date,
@@ -4951,7 +5074,7 @@ class MemoryDataChunkSession:
             rule_exception_set=query.rule_exception_set,
             market_scope=query.market_scope,
             universe_query_policy=query.universe_query_policy,
-            qualification_policy_version=query.qualification_policy_version,
+            qualification_policy_version=qualification_policy,
             required_fixture_capabilities=tuple(
                 fixture.capability for fixture in self._provider.fixtures
             ),
@@ -5027,6 +5150,72 @@ class MemoryDataChunkSession:
                 return nested
         return None
 
+    def _resolve_instrument_qualification(
+        self,
+        instrument_id: UUID,
+        query: UniverseQuery,
+    ) -> object | None:
+        """Consume the explicit task-13 single-instrument qualification port."""
+
+        provider = self._provider._pit_spec_provider
+        if provider is None:
+            return None
+        method = None
+        for name in (
+            "qualify",
+            "qualify_instrument",
+            "resolve_qualification",
+        ):
+            candidate = getattr(provider, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None:
+            return None
+        effective_at = datetime.combine(query.effective_date, time.min, tzinfo=UTC)
+        values = {
+            "instrument_id": instrument_id,
+            "effective_at": effective_at,
+            "effective_date": query.effective_date,
+            "data_cutoff": query.boundary.data_cutoff,
+            "rule_package_reference": query.rule,
+            "exception_set_reference": query.rule_exception_set,
+            "rule_exception_set": query.rule_exception_set,
+        }
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return method(instrument_id)
+        kwargs = {
+            name: value
+            for name, value in values.items()
+            if name in parameters
+            and parameters[name].kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        positional = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+            or (
+                parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and parameter.default is inspect.Parameter.empty
+                and parameter.name not in kwargs
+            )
+        ]
+        try:
+            return method(instrument_id, **kwargs) if positional else method(**kwargs)
+        except UnsupportedCapabilityError:
+            raise
+        except Exception as exc:
+            raise UniverseProviderContractViolationError(
+                "the task-13 instrument qualification port failed",
+                details={
+                    "instrument_id": str(instrument_id),
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+
     def _evaluate_dynamic_candidate(
         self,
         row: object,
@@ -5054,6 +5243,7 @@ class MemoryDataChunkSession:
             "qualify_instrument",
             "coverage_qualification",
             "qualify",
+            "resolve_qualification",
         ):
             candidate = getattr(qualification_source, name, None)
             if callable(candidate):
@@ -5089,7 +5279,11 @@ class MemoryDataChunkSession:
                 "the configured qualification port returned no result",
                 details={"instrument_id": str(spec.instrument_id)},
             )
-        result_id = getattr(qualification, "instrument_id", spec.instrument_id)
+        result_id = (
+            qualification.get("instrument_id", spec.instrument_id)
+            if isinstance(qualification, Mapping)
+            else getattr(qualification, "instrument_id", spec.instrument_id)
+        )
         if result_id != spec.instrument_id:
             raise UniverseProviderContractViolationError(
                 "qualification result instrument_id does not match the candidate",
@@ -5098,6 +5292,22 @@ class MemoryDataChunkSession:
                     "actual": str(result_id),
                 },
             )
+        instrument_qualification = None
+        if self._provider._pit_spec_provider is not None:
+            try:
+                instrument_qualification = self._resolve_instrument_qualification(
+                    spec.instrument_id, query
+                )
+            except UnsupportedCapabilityError:
+                raise UniverseCapabilityMissingError(
+                    "the task-13 instrument qualification port is unavailable",
+                    details={"instrument_id": str(spec.instrument_id)},
+                )
+        qualification_results = tuple(
+            value
+            for value in (instrument_qualification, qualification)
+            if value is not None
+        )
 
         display = spec.display
         effective_at = datetime.combine(query.effective_date, time.min, tzinfo=UTC)
@@ -5109,8 +5319,13 @@ class MemoryDataChunkSession:
             "spec": spec,
             "qualification": qualification,
             "coverage_qualification": qualification,
+            "instrument_qualification": instrument_qualification,
             "reason_codes": tuple(precomputed_reasons)
-            + self._qualification_result_reason_codes(qualification),
+            + tuple(
+                reason
+                for value in qualification_results
+                for reason in self._qualification_result_reason_codes(value)
+            ),
             "identity_evidence": {
                 "complete": bool(
                     identity_interval_valid
@@ -5156,17 +5371,22 @@ class MemoryDataChunkSession:
         ):
             if name not in payload and hasattr(row, name):
                 payload[name] = getattr(row, name)
-        payload.update(
-            {
-                name: value
-                for name, value in self._qualification_evidence(
-                    qualification,
-                    qualification_request.required_capabilities,
-                    spec,
-                ).items()
-                if name not in payload
-            }
-        )
+        for source_result in qualification_results:
+            payload.update(
+                {
+                    name: value
+                    for name, value in self._qualification_evidence(
+                        source_result,
+                        qualification_request.required_capabilities,
+                        spec,
+                    ).items()
+                    if name not in payload
+                    or (
+                        isinstance(payload[name], Mapping)
+                        and not payload[name]
+                    )
+                }
+            )
         context = CandidateEligibilityContext(
             effective_date=query.effective_date,
             data_cutoff=query.boundary.data_cutoff,
@@ -5213,19 +5433,35 @@ class MemoryDataChunkSession:
             payload["candidate_qualification"] = candidate_result
 
         evaluation = evaluate_candidate(payload, context)
-        missing = self._required_qualification_reasons(
-            qualification,
-            self._qualification_evidence(
-                qualification,
+        combined_evidence: dict[str, Mapping[str, object]] = {}
+        for source_result in qualification_results:
+            for name, value in self._qualification_evidence(
+                source_result,
                 qualification_request.required_capabilities,
                 spec,
-            ),
+            ).items():
+                if name not in combined_evidence or not combined_evidence[name]:
+                    combined_evidence[name] = value
+        missing = self._required_qualification_reasons(
+            qualification,
+            combined_evidence,
             qualification_request,
             spec,
         )
         reasons = tuple(sorted(set(evaluation.reason_codes) | set(missing)))
-        explicit_eligible = getattr(qualification, "eligible", None)
-        if explicit_eligible is False and not reasons:
+        explicit_eligible = (
+            qualification.get("eligible")
+            if isinstance(qualification, Mapping)
+            else getattr(qualification, "eligible", None)
+        )
+        instrument_eligible = (
+            instrument_qualification.get("eligible")
+            if isinstance(instrument_qualification, Mapping)
+            else getattr(instrument_qualification, "eligible", None)
+        )
+        if (
+            explicit_eligible is False or instrument_eligible is False
+        ) and not reasons:
             reasons = ("candidate_qualification_unavailable",)
         return not reasons, reasons, evaluation
 
@@ -5354,6 +5590,9 @@ class MemoryDataChunkSession:
                 for spec in cached
                 if spec.instrument_id not in self._fixed_authorized_instrument_ids
             )
+            self._session._step_candidate_authorized_instrument_ids = (
+                self._step_candidate_authorized_instrument_ids
+            )
             self._universe_last_query_hash = cache_key
             return cached
 
@@ -5435,8 +5674,46 @@ class MemoryDataChunkSession:
                 except UniverseProviderContractViolationError:
                     keyed_rows.append((str(candidate_id), type(row).__name__, row))
                     continue
-            row_key = self._stable_source_row_key(row, candidate_spec) if candidate_spec is not None else (type(row).__name__,)
-            keyed_rows.append((str(candidate_id), *row_key, row))
+            row_key = (
+                self._stable_source_row_key(row, candidate_spec)
+                if candidate_spec is not None
+                else (type(row).__name__,)
+            )
+            effective_at = datetime.combine(query.effective_date, time.min, tzinfo=UTC)
+            valid_from = getattr(candidate_spec, "valid_from", None)
+            valid_to = getattr(candidate_spec, "valid_to", None)
+            effective_match = bool(
+                candidate_spec is not None
+                and (valid_from is None or effective_at >= valid_from)
+                and (valid_to is None or effective_at < valid_to)
+            )
+            known_at = getattr(row, "known_at", None)
+            if known_at is None and candidate_spec is not None:
+                known_at = getattr(candidate_spec, "known_at", None)
+            known_match = True
+            if known_at is not None:
+                try:
+                    if isinstance(known_at, str):
+                        known_at = datetime.fromisoformat(known_at)
+                    known_match = (
+                        isinstance(known_at, datetime)
+                        and known_at.tzinfo is not None
+                        and known_at <= query.boundary.data_cutoff
+                    )
+                except (TypeError, ValueError):
+                    known_match = False
+            # Valid-at-date and known-before-cutoff versions win over rows
+            # outside the requested PIT coordinate; the remaining fields are
+            # a deterministic tie-break for overlapping/duplicate source rows.
+            keyed_rows.append(
+                (
+                    str(candidate_id),
+                    0 if effective_match else 1,
+                    0 if known_match else 1,
+                    *row_key,
+                    row,
+                )
+            )
         keyed_rows.sort(key=lambda item: item[:-1])
         source_rows = tuple(item[-1] for item in keyed_rows)
         seen: set[UUID] = set()
@@ -5517,6 +5794,9 @@ class MemoryDataChunkSession:
             spec.instrument_id
             for spec in result
             if spec.instrument_id not in self._fixed_authorized_instrument_ids
+        )
+        self._session._step_candidate_authorized_instrument_ids = (
+            self._step_candidate_authorized_instrument_ids
         )
         return result
 

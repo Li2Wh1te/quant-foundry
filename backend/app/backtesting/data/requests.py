@@ -2631,6 +2631,12 @@ class UniverseQuery:
 
         return self.qualification_policy_version
 
+    @property
+    def candidate_set_policy(self) -> UniverseQueryPolicy:
+        """Read-only alias for the frozen candidate-set policy."""
+
+        return self.universe_query_policy
+
 
 def _require_single_window(window: object, field_name: str) -> None:
     """Reject anything that is neither a DateRange nor a LookbackWindow."""
