@@ -51,6 +51,11 @@ __all__ = [
     "compute_dividend_entitlement",
     "derive_cash_effective_session",
     "entitlement_from_portfolio",
+    "CASH_DATE_RULE_KEY",
+    "CASH_DATE_RULE_VERSION",
+    "TIMING_RULE_KEY",
+    "TIMING_RULE_VERSION",
+    "select_source_payment_date",
 ]
 
 
@@ -105,6 +110,30 @@ class DividendEntryKind(StrEnum):
 #: Key of the first supported entitlement derivation rule.
 ENTITLEMENT_RULE_KEY = "record_date_entitlement"
 ENTITLEMENT_RULE_VERSION = 1
+CASH_DATE_RULE_KEY = "earpay_date_then_pay_date"
+CASH_DATE_RULE_VERSION = 1
+TIMING_RULE_KEY = "after_open_match"
+TIMING_RULE_VERSION = 1
+
+
+def select_source_payment_date(
+    *, earpay_date: date | None = None, pay_date: date | None = None,
+) -> tuple[date, dict[str, object]]:
+    """Select the approved Tushare payment date and return audit evidence."""
+    chosen = earpay_date or pay_date
+    if chosen is None:
+        raise DividendDerivationError("both earpay_date and pay_date are missing")
+    if not isinstance(chosen, date) or isinstance(chosen, datetime):
+        raise DividendDerivationError("payment date must be a calendar date")
+    return chosen, {
+        "rule_key": CASH_DATE_RULE_KEY,
+        "rule_version": CASH_DATE_RULE_VERSION,
+        "selected_field": "earpay_date" if earpay_date else "pay_date",
+        "earpay_date": earpay_date.isoformat() if earpay_date else None,
+        "pay_date": pay_date.isoformat() if pay_date else None,
+        "timing_rule": TIMING_RULE_KEY,
+        "timing_rule_version": TIMING_RULE_VERSION,
+    }
 
 
 def _calendar_date(value: object, field_name: str) -> date:

@@ -921,11 +921,16 @@ class AnalysisFinalizationCoordinator:
                 raise
             if not hasattr(runner, "build_analysis_failure_snapshot"):
                 raise
+            # Freeze the failure envelope before transitioning the analyzer so
+            # the abort payload is derived from the original valuation error.
             failure_snapshot = runner.build_analysis_failure_snapshot(exc)
             # Advance the live engine to ``aborted`` exactly once, but keep
-            # persistence based on the immutable failure snapshot.  A final
-            # engine is left untouched and is rejected as a conflict by the
-            # finalizer.
+            # persistence based on a snapshot captured after this transition.
+            # Capturing it before ``engine.finalize`` leaves a PARTIAL snapshot
+            # bound to an ABORTED engine and invalidates the admission binding,
+            # preventing the independent transaction from writing the abort.
+            # A final engine is left untouched and is rejected as a conflict by
+            # the finalizer.
             engine = getattr(runner, "_analysis_engine", None)
             if engine is not None and engine.finalized_status is None:
                 failure_payload = {
@@ -946,6 +951,9 @@ class AnalysisFinalizationCoordinator:
                     raise AnalysisFinalizationError(
                         f"aborted metric computation failed: {finalize_exc}"
                     ) from finalize_exc
+            # Rebuild after the terminal transition so the snapshot binding
+            # reflects the analyzer's ABORTED status and remains replayable.
+            failure_snapshot = runner.build_analysis_failure_snapshot(exc)
             if session_factory is not None:
                 try:
                     self._finalizer.finalize_aborted(

@@ -64,6 +64,7 @@ from app.backtesting.dividends import (
     derive_cash_effective_session,
     entitlement_from_portfolio,
 )
+from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.session_matching import (
     _clone_portfolio,
     _copy_shadow_into,
@@ -1252,7 +1253,8 @@ def _load_dividend_declarations(
             "cash_dividend_events(); arrival-day dividend sources are no "
             "longer accepted"
         )
-    declarations = tuple(corporate_actions.cash_dividend_events())
+    source = corporate_actions.cash_dividend_events
+    declarations = tuple(source() if callable(source) else source)
     seen: set[UUID] = set()
     for event in declarations:
         if event.event_id in seen:
@@ -1681,6 +1683,17 @@ class DeterministicBacktestRunner:
         self._interpreter = interpreter
         self._execution_model = execution_model
         self._accounting = accounting
+        # Production runs consume only the immutable provider snapshot.  The
+        # legacy protocol remains available for explicit unit-test fixtures.
+        if corporate_actions is not None and isinstance(corporate_actions, RunCorporateActionEventSnapshot):
+            corporate_actions = corporate_actions
+        # Formal/production runs must consume the immutable Provider snapshot;
+        # transitional unit fixtures may still provide the legacy protocol.
+        if selected_rule_snapshot is not None and corporate_actions is not None \
+                and not isinstance(corporate_actions, RunCorporateActionEventSnapshot):
+            raise DomainValidationError(
+                "formal runs require a Provider-generated RunCorporateActionEventSnapshot"
+            )
         self._corporate_actions = corporate_actions
         self._analyzers = tuple(analyzers)
         self._currency = currency.upper()
@@ -2054,6 +2067,25 @@ class DeterministicBacktestRunner:
         self._dividend_declarations: tuple[CashDividendEvent, ...] = (
             _load_dividend_declarations(corporate_actions)
         )
+        # An open entitlement whose record date precedes the run cannot be
+        # reconstructed from the starting portfolio; require explicit frozen
+        # evidence before any strategy code is loaded.
+        if len(axis):
+            run_start = axis.at(0).start_time.date()
+            run_end = axis.at(len(axis) - 1).start_time.date()
+            for declaration in self._dividend_declarations:
+                if declaration.record_date < run_start and not declaration.is_entitlement_frozen:
+                    raise DividendDerivationError(
+                        f"cash_dividend_entitlement_outside_run: dividend event {declaration.event_id} requires frozen entitlement before run start",
+                        details={"reason_code": "cash_dividend_entitlement_outside_run", "event_id": str(declaration.event_id), "run_start": run_start.isoformat()},
+                    )
+                if declaration.record_date <= run_end < declaration.cash_effective_session_id:
+                    # This is an explicit end-of-run receivable and must be
+                    # represented by the run contract, never silently dropped.
+                    raise DividendDerivationError(
+                        f"cash_dividend_receivable_beyond_run: dividend event {declaration.event_id} remains receivable after run end",
+                        details={"reason_code": "cash_dividend_receivable_beyond_run", "event_id": str(declaration.event_id), "run_end": run_end.isoformat(), "cash_effective_session": declaration.cash_effective_session_id.isoformat()},
+                    )
         self._completed_dividend_events: dict[UUID, CashDividendEvent] = {
             # Declarations that already carry the source-supplied
             # entitlement are complete at admission, even when their
@@ -2126,6 +2158,21 @@ class DeterministicBacktestRunner:
         """Return the frozen dynamic-scope hash used by this run."""
 
         return self._universe_scope_snapshot_hash
+
+    @property
+    def corporate_action_snapshot_hash(self) -> str | None:
+        """Hash of the frozen corporate-action facts consumed by Runner."""
+        snapshot = self._corporate_actions
+        return getattr(snapshot, "snapshot_hash", None)
+
+    @property
+    def corporate_action_rule_refs(self) -> Mapping[str, tuple[str, ...]]:
+        """Frozen cash-date and timing rule references for audit output."""
+        snapshot = self._corporate_actions
+        return {
+            "cash_date": tuple(getattr(snapshot, "cash_date_rule_refs", ())),
+            "timing": tuple(getattr(snapshot, "timing_rule_refs", ())),
+        }
 
     @property
     def final_qualification_results(self) -> tuple[Mapping[str, Any], ...]:
@@ -4740,8 +4787,6 @@ class DeterministicBacktestRunner:
                 if self._last_analysis_completed_session is not None
                 else None
             ),
-            "universe_scope_snapshot_hash": self._universe_scope_snapshot_hash,
-            "universe_final_qualification_failure": self._last_final_qualification_failure,
         }
 
         snapshot_binding = _bind_failure_snapshot(

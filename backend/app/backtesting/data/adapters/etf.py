@@ -60,7 +60,7 @@ from app.backtesting.data.adjustment_policy import (
     AdjustmentSeriesPolicy,
     INACTIVE_ADJUSTMENT_POLICY,
 )
-from app.backtesting.data.facts import AdjustedSeriesPoint, Bar, FactEvidence
+from app.backtesting.data.facts import AdjustedSeriesPoint, Bar, FactEvidence, CorporateAction, DataCoverageFact
 from app.backtesting.data.etf_adjustment import (
     build_research_price_series,
     cutoff_local_date,
@@ -400,6 +400,7 @@ class EtfFactsAdapter:
     # profile needs one.
     fixtures: tuple[InternalFixture, ...] = ()
     internal_fixtures: tuple[InternalFixture, ...] = ()
+    corporate_action_repository: object | None = None
 
     def __post_init__(self) -> None:
         if self.calendar_id_resolver is not None and not callable(self.calendar_id_resolver):
@@ -418,6 +419,8 @@ class EtfFactsAdapter:
                 raise InvalidDataRequestError(
                     "spec provider must expose a callable resolve_spec method"
                 )
+        if self.corporate_action_repository is not None and not callable(getattr(self.corporate_action_repository, "list_facts", None)):
+            raise InvalidDataRequestError("corporate_action_repository must expose list_facts")
         if not isinstance(self.market_timezone, str) or not self.market_timezone.strip():
             raise InvalidDataRequestError("market_timezone must be non-blank text")
         object.__setattr__(self, "market_timezone", self.market_timezone.strip())
@@ -1034,6 +1037,91 @@ class EtfFactsAdapter:
                 "request must be a CoverageQualificationRequest"
             )
         return self.qualify_instrument(request)
+
+    def corporate_actions(self, query):
+        """Read normalized actions through the injected repository only."""
+        if self.corporate_action_repository is None:
+            raise UnsupportedCapabilityError("corporate_actions repository is unavailable")
+        rows = self.corporate_action_repository.list_facts(
+            query.instrument_ids, query.window.start_date, query.window.end_date,
+            cutoff=query.boundary.data_cutoff,
+            action_types=query.action_types,
+        )
+        result = []
+        for row in rows:
+            if row.action_type not in {"cash_dividend", "split", "consolidation", "share_change"}:
+                continue
+            ex_date = row.ex_date or row.cash_effective_date
+            if ex_date is None:
+                continue
+            # Cash events must carry explicit calendar/date-rule evidence.
+            # Never guess an exchange calendar or host timezone at runtime.
+            if row.action_type == "cash_dividend":
+                evidence_payload = row.evidence or {}
+                required = ("calendar_id", "timezone", "cash_date_rule", "timing_rule")
+                if not all((getattr(row, name, None) or evidence_payload.get(name)) for name in required):
+                    raise ProviderContractViolationError(
+                        "corporate action calendar/date-rule evidence is incomplete",
+                        details={"event_id": str(row.event_id), "reason_code": "corporate_action_calendar_unresolved"},
+                    )
+            quality = row.quality or "complete"
+            try:
+                quality_status = QualityStatus(quality)
+            except ValueError as exc:
+                raise ProviderContractViolationError(
+                    "corporate action quality status is unsupported",
+                    details={"event_id": str(row.event_id), "quality": quality},
+                ) from exc
+            observed = row.created_at or datetime.now(timezone.utc)
+            result.append(CorporateAction(
+                instrument_id=row.instrument_id, action_type=row.action_type,
+                ex_date=ex_date,
+                evidence=FactEvidence(source=row.source, observed_at=observed, quality_status=quality_status, source_revision=str(row.fact_version)),
+                attributes={"event_id": str(row.event_id), "record_date": row.record_date.isoformat() if row.record_date else None,
+                            "source_payment_date": row.source_payment_date.isoformat() if row.source_payment_date else None,
+                            "source_arrival_date": row.source_arrival_date.isoformat() if row.source_arrival_date else None,
+                            "cash_effective_date": row.cash_effective_date.isoformat() if row.cash_effective_date else None,
+                            "cash_amount_per_unit": str(row.cash_amount_per_unit) if row.cash_amount_per_unit is not None else None,
+                            "currency": row.currency, "cash_effective_phase": row.cash_effective_phase,
+                            "entitlement_rule": row.entitlement_rule,
+                            "cash_date_rule": row.cash_date_rule, "timing_rule": row.timing_rule, **(row.evidence or {})},
+            ))
+        result.sort(key=lambda x: (x.ex_date, str(x.instrument_id), x.action_type))
+        return tuple(result)
+
+    def corporate_action_coverage(self, instrument_ids, start_date: date, end_date: date):
+        """Return persisted domain coverage facts for 16A projection."""
+        if self.corporate_action_repository is None or not callable(getattr(self.corporate_action_repository, "coverage", None)):
+            raise UnsupportedCapabilityError("corporate action coverage is unavailable")
+        return self.corporate_action_repository.coverage(instrument_ids, start_date, end_date)
+
+    def corporate_action_coverage_facts(self, instrument_ids, start_date: date, end_date: date):
+        """Project persisted coverage rows into immutable 16A facts."""
+        rows = self.corporate_action_coverage(instrument_ids, start_date, end_date)
+        facts = []
+        for row in rows:
+            try:
+                status = QualityStatus(str(row.status))
+            except ValueError as exc:
+                raise ProviderContractViolationError(
+                    "corporate action coverage status is unsupported",
+                    details={"status": row.status},
+                ) from exc
+            evidence_data = row.evidence or {}
+            observed = row.computed_at or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            evidence = FactEvidence(source="corporate_action_repository", observed_at=observed, quality_status=status)
+            count = row.event_count
+            details = {"event_count": count, "summary": row.summary or {}, **evidence_data}
+            facts.append(DataCoverageFact(
+                instrument_id=row.instrument_id, session_date=row.start_date,
+                capability=DataCapability.ACTIONS,
+                field=row.action_type or "corporate_actions",
+                validation_rule=row.validation_rule,
+                quality_status=status, evidence=evidence, details=details,
+            ))
+        return tuple(facts)
 
     def qualify_instrument(
         self,

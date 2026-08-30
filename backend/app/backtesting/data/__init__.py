@@ -22,6 +22,8 @@ import importlib
 from typing import Any
 
 _SUBMODULE_EXPORTS: dict[str, str] = {
+    "RunCorporateActionEventSnapshot": "corporate_actions",
+    "CorporateActionSnapshotConflict": "corporate_actions",
     # errors
     "ERROR_CODES": "errors",
     "DataContractError": "errors",

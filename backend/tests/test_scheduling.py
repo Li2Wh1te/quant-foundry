@@ -38,7 +38,7 @@ class TestTaskParameters(BaseModel):
     pass
 
 
-def test_task_handler(
+def noop_task_handler(
     context: TaskContext, parameters: TestTaskParameters
 ) -> dict[str, str]:
     return {"status": "ok"}
@@ -51,7 +51,7 @@ def make_test_registry() -> TaskRegistry:
             key=TEST_TASK_TYPE,
             name="Test noop",
             parameters_model=TestTaskParameters,
-            handler=test_task_handler,
+            handler=noop_task_handler,
         )
     )
     return registry

@@ -72,6 +72,49 @@ class CheckStatus(StrEnum):
     BLOCKED = "blocked"
 
 
+@dataclass(frozen=True, slots=True)
+class CorporateActionEligibility:
+    """Small, mode-neutral result shared by fixed/dynamic/selected gates."""
+
+    status: str  # eligible, filter, blocked
+    code: str | None = None
+    message: str = ""
+
+
+def evaluate_corporate_action_eligibility(
+    *, coverage_status: str | None,
+    action_type: str | None = None,
+    profile: str = "formal",
+    fixture_start: date | None = None,
+    fixture_end: date | None = None,
+    requested_start: date | None = None,
+    requested_end: date | None = None,
+    entitlement_frozen: bool = True,
+) -> CorporateActionEligibility:
+    """Evaluate common company-action gates without changing orchestration.
+
+    Quantity actions are not production-supported: formal runs block while
+    internal runs may proceed only when an explicitly bounded fixture covers
+    the entire requested range.  Incomplete coverage filters dynamic
+    candidates but blocks fixed/selected callers via ``profile`` marker.
+    """
+    quantity = action_type in {"split", "consolidation", "share_change"}
+    if quantity:
+        if profile != "internal_link_acceptance":
+            return CorporateActionEligibility("blocked", "corporate_action_quantity_coverage_unavailable", "正式运行缺少数量类公司行动覆盖")
+        if not (fixture_start and fixture_end and requested_start and requested_end and fixture_start <= requested_start and fixture_end >= requested_end):
+            return CorporateActionEligibility("blocked", "corporate_action_fixture_out_of_scope", "数量类 fixture 未覆盖请求区间")
+    if not entitlement_frozen:
+        return CorporateActionEligibility("blocked", "corporate_action_entitlement_unfrozen", "公司行动权益尚未冻结")
+    if coverage_status in (None, "unavailable"):
+        return CorporateActionEligibility("blocked", "corporate_action_coverage_unavailable", "公司行动覆盖不可用")
+    if coverage_status in ("partial", "invalid", "incomplete"):
+        return CorporateActionEligibility("filter", "corporate_action_coverage_incomplete", "公司行动覆盖不完整")
+    if coverage_status != "complete":
+        return CorporateActionEligibility("blocked", "corporate_action_provider_contract_violation", "公司行动覆盖状态非法")
+    return CorporateActionEligibility("eligible")
+
+
 class IssueSeverity(StrEnum):
     """Issue severity; every current preflight failure is blocking."""
 
@@ -241,6 +284,8 @@ CODE_VALUATION_PRICE_MISSING = "VALUATION_PRICE_MISSING"
 CODE_VALUATION_PRICE_STALE = "VALUATION_PRICE_STALE"
 CODE_VALUATION_PRICE_INVALID = "VALUATION_PRICE_INVALID"
 CODE_CORPORATE_ACTION_FACTS_MISSING = "CORPORATE_ACTION_FACTS_MISSING"
+CODE_CASH_DIVIDEND_ENTITLEMENT_OUTSIDE_RUN = "cash_dividend_entitlement_outside_run"
+CODE_CASH_DIVIDEND_RECEIVABLE_BEYOND_RUN = "cash_dividend_receivable_beyond_run"
 CODE_TRADING_STATUS_FACTS_MISSING = "TRADING_STATUS_FACTS_MISSING"
 
 
@@ -610,6 +655,15 @@ class InitialPositionPreflightService:
                         f"incomplete{self._detail_suffix(corporate_outcome)}",
                     )
                 )
+            # Providers may expose lifecycle-specific blockers discovered while
+            # evaluating the bounded window. Preserve their stable codes rather
+            # than collapsing them into a generic coverage failure.
+            for code, label in ((CODE_CASH_DIVIDEND_ENTITLEMENT_OUTSIDE_RUN, "起点前登记日权益未冻结"), (CODE_CASH_DIVIDEND_RECEIVABLE_BEYOND_RUN, "终点后应收分红")):
+                details = getattr(corporate_outcome, "details", {}) or {}
+                flagged = bool(getattr(corporate_outcome, code, False)) or bool(isinstance(details, Mapping) and details.get(code))
+                if flagged:
+                    corporate_action_status = CheckStatus.BLOCKED
+                    issues.append(_issue(code, instrument_id, "corporate_actions", label))
 
         valuation_session: date | None = None
         raw_valuation_price: Decimal | None = None

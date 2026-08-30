@@ -62,11 +62,13 @@ def _register_application_tasks() -> None:
     )
     from app.data_ingestion.scheduler_tasks.etf_daily import register_tasks as register_etf_daily_tasks
     from app.data_ingestion.scheduler_tasks.trade_calendar import register_tasks
+    from app.data_ingestion.scheduler_tasks.corporate_action import register_tasks as register_corporate_action_tasks
 
     register_tasks(task_registry)
     register_etf_tasks(task_registry)
     register_etf_adjustment_tasks(task_registry)
     register_etf_daily_tasks(task_registry)
+    register_corporate_action_tasks(task_registry)
 
 
 _register_application_tasks()
