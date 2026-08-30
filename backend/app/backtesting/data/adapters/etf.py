@@ -39,6 +39,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+import re
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
 
@@ -52,7 +53,19 @@ from app.backtesting.data.errors import (
     ProviderContractViolationError,
     UnsupportedCapabilityError,
 )
+from app.backtesting.data.adjustment_policy import (
+    ADJUSTMENT_ADAPTER_VERSION,
+    ADJUSTMENT_SERIES_POLICY_KEY,
+    ADJUSTMENT_SERIES_POLICY_VERSION,
+    AdjustmentSeriesPolicy,
+    INACTIVE_ADJUSTMENT_POLICY,
+)
 from app.backtesting.data.facts import AdjustedSeriesPoint, Bar, FactEvidence
+from app.backtesting.data.etf_adjustment import (
+    build_research_price_series,
+    cutoff_local_date,
+    normalize_adjustment_factor,
+)
 from app.backtesting.data.pit_history import (
     PITMappingResolution,
     SegmentedAdjustedSeries,
@@ -81,6 +94,10 @@ from app.instruments.domain import (
 
 __all__ = [
     "ADJUSTMENT_SERIES_POLICY",
+    "ADJUSTMENT_SERIES_POLICY_KEY",
+    "ADJUSTMENT_SERIES_POLICY_VERSION",
+    "AdjustmentSeriesPolicy",
+    "INACTIVE_ADJUSTMENT_POLICY",
     "ETF_ADAPTER_KEY",
     "ETF_ADAPTER_VERSION",
     "ETF_VALIDATION_RULE_KEY",
@@ -108,6 +125,37 @@ ETF_RULE_PACKAGE = ("china_listed_etf_rules", 1)
 
 ADJUSTMENT_SERIES_POLICY = ("tushare_adj_factor_native", 1)
 """First-version adjustment-series policy (key, version)."""
+
+_SENSITIVE_KEY_RE = re.compile(
+    r"(?:access[_-]?token|api[_-]?key|authorization|bearer|credential|password|secret|token)",
+    re.IGNORECASE,
+)
+_SENSITIVE_VALUE_RE = re.compile(
+    r"(?:token|password|secret|api[_-]?key|authorization)\s*[:=]",
+    re.IGNORECASE,
+)
+
+
+def _redact_sensitive(value: object) -> object:
+    """Remove credential-shaped data before it reaches preflight/hash output.
+
+    Adapter summaries are assembled from provider diagnostics and caller
+    supplied issue details.  They are machine-readable evidence, not a place
+    to persist credentials, so redact by key and by the common ``key=value``
+    value form before serializing or hashing the summary.
+    """
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _redact_sensitive(item)
+            for key, item in value.items()
+            if not (isinstance(key, str) and _SENSITIVE_KEY_RE.search(key))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_sensitive(item) for item in value]
+    if isinstance(value, str) and _SENSITIVE_VALUE_RE.search(value):
+        return "[redacted]"
+    return value
 
 # ---------------------------------------------------------------------------
 # Read-only ports (thin wrappers over the ingestion query repositories)
@@ -315,7 +363,13 @@ class EtfFactsAdapter:
     trading_days: TradingDaysPort
     source: str = "tushare"
     adjustment_active: bool = False
-    adjustment_verification_evidence: str | None = None
+    adjustment_verification_evidence: str | Mapping[str, object] | None = None
+    # Policy-backed activation is the production path.  The legacy boolean
+    # fields remain in the constructor only to keep old call sites readable;
+    # ``__post_init__`` maps them to this fixed descriptor and rejects weak
+    # evidence instead of allowing a boolean bypass.
+    adjustment_policy: AdjustmentSeriesPolicy | None = None
+    adjustment_verification_artifact: object | None = None
     # Task-11 canonical identity hook: the resolver must receive the
     # effective day and PIT cutoff so it can return
     # InstrumentIdentityFact.calendar_id.  There is no adapter-level
@@ -327,6 +381,9 @@ class EtfFactsAdapter:
     spec_provider: InstrumentSpecProvider | None = None
     # Descriptive alias for callers that prefer the protocol's full name.
     instrument_spec_provider: InstrumentSpecProvider | None = None
+    # ETF factors are dated in the market's local calendar.  Keeping this
+    # explicit prevents a UTC date from changing the visible factor set.
+    market_timezone: str = "Asia/Shanghai"
 
     def __post_init__(self) -> None:
         if self.calendar_id_resolver is not None and not callable(self.calendar_id_resolver):
@@ -345,14 +402,71 @@ class EtfFactsAdapter:
                 raise InvalidDataRequestError(
                     "spec provider must expose a callable resolve_spec method"
                 )
-        if self.adjustment_active and not (
-            isinstance(self.adjustment_verification_evidence, str)
-            and self.adjustment_verification_evidence.strip()
-        ):
+        if not isinstance(self.market_timezone, str) or not self.market_timezone.strip():
+            raise InvalidDataRequestError("market_timezone must be non-blank text")
+        object.__setattr__(self, "market_timezone", self.market_timezone.strip())
+        policy = self.adjustment_policy
+        artifact = self.adjustment_verification_artifact
+        if policy is None and artifact is not None:
+            policy = AdjustmentSeriesPolicy.from_verification_artifact(artifact)
+            object.__setattr__(self, "adjustment_policy", policy)
+        if policy is None:
+            if self.adjustment_active:
+                # A free-form string is not verification evidence.  A
+                # structured artifact is accepted as a compatibility path,
+                # but it still goes through the immutable policy validator.
+                evidence = self.adjustment_verification_evidence
+                if isinstance(evidence, Mapping):
+                    policy = AdjustmentSeriesPolicy.from_verification_artifact(evidence)
+                    object.__setattr__(self, "adjustment_policy", policy)
+                    object.__setattr__(
+                        self,
+                        "adjustment_verification_evidence",
+                        policy.verification_summary,
+                    )
+                else:
+                    raise InvalidDataRequestError(
+                        "adjustment_active=True is not an activation mechanism; "
+                        "pass a verified AdjustmentSeriesPolicy"
+                    )
+            else:
+                policy = INACTIVE_ADJUSTMENT_POLICY
+                object.__setattr__(self, "adjustment_policy", policy)
+        elif not isinstance(policy, AdjustmentSeriesPolicy):
             raise InvalidDataRequestError(
-                "an active tushare_adj_factor_native@1 policy requires "
-                "real-source verification evidence"
+                "adjustment_policy must be an AdjustmentSeriesPolicy"
             )
+        if policy.key != ADJUSTMENT_SERIES_POLICY_KEY or policy.version != ADJUSTMENT_SERIES_POLICY_VERSION:
+            raise InvalidDataRequestError(
+                "only tushare_adj_factor_native@1 is registered for ETF adjustments"
+            )
+        if policy.adapter_version != ADJUSTMENT_ADAPTER_VERSION:
+            raise InvalidDataRequestError(
+                "adjustment_policy adapter_version does not match the ETF adapter"
+            )
+        if self.adjustment_active and not policy.is_active():
+            raise InvalidDataRequestError(
+                "adjustment_active=True cannot activate an inactive policy"
+            )
+        # The descriptor is the single source of truth.  A default/legacy
+        # ``False`` value must not make an explicitly supplied active policy
+        # unusable, while a legacy ``True`` can never promote an inactive one.
+        object.__setattr__(self, "adjustment_active", policy.is_active())
+        if policy.is_active():
+            policy.validate_activation()
+            if (
+                self.adjustment_verification_evidence is not None
+                and self.adjustment_verification_evidence
+                != policy.verification_summary
+            ):
+                raise InvalidDataRequestError(
+                    "legacy verification evidence does not match adjustment_policy"
+                )
+        elif self.adjustment_verification_evidence is not None:
+            if not isinstance(self.adjustment_verification_evidence, str) or not self.adjustment_verification_evidence.strip():
+                raise InvalidDataRequestError(
+                    "adjustment_verification_evidence must be blank when policy is inactive"
+                )
 
     # ------------------------------------------------------------------
     # Identity mappings
@@ -741,6 +855,7 @@ class EtfFactsAdapter:
             sessions=sessions,
             mappings=mappings,
             data_cutoff=data_cutoff,
+            session_cutoff_date=cutoff_local_date(data_cutoff, self.market_timezone),
         )
 
     def bars(
@@ -874,21 +989,35 @@ class EtfFactsAdapter:
     # Adjustment factors
     # ------------------------------------------------------------------
 
-    def project_factor(self, row: AdjustmentFactorRow, instrument_id: UUID) -> AdjustedSeriesPoint:
-        """Project one factor row; the effective date is ``trade_date``."""
+    def project_factor(
+        self,
+        row: AdjustmentFactorRow,
+        instrument_id: UUID,
+        *,
+        price_basis: PriceBasis = PriceBasis.QFQ,
+        cutoff: date | None = None,
+        source_code: str | None = None,
+    ) -> AdjustedSeriesPoint:
+        """Project one current factor after strict source-row validation.
 
-        return AdjustedSeriesPoint(
+        ``trade_date`` is the source field and ``point_date`` is its
+        normalized ``effective_date``.  The optional source coordinates on
+        the generic point preserve that relation for audit consumers.
+        """
+
+        expected_code = source_code or getattr(row, "ts_code", None)
+        if not isinstance(expected_code, str) or not expected_code.strip():
+            raise ProviderContractViolationError(
+                "adjustment factor requires a non-blank source code"
+            )
+        normalized = normalize_adjustment_factor(
+            row,
             instrument_id=instrument_id,
-            point_date=row.trade_date,
-            price_basis=PriceBasis.QFQ,
-            adj_factor=row.adj_factor,
-            evidence=FactEvidence(
-                source=self.source,
-                observed_at=row.updated_at,
-                quality_status=QualityStatus.COMPLETE,
-                known_at=None,
-            ),
+            source=self.source,
+            expected_source_code=expected_code.strip(),
+            cutoff=cutoff,
         )
+        return normalized.as_point(price_basis=price_basis)
 
     def adjusted_series(
         self,
@@ -903,31 +1032,191 @@ class EtfFactsAdapter:
             raise InvalidDataRequestError(
                 "raw prices need no adjustment series"
             )
-        if not self.adjustment_active:
+        if self.adjustment_policy is None or not self.adjustment_policy.is_active():
             raise UnsupportedCapabilityError(
                 "the tushare_adj_factor_native@1 policy is not verified "
                 "and active; adjusted series are blocked",
                 details={
-                    "policy_key": ADJUSTMENT_SERIES_POLICY[0],
-                    "policy_version": ADJUSTMENT_SERIES_POLICY[1],
+                    "policy_key": ADJUSTMENT_SERIES_POLICY_KEY,
+                    "policy_version": ADJUSTMENT_SERIES_POLICY_VERSION,
+                },
+            )
+        policy = self.adjustment_policy
+        effective_date_mapping = policy.effective_date.strip().casefold()
+        if (
+            policy.source.strip().casefold() != self.source.strip().casefold()
+            or policy.factor_field != "adj_factor"
+            or not (
+                effective_date_mapping == "trade_date"
+                or (
+                    effective_date_mapping.startswith("trade_date")
+                    and "normalized" in effective_date_mapping
+                )
+            )
+        ):
+            raise InvalidDataRequestError(
+                "active adjustment policy does not match ETF factor storage",
+                details={
+                    "policy_source": policy.source,
+                    "adapter_source": self.source,
+                    "factor_field": policy.factor_field,
+                    "effective_date": policy.effective_date,
                 },
             )
         adapter = self
+        cutoff_date = cutoff_local_date(
+            resolution.data_cutoff, self.market_timezone
+        )
 
         class _FactorReader:
             def read_factors(self, source_code: str, start_date: date, end_date: date):
                 points = []
                 for row in adapter.adjustment_factors(source_code, start_date, end_date):
                     adapter.require_row_code(row, source_code)
-                    if not (start_date <= row.trade_date <= end_date):
-                        continue
-                    point = adapter.project_factor(row, instrument_id)
+                    point = adapter.project_factor(
+                        row,
+                        instrument_id,
+                        price_basis=price_basis,
+                        cutoff=cutoff_date,
+                        source_code=source_code,
+                    )
+                    row_date = point.point_date
+                    # A repository returning an out-of-segment row is a
+                    # contract violation, not a row to silently discard.
+                    if not (start_date <= row_date <= end_date):
+                        raise HistoryIncompleteError(
+                            "adjustment factor falls outside its PIT segment",
+                            details={
+                                "instrument_id": str(instrument_id),
+                                "source_code": source_code,
+                                "effective_date": row_date.isoformat(),
+                                "expected_start_date": start_date.isoformat(),
+                                "expected_end_date": end_date.isoformat(),
+                            },
+                        )
                     if point.price_basis is not price_basis:
                         continue
                     points.append(point)
                 return points
 
-        return read_segmented_adjusted_series(resolution, _FactorReader())
+        return read_segmented_adjusted_series(
+            resolution,
+            _FactorReader(),
+            cutoff_date=cutoff_date,
+        )
+
+    def research_price_series(
+        self,
+        instrument_id: UUID,
+        *,
+        resolution: PITMappingResolution,
+        price_basis: PriceBasis,
+    ) -> SegmentedBarHistory:
+        """Generate an explicitly requested qfq/hfq Bar series for research.
+
+        Raw bars and cutoff-visible factors are read independently, then the
+        source-native semantics frozen by the active policy are applied by the
+        ETF adapter.  The returned bars are new objects; the raw table and raw
+        ``Bar`` facts are never mutated or replaced.
+        """
+
+        if price_basis is PriceBasis.RAW:
+            raise InvalidDataRequestError(
+                "research price series require qfq or hfq basis"
+            )
+        policy = getattr(self, "adjustment_policy", None)
+        if policy is not None:
+            active = bool(getattr(policy, "is_active", lambda: False)())
+            if not active:
+                raise UnsupportedCapabilityError(
+                    "the adjustment policy is not verified and active",
+                    details={
+                        "policy_key": getattr(policy, "policy_key", None),
+                        "price_basis": price_basis.value,
+                    },
+                )
+            formula = getattr(
+                policy,
+                "qfq_formula" if price_basis is PriceBasis.QFQ else "hfq_formula",
+                None,
+            )
+            anchor = getattr(
+                policy,
+                "qfq_anchor" if price_basis is PriceBasis.QFQ else "hfq_anchor",
+                None,
+            )
+            precision = getattr(policy, "precision", None)
+            rounding = getattr(policy, "rounding", None)
+            policy_key = getattr(policy, "key", None)
+            policy_version = getattr(policy, "version", None)
+        else:
+            # Legacy boolean construction remains a read gate only.  It does
+            # not imply a formula, anchor, precision, or rounding contract.
+            if not self.adjustment_active:
+                raise UnsupportedCapabilityError(
+                    "the adjustment policy is not verified and active",
+                    details={"price_basis": price_basis.value},
+                )
+            formula = getattr(
+                self,
+                "qfq_formula" if price_basis is PriceBasis.QFQ else "hfq_formula",
+                None,
+            )
+            anchor = getattr(
+                self,
+                "qfq_anchor" if price_basis is PriceBasis.QFQ else "hfq_anchor",
+                None,
+            )
+            precision = getattr(self, "adjustment_precision", None)
+            rounding = getattr(self, "adjustment_rounding", None)
+            policy_key = ADJUSTMENT_SERIES_POLICY[0]
+            policy_version = ADJUSTMENT_SERIES_POLICY[1]
+        raw_history = self.bars(instrument_id, resolution=resolution)
+        factor_history = self.adjusted_series(
+            instrument_id,
+            resolution=resolution,
+            price_basis=price_basis,
+        )
+        adjusted = build_research_price_series(
+            raw_history.bars,
+            factor_history.points,
+            price_basis=price_basis,
+            formula=formula,
+            anchor=anchor,
+            precision=precision,
+            rounding=rounding,
+            policy_key=policy_key,
+            policy_version=policy_version,
+        )
+        return SegmentedBarHistory(
+            bars=adjusted,
+            resolution=raw_history.resolution,
+            segment_evidence=raw_history.segment_evidence,
+        )
+
+    # Descriptive aliases keep the adapter-to-view conversion discoverable
+    # without introducing another public data contract or source of truth.
+    def research_bars(
+        self,
+        instrument_id: UUID,
+        *,
+        resolution: PITMappingResolution,
+        price_basis: PriceBasis,
+    ) -> SegmentedBarHistory:
+        return self.research_price_series(
+            instrument_id, resolution=resolution, price_basis=price_basis
+        )
+
+    def adjusted_bars(
+        self,
+        instrument_id: UUID,
+        *,
+        resolution: PITMappingResolution,
+        price_basis: PriceBasis,
+    ) -> SegmentedBarHistory:
+        return self.research_price_series(
+            instrument_id, resolution=resolution, price_basis=price_basis
+        )
 
     # ------------------------------------------------------------------
     # Calendar projection
@@ -1060,6 +1349,12 @@ class EtfFactsAdapter:
         expected_sessions: Sequence[date],
         bars_by_instrument: Mapping[UUID, Sequence[date]],
         factors_by_instrument: Mapping[UUID, Sequence[date]] | None = None,
+        # ``strategy_price_bases`` is optional for compatibility with the
+        # existing bars-only summary.  When qfq/hfq is requested, this method
+        # becomes the hard admission gate for policy and coverage evidence.
+        strategy_price_bases: Sequence[PriceBasis] = (),
+        research_prices_by_instrument: Mapping[UUID, Sequence[date]] | None = None,
+        data_cutoff: datetime | None = None,
         mappings_by_instrument: Mapping[UUID, Sequence[InstrumentCodeMapping]]
         | None = None,
         daily_rows: Sequence[DailyBarRow] = (),
@@ -1097,6 +1392,24 @@ class EtfFactsAdapter:
                 )
                 for instrument_id in instrument_ids
             }
+        research_price_coverage: dict[str, object] = {}
+        if research_prices_by_instrument is not None:
+            research_price_coverage = {
+                str(instrument_id): self.coverage_summary(
+                    expected_sessions,
+                    research_prices_by_instrument.get(instrument_id, ()),
+                )
+                for instrument_id in instrument_ids
+            }
+        requested_bases: tuple[PriceBasis, ...] = tuple(
+            sorted(
+                {
+                    basis if isinstance(basis, PriceBasis) else PriceBasis(basis)
+                    for basis in strategy_price_bases
+                },
+                key=lambda basis: basis.value,
+            )
+        )
         mapping_summary: dict[str, object] = {}
         if mappings_by_instrument is not None:
             mapping_summary = {
@@ -1126,6 +1439,146 @@ class EtfFactsAdapter:
                 "end_date": max(expected_sessions).isoformat(),
             }
         issues_payload = [dict(issue) for issue in blocking_issues]
+        adjusted_requested = any(
+            basis in (PriceBasis.QFQ, PriceBasis.HFQ) for basis in requested_bases
+        )
+        policy = self.adjustment_policy
+        cutoff_date: date | None = None
+        if data_cutoff is not None:
+            # The cutoff is an instant, while ETF factor effective dates are
+            # market-local calendar dates.  Resolve it once and reuse the
+            # same boundary for all adjusted-basis checks below.
+            cutoff_date = cutoff_local_date(data_cutoff, self.market_timezone)
+        if adjusted_requested:
+            if (
+                policy is None
+                or policy.key != ADJUSTMENT_SERIES_POLICY_KEY
+                or policy.version != ADJUSTMENT_SERIES_POLICY_VERSION
+            ):
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_POLICY_MISMATCH",
+                        "field": "adjustment_series_policy",
+                        "reason": "qfq/hfq research requires tushare_adj_factor_native@1",
+                    }
+                )
+            if policy is None or not policy.is_active():
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_POLICY_INACTIVE",
+                        "field": "adjustment_series_policy",
+                        "reason": "qfq/hfq research requires an active verified policy",
+                    }
+                )
+            elif policy.adapter_version != ETF_ADAPTER_VERSION:
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_ADAPTER_VERSION_MISMATCH",
+                        "field": "adjustment_adapter_version",
+                        "reason": "the active adjustment policy targets another adapter version",
+                    }
+                )
+            elif not policy.verification_summary:
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_VERIFICATION_MISSING",
+                        "field": "verification_summary",
+                        "reason": "qfq/hfq research requires a verification evidence summary",
+                    }
+                )
+            if factors_by_instrument is None:
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_FACTOR_COVERAGE_MISSING",
+                        "field": "factor_coverage",
+                        "reason": "qfq/hfq research requires cutoff-visible factors",
+                    }
+                )
+            elif any(
+                coverage.get("status") != "complete"
+                for coverage in factor_coverage.values()
+                if isinstance(coverage, Mapping)
+            ):
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_FACTOR_COVERAGE_INCOMPLETE",
+                        "field": "factor_coverage",
+                        "reason": "factor coverage is incomplete for the requested window",
+                    }
+                )
+            if research_prices_by_instrument is None:
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTED_PRICE_COVERAGE_MISSING",
+                        "field": "research_price_coverage",
+                        "reason": "qfq/hfq research requires generated price coverage",
+                    }
+                )
+            elif any(
+                coverage.get("status") != "complete"
+                for coverage in research_price_coverage.values()
+                if isinstance(coverage, Mapping)
+            ):
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTED_PRICE_COVERAGE_INCOMPLETE",
+                        "field": "research_price_coverage",
+                        "reason": "research price coverage is incomplete for the requested window",
+                    }
+                )
+            if data_cutoff is None:
+                issues_payload.append(
+                    {
+                        "code": "ADJUSTMENT_CUTOFF_MISSING",
+                        "field": "cutoff_boundary",
+                        "reason": "qfq/hfq research requires a timezone-aware data cutoff",
+                    }
+                )
+            else:
+                future_sessions = sorted(
+                    {
+                        day
+                        for day in expected_sessions
+                        if isinstance(day, date) and day > cutoff_date
+                    }
+                )
+                if future_sessions:
+                    issues_payload.append(
+                        {
+                            "code": "ADJUSTMENT_CUTOFF_EXCEEDED",
+                            "field": "cutoff_boundary",
+                            "reason": "requested adjusted sessions exceed the local data cutoff",
+                            "sessions": [day.isoformat() for day in future_sessions],
+                        }
+                    )
+                future_factors = sorted(
+                    {
+                        day
+                        for dates in (factors_by_instrument or {}).values()
+                        for day in dates
+                        if isinstance(day, date) and day > cutoff_date
+                    }
+                )
+                if future_factors:
+                    issues_payload.append(
+                        {
+                            "code": "ADJUSTMENT_FACTOR_AFTER_CUTOFF",
+                            "field": "factor_coverage",
+                            "reason": "factor effective_date is later than the local data cutoff",
+                            "sessions": [day.isoformat() for day in future_factors],
+                        }
+                    )
+        cutoff_boundary = None
+        if data_cutoff is not None:
+            cutoff_boundary = {
+                "data_cutoff": data_cutoff.isoformat(),
+                "cutoff_local_date": cutoff_date.isoformat() if cutoff_date else None,
+                "factor_cutoff_rule": (
+                    policy.cutoff_rule
+                    if policy is not None
+                    else "effective_date <= data_cutoff"
+                ),
+            }
         # Invalid bars are blocking issues, but remain separately indexed in
         # ``invalid_bars`` so callers can render the original field/value.
         issues_payload.extend(
@@ -1138,6 +1591,40 @@ class EtfFactsAdapter:
             }
             for item in invalid_bars
         )
+        # Persist only the stable policy contract.  The verification artifact
+        # may carry source metadata or credential-shaped fields needed while
+        # validating it; those fields never belong in a run record or its
+        # hash.  The three reproducible evidence digests and summary remain.
+        policy_description = self.adjustment_policy.as_dict()
+        policy_payload = {
+            key: policy_description.get(key)
+            for key in (
+                "key",
+                "version",
+                "policy_key",
+                "status",
+                "adapter_version",
+                "source",
+                "factor_field",
+                "effective_date",
+                "cutoff_rule",
+                "factor_cutoff_rule",
+                "qfq_formula",
+                "hfq_formula",
+                "formula_version",
+                "qfq_anchor",
+                "hfq_anchor",
+                "precision",
+                "rounding",
+                "verification_summary",
+                "verification_status",
+                "verification_published",
+                "verification_input_hash",
+                "verification_output_hash",
+                "verification_evidence_hash",
+                "verification",
+            )
+        }
         summary: dict[str, object] = {
             "provider_key": ETF_PROVIDER_KEY,
             "adapter_key": ETF_ADAPTER_KEY,
@@ -1147,6 +1634,7 @@ class EtfFactsAdapter:
             "capability": "bars",
             "frequency": "1d",
             "price_basis": PriceBasis.RAW.value,
+            "strategy_price_bases": [basis.value for basis in requested_bases],
             "requested_range": expected_range,
             "lookback_sessions": lookback_sessions,
             "max_lookback_sessions": max_lookback_sessions,
@@ -1155,22 +1643,42 @@ class EtfFactsAdapter:
                 len(set(bars_by_instrument.get(instrument_id, ())))
                 for instrument_id in instrument_ids
             ),
-            "adjustment_series_policy": {
-                "key": ADJUSTMENT_SERIES_POLICY[0],
-                "version": ADJUSTMENT_SERIES_POLICY[1],
-                "active": self.adjustment_active,
-                "factor_cutoff_rule": "effective_date <= data_cutoff",
-            },
+            "adjustment_series_policy": policy_payload,
+            "policy_status": policy_payload.get("status"),
+            "adjustment_policy_status": policy_payload.get("status"),
+            "adjustment_adapter_version": policy_payload.get("adapter_version"),
+            "formula_version": policy_payload.get("formula_version"),
+            "adjustment_formula_version": policy_payload.get("formula_version"),
+            "qfq_anchor": policy_payload.get("qfq_anchor"),
+            "adjustment_qfq_anchor": policy_payload.get("qfq_anchor"),
+            "hfq_anchor": policy_payload.get("hfq_anchor"),
+            "adjustment_hfq_anchor": policy_payload.get("hfq_anchor"),
+            "factor_cutoff_rule": policy_payload.get("cutoff_rule"),
+            "adjustment_factor_cutoff_rule": policy_payload.get("cutoff_rule"),
+            "verification_input_hash": policy_payload.get("verification_input_hash"),
+            "adjustment_verification_input_hash": policy_payload.get("verification_input_hash"),
+            "verification_output_hash": policy_payload.get("verification_output_hash"),
+            "adjustment_verification_output_hash": policy_payload.get("verification_output_hash"),
+            "verification_evidence_hash": policy_payload.get("verification_evidence_hash"),
+            "adjustment_verification_evidence_hash": policy_payload.get("verification_evidence_hash"),
+            "factor_coverage": factor_coverage,
+            "adjustment_factor_coverage": factor_coverage,
+            "research_price_coverage": research_price_coverage,
+            "cutoff_boundary": cutoff_boundary,
             # Audit evidence for why the adjustment policy may be active:
             # absent evidence with an active policy is a construction error.
             "adjustment_series_validation": {
-                "active": self.adjustment_active,
-                "verification_evidence": (
-                    self.adjustment_verification_evidence
-                    if self.adjustment_active
-                    else None
-                ),
-                "factor_cutoff_rule": "effective_date <= data_cutoff",
+                "active": self.adjustment_policy.is_active(),
+                "policy_key": self.adjustment_policy.key,
+                "policy_version": self.adjustment_policy.version,
+                "adapter_version": self.adjustment_policy.adapter_version,
+                "verification_evidence": self.adjustment_policy.verification_summary,
+                "verification_status": self.adjustment_policy.verification_status,
+                "verification_published": self.adjustment_policy.verification_published,
+                "verification_input_hash": self.adjustment_policy.verification_input_hash,
+                "verification_output_hash": self.adjustment_policy.verification_output_hash,
+                "verification_evidence_hash": self.adjustment_policy.verification_evidence_hash,
+                "factor_cutoff_rule": self.adjustment_policy.cutoff_rule,
             },
             "pit_status": self.pit_status(),
             "instrument_mapping_summary": mapping_summary,
@@ -1184,6 +1692,11 @@ class EtfFactsAdapter:
                 **(
                     {"adjusted_series": {"coverage": factor_coverage}}
                     if factor_coverage
+                    else {}
+                ),
+                **(
+                    {"research_prices": {"coverage": research_price_coverage}}
+                    if research_price_coverage
                     else {}
                 ),
             },
@@ -1221,10 +1734,16 @@ class EtfFactsAdapter:
         summary["status"] = (
             "blocked"
             if invalid_bars
-            or blocking_issues
+            or issues_payload
             or any(item["status"] != "complete" for item in coverage_values)
             else "ready"
         )
+        sanitized = _redact_sensitive(summary)
+        if not isinstance(sanitized, dict):  # pragma: no cover - defensive
+            raise ProviderContractViolationError(
+                "preflight summary must remain a JSON object"
+            )
+        summary = sanitized
         summary["report_hash"] = canonical_hash(summary)
         return summary
 
@@ -1282,6 +1801,38 @@ def build_data_preflight_payloads(
     elif summary.get("invalid_bars"):
         first_invalid = summary["invalid_bars"][0]
         failure_reason = str(first_invalid.get("code", "bar_invalid"))
+    # Keep the full adjustment contract in the existing capabilities JSON so
+    # admission records and later run reads expose the same machine evidence
+    # as the preflight summary.  Do not copy arbitrary summary keys: this
+    # explicit allow-list prevents credentials or raw source payloads from
+    # leaking into persistence.
+    adjustment_fields = {
+        "adjustment_series_policy": summary.get("adjustment_series_policy"),
+        "policy_status": summary.get("policy_status"),
+        "adjustment_policy_status": summary.get("adjustment_policy_status"),
+        # ``adapter_version`` is already an existing generic capability key;
+        # preserve that value below and expose the adjustment-specific value
+        # under an explicit alias as well.
+        "adjustment_adapter_version": summary.get("adjustment_adapter_version"),
+        "formula_version": summary.get("formula_version"),
+        "adjustment_formula_version": summary.get("adjustment_formula_version"),
+        "qfq_anchor": summary.get("qfq_anchor"),
+        "adjustment_qfq_anchor": summary.get("adjustment_qfq_anchor"),
+        "hfq_anchor": summary.get("hfq_anchor"),
+        "adjustment_hfq_anchor": summary.get("adjustment_hfq_anchor"),
+        "factor_cutoff_rule": summary.get("factor_cutoff_rule"),
+        "adjustment_factor_cutoff_rule": summary.get("adjustment_factor_cutoff_rule"),
+        "verification_input_hash": summary.get("verification_input_hash"),
+        "adjustment_verification_input_hash": summary.get("adjustment_verification_input_hash"),
+        "verification_output_hash": summary.get("verification_output_hash"),
+        "adjustment_verification_output_hash": summary.get("adjustment_verification_output_hash"),
+        "verification_evidence_hash": summary.get("verification_evidence_hash"),
+        "adjustment_verification_evidence_hash": summary.get("adjustment_verification_evidence_hash"),
+        "factor_coverage": summary.get("factor_coverage"),
+        "adjustment_factor_coverage": summary.get("adjustment_factor_coverage"),
+        "research_price_coverage": summary.get("research_price_coverage"),
+        "cutoff_boundary": summary.get("cutoff_boundary"),
+    }
     return {
         "capabilities": {
             "provider_key": summary.get("provider_key"),
@@ -1289,7 +1840,7 @@ def build_data_preflight_payloads(
             "adapter_key": summary.get("adapter_key"),
             "adapter_version": summary.get("adapter_version"),
             "validation_rule_version": summary.get("validation_rule_version"),
-            "adjustment_series_policy": summary.get("adjustment_series_policy"),
+            **adjustment_fields,
         },
         "coverage": coverage_payload,
         "pit_status": pit_value,

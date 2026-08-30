@@ -663,6 +663,20 @@ class DataPreflightReport:
     universe_query_policy: UniverseQueryPolicy | None = None
     allowed_settlement_rule_class: str | None = None
     adjustment_series_policy: ContractRef | None = None
+    # Adjustment-contract evidence is kept beside the generic policy
+    # reference so admission/run records can prove exactly which verified
+    # implementation and factor coverage they consumed.  All fields are
+    # optional for legacy reports that never requested qfq/hfq data.
+    adjustment_policy_status: str | None = None
+    adjustment_adapter_version: str | None = None
+    adjustment_formula_version: str | None = None
+    adjustment_qfq_anchor: str | None = None
+    adjustment_hfq_anchor: str | None = None
+    adjustment_factor_cutoff_rule: str | None = None
+    adjustment_verification_input_hash: str | None = None
+    adjustment_verification_output_hash: str | None = None
+    adjustment_verification_evidence_hash: str | None = None
+    adjustment_factor_coverage: Mapping[str, object] | None = None
     quality_mode: QualityMode = QualityMode.STRICT
     coverage_reports: tuple[DataCoverageReport, ...] = ()
     source_revisions: Mapping[str, str] | None = None
@@ -1033,9 +1047,74 @@ class DataPreflightReport:
         if self.adjustment_series_policy is not None and not isinstance(
             self.adjustment_series_policy, ContractRef
         ):
+            # Accept the immutable ETF policy descriptor as a convenience at
+            # this boundary and flatten its audit fields into this report.
+            # The stored request reference remains the generic ContractRef;
+            # no provider-specific policy object leaks into the report DTO.
+            candidate = self.adjustment_series_policy
+            as_dict = getattr(candidate, "as_dict", None)
+            reference = getattr(candidate, "reference", None)
+            payload = as_dict() if callable(as_dict) else None
+            if not isinstance(reference, ContractRef) or not isinstance(payload, Mapping):
+                raise InvalidDataRequestError(
+                    "adjustment_series_policy must be a ContractRef when provided"
+                )
+            object.__setattr__(self, "adjustment_series_policy", reference)
+            field_aliases = {
+                "status": "adjustment_policy_status",
+                "adapter_version": "adjustment_adapter_version",
+                "formula_version": "adjustment_formula_version",
+                "qfq_anchor": "adjustment_qfq_anchor",
+                "hfq_anchor": "adjustment_hfq_anchor",
+                "cutoff_rule": "adjustment_factor_cutoff_rule",
+                "verification_input_hash": "adjustment_verification_input_hash",
+                "verification_output_hash": "adjustment_verification_output_hash",
+                "verification_evidence_hash": "adjustment_verification_evidence_hash",
+                "factor_coverage": "adjustment_factor_coverage",
+            }
+            for source_name, target_name in field_aliases.items():
+                if getattr(self, target_name) is None and payload.get(source_name) is not None:
+                    object.__setattr__(self, target_name, payload[source_name])
+        # Adjustment evidence is optional for legacy/raw-only reports, but
+        # every supplied value must be deterministic and JSON-safe.  The
+        # policy gate itself validates the stronger active-policy invariant;
+        # this report merely preserves its immutable audit fields.
+        for name in (
+            "adjustment_policy_status",
+            "adjustment_adapter_version",
+            "adjustment_formula_version",
+            "adjustment_qfq_anchor",
+            "adjustment_hfq_anchor",
+            "adjustment_factor_cutoff_rule",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _non_blank_text(value, name))
+        for name in (
+            "adjustment_verification_input_hash",
+            "adjustment_verification_output_hash",
+            "adjustment_verification_evidence_hash",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _require_hash_digest(value, name))
+        if self.adjustment_policy_status is not None and self.adjustment_policy_status not in {
+            "inactive",
+            "active",
+        }:
             raise InvalidDataRequestError(
-                "adjustment_series_policy must be a ContractRef when provided"
+                "adjustment_policy_status must be inactive or active"
             )
+        if self.adjustment_factor_coverage is not None:
+            frozen_coverage = freeze_json(
+                dict(self.adjustment_factor_coverage),
+                "adjustment_factor_coverage",
+            )
+            if not isinstance(frozen_coverage, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "adjustment_factor_coverage must be a JSON mapping"
+                )
+            object.__setattr__(self, "adjustment_factor_coverage", frozen_coverage)
         if not isinstance(self.quality_mode, QualityMode):
             raise InvalidDataRequestError("quality_mode must be a QualityMode")
         if self.data_chunk_policy != CHUNK_POLICY:
@@ -1341,6 +1420,24 @@ class DataPreflightReport:
             "knowledge_as_of": context.get("knowledge_as_of") if isinstance(context, Mapping) else None,
             "non_strict_pit": self.non_strict_pit,
             "non_strict_pit_capabilities": self.non_strict_pit_capabilities,
+            "adjustment_series_policy": (
+                {
+                    "key": self.adjustment_series_policy.key,
+                    "version": self.adjustment_series_policy.version,
+                }
+                if self.adjustment_series_policy is not None
+                else None
+            ),
+            "adjustment_policy_status": self.adjustment_policy_status,
+            "adjustment_adapter_version": self.adjustment_adapter_version,
+            "adjustment_formula_version": self.adjustment_formula_version,
+            "adjustment_qfq_anchor": self.adjustment_qfq_anchor,
+            "adjustment_hfq_anchor": self.adjustment_hfq_anchor,
+            "adjustment_factor_cutoff_rule": self.adjustment_factor_cutoff_rule,
+            "adjustment_verification_input_hash": self.adjustment_verification_input_hash,
+            "adjustment_verification_output_hash": self.adjustment_verification_output_hash,
+            "adjustment_verification_evidence_hash": self.adjustment_verification_evidence_hash,
+            "adjustment_factor_coverage": self.adjustment_factor_coverage,
             "calendar_ids": self.resolved_calendar_ids,
             "coverage": self.calendar_summary.get("coverage") if self.calendar_summary else None,
             "report_hash": self.report_hash if self.hash_schema_version == 2 else None,
@@ -1446,6 +1543,19 @@ class DataPreflightReport:
                 if self.adjustment_series_policy
                 else None
             ),
+            # Keep the immutable adjustment contract in the report digest.
+            # Generation timestamps and credentials are intentionally absent;
+            # changing policy/evidence/coverage must produce a new hash.
+            "adjustment_policy_status": self.adjustment_policy_status,
+            "adjustment_adapter_version": self.adjustment_adapter_version,
+            "adjustment_formula_version": self.adjustment_formula_version,
+            "adjustment_qfq_anchor": self.adjustment_qfq_anchor,
+            "adjustment_hfq_anchor": self.adjustment_hfq_anchor,
+            "adjustment_factor_cutoff_rule": self.adjustment_factor_cutoff_rule,
+            "adjustment_verification_input_hash": self.adjustment_verification_input_hash,
+            "adjustment_verification_output_hash": self.adjustment_verification_output_hash,
+            "adjustment_verification_evidence_hash": self.adjustment_verification_evidence_hash,
+            "adjustment_factor_coverage": self.adjustment_factor_coverage,
             "quality_mode": self.quality_mode,
             "required_capabilities": self.required_capabilities,
             "strategy_price_bases": self.strategy_price_bases,

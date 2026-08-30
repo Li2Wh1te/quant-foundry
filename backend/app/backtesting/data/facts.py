@@ -519,6 +519,10 @@ class AdjustedSeriesPoint:
     price_basis: PriceBasis
     adj_factor: Decimal | int | str
     evidence: FactEvidence
+    # Optional source coordinates keep the normalization relation auditable
+    # without making the generic point depend on an ingestion ORM row.
+    source_code: str | None = None
+    source_trade_date: date | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -533,6 +537,26 @@ class AdjustedSeriesPoint:
         )
         if not isinstance(self.evidence, FactEvidence):
             raise ProviderContractViolationError("evidence must be a FactEvidence")
+        if self.source_code is not None:
+            object.__setattr__(
+                self, "source_code", _optional_text(self.source_code, "source_code")
+            )
+        if self.source_trade_date is not None:
+            object.__setattr__(
+                self,
+                "source_trade_date",
+                _plain_date(self.source_trade_date, "source_trade_date"),
+            )
+            if self.source_trade_date != self.point_date:
+                raise ProviderContractViolationError(
+                    "source_trade_date must equal normalized point_date"
+                )
+
+    @property
+    def effective_date(self) -> date:
+        """Normalized effective date alias used by adjustment readers."""
+
+        return self.point_date
 
 
 @dataclass(frozen=True, slots=True)

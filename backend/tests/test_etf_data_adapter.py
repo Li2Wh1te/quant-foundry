@@ -23,6 +23,7 @@ from app.backtesting.data.adapters import (
     EtfFactsAdapter,
     build_data_preflight_payloads,
 )
+from app.backtesting.data.adjustment_policy import AdjustmentSeriesPolicy
 from app.backtesting.data.errors import (
     DataContractError,
     DataCutoffExceededError,
@@ -113,6 +114,40 @@ def make_factor_row(point_date, source_code="510300.SH", factor="1.050"):
         trade_date=point_date,
         adj_factor=Decimal(factor),
         updated_at=datetime(2026, 8, 20, 2, 0, tzinfo=UTC),
+    )
+
+
+def make_verified_adjustment_policy() -> AdjustmentSeriesPolicy:
+    """Return the minimal evidence-bound policy used by adjusted-read tests."""
+
+    digest = "a" * 64
+    return AdjustmentSeriesPolicy.from_verification_artifact(
+        {
+            "policy": {"key": "tushare_adj_factor_native", "version": 1},
+            "adapter": {"version": "etf_raw_bar_adapter@1"},
+            "source": {"name": "tushare"},
+            "field_mapping": {
+                "adj_factor": "adj_factor",
+                "effective_date": "trade_date",
+            },
+            "semantics": {
+                "cutoff_rule": "effective_date <= data_cutoff",
+                "qfq_formula": "tushare_qfq_native_v1",
+                "hfq_formula": "tushare_hfq_native_v1",
+                "qfq_anchor": "latest-visible-close",
+                "hfq_anchor": "first-visible-close",
+                "precision": 6,
+                "rounding": "source-declared-half-up",
+            },
+            "verification": {
+                "summary": "test evidence",
+                "status": "verified",
+                "published": True,
+                "input_hash": digest,
+                "output_hash": "b" * 64,
+                "evidence_hash": "c" * 64,
+            },
+        }
     )
 
 
@@ -360,8 +395,7 @@ class AdjustmentPolicyTestCase(unittest.TestCase):
             make_adapter(self.stores, adjustment_active=True)
         adapter = make_adapter(
             self.stores,
-            adjustment_active=True,
-            adjustment_verification_evidence="verified against tushare source 2026-08",
+            adjustment_policy=make_verified_adjustment_policy(),
         )
         series = adapter.adjusted_series(
             INSTRUMENT_ID,
@@ -382,8 +416,7 @@ class AdjustmentPolicyTestCase(unittest.TestCase):
         )
         adapter = make_adapter(
             stores,
-            adjustment_active=True,
-            adjustment_verification_evidence="verified",
+            adjustment_policy=make_verified_adjustment_policy(),
         )
         series = adapter.adjusted_series(
             INSTRUMENT_ID,
@@ -405,8 +438,7 @@ class AdjustmentPolicyTestCase(unittest.TestCase):
         )
         adapter = make_adapter(
             stores,
-            adjustment_active=True,
-            adjustment_verification_evidence="verified",
+            adjustment_policy=make_verified_adjustment_policy(),
         )
         resolution = adapter.resolve(INSTRUMENT_ID, sessions=SESSIONS, data_cutoff=CUTOFF)
         with self.assertRaises(HistoryBarsIncompleteError):
@@ -632,8 +664,7 @@ class WrongSourceCodeTestCase(unittest.TestCase):
         adapter = make_adapter(
             stores,
             adjustment_factors=leaky_factors,
-            adjustment_active=True,
-            adjustment_verification_evidence="verified",
+            adjustment_policy=make_verified_adjustment_policy(),
         )
         resolution = adapter.resolve(INSTRUMENT_ID, sessions=SESSIONS, data_cutoff=CUTOFF)
         with self.assertRaises(ProviderContractViolationError):

@@ -1243,6 +1243,11 @@ class PITMappingResolution:
     data_cutoff: datetime
     coverage_status: PITMappingCoverage
     evidence_summary: Mapping[str, object]
+    # Optional market-local calendar date corresponding to ``data_cutoff``.
+    # Generic callers retain the legacy UTC-surface date; asset adapters can
+    # bind their own confirmed market timezone without changing the instant
+    # used for PIT mapping visibility.
+    session_cutoff_date: date | None = None
 
     def __post_init__(self) -> None:
         """Validate and deep-freeze externally supplied resolutions.
@@ -1293,7 +1298,15 @@ class PITMappingResolution:
         )
         object.__setattr__(self, "requested_sessions", ordered)
         object.__setattr__(self, "data_cutoff", cutoff)
-        future = [day for day in ordered if day > cutoff.date()]
+        session_cutoff = self.session_cutoff_date
+        if session_cutoff is None:
+            session_cutoff = cutoff.date()
+        elif not isinstance(session_cutoff, date) or isinstance(session_cutoff, datetime):
+            raise InvalidDataRequestError(
+                "resolution session_cutoff_date must be a calendar date"
+            )
+        object.__setattr__(self, "session_cutoff_date", session_cutoff)
+        future = [day for day in ordered if day > session_cutoff]
         if future:
             raise DataCutoffExceededError(
                 "resolved sessions extend past the data cutoff",
@@ -1301,7 +1314,7 @@ class PITMappingResolution:
                     instrument_id=self.instrument_id,
                     source=source,
                     session_date=future[0],
-                    expected=f"<= {cutoff.date().isoformat()}",
+                    expected=f"<= {session_cutoff.isoformat()}",
                     actual=future[0],
                     data_cutoff=cutoff,
                     first_session_past_cutoff=future[0],
@@ -1748,6 +1761,7 @@ def resolve_pit_mappings(
     sessions: Sequence[date],
     mappings: Sequence[InstrumentCodeMapping],
     data_cutoff: datetime,
+    session_cutoff_date: date | None = None,
 ) -> PITMappingResolution:
     """Bind every requested session to exactly one evidenced source code.
 
@@ -1786,7 +1800,17 @@ def resolve_pit_mappings(
     )
     # A session after the cutoff cannot have visible history: asking for
     # one is a caller contract breach, blocked before any resolution.
-    cutoff_date = data_cutoff.date()
+    cutoff_date = data_cutoff.date() if session_cutoff_date is None else session_cutoff_date
+    if not isinstance(cutoff_date, date) or isinstance(cutoff_date, datetime):
+        raise InvalidDataRequestError(
+            "session_cutoff_date must be a calendar date",
+            details=_error_details(
+                instrument_id=instrument_id,
+                source=source,
+                data_cutoff=data_cutoff,
+                actual=cutoff_date,
+            ),
+        )
     future = [day for day in ordered_sessions if day > cutoff_date]
     if future:
         raise DataCutoffExceededError(
@@ -2061,6 +2085,7 @@ def resolve_pit_mappings(
         {
             "coverage_status": PITMappingCoverage.COMPLETE.value,
             "data_cutoff": data_cutoff.isoformat(),
+            "session_cutoff_date": cutoff_date.isoformat(),
             "session_bindings": {
                 day.isoformat(): binding.source_code
                 for day, binding in bindings.items()
@@ -2106,6 +2131,7 @@ def resolve_pit_mappings(
         data_cutoff=data_cutoff,
         coverage_status=PITMappingCoverage.COMPLETE,
         evidence_summary=evidence_summary,
+        session_cutoff_date=cutoff_date,
     )
 
 
@@ -3097,6 +3123,8 @@ class SegmentedAdjustedSeries:
 def read_segmented_adjusted_series(
     resolution: PITMappingResolution,
     reader: SegmentFactorReader,
+    *,
+    cutoff_date: date | None = None,
 ) -> SegmentedAdjustedSeries:
     """Read every segment's factors by source code and stitch one series.
 
@@ -3113,7 +3141,13 @@ def read_segmented_adjusted_series(
     """
 
     collected: dict[date, AdjustedSeriesPoint] = {}
-    cutoff_date = resolution.data_cutoff.date()
+    # Providers with a market-local calendar may pass the already resolved
+    # cutoff date.  The legacy default remains the UTC-surface date for
+    # generic callers, while ETF adapters bind this to Asia/Shanghai.
+    if cutoff_date is None:
+        cutoff_date = resolution.data_cutoff.date()
+    elif not isinstance(cutoff_date, date) or isinstance(cutoff_date, datetime):
+        raise InvalidDataRequestError("cutoff_date must be a calendar date")
     for segment in resolution.segments:
         expected = segment.requested_sessions
         rows = reader.read_factors(
@@ -3139,6 +3173,30 @@ def read_segmented_adjusted_series(
                         "source_code": segment.source_code,
                         "expected_instrument_id": str(resolution.instrument_id),
                         "returned_instrument_id": str(row.instrument_id),
+                        "point_date": row.point_date.isoformat(),
+                    },
+                )
+            # ``AdjustedSeriesPoint`` keeps source coordinates optional for
+            # compatibility with generic providers.  When a reader supplies
+            # them, however, they are authoritative provenance and must
+            # agree with the PIT segment that was queried; otherwise a
+            # cross-code factor could be silently stitched into this history.
+            if row.source_code is not None and row.source_code != segment.source_code:
+                raise ProviderContractViolationError(
+                    "segment reader returned an adjustment factor for another source code",
+                    details={
+                        "source_code": segment.source_code,
+                        "returned_source_code": row.source_code,
+                        "point_date": row.point_date.isoformat(),
+                    },
+                )
+            if _source_key(row.evidence.source) != _source_key(resolution.source):
+                raise ProviderContractViolationError(
+                    "segment reader returned an adjustment factor from another source",
+                    details={
+                        "source_code": segment.source_code,
+                        "expected_source": resolution.source,
+                        "actual_source": row.evidence.source,
                         "point_date": row.point_date.isoformat(),
                     },
                 )

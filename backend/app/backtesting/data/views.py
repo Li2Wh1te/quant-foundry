@@ -35,10 +35,12 @@ from uuid import UUID
 from app.backtesting.calendar_axis import normalize_calendar_id
 from app.backtesting.data.errors import (
     InvalidDataRequestError,
+    ProviderContractViolationError,
     UniverseCalendarNotPreflightedError,
     UnsupportedCapabilityError,
 )
 from app.backtesting.data.facts import (
+    AdjustedSeriesPoint,
     Bar,
     CorporateAction,
     TradingRule,
@@ -46,6 +48,7 @@ from app.backtesting.data.facts import (
 )
 from app.backtesting.data.requests import (
     BarQuery,
+    AdjustedSeriesQuery,
     CorporateActionQuery,
     DateRange,
     LookbackWindow,
@@ -114,9 +117,33 @@ class ChunkEngineDataView:
         raise AttributeError("the engine data view is read-only once constructed")
 
     def bars(self, query: BarQuery) -> tuple[Bar, ...]:
-        """Engine bar read; the chunk enforces its own bounded window."""
+        """Engine bar read; only raw prices may cross this boundary.
 
-        return self._ChunkEngineDataView__chunk.bars(query)
+        The engine has no adjustment semantics.  Rejecting a non-raw query
+        before delegating also protects providers whose chunk implementation
+        does not repeat the same check; returned rows are re-checked for the
+        same reason.
+        """
+
+        if not isinstance(query, BarQuery):
+            raise InvalidDataRequestError("engine bars query must be a BarQuery")
+        if query.price_basis is not PriceBasis.RAW:
+            raise ProviderContractViolationError(
+                "engine bars require the raw price basis; adjusted prices are strategy-only",
+                details={"price_basis": query.price_basis.value},
+            )
+        rows = tuple(self._ChunkEngineDataView__chunk.bars(query))
+        for row in rows:
+            if not isinstance(row, Bar):
+                raise ProviderContractViolationError(
+                    "engine provider returned a non-Bar row"
+                )
+            if row.price_basis is not PriceBasis.RAW:
+                raise ProviderContractViolationError(
+                    "engine provider returned an adjusted bar",
+                    details={"price_basis": row.price_basis.value},
+                )
+        return rows
 
     def trading_rules(self, query: TradingRuleQuery) -> tuple[object, ...]:
         return self._ChunkEngineDataView__chunk.trading_rules(query)
@@ -439,10 +466,17 @@ class ChunkStrategyDataView:
         end_date: date | None = None,
         lookback_sessions: int | None = None,
     ):
-        """Adjusted series stay blocked until their source is verified."""
+        """Read verified adjustment factors for a strategy window.
+
+        The generic chunk session owns factor reads; this view only applies
+        the strategy boundary and converts the immutable provider facts into
+        strategy DTOs.  Providers that do not declare the capability keep the
+        existing ``UnsupportedCapabilityError`` behavior.  Price generation
+        remains an ETF-adapter concern and is never reimplemented here.
+        """
 
         from app.strategy_protocol.contract import AdjustmentNotActiveError
-        from app.strategy_protocol.data_view import AdjustmentBasis
+        from app.strategy_protocol.data_view import AdjustmentBasis, AdjustedSeriesPointDTO
 
         try:
             resolved_basis = AdjustmentBasis(basis)
@@ -455,10 +489,136 @@ class ChunkStrategyDataView:
                 "qfq/hfq series require tushare_adj_factor_native@1 to be "
                 "verified and active"
             )
-        raise UnsupportedCapabilityError(
-            "this run's provider does not serve verified adjusted series",
-            details={"basis": resolved_basis.value},
+        if resolved_basis is AdjustmentBasis.RAW:
+            raise UnsupportedCapabilityError(
+                "raw prices are served through bars(), not adjusted_series()",
+                details={"basis": resolved_basis.value},
+            )
+
+        # Apply the same bounded-window rules as ``bars`` before touching the
+        # chunk.  Keeping this validation local prevents an adjusted read
+        # from widening the fixed run window merely because a provider has a
+        # permissive query implementation.
+        cutoff_date = self._ChunkStrategyDataView__data_cutoff.date()
+        if lookback_sessions is not None:
+            if (
+                isinstance(lookback_sessions, bool)
+                or not isinstance(lookback_sessions, int)
+                or lookback_sessions <= 0
+            ):
+                raise ValueError("lookback_sessions must be a positive integer")
+            if lookback_sessions > MAX_LOOKBACK_SESSIONS:
+                from app.strategy_protocol.contract import LookbackLimitExceededError
+
+                raise LookbackLimitExceededError(
+                    lookback_sessions,
+                    MAX_LOOKBACK_SESSIONS,
+                    instrument_id=instrument_id,
+                    data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+                )
+            if start_date is not None or end_date is not None:
+                raise ValueError(
+                    "pass either lookback_sessions or an explicit date range, "
+                    "never both"
+                )
+        for name, value in (("start_date", start_date), ("end_date", end_date)):
+            if value is None:
+                continue
+            if not isinstance(value, date) or isinstance(value, datetime):
+                raise ValueError(f"{name} must be a calendar date")
+            if value > cutoff_date or (
+                value == cutoff_date
+                and not self._ChunkStrategyDataView__include_cutoff_day
+            ):
+                from app.strategy_protocol.contract import DataCutoffViolationError
+
+                raise DataCutoffViolationError(
+                    value,
+                    cutoff_date,
+                    instrument_id=instrument_id,
+                    session_date=value,
+                    data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+                )
+        if lookback_sessions is None:
+            if start_date is None or end_date is None:
+                raise InvalidDataRequestError(
+                    "an adjusted-series range needs both start_date and end_date; "
+                    "use lookback_sessions for an open-ended history window"
+                )
+            if start_date > end_date:
+                raise ValueError("start_date cannot be after end_date")
+
+        boundary = QueryBoundary(
+            data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+            include_cutoff_day=self._ChunkStrategyDataView__include_cutoff_day,
         )
+        if lookback_sessions is not None:
+            window = LookbackWindow(
+                sessions=lookback_sessions,
+                end_at=self._ChunkStrategyDataView__data_cutoff,
+            )
+        else:
+            window = DateRange(start_date=start_date, end_date=end_date)
+        reader = getattr(self._ChunkStrategyDataView__chunk, "adjusted_series", None)
+        if not callable(reader):
+            raise UnsupportedCapabilityError(
+                "this run's provider does not serve verified adjusted series",
+                details={"basis": resolved_basis.value},
+            )
+        rows = reader(
+            AdjustedSeriesQuery(
+                instrument_ids=instrument_id,
+                frequency=self._ChunkStrategyDataView__frequency,
+                price_basis=PriceBasis(resolved_basis.value),
+                boundary=boundary,
+                window=window,
+            )
+        )
+        result: list[AdjustedSeriesPointDTO] = []
+        previous: date | None = None
+        for row in rows:
+            if isinstance(row, AdjustedSeriesPointDTO):
+                point = row
+            elif isinstance(row, AdjustedSeriesPoint):
+                if row.instrument_id != instrument_id:
+                    raise ProviderContractViolationError(
+                        "provider returned an adjustment point for another instrument"
+                    )
+                if row.price_basis is not PriceBasis(resolved_basis.value):
+                    raise ProviderContractViolationError(
+                        "provider returned an adjustment point with another price basis"
+                    )
+                if row.evidence.quality_status is not QualityStatus.COMPLETE:
+                    raise ProviderContractViolationError(
+                        "provider returned an incomplete adjustment point"
+                    )
+                point = AdjustedSeriesPointDTO(
+                    instrument_id=row.instrument_id,
+                    trade_date=row.point_date,
+                    adj_factor=row.adj_factor,
+                )
+            else:
+                raise ProviderContractViolationError(
+                    "provider returned a non-adjustment-series row"
+                )
+            if point.instrument_id != instrument_id:
+                raise ProviderContractViolationError(
+                    "provider returned an adjustment point for another instrument"
+                )
+            if point.trade_date > cutoff_date or (
+                point.trade_date == cutoff_date
+                and not self._ChunkStrategyDataView__include_cutoff_day
+            ):
+                raise ProviderContractViolationError(
+                    "provider returned an adjustment point beyond the data cutoff"
+                )
+            if previous is not None and point.trade_date <= previous:
+                raise ProviderContractViolationError(
+                    "provider returned adjustment points out of ascending date order"
+                )
+            previous = point.trade_date
+            result.append(point)
+        return tuple(result)
 
     def universe(self, query=None):
         """Dynamic candidate sets are not served by this task package."""

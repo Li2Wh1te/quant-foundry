@@ -295,18 +295,38 @@ class UniverseQuery(Protocol):
 
 
 class AdjustmentPolicyGate:
-    """Immutable boolean gate backed by a named, versioned policy fact.
+    """Immutable gate backed by a named, versioned adjustment policy.
 
     Adjusted series may only be served after the native adjustment-factor
     source has passed real-source verification and been marked active.  The
     gate rejects all attribute writes so strategy code cannot flip it open.
+
+    ``from_policy`` is the strict construction path used by production
+    callers: an inactive or otherwise invalid policy can never activate the
+    gate.  ``active_gate()`` remains as a compatibility constructor for the
+    pre-policy strategy protocol tests; ETF adapters must pass an
+    :class:`AdjustmentSeriesPolicy` instead of using that legacy hook.
     """
 
     POLICY_KEY = "tushare_adj_factor_native@1"
 
-    __slots__ = ("_AdjustmentPolicyGate__active",)
+    __slots__ = (
+        "_AdjustmentPolicyGate__active",
+        "_AdjustmentPolicyGate__policy",
+    )
 
-    def __init__(self, active: bool) -> None:
+    def __init__(self, active: bool, policy=None) -> None:
+        if policy is not None:
+            try:
+                from app.backtesting.data.adjustment_policy import AdjustmentSeriesPolicy
+
+                if not isinstance(policy, AdjustmentSeriesPolicy):
+                    raise TypeError
+                policy.validate_activation() if policy.is_active() else None
+                active = policy.is_active()
+            except (ImportError, TypeError) as exc:
+                raise ValueError("policy must be an AdjustmentSeriesPolicy") from exc
+        object.__setattr__(self, "_AdjustmentPolicyGate__policy", policy)
         object.__setattr__(self, "_AdjustmentPolicyGate__active", bool(active))
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -316,14 +336,50 @@ class AdjustmentPolicyGate:
         raise AttributeError("the adjustment policy gate is read-only")
 
     @classmethod
-    def from_policy_key(cls, policy_key: str | None) -> "AdjustmentPolicyGate":
-        """Only the verified native adjustment source activates the gate."""
+    def from_policy_key(
+        cls, policy_key: str | None, *, policy=None
+    ) -> "AdjustmentPolicyGate":
+        """Construct from a policy reference, validating a supplied policy.
+
+        The no-policy form is retained for old strategy protocol callers that
+        only had a key.  New data adapters should provide ``policy`` so a key
+        alone cannot stand in for real-source evidence.
+        """
+
+        if policy is not None:
+            if policy_key != cls.POLICY_KEY:
+                return cls.inactive_gate()
+            return cls.from_policy(policy)
 
         return cls(active=policy_key == cls.POLICY_KEY)
 
     @classmethod
-    def active_gate(cls) -> "AdjustmentPolicyGate":
-        """Gate for a verified and active native adjustment policy."""
+    def from_policy(cls, policy) -> "AdjustmentPolicyGate":
+        """Build a gate from an immutable, evidence-validated policy."""
+
+        try:
+            from app.backtesting.data.adjustment_policy import AdjustmentSeriesPolicy
+        except ImportError as exc:  # pragma: no cover - import wiring failure
+            raise ValueError("adjustment policy support is unavailable") from exc
+        if not isinstance(policy, AdjustmentSeriesPolicy):
+            raise ValueError("policy must be an AdjustmentSeriesPolicy")
+        if policy.policy_key != cls.POLICY_KEY:
+            return cls.inactive_gate()
+        if policy.is_active():
+            policy.validate_activation()
+        return cls(active=policy.is_active(), policy=policy)
+
+    @classmethod
+    def active_gate(cls, policy=None) -> "AdjustmentPolicyGate":
+        """Gate for a verified and active native adjustment policy.
+
+        Passing a policy uses the strict path.  Calling without one is kept
+        solely for compatibility with the original strategy protocol; it is
+        not an ETF-adapter activation mechanism.
+        """
+
+        if policy is not None:
+            return cls.from_policy(policy)
 
         return cls(active=True)
 
@@ -335,6 +391,12 @@ class AdjustmentPolicyGate:
 
     def is_active(self) -> bool:
         return self._AdjustmentPolicyGate__active
+
+    @property
+    def policy(self):
+        """The immutable policy fact, when this gate was policy-backed."""
+
+        return self._AdjustmentPolicyGate__policy
 
 
 @dataclass(frozen=True, slots=True)
