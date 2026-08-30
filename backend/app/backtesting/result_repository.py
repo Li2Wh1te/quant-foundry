@@ -975,6 +975,9 @@ def _chunk_record(dto: BacktestDataChunkDto) -> dict[str, Any]:
         "time_end": dto.time_end,
         "chunk_strategy_version": dto.chunk_strategy_version,
         "token_digest": dto.token_digest,
+        "consistency_mode": dto.consistency_mode.value,
+        "coverage_summary": _thaw_json(dict(dto.coverage_summary)),
+        "failure_phase": dto.failure_phase,
         "validation_status": dto.validation_status.value,
         "started_at": dto.started_at,
         "finished_at": dto.finished_at,
@@ -1311,6 +1314,28 @@ class BacktestResultRepository:
                 )
             seen.add(identity)
             payloads.append(spec.to_record(dto))
+        if kind == "data_chunks":
+            # Chunk writes are idempotent: an identical existing row is a no-op,
+            # while the same business key with different evidence is a conflict.
+            existing = self.session.scalars(
+                select(spec.record_cls).where(
+                    spec.record_cls.run_id == dtos[0].run_id,
+                    spec.record_cls.phase.in_([d.phase.value for d in dtos]),
+                    spec.record_cls.chunk_sequence.in_([d.chunk_sequence for d in dtos]),
+                )
+            ).all()
+            by_id = {(r.run_id, r.phase, r.chunk_sequence): r for r in existing}
+            filtered = []
+            for dto, payload in zip(dtos, payloads):
+                row = by_id.get((dto.run_id, dto.phase.value, dto.chunk_sequence))
+                if row is None:
+                    filtered.append(payload)
+                    continue
+                if any(getattr(row, k) != v for k, v in payload.items() if k != "run_id"):
+                    raise ResultRecordConflictError(f"data_chunks identity conflict {dto.phase.value}/{dto.chunk_sequence}")
+            payloads = filtered
+            if not payloads:
+                return 0
         try:
             self.session.add_all([spec.record_cls(**payload) for payload in payloads])
             self.session.flush()

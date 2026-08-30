@@ -386,8 +386,11 @@ class BacktestDataChunkItem(_ResultItem):
     time_start: datetime
     time_end: datetime
     chunk_strategy_version: str
-    token_digest: str
     validation_status: str
+    token_digest: str | None = None
+    consistency_mode: str = "chunked_logical_token"
+    coverage_summary: dict | list | None = None
+    failure_phase: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_reason: str | None = None

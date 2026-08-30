@@ -411,6 +411,10 @@ class ChunkValidationStatus(StrEnum):
     PASSED = "passed"
     FAILED = "failed"
 
+class ConsistencyMode(StrEnum):
+    CHUNKED_LOGICAL_TOKEN = "chunked_logical_token"
+    TRANSITIONAL_REPEATABLE_READ = "transitional_repeatable_read"
+
 
 class AnalysisSummaryStatus(StrEnum):
     """Run-level analysis lifecycle persisted on the summary table."""
@@ -1498,8 +1502,11 @@ class BacktestDataChunkRecord:
     time_start: datetime
     time_end: datetime
     chunk_strategy_version: str
-    token_digest: str
+    token_digest: str | None
     validation_status: ChunkValidationStatus
+    consistency_mode: ConsistencyMode = ConsistencyMode.CHUNKED_LOGICAL_TOKEN
+    coverage_summary: Mapping[str, Any] = field(default_factory=dict)
+    failure_phase: str | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     failure_reason: str | None = None
@@ -1520,13 +1527,21 @@ class BacktestDataChunkRecord:
             _required_text(self.chunk_strategy_version, "chunk_strategy_version"),
         )
         object.__setattr__(
-            self, "token_digest", _required_text(self.token_digest, "token_digest")
+            self, "token_digest", _optional_text(self.token_digest, "token_digest")
         )
         object.__setattr__(
             self,
             "validation_status",
             _enum(self.validation_status, ChunkValidationStatus, "validation_status"),
         )
+        object.__setattr__(self, "consistency_mode", _enum(self.consistency_mode, ConsistencyMode, "consistency_mode"))
+        object.__setattr__(self, "coverage_summary", _json_payload(self.coverage_summary, "coverage_summary"))
+        _reject_preflight_sensitive_keys(self.coverage_summary, "coverage_summary")
+        object.__setattr__(self, "failure_phase", _optional_text(self.failure_phase, "failure_phase"))
+        if self.consistency_mode is ConsistencyMode.TRANSITIONAL_REPEATABLE_READ and self.token_digest is not None:
+            raise DomainValidationError("transitional mode requires token_digest to be NULL")
+        if self.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN and self.token_digest is None:
+            raise DomainValidationError("chunked logical token mode requires token_digest")
         if self.started_at is not None:
             object.__setattr__(
                 self, "started_at", _aware_datetime(self.started_at, "started_at")
@@ -1553,6 +1568,7 @@ __all__ = [
     "AnalysisSummaryStatus",
     "AnalyzerState",
     "ChunkValidationStatus",
+    "ConsistencyMode",
     "DataPhase",
     "DataQualityStatus",
     "DecisionValidationStatus",

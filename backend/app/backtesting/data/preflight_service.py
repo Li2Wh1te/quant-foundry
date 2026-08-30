@@ -392,6 +392,7 @@ class PreflightOutcome:
             "hash_match": self.hash_match,
             "report_diff": list(self.report_diff),
             "failure_phase": self.failure_phase,
+            "__consistency__": _consistency_summary(self.report),
         }
         coverage_by_capability = {
             item.capability.value: item.machine_content()
@@ -543,6 +544,7 @@ class PreflightOutcome:
             "manifest_version": report.capability_manifest_version,
             "required_capabilities": [item.value for item in report.required_capabilities],
             PREFLIGHT_METADATA_KEY: metadata,
+            "__consistency__": _consistency_summary(report),
         }
         pit_status = (
             "non_strict"
@@ -703,6 +705,61 @@ def _minimal_blocked_report(
         query_boundary=request.query_boundary,
         hash_schema_version=1,
     )
+
+
+def _consistency_summary(report: DataPreflightReport) -> dict[str, object]:
+    """Build the run-level consistency projection for persisted preflight JSON.
+
+    This is deliberately an operator/persistence projection, not part of the
+    canonical report hash.  Values are derived exclusively from the frozen
+    report and therefore cannot alter execution semantics or introduce a
+    second run-configuration source.
+    """
+    contract = report.consistency_token_contract
+    formal_count = len(report.resolved_sessions)
+    chunk_size = report.data_chunk_size_sessions
+    chunk_count = (formal_count + chunk_size - 1) // chunk_size if chunk_size else 0
+    summary: dict[str, object] = {
+        "provider_key": report.provider_key,
+        "data_contract_version": report.data_contract_version,
+        "consistency_mode": report.consistency_mode.value,
+        "consistency_token_contract": (
+            {"key": contract.key, "version": contract.version}
+            if contract is not None
+            else None
+        ),
+        "max_lookback_sessions": report.max_lookback_sessions,
+        "data_chunk_policy": {
+            "key": report.data_chunk_policy.key,
+            "version": report.data_chunk_policy.version,
+        },
+        "data_chunk_size_sessions": chunk_size,
+        "context_summary": {
+            "formal_session_count": formal_count,
+            "warmup_session_count": len(report.warmup_sessions),
+            "chunk_count": chunk_count,
+        },
+        "chunk_token_summary": {
+            "chunk_count": chunk_count,
+            "chunk_size_sessions": chunk_size,
+            "covered_chunk_start": 0,
+            "covered_chunk_end": chunk_count,
+        },
+    }
+    # Providers may expose a real watermark in session/data revision evidence;
+    # preserve it when present and never synthesize a timestamp or hash.
+    watermark = None
+    for source in (report.session_summary, report.source_revisions):
+        if isinstance(source, Mapping):
+            for key in ("data_watermark", "watermark", "revision_watermark"):
+                if source.get(key) is not None:
+                    watermark = source[key]
+                    break
+        if watermark is not None:
+            break
+    if watermark is not None:
+        summary["data_watermark"] = watermark
+    return summary
 
 
 def _with_report_issues(

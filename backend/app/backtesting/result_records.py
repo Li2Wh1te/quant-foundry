@@ -900,11 +900,14 @@ class BacktestDataChunkRecord(_RunBoundRecord):
         nullable=False,
         comment="Version of the chunking policy that produced boundaries.",
     )
-    token_digest: Mapped[str] = mapped_column(
+    token_digest: Mapped[str | None] = mapped_column(
         String(128),
-        nullable=False,
+        nullable=True,
         comment="Non-sensitive digest identifying the data token.",
     )
+    consistency_mode: Mapped[str] = mapped_column(String(40), nullable=False, comment="Consistency mode.")
+    coverage_summary: Mapped[dict] = mapped_column(JsonType, nullable=False, comment="Bounded consistency coverage evidence.")
+    failure_phase: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="Failure phase when validation failed.")
     validation_status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,

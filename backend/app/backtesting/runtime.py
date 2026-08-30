@@ -100,6 +100,7 @@ from app.strategy_protocol.data_view import (
 from app.backtesting.result_models import (
     InstrumentDisplaySnapshot,
 )
+from app.backtesting.data.requests import ConsistencyValidation, DataChunkQuery, DataCapability
 
 __all__ = [
     "BacktestEventType",
@@ -122,6 +123,7 @@ __all__ = [
     "StrategyProgram",
     "TargetWeightsInterpreter",
     "ValuationBlockedError",
+    "run_data_session",
 ]
 
 
@@ -1560,6 +1562,108 @@ class BacktestRunResult:
 
         value = self.universe_eligibility_summary.get("resolved_calendar_ids", ())
         return tuple(value) if isinstance(value, (tuple, list)) else ()
+
+
+def run_data_session(
+    session: Any,
+    runner: "DeterministicBacktestRunner",
+    *,
+    evidence_sink: Callable[[Any], None] | None = None,
+    fact_types: Sequence[Any] = (DataCapability.BARS,),
+    view_factory: Any | None = None,
+) -> BacktestRunResult:
+    """Drive an existing runner from a preflighted ``DataSession``.
+
+    The coordinator intentionally contains no phase logic: it opens each
+    frozen 20-session chunk, validates consistency before touching the
+    runner, emits non-sensitive evidence, then delegates to ``run_steps``.
+    A failed token is surfaced as ``PhaseExecutionError`` at the explicit
+    ``data_consistency`` phase and cannot trigger strategy or account work.
+    """
+    # The public order follows the task package example ``(session, runner)``;
+    # accept the historical ``(runner, session)`` order for compatibility.
+    if hasattr(session, "_axis") and hasattr(runner, "resolved_sessions"):
+        session, runner = runner, session
+    if session is None or not hasattr(session, "resolved_sessions"):
+        raise DomainValidationError("session must be a DataSession")
+    formal = tuple(session.resolved_sessions)
+    if not formal:
+        raise DomainValidationError("data session contains no formal sessions")
+    axis = getattr(runner, "_axis", None)
+    if axis is None:
+        raise DomainValidationError("runner does not expose an official time axis")
+    # Group official steps by the session date carried in immutable metadata.
+    by_date: dict[date, list[TimeStep]] = {}
+    for step in axis:
+        raw = step.metadata.get("session_date")
+        if isinstance(raw, str):
+            try:
+                by_date.setdefault(date.fromisoformat(raw), []).append(step)
+            except ValueError:
+                continue
+    result: BacktestRunResult | None = None
+    # The data contract fixes chunking to exactly twenty formal sessions.
+    # Never derive a different size from an untrusted adapter attribute: doing
+    # so would make one-shot and chunked execution observe different scopes.
+    size = 20
+    configured_size = getattr(
+        getattr(session, "_request", None), "data_chunk_size_sessions", size
+    )
+    if configured_size != size:
+        raise DomainValidationError(
+            "data session violates fixed_trading_sessions@1 chunk size"
+        )
+    for chunk_index, start in enumerate(range(0, len(formal), size)):
+        chunk_sessions = formal[start : start + size]
+        query = DataChunkQuery(
+            chunk_index=chunk_index,
+            first_session_id=chunk_sessions[0].session_id,
+            last_session_id=chunk_sessions[-1].session_id,
+            fact_types=tuple(fact_types),
+        )
+        chunk = session.open_chunk(query)
+        # DataChunkSession is explicitly a context manager.  Entering it is
+        # part of the consistency boundary (providers may acquire a cursor or
+        # transaction there), and guarantees release even when validation or
+        # a runtime phase raises.
+        with chunk:
+            try:
+                status = chunk.validate_consistency()
+                evidence = chunk.consistency_evidence
+                if evidence_sink is not None:
+                    evidence_sink(evidence)
+                if status.status is not ConsistencyValidation.VALID:
+                    raise PhaseExecutionError(
+                        run_id=str(getattr(runner, "_run_id", "")),
+                        step_sequence=getattr(runner, "_next_expected_step", 0),
+                        phase_sequence=0,
+                        phase_key="data_consistency",
+                        error_type=type(status).__name__,
+                        error_code=status.failure_reason or "data_consistency_failed",
+                        message=status.failure_reason or "consistency validation failed",
+                        details={"chunk_index": chunk_index},
+                    )
+                if view_factory is not None:
+                    binder = getattr(view_factory, "bind_chunk", None)
+                    if callable(binder):
+                        binder(chunk)
+                steps: list[TimeStep] = []
+                for point in chunk_sessions:
+                    steps.extend(by_date.get(point.session_date, ()))
+                if not steps:
+                    raise DomainValidationError(
+                        f"no official timeline steps for chunk {chunk_index}"
+                    )
+                steps.sort(key=lambda item: item.sequence)
+                next_step = axis.at(steps[-1].sequence + 1) if steps[-1].sequence + 1 < len(axis) else None
+                result = runner.run_steps(tuple(steps), next_after_last=next_step)
+            finally:
+                if view_factory is not None:
+                    unbinder = getattr(view_factory, "unbind_chunk", None)
+                    if callable(unbinder):
+                        unbinder(chunk)
+    assert result is not None
+    return result
 
 
 class DeterministicBacktestRunner:

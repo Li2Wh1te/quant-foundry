@@ -266,6 +266,26 @@ class _ChunkUniverseQuery:
         step_cutoff = data_cutoff if data_cutoff is not None else (
             decision_time if decision_time is not None else query.boundary.data_cutoff
         )
+        # A strategy may narrow visibility for an individual decision, but it
+        # must never move the bound later than the cutoff fixed when this view
+        # was admitted.  Enforce this before constructing a new query so a
+        # provider cannot observe an expanded PIT window even transiently.
+        if not isinstance(step_cutoff, datetime) or step_cutoff.tzinfo is None:
+            raise InvalidDataRequestError("data_cutoff must be timezone-aware")
+        view_cutoff = self._ChunkUniverseQuery__view.data_cutoff
+        # Advancing to a later decision date is the normal per-step binding
+        # operation; only an expansion within the same PIT date is forbidden.
+        # Runtime creates a fresh view for each chunk, while this distinction
+        # keeps legacy step resolvers able to move from one session to the
+        # next without permitting an in-session cutoff widening attack.
+        if step_cutoff > view_cutoff and step_date <= query.effective_date:
+            raise InvalidDataRequestError(
+                "strategy universe cutoff cannot expand the bound data_cutoff",
+                details={
+                    "bound_data_cutoff": view_cutoff.isoformat(),
+                    "requested_data_cutoff": step_cutoff.isoformat(),
+                },
+            )
         knowledge_as_of = query.boundary.knowledge_as_of
         if knowledge_as_of is not None and knowledge_as_of > step_cutoff:
             # A step may narrow the cognition cutoff together with the
@@ -1076,6 +1096,41 @@ class ChunkStrategyDataView:
             )
         if not isinstance(query, DataUniverseQuery):
             raise InvalidDataRequestError("query must be a UniverseQuery")
+        # Defensive boundary at the strategy facade: custom/synthetic chunks
+        # may not implement the memory provider's validation, so reject any
+        # attempt to move the cutoff or add calendars before delegation.
+        if query.boundary.data_cutoff > self.__data_cutoff:
+            raise InvalidDataRequestError(
+                "strategy universe cutoff cannot expand the bound data_cutoff",
+                details={
+                    "bound_data_cutoff": self.__data_cutoff.isoformat(),
+                    "requested_data_cutoff": query.boundary.data_cutoff.isoformat(),
+                },
+            )
+        bound_query = self.__bound_universe_query
+        allowed_source = (
+            bound_query.allowed_calendar_ids if bound_query is not None else None
+        )
+        if allowed_source is None:
+            request = getattr(self.__chunk, "_session", None)
+            request = getattr(request, "_request", None)
+            allowed_source = getattr(request, "resolved_calendar_ids", ())
+        if allowed_source:
+            allowed = {
+                normalize_calendar_id(value)
+                for value in allowed_source
+            }
+            requested = {
+                normalize_calendar_id(value)
+                for value in query.allowed_calendar_ids
+            }
+            if requested - allowed:
+                raise InvalidDataRequestError(
+                    "strategy universe query cannot expand preflighted calendars",
+                    details={
+                        "unpreflighted_calendar_ids": sorted(requested - allowed),
+                    },
+                )
         return _ChunkUniverseQuery(self, query)
 
     def _query_universe_specs(self, query: DataUniverseQuery):

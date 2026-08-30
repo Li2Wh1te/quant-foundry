@@ -1098,49 +1098,56 @@ class SqlCalendarAxisDataProvider:
         elif query_boundary is not None and query_boundary != request.query_boundary:
             raise InvalidDataRequestError("snapshot query_boundary must match the request boundary")
         last_failure: CalendarContractError | None = None
-        for attempt in range(2):
-            try:
-                plan = self.prepare_calendar_snapshot(request)
-                snapshot = self.load_calendar_snapshot(plan)
-                self._snapshots[snapshot.snapshot_id] = snapshot
-                self.session.commit()
-                return snapshot
-            except DBAPIError as exc:
-                self.session.rollback()
-                dialect = self.session.get_bind().dialect
-                if not _is_retryable_dbapi_error(exc, dialect=dialect):
-                    self._snapshot_connection = None
-                    self._snapshot_transaction = None
-                    raise ProviderContractViolationError(
-                        "calendar snapshot database operation failed",
-                        details={
-                            "cause_type": type(exc.orig).__name__,
-                            "dialect": dialect.name,
-                        },
-                    ) from exc
-                last_failure = CalendarSnapshotRevisionChangedError(
-                    "calendar snapshot transaction failed before a stable watermark was obtained"
-                )
-            except CalendarSnapshotRevisionChangedError:
-                self.session.rollback()
+        try:
+            for attempt in range(2):
+                try:
+                    plan = self.prepare_calendar_snapshot(request)
+                    snapshot = self.load_calendar_snapshot(plan)
+                    self._snapshots[snapshot.snapshot_id] = snapshot
+                    self.session.commit()
+                    return snapshot
+                except DBAPIError as exc:
+                    self.session.rollback()
+                    dialect = self.session.get_bind().dialect
+                    if not _is_retryable_dbapi_error(exc, dialect=dialect):
+                        raise ProviderContractViolationError(
+                            "calendar snapshot database operation failed",
+                            details={
+                                "cause_type": type(exc.orig).__name__,
+                                "dialect": dialect.name,
+                            },
+                        ) from exc
+                    last_failure = CalendarSnapshotRevisionChangedError(
+                        "calendar snapshot transaction failed before a stable watermark was obtained"
+                    )
+                except CalendarSnapshotRevisionChangedError:
+                    self.session.rollback()
                 # Revision mismatches are stable evidence from this attempt
                 # (including prepare/load index, anchor, and transaction
                 # watermark checks).  Retrying them would repeat the same
                 # semantic failure and could hide the original cause behind
                 # ``calendar_snapshot_retry_exhausted``; only DBAPI failures
                 # below are eligible for the existing transient retry path.
-                raise
-            except CalendarContractError:
-                self.session.rollback()
-                raise
-            if attempt == 1:
-                raise CalendarSnapshotRetryExhaustedError(
-                    "calendar snapshot retry exhausted after one complete retry",
-                    details={"attempts": 2, "cause_code": getattr(last_failure, "code", "calendar_snapshot_revision_changed")},
-                ) from last_failure
+                    raise
+                except CalendarContractError:
+                    self.session.rollback()
+                    raise
+                except Exception:
+                    # Ensure unexpected query failures cannot leave a short
+                    # transaction/connection pinned to this provider.
+                    self.session.rollback()
+                    raise
+                if attempt == 1:
+                    raise CalendarSnapshotRetryExhaustedError(
+                        "calendar snapshot retry exhausted after one complete retry",
+                        details={"attempts": 2, "cause_code": getattr(last_failure, "code", "calendar_snapshot_revision_changed")},
+                    ) from last_failure
+                self._snapshot_connection = None
+                self._snapshot_transaction = None
+            raise AssertionError("unreachable")
+        finally:
             self._snapshot_connection = None
             self._snapshot_transaction = None
-        raise AssertionError("unreachable")
 
     def snapshot(self, snapshot_id: UUID) -> CalendarSnapshot | None:
         return self._snapshots.get(snapshot_id)

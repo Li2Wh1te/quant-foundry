@@ -1467,17 +1467,54 @@ class AuthoritativeDataSession:
     # ------------------------------------------------------------------
 
     def open_chunk(self, query: DataChunkQuery) -> "object":
-        """Chunk opening belongs to the chunk-flow deliverable."""
+        """Open a provider chunk when this session is backed by one.
+
+        Authoritative calendar-only sessions intentionally remain a thin
+        lifecycle object.  Providers that implement the chunk protocol may
+        expose ``open_chunk``; delegation keeps this class from becoming a
+        fact-reading provider while still enforcing the ready/blocked gates.
+        """
 
         if self._state is DataSessionState.CLOSED:
             raise DataSessionClosedError(
                 "the data session is closed; no new chunk may be opened",
                 details={"session_state": self._state.value},
             )
+        if self._state is DataSessionState.CREATED:
+            raise InvalidDataRequestError("open_chunk requires a completed ready preflight")
+        if self._state is DataSessionState.BLOCKED:
+            raise InvalidDataRequestError("a blocked session exposes no official chunks")
+        if not isinstance(query, DataChunkQuery):
+            # Calendar-only sessions historically exposed no chunk protocol;
+            # preserve that capability error for malformed/None probes while
+            # still rejecting valid queries before any provider read.
+            raise UnsupportedCapabilityError("the bound provider does not expose chunk reads")
+        opener = getattr(self._calendar_provider, "open_chunk", None)
+        if callable(opener):
+            try:
+                return opener(query)
+            except TypeError as exc:
+                # Calendar-only providers may expose an unrelated legacy
+                # ``open_chunk`` signature.  Normalize that compatibility
+                # mismatch to the stable capability error instead of leaking
+                # a raw Python argument exception to callers.
+                raise UnsupportedCapabilityError(
+                    "the bound provider does not expose compatible chunk reads",
+                    details={"provider_type": type(self._calendar_provider).__name__},
+                ) from exc
         raise UnsupportedCapabilityError(
-            "the chunk flow is delivered by a later task; this session only "
-            "owns preflight, formal sessions, and warmup sessions"
+            "the bound provider does not expose chunk reads"
         )
+
+    @property
+    def chunk_plan(self) -> tuple[tuple[int, int], ...]:
+        """Deterministic half-open ranges over frozen formal sessions."""
+
+        if self._state is DataSessionState.CREATED:
+            raise InvalidDataRequestError("chunk_plan requires a completed preflight")
+        size = self._request.data_chunk_size_sessions
+        total = len(self._resolved_sessions or ())
+        return tuple((offset, min(offset + size, total)) for offset in range(0, total, size))
 
     # ------------------------------------------------------------------
     # Internals

@@ -592,6 +592,16 @@ class CoverageEnvelope:
     warmup_first_session_date: date | None = None
     warmup_session_count: int = 0
     lookback_envelope_sessions: int = MAX_LOOKBACK_SESSIONS
+    # Stable signatures and scope metadata used by provider token backends.
+    # They are opaque digests (never row data or private handles).
+    axis_session_signature: str | None = None
+    warmup_session_signature: str | None = None
+    history_envelope_signature: str | None = None
+    covered_chunk_start: int = 0
+    covered_chunk_end: int = 1
+    dependency_fact_types: tuple[DataCapability, ...] = ()
+    data_cutoff: datetime | None = None
+    knowledge_as_of: datetime | None = None
 
     def __post_init__(self) -> None:
         first = _plain_date(
@@ -651,6 +661,21 @@ class CoverageEnvelope:
                 self.fact_types, DataCapability, "fact_types", allow_empty=True
             ),
         )
+        for name in ("axis_session_signature", "warmup_session_signature", "history_envelope_signature"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _non_blank_text(value, name))
+        for name in ("covered_chunk_start", "covered_chunk_end"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise InvalidDataRequestError(f"{name} must be a non-negative integer")
+        if self.covered_chunk_end <= self.covered_chunk_start:
+            raise InvalidDataRequestError("covered_chunk_end must be greater than covered_chunk_start")
+        object.__setattr__(self, "dependency_fact_types", _sorted_unique_enum(self.dependency_fact_types, DataCapability, "dependency_fact_types", allow_empty=True))
+        for name in ("data_cutoff", "knowledge_as_of"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _aware_datetime(value, name))
 
     def to_summary(self) -> Mapping[str, object]:
         """Deep-frozen JSON summary safe for results, logs, and evidence."""
@@ -669,6 +694,14 @@ class CoverageEnvelope:
                 "warmup_session_count": self.warmup_session_count,
                 "lookback_envelope_sessions": self.lookback_envelope_sessions,
                 "fact_types": [capability.value for capability in self.fact_types],
+                "dependency_fact_types": [capability.value for capability in self.dependency_fact_types],
+                "axis_session_signature": self.axis_session_signature,
+                "warmup_session_signature": self.warmup_session_signature,
+                "history_envelope_signature": self.history_envelope_signature,
+                "covered_chunk_start": self.covered_chunk_start,
+                "covered_chunk_end": self.covered_chunk_end,
+                "data_cutoff": self.data_cutoff.isoformat() if self.data_cutoff else None,
+                "knowledge_as_of": self.knowledge_as_of.isoformat() if self.knowledge_as_of else None,
             },
             "coverage_envelope",
         )
@@ -687,6 +720,8 @@ class ConsistencyTokenStatus:
     covered_chunk: int | None = None
     covered_fact_types: tuple[DataCapability, ...] = ()
     failure_reason: str | None = None
+    covered_chunk_start: int | None = None
+    covered_chunk_end: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, ConsistencyValidation):
@@ -703,6 +738,12 @@ class ConsistencyTokenStatus:
                 raise InvalidDataRequestError(
                     "covered_chunk must be a non-negative integer"
                 )
+        for name in ("covered_chunk_start", "covered_chunk_end"):
+            value = getattr(self, name)
+            if value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0):
+                raise InvalidDataRequestError(f"{name} must be a non-negative integer")
+        if self.covered_chunk_start is not None and self.covered_chunk_end is not None and self.covered_chunk_end <= self.covered_chunk_start:
+            raise InvalidDataRequestError("covered_chunk_end must be greater than covered_chunk_start")
         object.__setattr__(
             self,
             "covered_fact_types",

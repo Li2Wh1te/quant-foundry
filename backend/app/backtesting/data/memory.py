@@ -4006,8 +4006,18 @@ class MemoryDataChunkSession:
 
     def close(self) -> None:
         """Close this chunk; further reads fail."""
-
+        if self._closed:
+            return
         self._closed = True
+        # Chunk-scoped caches and authorization handles must not survive the
+        # resource boundary; retaining them would create an unbounded,
+        # cross-token cache and leak permissions into a later chunk.
+        self._universe_cache.clear()
+        self._universe_specs.clear()
+        self._universe_filter_reason_counts.clear()
+        self._universe_filter_records.clear()
+        self._universe_last_query_hash = None
+        self._step_candidate_authorized_instrument_ids = frozenset()
 
     def begin_decision_step(self, step_key: object | None = None) -> None:
         """Reset dynamic authorization for a new decision step.
@@ -4213,6 +4223,12 @@ class MemoryDataChunkSession:
             covered_chunk=(
                 self._chunk_index if status is ConsistencyValidation.VALID else None
             ),
+            covered_chunk_start=(
+                self._chunk_index if status is ConsistencyValidation.VALID else None
+            ),
+            covered_chunk_end=(
+                self._chunk_index + 1 if status is ConsistencyValidation.VALID else None
+            ),
             covered_fact_types=(
                 self._fact_types if status is ConsistencyValidation.VALID else ()
             ),
@@ -4390,6 +4406,15 @@ class MemoryDataChunkSession:
                 # request implementation accidentally sharing a cache across
                 # providers with different admission semantics.
                 "request_provider": request.provider_key,
+                # Include the owning chunk's frozen formal scope.  Although
+                # caches are currently chunk-local, this guard prevents a
+                # future adapter from accidentally reusing a query result
+                # across chunks with different PIT/session boundaries.
+                "chunk_scope": {
+                    "chunk_index": self._chunk_index,
+                    "first_session_id": self._sessions[0].session_id,
+                    "last_session_id": self._sessions[-1].session_id,
+                },
             }
         )
 
