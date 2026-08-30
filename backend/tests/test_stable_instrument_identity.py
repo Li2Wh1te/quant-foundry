@@ -1628,11 +1628,27 @@ class MigrationScopeAcceptanceTests(unittest.TestCase):
                 upgraded_metadata,
                 autoload_with=connection,
             )
+            upgraded_display_facts = Table(
+                "instrument_display_facts",
+                upgraded_metadata,
+                autoload_with=connection,
+            )
             self.assertIn("effective_range", upgraded_identity_facts.c)
             self.assertIn("knowledge_range", upgraded_identity_facts.c)
             self.assertNotIn("source", upgraded_identity_facts.c)
             self.assertNotIn("source_revision", upgraded_identity_facts.c)
             self.assertNotIn("source_code", upgraded_identity_facts.c)
+            self.assertEqual(
+                inspect(connection)
+                .get_pk_constraint("instrument_identity_facts")["constrained_columns"],
+                ["id"],
+            )
+            self.assertEqual(
+                inspect(connection)
+                .get_pk_constraint("instrument_display_facts")["constrained_columns"],
+                ["id"],
+            )
+            self.assertIn("id", upgraded_display_facts.c)
             identity_fact_indexes = {
                 index["name"]
                 for index in inspect(connection).get_indexes("instrument_identity_facts")
