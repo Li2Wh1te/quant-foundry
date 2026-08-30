@@ -109,7 +109,7 @@ def sync_fund_div(client, *, session=None, checkpoint_repo=None, sync_key=None,
         advanced = True
     return {"items": items, "fetched": len(raw_rows), "changed": persisted or max(0, len(items)-failed),
             "unchanged": 0, "failed": failed, "skipped_non_target": 0,
-            "checkpoint_advanced": advanced, "conflicts": conflicts}
+            "checkpoint_advanced": advanced, "checkpoint_after": (checkpoint_cursor or {}) if advanced else None, "conflicts": conflicts}
 
 
 def sync_fund_div_full(client, *, ts_codes, session=None, checkpoint_repo=None,
@@ -150,4 +150,5 @@ def sync_fund_div_full(client, *, ts_codes, session=None, checkpoint_repo=None,
         checkpoint_repo.advance(sync_key=sync_key, scope_key="fund_div",
                                 cursor={"ts_codes": list(ts_codes)}, expected_version=None)
         aggregate["checkpoint_advanced"] = True
+        aggregate["checkpoint_after"] = {"ts_codes": list(ts_codes)}
     return aggregate

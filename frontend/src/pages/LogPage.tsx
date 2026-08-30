@@ -74,11 +74,24 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   task_run_failed: { title: "任务失败", summary: "任务执行失败，请查看异常详情。" },
   task_run_worker_crashed: { title: "任务执行器异常退出", summary: "任务执行器异常退出，系统正在补偿结束运行记录。" },
   task_run_failure_recovery_failed: { title: "任务运行记录补偿失败", summary: "任务执行器异常后的运行记录补偿失败，请查看异常详情。" },
-  trade_calendar_sync_planned: { title: "生成采集计划" },
-  trade_calendar_range_started: { title: "开始采集分段" },
-  trade_calendar_range_succeeded: { title: "完成采集分段" },
-  trade_calendar_range_failed: { title: "采集分段失败" },
+  task_run_cancel_requested: { title: "请求取消任务", summary: "Supervisor 已请求取消任务运行，正在等待执行器退出。" },
+  task_run_cancelled: { title: "任务已取消", summary: "任务运行已取消，终态记录已写入。" },
+  task_run_worker_exited: { title: "任务子进程退出", summary: "任务子进程已退出，系统正在核对退出码并写入运行终态。" },
+  task_run_terminal_written: { title: "任务终态已写入", summary: "任务运行终态已写入，完成标记和退出信息可在详情中查看。" },
+  task_run_lost_heartbeat_terminated: { title: "任务心跳失联并终止", summary: "任务运行连续 60 秒无有效心跳，已在取消宽限期后终止，原运行不会重启或复用。" },
+  scheduler_started: { title: "调度器启动", summary: "调度器已启动并加载活动任务。" },
+  scheduler_stopped: { title: "调度器停止", summary: "调度器已停止运行。" },
+  scheduler_disabled: { title: "调度器未启用", summary: "调度器配置为未启用，未执行调度任务。" },
+  task_sync_failed: { title: "任务同步失败", summary: "任务配置同步失败，请查看展开详情。" },
+  scheduled_run_ignored: { title: "计划运行已忽略", summary: "该计划运行与并发策略冲突，已按规则忽略。" },
+  scheduled_run_enqueue_failed: { title: "计划运行入队失败", summary: "计划运行未能加入执行队列，请查看展开详情。" },
+  application_started: { title: "应用启动", summary: "应用服务已启动。" },
+  application_stopped: { title: "应用停止", summary: "应用服务已停止。" },
   trade_calendar_sync_completed: { title: "交易日历采集完成" },
+  trade_calendar_sync_planned: { title: "生成交易日历采集计划", summary: "已生成交易日历采集分段计划。" },
+  trade_calendar_range_started: { title: "开始采集交易日历", summary: "正在采集交易日历分段。" },
+  trade_calendar_range_succeeded: { title: "完成交易日历采集", summary: "交易日历分段已完成，详情包含日期范围和计数。" },
+  trade_calendar_range_failed: { title: "交易日历采集失败", summary: "交易日历分段采集失败，checkpoint 未推进。" },
   trade_calendar_named_sync_planned: { title: "生成具名交易日历采集计划" },
   trade_calendar_named_range_started: { title: "开始采集具名日历", summary: "正在采集具名交易日历分段。" },
   trade_calendar_named_range_succeeded: { title: "完成具名日历采集", summary: "具名交易日历分段已完成，详情包含范围、计数和 checkpoint。" },
@@ -86,6 +99,8 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   calendar_reconciliation_started: { title: "开始日历修订校验", summary: "正在校验日历修订范围和覆盖缺口。" },
   calendar_reconciliation_completed: { title: "完成日历修订校验", summary: "日历修订范围已完成校验并更新覆盖证据。" },
   calendar_reconciliation_blocked: { title: "日历修订校验阻断", summary: "日历修订范围仍有缺口或冲突，checkpoint 未推进。" },
+  corporate_action_calendar_unresolved: { title: "公司行动日历未解析", summary: "公司行动关联的交易日历暂未解析，请查看展开详情。" },
+  legacy_trade_calendar_backfill_completed: { title: "历史交易日历回填完成", summary: "历史交易日历回填已完成。" },
   etf_basic_sync_started: {
     title: "开始采集 ETF 基础信息",
     summary: "正在拉取全部状态的 ETF 基础信息。"
@@ -176,6 +191,12 @@ function describeEntry(entry: LogEntry): string {
 
   const presentation = eventPresentation(entry);
   if (presentation.summary) return presentation.summary;
+
+  // Known events without a backend message still receive a concise Chinese
+  // fallback rather than exposing an English logger payload as the summary.
+  if (typeof entry.event === "string" && EVENT_PRESENTATIONS[entry.event]) {
+    return `${presentation.title}。`;
+  }
 
   // Keep operator-facing summaries Chinese even when a web server or a third
   // party emits only technical English. Raw fields remain available on expand.
@@ -492,10 +513,16 @@ export function LogPage() {
                 <div className="log-entry__detail">
                   <dl>
                     <div><dt>Request ID</dt><dd>{entry.request_id || "—"}</dd></div>
+                    <div><dt>任务 ID</dt><dd>{entry.task_id || "—"}</dd></div>
+                    <div><dt>运行 ID</dt><dd>{entry.run_id || "—"}</dd></div>
+                    <div><dt>任务类型</dt><dd>{entry.task_type || "—"}</dd></div>
+                    <div><dt>错误类型</dt><dd>{entry.error_type || "—"}</dd></div>
+                    <div><dt>错误信息</dt><dd>{entry.error_message || "—"}</dd></div>
                     <div><dt>接口路径</dt><dd>{entry.path || "—"}</dd></div>
                     <div><dt>HTTP 状态</dt><dd>{entry.status_code ?? "—"}</dd></div>
                     <div><dt>耗时</dt><dd>{typeof entry.duration_ms === "number" ? `${entry.duration_ms} ms` : "—"}</dd></div>
                   </dl>
+                  {(entry.stack || entry.exception) && <pre className="log-entry__stack">{entry.stack || entry.exception}</pre>}
                   <pre>{JSON.stringify(entry, null, 2)}</pre>
                 </div>
               </details>

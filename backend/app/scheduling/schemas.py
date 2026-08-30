@@ -40,6 +40,9 @@ class RunStatus(StrEnum):
     FAILED = "failed"
     SKIPPED = "skipped"
     INTERRUPTED = "interrupted"
+    CANCELLED = "cancelled"
+    TIMED_OUT = "timed_out"
+    INDETERMINATE = "indeterminate"
 
 
 class CronSchedule(BaseModel):
@@ -165,6 +168,15 @@ class TaskRunResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    current_trading_date: str | None
+    current_step: str | None
+    progress: float = Field(ge=0.0, le=1.0)
+    last_heartbeat_at: datetime | None
+    worker_id: str | None
+    exit_code: int | None
+    completion_marker: str | None
+    failure_phase: str | None
+    cancellation_requested_at: datetime | None
 
 
 class TaskResponse(BaseModel):

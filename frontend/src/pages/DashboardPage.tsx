@@ -73,7 +73,10 @@ function runStatusLabel(run: TaskRun): string {
     succeeded: "运行成功",
     failed: "运行失败",
     skipped: "已跳过",
-    interrupted: "已中断"
+    interrupted: "已中断",
+    cancelled: "已取消",
+    timed_out: "已超时",
+    indeterminate: "状态不确定"
   }[run.status];
 }
 

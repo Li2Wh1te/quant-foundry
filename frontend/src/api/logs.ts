@@ -15,6 +15,15 @@ export interface LogEntry {
   request_id?: string;
   service?: string;
   environment?: string;
+  /** Common scheduler context fields retained for the expanded detail view. */
+  message?: string;
+  task_id?: string;
+  run_id?: string;
+  task_type?: string;
+  error_type?: string;
+  error_message?: string;
+  stack?: string;
+  exception?: string;
   [key: string]: unknown;
 }
 

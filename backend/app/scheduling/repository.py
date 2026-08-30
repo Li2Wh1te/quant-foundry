@@ -16,6 +16,9 @@ TERMINAL_RUN_STATUSES = (
     RunStatus.FAILED.value,
     RunStatus.SKIPPED.value,
     RunStatus.INTERRUPTED.value,
+    RunStatus.CANCELLED.value,
+    RunStatus.TIMED_OUT.value,
+    RunStatus.INDETERMINATE.value,
 )
 
 
@@ -192,6 +195,7 @@ class SchedulerRepository:
         for run, task in candidates:
             run.status = RunStatus.RUNNING.value
             run.started_at = now
+            run.last_heartbeat_at = now
             claimed.append(run.id)
         self.session.flush()
         return claimed
@@ -204,24 +208,87 @@ class SchedulerRepository:
         result: dict | None = None,
         error_type: str | None = None,
         error_message: str | None = None,
+        exit_code: int | None = None,
+        completion_marker: str | None = None,
+        failure_phase: str | None = None,
     ) -> bool:
         if status.value not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"non-terminal run status: {status}")
+        values = dict(
+            status=status.value,
+            result=result,
+            error_type=error_type,
+            error_message=error_message,
+            exit_code=exit_code,
+            completion_marker=completion_marker,
+            failure_phase=failure_phase,
+            finished_at=datetime.now(UTC),
+        )
+        if status == RunStatus.SUCCEEDED:
+            values["progress"] = 1.0
         statement = (
             update(TaskRun)
             .where(
                 TaskRun.id == run_id,
                 TaskRun.status == RunStatus.RUNNING.value,
             )
+            .values(**values)
+        )
+        return (self.session.execute(statement).rowcount or 0) == 1
+
+    def update_progress(
+        self,
+        run_id: UUID,
+        *,
+        current_trading_date: str | None,
+        current_step: str,
+        progress: float,
+        worker_id: str | None = None,
+    ) -> bool:
+        """Persist monotonic execution progress and a valid heartbeat atomically."""
+        if not 0.0 <= progress <= 1.0:
+            raise ValueError("progress must be between 0 and 1")
+        now = datetime.now(UTC)
+        statement = (
+            update(TaskRun)
+            .where(
+                TaskRun.id == run_id,
+                TaskRun.status == RunStatus.RUNNING.value,
+                TaskRun.progress <= progress,
+            )
             .values(
-                status=status.value,
-                result=result,
-                error_type=error_type,
-                error_message=error_message,
-                finished_at=datetime.now(UTC),
+                current_trading_date=current_trading_date,
+                current_step=current_step,
+                progress=progress,
+                last_heartbeat_at=now,
+                worker_id=worker_id,
             )
         )
         return (self.session.execute(statement).rowcount or 0) == 1
+
+    def heartbeat(self, run_id: UUID, *, worker_id: str | None = None) -> bool:
+        statement = (
+            update(TaskRun)
+            .where(TaskRun.id == run_id, TaskRun.status == RunStatus.RUNNING.value)
+            .values(last_heartbeat_at=datetime.now(UTC), worker_id=worker_id)
+        )
+        return (self.session.execute(statement).rowcount or 0) == 1
+
+    def request_cancellation(self, run_id: UUID) -> bool:
+        statement = (
+            update(TaskRun)
+            .where(TaskRun.id == run_id, TaskRun.status == RunStatus.RUNNING.value)
+            .values(cancellation_requested_at=datetime.now(UTC))
+        )
+        return (self.session.execute(statement).rowcount or 0) == 1
+
+    def list_lost_heartbeat_runs(self, *, cutoff: datetime) -> list[UUID]:
+        statement = select(TaskRun.id).where(
+            TaskRun.status == RunStatus.RUNNING.value,
+            TaskRun.last_heartbeat_at.is_not(None),
+            TaskRun.last_heartbeat_at < cutoff,
+        )
+        return list(self.session.scalars(statement))
 
     def interrupt_running_runs(self) -> int:
         now = datetime.now(UTC)

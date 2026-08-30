@@ -10,6 +10,7 @@ FUND_DIV_FIELDS = (
     "pay_date,earpay_date,net_ex_date,div_cash,base_unit,ear_distr,ear_amount,"
     "account_date,base_year"
 )
+SUSPEND_FIELDS = "ts_code,trade_date,suspend_type,suspend_timing"
 
 
 class TushareClient:
@@ -31,3 +32,11 @@ class TushareClient:
                                  start_date=start_date, end_date=end_date,
                                  offset=offset, limit=limit,
                                  fields=FUND_DIV_FIELDS)
+
+    def suspend_d(self, *, ts_code: str | None = None, trade_date: str | None = None,
+                  start_date: str | None = None, end_date: str | None = None,
+                  offset: int = 0, limit: int = 5000):
+        """Fetch daily suspension/trading-status facts from Tushare."""
+        return self.pro.suspend_d(ts_code=ts_code, trade_date=trade_date,
+                                  start_date=start_date, end_date=end_date,
+                                  offset=offset, limit=limit, fields=SUSPEND_FIELDS)
