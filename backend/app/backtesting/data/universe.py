@@ -59,6 +59,7 @@ __all__ = [
     "CANDIDATE_QUALIFICATION_UNAVAILABLE",
     "CANDIDATE_RULE_INCOMPLETE",
     "CANDIDATE_STATUS_INCOMPLETE",
+    "CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH",
     "CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE",
     "CandidateEligibility",
     "CandidateEligibilityContext",
@@ -95,8 +96,20 @@ CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE = (
     "candidate_quantity_action_coverage_incomplete"
 )
 CANDIDATE_STATUS_INCOMPLETE = "candidate_status_incomplete"
+CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH = (
+    "trading_status_capability_requirement_mismatch"
+)
 CANDIDATE_PIT_BOUNDARY_VIOLATION = "universe_pit_boundary_violation"
 CANDIDATE_QUALIFICATION_UNAVAILABLE = "candidate_qualification_unavailable"
+
+# These are the only trading-status dimensions understood by the v1 rule
+# contract.  Keep the order stable so required-dimension evidence has the
+# same representation regardless of provider mapping order.
+_STATUS_DIMENSIONS = (
+    "suspension",
+    "opening_availability",
+    "price_limit_tradability",
+)
 
 
 class UniverseScopeStatus(StrEnum):
@@ -980,6 +993,11 @@ class CandidateInput:
     corporate_action_evidence: Mapping[str, object] = dc_field(default_factory=dict)
     quantity_action_coverage_evidence: Mapping[str, object] = dc_field(default_factory=dict)
     status_evidence: Mapping[str, object] = dc_field(default_factory=dict)
+    # The candidate's own frozen rule declaration, when available.  This is
+    # intentionally separate from request-level capabilities because a
+    # dynamic candidate may require STATUS even when the run did not request
+    # it.
+    trading_status_policy: Mapping[str, object] | None = None
     metadata: Mapping[str, object] = dc_field(default_factory=dict)
     coverage_qualification: object | None = None
     coverage_result: object | None = None
@@ -1012,6 +1030,12 @@ class CandidateInput:
             "metadata",
         ):
             object.__setattr__(self, name, _freeze_mapping(getattr(self, name), name))
+        if self.trading_status_policy is not None:
+            object.__setattr__(
+                self,
+                "trading_status_policy",
+                _freeze_mapping(self.trading_status_policy, "trading_status_policy"),
+            )
         object.__setattr__(self, "reason_codes", _sorted_codes(self.reason_codes))
 
 
@@ -1036,6 +1060,7 @@ class CandidateEligibility:
     corporate_action_evidence: Mapping[str, object] = dc_field(default_factory=dict)
     quantity_action_coverage_evidence: Mapping[str, object] = dc_field(default_factory=dict)
     status_evidence: Mapping[str, object] = dc_field(default_factory=dict)
+    required_status_dimensions: tuple[str, ...] = ()
     failed_check: str | None = None
     expected: object | None = None
     actual: object | None = None
@@ -1064,6 +1089,33 @@ class CandidateEligibility:
             "evidence_summary",
         ):
             object.__setattr__(self, name, _freeze_mapping(getattr(self, name), name))
+        dimensions = self.required_status_dimensions
+        if isinstance(dimensions, (str, bytes)):
+            raise InvalidDataRequestError(
+                "required_status_dimensions must be an iterable of dimension strings"
+            )
+        try:
+            dimensions = tuple(dimensions)
+        except TypeError as exc:
+            raise InvalidDataRequestError(
+                "required_status_dimensions must be an iterable of dimension strings"
+            ) from exc
+        if any(
+            not isinstance(item, str) or item not in _STATUS_DIMENSIONS
+            for item in dimensions
+        ):
+            raise InvalidDataRequestError(
+                "required_status_dimensions contains an unknown dimension"
+            )
+        object.__setattr__(
+            self,
+            "required_status_dimensions",
+            tuple(
+                dimension
+                for dimension in _STATUS_DIMENSIONS
+                if dimension in set(dimensions)
+            ),
+        )
         if self.failed_check is not None:
             object.__setattr__(self, "failed_check", _non_blank(self.failed_check, "failed_check"))
         object.__setattr__(self, "expected", _freeze_value(self.expected, "expected"))
@@ -1106,6 +1158,7 @@ class CandidateEligibility:
                 "corporate_action_evidence": _stable_audit_value(self.corporate_action_evidence),
                 "quantity_action_coverage_evidence": _stable_audit_value(self.quantity_action_coverage_evidence),
                 "status_evidence": _stable_audit_value(self.status_evidence),
+                "required_status_dimensions": self.required_status_dimensions,
                 "failed_check": self.failed_check,
                 "expected": self.expected,
                 "actual": self.actual,
@@ -1125,6 +1178,7 @@ class CandidateEligibility:
             "failed_check": self.failed_check,
             "expected": _json_value(self.expected),
             "actual": _json_value(self.actual),
+            "required_status_dimensions": self.required_status_dimensions,
             "evidence_summary": self.evidence_summary,
             "qualification_hash": self.qualification_hash,
         }
@@ -1138,6 +1192,12 @@ class CandidateEligibility:
         return hashlib.sha256(
             json.dumps(_json_value(self.machine_content()), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
         ).hexdigest()
+
+    @property
+    def candidate_required_status_dimensions(self) -> tuple[str, ...]:
+        """Compatibility alias for candidate-level audit consumers."""
+
+        return self.required_status_dimensions
 
 
 CandidateEligibilityResult = CandidateEligibility
@@ -1336,6 +1396,29 @@ def _evidence_complete(evidence: object) -> bool:
     return False
 
 
+def _status_evidence_complete(evidence: object) -> bool:
+    """Require a positive fact and reject an N/A declaration as a fact.
+
+    ``not_applicable`` is a rule declaration, not evidence that can satisfy a
+    request which explicitly requires trading status.  Keep this distinction
+    local to the status dimension so the generic evidence helper remains
+    reusable for other optional dimensions.
+    """
+
+    normalized = _as_evidence_mapping(evidence)
+    if not normalized or _evidence_failed(normalized):
+        return False
+    applicability = _mapping_value(
+        normalized, "applicability", "trading_status_applicability"
+    )
+    quality = _mapping_value(normalized, "quality_status", "status")
+    for value in (applicability, quality):
+        value = getattr(value, "value", value)
+        if isinstance(value, str) and value.strip().lower() == "not_applicable":
+            return False
+    return _evidence_complete(normalized)
+
+
 def _issue_code(issue: object) -> str | None:
     """Project a provider issue to its stable code without serializing it."""
 
@@ -1392,6 +1475,117 @@ def _classify_issue(code: str) -> str:
     if "bar" in lowered or "history" in lowered or "coverage" in lowered:
         return CANDIDATE_MARKET_DATA_INCOMPLETE
     return code
+
+
+def _status_aware_reason_codes(
+    codes: Iterable[str], *, status_required: bool
+) -> tuple[str, ...]:
+    """Ignore upstream status failures when the request does not use STATUS.
+
+    A provider may expose one broad qualification result containing evidence
+    for dimensions that are not part of the frozen request.  Those unused
+    status observations must not alter the candidate set.  When STATUS is
+    required, preserve the upstream codes so the existing fail-closed path
+    remains authoritative.
+    """
+
+    if status_required:
+        return tuple(codes)
+    return tuple(
+        code
+        for code in codes
+        if _classify_issue(code) != CANDIDATE_STATUS_INCOMPLETE
+    )
+
+
+_STATUS_POLICY_MISSING = object()
+
+
+def _status_policy_source(candidate: object, spec: object | None) -> object:
+    """Find the candidate-owned status declaration without deriving one."""
+
+    sources: list[object] = [candidate]
+    if spec is not None:
+        sources.append(spec)
+    # A qualification result may carry the resolved rule evidence instead of
+    # attaching it directly to the candidate row.  It is still candidate
+    # evidence and remains bounded by the already-resolved provider result.
+    for source in tuple(sources):
+        for nested_name in (
+            "qualification",
+            "coverage_qualification",
+            "coverage_result",
+        ):
+            nested = _candidate_value(source, nested_name, None)
+            if nested is not None:
+                sources.append(nested)
+
+    for source in sources:
+        for field_name in (
+            "trading_status_policy",
+            "trading_status_applicability",
+            "capability_declarations",
+        ):
+            value = _candidate_value(source, field_name, _STATUS_POLICY_MISSING)
+            if value is not _STATUS_POLICY_MISSING and value is not None:
+                return value
+        rule_evidence = _candidate_value(source, "rule_evidence", None)
+        if isinstance(rule_evidence, Mapping):
+            for field_name in (
+                "trading_status_policy",
+                "trading_status_applicability",
+                "capability_declarations",
+            ):
+                value = rule_evidence.get(field_name, _STATUS_POLICY_MISSING)
+                if value is not _STATUS_POLICY_MISSING and value is not None:
+                    return value
+            # Some providers flatten the declaration into rule_evidence while
+            # keeping unrelated qualification fields beside it.
+            if set(rule_evidence).intersection(_STATUS_DIMENSIONS):
+                return {
+                    dimension: rule_evidence[dimension]
+                    for dimension in _STATUS_DIMENSIONS
+                    if dimension in rule_evidence
+                }
+    return _STATUS_POLICY_MISSING
+
+
+def _candidate_status_policy_requirements(
+    candidate: object, spec: object | None
+) -> tuple[tuple[str, ...] | None, bool, bool]:
+    """Return required status dimensions and declaration validity.
+
+    The first tuple item is ``None`` only when no declaration was supplied.
+    A supplied but incomplete/invalid mapping is reported separately so the
+    caller can fail the candidate as a rule qualification error rather than
+    silently treating it as all ``not_applicable``.
+    """
+
+    source = _status_policy_source(candidate, spec)
+    if source is _STATUS_POLICY_MISSING:
+        return None, True, False
+    if not isinstance(source, Mapping):
+        return (), False, True
+    if set(source) != set(_STATUS_DIMENSIONS):
+        return (), False, True
+    normalized: dict[str, str] = {}
+    for dimension in _STATUS_DIMENSIONS:
+        value = getattr(source[dimension], "value", source[dimension])
+        if not isinstance(value, str):
+            return (), False, True
+        value = value.strip().lower()
+        if value not in {"required", "not_applicable"}:
+            return (), False, True
+        normalized[dimension] = value
+    return (
+        tuple(
+            dimension
+            for dimension in _STATUS_DIMENSIONS
+            if normalized[dimension] == "required"
+        ),
+        True,
+        True,
+    )
 
 
 def _candidate_evidence(candidate: object, spec: object | None, name: str) -> Mapping[str, object]:
@@ -1454,13 +1648,55 @@ def evaluate_candidate(
     evidence = {
         name: _candidate_evidence(candidate, spec, name) for name in evidence_names
     }
+    dynamic_scope = context.scope_mode in (
+        InstrumentScopeMode.DYNAMIC,
+        InstrumentScopeMode.HYBRID,
+    ) or bool(
+        context.universe_query_policy is not None
+        and context.universe_query_policy.has_candidate_rules
+    )
+    (
+        required_status_dimensions,
+        status_declaration_valid,
+        status_declaration_present,
+    ) = _candidate_status_policy_requirements(candidate, spec)
+    if not status_declaration_valid or (
+        dynamic_scope and spec is not None and not status_declaration_present
+    ):
+        # A resolved provider spec must carry the complete status declaration;
+        # a missing or malformed declaration is a rule qualification failure,
+        # never an implicit all-N/A decision.
+        required_status_dimensions = ()
+    status_requested = DataCapability.STATUS in context.required_capabilities
+    # A missing declaration remains fail-closed when the request explicitly
+    # asks for STATUS.  A valid all-N/A declaration, however, makes status
+    # evidence irrelevant even if a broader request carries STATUS for some
+    # other candidate.
+    status_required = status_requested and (
+        not status_declaration_present
+        or not status_declaration_valid
+        or bool(required_status_dimensions)
+    )
     reasons: list[str] = []
-    existing_codes = _existing_reason_codes(candidate)
+    existing_codes = _status_aware_reason_codes(
+        _existing_reason_codes(candidate), status_required=status_required
+    )
     # Upstream qualifications already expose stable machine codes.  Preserve
     # those codes verbatim for audit/counting instead of collapsing them into
     # a second vocabulary; task-15 adds its own stable codes only for checks
     # performed at this boundary.
     reasons.extend(existing_codes)
+    if not status_declaration_valid or (
+        dynamic_scope and spec is not None and not status_declaration_present
+    ):
+        reasons.append(CANDIDATE_RULE_INCOMPLETE)
+    if (
+        dynamic_scope
+        and status_declaration_valid
+        and required_status_dimensions
+        and not status_requested
+    ):
+        reasons.append(CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH)
 
     # 1. PIT identity: calendar and core identity fields must come from a
     # resolved fact.  No source code or current catalogue fallback is used.
@@ -1539,21 +1775,9 @@ def evaluate_candidate(
         reasons.append(CANDIDATE_CORPORATE_ACTION_INCOMPLETE)
     if _evidence_failed(evidence["quantity_action_coverage_evidence"]):
         reasons.append(CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE)
-    status_required = DataCapability.STATUS in context.required_capabilities
     if status_required and _evidence_failed(evidence["status_evidence"]):
         reasons.append(CANDIDATE_STATUS_INCOMPLETE)
-    elif _evidence_failed(evidence["status_evidence"]):
-        # An explicitly bad status fact is still a qualification failure even
-        # when the run's rule package says the dimension is optional.
-        reasons.append(CANDIDATE_STATUS_INCOMPLETE)
 
-    dynamic_scope = context.scope_mode in (
-        InstrumentScopeMode.DYNAMIC,
-        InstrumentScopeMode.HYBRID,
-    ) or bool(
-        context.universe_query_policy is not None
-        and context.universe_query_policy.has_candidate_rules
-    )
     # Dynamic candidates must be backed by the upstream PIT qualification
     # port for identity/mapping/rules.  No current catalogue fallback can
     # turn an empty evidence object into a ready candidate.
@@ -1577,7 +1801,12 @@ def evaluate_candidate(
     if status_required:
         required_evidence.append(("status_evidence", CANDIDATE_STATUS_INCOMPLETE))
     for evidence_name, reason_code in required_evidence:
-        if not _evidence_complete(evidence[evidence_name]):
+        evidence_complete = (
+            _status_evidence_complete(evidence[evidence_name])
+            if evidence_name == "status_evidence"
+            else _evidence_complete(evidence[evidence_name])
+        )
+        if not evidence_complete:
             reasons.append(reason_code)
 
     # 9. Known-at and effective-date checks.  These compare explicit provider
@@ -1623,7 +1852,31 @@ def evaluate_candidate(
         },
         "resolved_calendar_ids": context.resolved_calendar_ids,
         "upstream_reason_codes": existing_codes,
+        "required_status_dimensions": required_status_dimensions or (),
+        "status_capability_requested": status_requested,
     }
+    mismatch = CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH in reason_codes
+    expected = (
+        {"required_capability": DataCapability.STATUS.value}
+        if mismatch
+        else (
+            context.resolved_calendar_ids
+            if CANDIDATE_CALENDAR_NOT_PREFLIGHTED in reason_codes
+            else None
+        )
+    )
+    actual = (
+        {
+            "required_status_dimensions": required_status_dimensions,
+            "status_capability_requested": status_requested,
+        }
+        if mismatch
+        else (
+            calendar_id
+            if CANDIDATE_CALENDAR_NOT_PREFLIGHTED in reason_codes
+            else None
+        )
+    )
     return CandidateEligibility(
         instrument_id=instrument_id,
         eligible=not reason_codes,
@@ -1636,9 +1889,10 @@ def evaluate_candidate(
         corporate_action_evidence=evidence["corporate_action_evidence"],
         quantity_action_coverage_evidence=evidence["quantity_action_coverage_evidence"],
         status_evidence=evidence["status_evidence"],
+        required_status_dimensions=required_status_dimensions or (),
         failed_check=reason_codes[0] if reason_codes else None,
-        expected=(context.resolved_calendar_ids if CANDIDATE_CALENDAR_NOT_PREFLIGHTED in reason_codes else None),
-        actual=calendar_id if CANDIDATE_CALENDAR_NOT_PREFLIGHTED in reason_codes else None,
+        expected=expected,
+        actual=actual,
         evidence_summary=summary,
     )
 

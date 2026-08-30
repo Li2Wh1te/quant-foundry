@@ -216,6 +216,18 @@ class InstrumentRulePreflightResult:
     selected_fact_references: tuple[VersionedReference, ...]
     issues: tuple[RulePackageIssue, ...]
 
+    @property
+    def required_trading_status_dimensions(self) -> tuple[str, ...]:
+        """Return dimensions required by this instrument's frozen segments."""
+
+        dimensions = {
+            dimension
+            for segment in self.resolved_segments
+            for dimension, requirement in segment.capability_declarations.items()
+            if requirement == "required"
+        }
+        return tuple(sorted(dimensions))
+
 
 @dataclass(frozen=True, slots=True)
 class RulePreflightReport:
@@ -241,6 +253,30 @@ class RulePreflightReport:
     snapshot_bundle: RunRuleSnapshotBundle | None = None
     snapshot_hash: str = ""
     report_hash: str = ""
+
+    @property
+    def required_trading_status_dimensions(self) -> tuple[str, ...]:
+        """Return the union of required status dimensions in the bundle.
+
+        The bundle is the authoritative source for request consistency.  A
+        blocked report intentionally has no bundle and therefore reports an
+        empty tuple; callers must still honor its blocked status instead of
+        treating that empty projection as a valid all-N/A result.
+        """
+
+        bundle = self.snapshot_bundle
+        if bundle is None:
+            return ()
+        dimensions = {
+            dimension
+            for segment in bundle.instrument_segments
+            for dimension, requirement in segment.capability_declarations.items()
+            if requirement == "required"
+        }
+        return tuple(sorted(dimensions))
+
+    # Short alias for integrations that use the task wording directly.
+    required_status_dimensions = required_trading_status_dimensions
 
     def __post_init__(self) -> None:
         # Machine judgment relies on the exact READY/BLOCKED vocabulary;

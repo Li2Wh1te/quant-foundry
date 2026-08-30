@@ -297,6 +297,51 @@ class ReadyPathTestCase(unittest.TestCase):
             "not_applicable",
         )
 
+    def test_all_not_applicable_snapshot_skips_status_fact_gateway(self) -> None:
+        instrument_id = uuid4()
+        fields = complete_fields()
+        fields["trading_status_applicability"] = {
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        gateway = FakeGateway({instrument_id: [make_fact(instrument_id, fields=fields)]})
+        report = make_service(gateway).run(make_request([instrument_id]))
+
+        self.assertIs(report.status, ResolutionStatus.READY)
+        self.assertEqual(gateway.status_queries, [])
+        self.assertEqual(report.required_trading_status_dimensions, ())
+        result = report.checked_instruments[0]
+        self.assertIs(result.capability_check_status, RuleCheckStatus.OK)
+        bundle = report.snapshot_bundle
+        assert bundle is not None
+        self.assertEqual(
+            dict(bundle.instrument_segments[0].capability_declarations),
+            fields["trading_status_applicability"],
+        )
+
+    def test_applicability_change_changes_snapshot_hash(self) -> None:
+        instrument_id = uuid4()
+        na_fields = complete_fields()
+        na_fields["trading_status_applicability"] = {
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        required_fields = dict(na_fields)
+        required_fields["trading_status_applicability"] = {
+            **na_fields["trading_status_applicability"],
+            "suspension": "required",
+        }
+        na_gateway = FakeGateway({instrument_id: [make_fact(instrument_id, fields=na_fields)]})
+        required_gateway = FakeGateway({instrument_id: [make_fact(instrument_id, fields=required_fields)]})
+        na_report = make_service(na_gateway).run(make_request([instrument_id]))
+        required_report = make_service(required_gateway).run(make_request([instrument_id]))
+
+        self.assertIs(na_report.status, ResolutionStatus.READY)
+        self.assertIs(required_report.status, ResolutionStatus.READY)
+        self.assertNotEqual(na_report.snapshot_hash, required_report.snapshot_hash)
+
     def test_unregistered_package_is_a_structured_block(self) -> None:
         instrument_id = uuid4()
         service = FixedInstrumentRulePreflightService(

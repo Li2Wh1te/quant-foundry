@@ -51,8 +51,8 @@ def _values(*, lot_size: str = "200", price_tick: str = "0.05") -> dict:
         "sellable_rule": VersionedReference("sell_rule", 1),
         "fee_categories": ("none",),
         "trading_status_applicability": {
-            "suspension": "required",
-            "opening_availability": "required",
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
             "price_limit_tradability": "not_applicable",
         },
         "currency": "CNY",
@@ -93,7 +93,11 @@ def _segment(
         normal_fact_reference=VersionedReference("etf_rule_fact", 3),
         exception_fact_reference=None,
         normalized_values=_values(lot_size=lot_size),
-        capability_declarations={"suspension": "required"},
+        capability_declarations={
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        },
         provenance=provenance,
         resolution_hash="r" * 64,
     )

@@ -28,6 +28,7 @@ _SUBMODULE_EXPORTS: dict[str, str] = {
     "ERROR_CODES": "errors",
     "DataContractError": "errors",
     "InvalidDataRequestError": "errors",
+    "TradingStatusCapabilityRequirementMismatchError": "errors",
     "UnsupportedCapabilityError": "errors",
     "DataPreflightBlockedError": "errors",
     "DataPreflightConfirmationMismatchError": "errors",
@@ -170,6 +171,7 @@ _SUBMODULE_EXPORTS: dict[str, str] = {
     "CANDIDATE_CORPORATE_ACTION_INCOMPLETE": "universe",
     "CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE": "universe",
     "CANDIDATE_STATUS_INCOMPLETE": "universe",
+    "CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH": "universe",
     "CANDIDATE_PIT_BOUNDARY_VIOLATION": "universe",
     "CANDIDATE_QUALIFICATION_UNAVAILABLE": "universe",
     # facts
@@ -415,6 +417,7 @@ __all__ = [
     "UnsupportedCapabilityError",
     "DataPreflightBlockedError",
     "DataPreflightConfirmationMismatchError",
+    "TradingStatusCapabilityRequirementMismatchError",
     "DataSessionClosedError",
     "DataCutoffExceededError",
     "DataCutoffRequiredError",
@@ -668,6 +671,7 @@ __all__ = [
     "CANDIDATE_CORPORATE_ACTION_INCOMPLETE",
     "CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE",
     "CANDIDATE_STATUS_INCOMPLETE",
+    "CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH",
     "CANDIDATE_PIT_BOUNDARY_VIOLATION",
     "CANDIDATE_QUALIFICATION_UNAVAILABLE",
     # session runtime + warmup resolution (task 02-02)

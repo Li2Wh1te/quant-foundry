@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
+from types import MappingProxyType
 from typing import Any, Iterable, Mapping, Protocol, Sequence, runtime_checkable
 from uuid import UUID
 
@@ -54,6 +55,11 @@ from app.backtesting.data.universe import (
     UniverseScopeStatus,
     scope_issue,
     merge_calendar_ids,
+)
+from app.instruments.domain import VersionedReference
+from app.instruments.rules.contracts import (
+    CAPABILITY_DIMENSIONS,
+    TradingStatusRequirement,
 )
 
 
@@ -140,10 +146,144 @@ class IdentityMappingEntry:
 
 @dataclass(frozen=True, slots=True)
 class InstrumentRulesFacts:
-    """Resolved rule package facts, including declared applicability."""
+    """Resolved rule evidence with an explicit trading-status declaration.
 
-    rule_package_id: str
-    requires_trading_status_facts: bool
+    The old DTO carried a caller-supplied ``requires_trading_status_facts``
+    boolean.  That value could not prove that every applicability dimension
+    had actually been resolved, so a malformed or partial rule packet could
+    accidentally be treated as ``not_applicable``.  The gateway now carries
+    the rule-package reference and the complete declaration instead; the
+    boolean below is only a derived convenience property and is never an
+    input to the gate.
+
+    Values are intentionally kept permissive at construction.  A gateway
+    returning a malformed packet must produce a structured blocked result,
+    not an exception that encourages callers to guess a fallback value.
+    """
+
+    rule_package_reference: VersionedReference | str | None = None
+    trading_status_applicability: Mapping[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        # Freeze a mapping when possible, while leaving malformed input for
+        # the service-level validator to report as a blocking issue.
+        if isinstance(self.trading_status_applicability, Mapping):
+            object.__setattr__(
+                self,
+                "trading_status_applicability",
+                MappingProxyType(dict(self.trading_status_applicability)),
+            )
+
+    @property
+    def rule_package_id(self) -> str:
+        """Return a display-compatible package reference for old consumers."""
+
+        reference = self.rule_package_reference
+        if isinstance(reference, VersionedReference):
+            return f"{reference.key}@{reference.version}"
+        return str(reference) if reference is not None else ""
+
+    @property
+    def requires_trading_status_facts(self) -> bool:
+        """Derive the requirement from a declaration, never from a flag."""
+
+        declaration = self.trading_status_applicability
+        return isinstance(declaration, Mapping) and any(
+            value == TradingStatusRequirement.REQUIRED.value
+            for value in declaration.values()
+        )
+
+    def declaration_issues(self) -> tuple[tuple[str, str, str], ...]:
+        """Return stable validation issues for this rule evidence packet.
+
+        The tuple items are ``(code, field, detail)``.  Keeping validation
+        here makes every caller use the same complete-dimension contract and
+        prevents malformed declarations from being silently interpreted as
+        all ``not_applicable``.
+        """
+
+        issues: list[tuple[str, str, str]] = []
+        reference = self.rule_package_reference
+        if reference is None or (
+            isinstance(reference, str) and not reference.strip()
+        ):
+            issues.append(
+                (
+                    CODE_RULE_PACKAGE_REFERENCE_MISSING,
+                    "rule_package_reference",
+                    "规则事实缺少规则包引用，禁止按默认规则继续",
+                )
+            )
+        elif isinstance(reference, str):
+            # Compatibility callers may still expose ``key@version`` text,
+            # but arbitrary text is not a rule-package reference.
+            key, separator, raw_version = reference.strip().rpartition("@")
+            try:
+                valid_text_reference = bool(key.strip()) and bool(separator) and int(raw_version) > 0
+            except (TypeError, ValueError):
+                valid_text_reference = False
+            if not valid_text_reference:
+                issues.append(
+                    (
+                        CODE_RULE_PACKAGE_REFERENCE_INVALID,
+                        "rule_package_reference",
+                        "规则事实的规则包引用格式非法，必须为 key@version",
+                    )
+                )
+        elif not isinstance(reference, VersionedReference):
+            issues.append(
+                (
+                    CODE_RULE_PACKAGE_REFERENCE_INVALID,
+                    "rule_package_reference",
+                    "规则事实的规则包引用格式非法，禁止按默认规则继续",
+                )
+            )
+
+        declaration = self.trading_status_applicability
+        if not isinstance(declaration, Mapping):
+            issues.append(
+                (
+                    CODE_TRADING_STATUS_DECLARATION_MISSING,
+                    "trading_status_applicability",
+                    "规则事实缺少完整交易状态适用性声明，禁止补为 N/A",
+                )
+            )
+            return tuple(issues)
+
+        expected = set(CAPABILITY_DIMENSIONS)
+        actual = set(declaration)
+        missing = sorted(expected - actual)
+        unknown = sorted(str(item) for item in actual - expected)
+        if missing:
+            issues.append(
+                (
+                    CODE_TRADING_STATUS_DECLARATION_MISSING,
+                    "trading_status_applicability",
+                    "交易状态适用性缺少显式维度：" + ", ".join(missing),
+                )
+            )
+        if unknown:
+            issues.append(
+                (
+                    CODE_TRADING_STATUS_DECLARATION_INVALID,
+                    "trading_status_applicability",
+                    "交易状态适用性包含未知维度：" + ", ".join(unknown),
+                )
+            )
+        for dimension in sorted(expected & actual):
+            value = declaration.get(dimension)
+            if value not in {
+                TradingStatusRequirement.REQUIRED.value,
+                TradingStatusRequirement.NOT_APPLICABLE.value,
+            }:
+                issues.append(
+                    (
+                        CODE_TRADING_STATUS_DECLARATION_INVALID,
+                        f"trading_status_applicability.{dimension}",
+                        f"交易状态适用性维度 {dimension} 的取值非法，必须为 required 或 not_applicable",
+                    )
+                )
+        return tuple(issues)
 
 
 @dataclass(frozen=True, slots=True)
@@ -287,6 +427,14 @@ CODE_CORPORATE_ACTION_FACTS_MISSING = "CORPORATE_ACTION_FACTS_MISSING"
 CODE_CASH_DIVIDEND_ENTITLEMENT_OUTSIDE_RUN = "cash_dividend_entitlement_outside_run"
 CODE_CASH_DIVIDEND_RECEIVABLE_BEYOND_RUN = "cash_dividend_receivable_beyond_run"
 CODE_TRADING_STATUS_FACTS_MISSING = "TRADING_STATUS_FACTS_MISSING"
+# Stable reasons for malformed initial-position rule evidence.  These are
+# deliberately separate from missing trading-status facts: a malformed
+# applicability packet is a rule admission failure and must never be
+# downgraded to the N/A path.
+CODE_RULE_PACKAGE_REFERENCE_MISSING = "rule_package_reference_missing"
+CODE_RULE_PACKAGE_REFERENCE_INVALID = "rule_package_reference_invalid"
+CODE_TRADING_STATUS_DECLARATION_MISSING = "trading_status_declaration_missing"
+CODE_TRADING_STATUS_DECLARATION_INVALID = "trading_status_declaration_invalid"
 
 
 def _issue(
@@ -567,6 +715,7 @@ class InitialPositionPreflightService:
                 )
 
         rules_facts: InstrumentRulesFacts | None = None
+        rules_declaration_issues: tuple[tuple[str, str, str], ...] = ()
         sell_rules: SettlementAndSellRules | None = None
         if resolved is not None:
             rules_facts = self._gateway.resolve_instrument_rules(
@@ -582,6 +731,31 @@ class InitialPositionPreflightService:
                         f"instrument rule package for {instrument_id} does not resolve",
                     )
                 )
+            elif not isinstance(rules_facts, InstrumentRulesFacts):
+                rules_status = CheckStatus.BLOCKED
+                rules_declaration_issues = (
+                    (
+                        CODE_TRADING_STATUS_DECLARATION_INVALID,
+                        "rule_package_reference",
+                        "规则事实返回类型非法，无法验证规则包和交易状态适用性声明",
+                    ),
+                )
+                issues.append(
+                    _issue(
+                        CODE_TRADING_STATUS_DECLARATION_INVALID,
+                        instrument_id,
+                        "rule_package_reference",
+                        "规则事实返回类型非法，无法验证规则包和交易状态适用性声明",
+                    )
+                )
+            else:
+                # Applicability is part of the rule fact, not a gateway
+                # policy switch.  Validate the complete three-dimension
+                # declaration before any status requirement is derived.
+                rules_declaration_issues = rules_facts.declaration_issues()
+                for code, field, message in rules_declaration_issues:
+                    rules_status = CheckStatus.BLOCKED
+                    issues.append(_issue(code, instrument_id, field, message))
 
             sell_rules = self._gateway.resolve_settlement_and_sell_rules(
                 instrument_id, as_of=as_of
@@ -710,6 +884,12 @@ class InitialPositionPreflightService:
 
         if resolved is not None:
             if rules_facts is None:
+                trading_status = CheckStatus.BLOCKED
+            elif rules_declaration_issues:
+                # Invalid or partial declarations must not become a
+                # permissive N/A result.  The rules category already carries
+                # the detailed issue above; this category records that the
+                # status decision is blocked by the same malformed evidence.
                 trading_status = CheckStatus.BLOCKED
             elif not rules_facts.requires_trading_status_facts:
                 # The rule package declares trading-status facts out of scope;

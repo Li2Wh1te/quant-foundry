@@ -99,14 +99,15 @@ def normalized_values(**overrides):
 
 
 def snapshot_segment(values=None):
+    resolved_values = values if values is not None else normalized_values()
     return InstrumentRuleSnapshotSegment(
         instrument_id=INSTRUMENT_ID,
         effective_from=date(2026, 1, 1),
         effective_to=None,
         normal_fact_reference=VersionedReference(key="etf_rule_fact", version=3),
         exception_fact_reference=None,
-        normalized_values=values if values is not None else normalized_values(),
-        capability_declarations={},
+        normalized_values=resolved_values,
+        capability_declarations=resolved_values["trading_status_applicability"],
         provenance={"source": "fixture"},
         resolution_hash="hash-04-04",
     )

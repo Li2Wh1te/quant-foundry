@@ -36,7 +36,7 @@ excludes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 import re
@@ -74,7 +74,12 @@ from app.backtesting.data.pit_history import (
     read_segmented_adjusted_series,
     read_segmented_history,
 )
-from app.backtesting.data.reports import DataCoverageReport, PreflightIssue, canonical_hash
+from app.backtesting.data.reports import (
+    DataCoverageReport,
+    PreflightIssue,
+    build_trading_status_summary,
+    canonical_hash,
+)
 from app.backtesting.data.requests import (
     DataCapability,
     DateRange,
@@ -84,6 +89,7 @@ from app.backtesting.data.requests import (
     QualityStatus,
     QueryBoundary,
     CoverageQualificationRequest,
+    ContractRef,
     InternalFixture,
     INTERNAL_LINK_ACCEPTANCE_PROFILE,
     INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY,
@@ -136,6 +142,61 @@ ETF_RULE_PACKAGE = ("china_listed_etf_rules", 1)
 
 ADJUSTMENT_SERIES_POLICY = ("tushare_adj_factor_native", 1)
 """First-version adjustment-series policy (key, version)."""
+
+_TRADING_STATUS_FIXTURE_CAPABILITY = "trading_status"
+"""The internal fixture capability reserved for explicit STATUS requests."""
+
+
+def _capability_value(value: object) -> str:
+    """Return the stable string value of an enum or request capability."""
+
+    return str(getattr(value, "value", value))
+
+
+def _status_requested(required_capabilities: Sequence[object]) -> bool:
+    """Whether the frozen request explicitly consumes STATUS evidence."""
+
+    return any(
+        _capability_value(item) == DataCapability.STATUS.value
+        for item in required_capabilities
+    )
+
+
+def _fixtures_for_capabilities(
+    fixtures: Sequence[InternalFixture],
+    required_capabilities: Sequence[object],
+) -> tuple[InternalFixture, ...]:
+    """Keep only fixture evidence consumed by the current capability request.
+
+    The internal profile may carry a broad fixture bundle for several task
+    packages.  A trading-status fixture is meaningful only when STATUS is a
+    required capability; retaining it on a bars-only ETF qualification would
+    make an unconsumed substitute affect profile gates and qualification
+    hashes.  Other fixture families keep their existing behavior.
+    """
+
+    if _status_requested(required_capabilities):
+        return tuple(fixtures)
+    return tuple(
+        fixture
+        for fixture in fixtures
+        if _capability_value(getattr(fixture, "capability", None))
+        != _TRADING_STATUS_FIXTURE_CAPABILITY
+    )
+
+
+def _summary_hash_content(value: object) -> object:
+    """Remove presentation and run metadata from ETF summary hash input."""
+
+    if isinstance(value, Mapping):
+        return {
+            key: _summary_hash_content(item)
+            for key, item in value.items()
+            if key not in {"generated_at", "run_id", "message", "title", "limitation"}
+        }
+    if isinstance(value, (list, tuple)):
+        return [_summary_hash_content(item) for item in value]
+    return value
 
 _SENSITIVE_KEY_RE = re.compile(
     r"(?:access[_-]?token|api[_-]?key|authorization|bearer|credential|password|secret|token)",
@@ -1193,7 +1254,49 @@ class EtfFactsAdapter:
         profile = PreflightProfileRegistry().resolve(
             qualification_request.preflight_profile
         )
-        fixtures = tuple(self.fixtures) + tuple(qualification_request.fixtures)
+        status_requested = _status_requested(
+            qualification_request.required_capabilities
+        )
+        if (
+            profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY
+            and not status_requested
+        ):
+            # A shared internal fixture bundle may include trading-status
+            # evidence for another capability path.  It is not part of this
+            # bars-only qualification contract, so remove it before the
+            # request is validated and hashed.  This keeps the N/A path from
+            # depending on, or recording, an unconsumed status substitute.
+            request_fixtures = tuple(
+                fixture
+                for fixture in qualification_request.fixtures
+                if _capability_value(getattr(fixture, "capability", None))
+                != _TRADING_STATUS_FIXTURE_CAPABILITY
+            )
+            request_fixture_capabilities = tuple(
+                capability
+                for capability in qualification_request.required_fixture_capabilities
+                if _capability_value(capability)
+                != _TRADING_STATUS_FIXTURE_CAPABILITY
+            )
+            if (
+                request_fixtures != qualification_request.fixtures
+                or request_fixture_capabilities
+                != qualification_request.required_fixture_capabilities
+            ):
+                qualification_request = replace(
+                    qualification_request,
+                    fixtures=request_fixtures,
+                    required_fixture_capabilities=request_fixture_capabilities,
+                )
+        configured_fixtures = tuple(self.fixtures) + tuple(qualification_request.fixtures)
+        fixtures = (
+            _fixtures_for_capabilities(
+                configured_fixtures,
+                qualification_request.required_capabilities,
+            )
+            if profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY
+            else configured_fixtures
+        )
         profile.validate_request(qualification_request)
         if profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY:
             if profile.allow_degraded:
@@ -1848,6 +1951,9 @@ class EtfFactsAdapter:
         preflight_profile: PreflightProfile | str | None = None,
         run_kind: str | None = None,
         fixtures: Sequence[InternalFixture] = (),
+        required_capabilities: Sequence[DataCapability] = (),
+        trading_status_applicability: Mapping[str, str] | None = None,
+        trading_status_limitation: str | None = None,
     ) -> dict[str, object]:
         """Assemble the machine summary consumed by result records.
 
@@ -1925,7 +2031,8 @@ class EtfFactsAdapter:
             }
         profile = None
         profile_issues: list[dict[str, object]] = []
-        normalized_fixtures = tuple(self.fixtures) + tuple(fixtures)
+        configured_fixtures = tuple(self.fixtures) + tuple(fixtures)
+        normalized_fixtures = configured_fixtures
         if preflight_profile is not None:
             registry = PreflightProfileRegistry()
             profile = (
@@ -1933,6 +2040,11 @@ class EtfFactsAdapter:
                 if isinstance(preflight_profile, PreflightProfile)
                 else registry.resolve(preflight_profile)
             )
+            if profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY:
+                normalized_fixtures = _fixtures_for_capabilities(
+                    configured_fixtures,
+                    required_capabilities,
+                )
             if profile.run_kind != (run_kind or profile.run_kind):
                 profile_issues.append(
                     {
@@ -1982,6 +2094,11 @@ class EtfFactsAdapter:
                             "fixture_version": fixture.fixture_version,
                         }
                     )
+        elif not _status_requested(required_capabilities):
+            normalized_fixtures = _fixtures_for_capabilities(
+                configured_fixtures,
+                required_capabilities,
+            )
         issues_payload = [dict(issue) for issue in blocking_issues]
         issues_payload.extend(profile_issues)
         adjusted_requested = any(
@@ -2187,6 +2304,15 @@ class EtfFactsAdapter:
                 if profile is not None
                 else None
             ),
+            "trading_status": build_trading_status_summary(
+                ContractRef(key=ETF_RULE_PACKAGE[0], version=ETF_RULE_PACKAGE[1]),
+                capability_declarations=trading_status_applicability,
+                **(
+                    {"limitation": trading_status_limitation}
+                    if trading_status_limitation is not None
+                    else {}
+                ),
+            ),
             "fixtures": [fixture.as_dict() for fixture in normalized_fixtures],
             "lookback_sessions": lookback_sessions,
             "max_lookback_sessions": max_lookback_sessions,
@@ -2296,7 +2422,7 @@ class EtfFactsAdapter:
                 "preflight summary must remain a JSON object"
             )
         summary = sanitized
-        summary["report_hash"] = canonical_hash(summary)
+        summary["report_hash"] = canonical_hash(_summary_hash_content(summary))
         return summary
 
 
@@ -2342,6 +2468,8 @@ def build_data_preflight_payloads(
         coverage_payload["adjustment_series_validation"] = summary[
             "adjustment_series_validation"
         ]
+    if summary.get("trading_status"):
+        coverage_payload["trading_status"] = summary["trading_status"]
     for field in ("bar_validity_summary", "invalid_bars"):
         if summary.get(field) is not None:
             coverage_payload[field] = summary[field]

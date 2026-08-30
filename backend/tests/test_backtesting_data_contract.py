@@ -83,6 +83,7 @@ from app.backtesting.data import (
     TickQuery,
     UniverseQuery,
     UniverseQueryPolicy,
+    TradingStatusCapabilityRequirementMismatchError,
     WarmupCoverageStatus,
     WarmupResolution,
     WarmupStatus,
@@ -167,7 +168,11 @@ def _preflight_request(**overrides) -> DataPreflightRequest:
     return DataPreflightRequest(**values)
 
 
-def _rule_report_for(request: DataPreflightRequest):
+def _rule_report_for(
+    request: DataPreflightRequest,
+    *,
+    trading_status_applicability: dict[str, str] | None = None,
+):
     """A minimal READY fixed-instrument rule preflight bound to ``request``."""
 
     from datetime import datetime, timezone
@@ -207,6 +212,11 @@ def _rule_report_for(request: DataPreflightRequest):
         or request.query_boundary.data_cutoff
     )
     request_start = request.requested_window.start_date
+    applicability = trading_status_applicability or {
+        "suspension": "not_applicable",
+        "opening_availability": "not_applicable",
+        "price_limit_tradability": "not_applicable",
+    }
     segments = tuple(
         InstrumentRuleSnapshotSegment(
             instrument_id=iid,
@@ -217,7 +227,7 @@ def _rule_report_for(request: DataPreflightRequest):
             ),
             exception_fact_reference=None,
             normalized_values={},
-            capability_declarations={},
+            capability_declarations=applicability,
             provenance={"normal_fact": {"fact_key": "etf_rule_fact"}},
             resolution_hash="c" * 64,
         )
@@ -937,6 +947,50 @@ class TestReports(unittest.TestCase):
         )
         self.assertEqual(reordered_issues.report_hash, flipped.report_hash)
 
+    def test_report_exposes_trading_status_boundary_and_hash_excludes_limitation(self):
+        report = _report()
+        trading_status = report.as_dict()["details"]["trading_status"]
+        self.assertEqual(trading_status["model"], "not_modeled")
+        self.assertEqual(
+            trading_status["required_dimensions"],
+            (),
+        )
+        self.assertEqual(
+            trading_status["not_applicable_dimensions"],
+            (
+                "suspension",
+                "opening_availability",
+                "price_limit_tradability",
+            ),
+        )
+        self.assertFalse(trading_status["provider_required"])
+        self.assertFalse(trading_status["coverage_required"])
+        for key in ("source", "coverage", "status"):
+            self.assertNotIn(key, trading_status)
+
+        changed_limitation = _report(
+            trading_status={
+                **dict(report.trading_status),
+                "limitation": "交易状态摘要的展示说明已调整",
+            }
+        )
+        required_status = _report(
+            trading_status={
+                "model": "requires_facts",
+                "rule_package": {"key": RULES.key, "version": RULES.version},
+                "required_dimensions": ("suspension",),
+                "not_applicable_dimensions": (
+                    "opening_availability",
+                    "price_limit_tradability",
+                ),
+                "provider_required": True,
+                "coverage_required": True,
+                "limitation": "交易状态事实由其他边界提供",
+            }
+        )
+        self.assertEqual(report.report_hash, changed_limitation.report_hash)
+        self.assertNotEqual(report.report_hash, required_status.report_hash)
+
     def test_hash_tracks_semantic_changes(self):
         baseline = _report()
         variants = [
@@ -1189,6 +1243,65 @@ class TestAdmissionBinding(unittest.TestCase):
             "rule_package",
         ):
             self.assertEqual(getattr(frozen, field), getattr(request, field))
+
+    def test_from_admission_accepts_full_na_snapshot_without_status(self):
+        request = _preflight_request()
+        report = _report_for(request)
+        frozen = DataRequest.from_admission(
+            request,
+            report,
+            rule_preflight_report=_rule_report_for(request),
+        )
+        self.assertNotIn(DataCapability.STATUS, frozen.required_capabilities)
+
+    def test_from_admission_blocks_status_for_full_na_snapshot(self):
+        request = _preflight_request(
+            required_capabilities=(DataCapability.BARS, DataCapability.STATUS)
+        )
+        report = _report_for(request)
+        with self.assertRaises(TradingStatusCapabilityRequirementMismatchError) as caught:
+            DataRequest.from_admission(
+                request,
+                report,
+                rule_preflight_report=_rule_report_for(request),
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "trading_status_capability_requirement_mismatch",
+        )
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "trading_status_capability_requirement_mismatch",
+        )
+        self.assertFalse(caught.exception.details["expected_status"])
+        self.assertTrue(caught.exception.details["actual_status"])
+
+    def test_from_admission_blocks_missing_status_for_required_snapshot(self):
+        request = _preflight_request()
+        report = _report_for(request)
+        required = {
+            "suspension": "required",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        with self.assertRaises(TradingStatusCapabilityRequirementMismatchError) as caught:
+            DataRequest.from_admission(
+                request,
+                report,
+                rule_preflight_report=_rule_report_for(
+                    request, trading_status_applicability=required
+                ),
+            )
+        self.assertEqual(
+            caught.exception.code,
+            "trading_status_capability_requirement_mismatch",
+        )
+        self.assertEqual(
+            caught.exception.details["reason_code"],
+            "trading_status_capability_requirement_mismatch",
+        )
+        self.assertTrue(caught.exception.details["expected_status"])
+        self.assertFalse(caught.exception.details["actual_status"])
 
     def test_from_admission_rejects_foreign_report(self):
         request = _preflight_request()

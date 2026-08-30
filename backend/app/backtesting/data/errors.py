@@ -33,6 +33,7 @@ __all__ = [
     "DataCutoffRequiredError",
     "DataPreflightBlockedError",
     "DataPreflightConfirmationMismatchError",
+    "TradingStatusCapabilityRequirementMismatchError",
     "DataSessionClosedError",
     "HistoryBarInstrumentMismatchError",
     "HistoryBarsDuplicateError",
@@ -163,6 +164,12 @@ class InvalidDataRequestError(DataContractError):
     """A request or query object violates a data-contract invariant."""
 
     code = "invalid_data_request"
+
+
+class TradingStatusCapabilityRequirementMismatchError(InvalidDataRequestError):
+    """Frozen rule applicability disagrees with the request STATUS capability."""
+
+    code = "trading_status_capability_requirement_mismatch"
 
 
 class UnsupportedCapabilityError(DataContractError):
@@ -571,6 +578,7 @@ ERROR_CODES: frozenset[str] = frozenset(
     cls.code
     for cls in (
         InvalidDataRequestError,
+        TradingStatusCapabilityRequirementMismatchError,
         UnsupportedCapabilityError,
         DataPreflightBlockedError,
         DataPreflightConfirmationMismatchError,

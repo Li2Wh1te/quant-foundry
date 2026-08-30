@@ -65,6 +65,7 @@ __all__ = [
     "DataCoverageReport",
     "DataPreflightReport",
     "PreflightIssue",
+    "build_trading_status_summary",
     "canonical_hash",
     "canonical_json",
     "calendar_semantic_signature",
@@ -142,6 +143,135 @@ def canonical_hash(value: object) -> str:
     """SHA-256 hex digest of :func:`canonical_json` output."""
 
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
+
+
+_TRADING_STATUS_DIMENSIONS = (
+    "suspension",
+    "opening_availability",
+    "price_limit_tradability",
+)
+_TRADING_STATUS_REQUIREMENTS = {"required", "not_applicable"}
+TRADING_STATUS_LIMITATION = "首期 ETF 日线模型不模拟逐标的交易状态"
+
+
+def build_trading_status_summary(
+    rule_package: ContractRef,
+    *,
+    capability_declarations: Mapping[str, str] | None = None,
+    limitation: str = TRADING_STATUS_LIMITATION,
+) -> dict[str, object]:
+    """Build the shared report/runtime shape for trading-status capability.
+
+    The report carries the rule declaration and capability requirement only.
+    It deliberately does not manufacture a source, coverage row, or status
+    fact when every dimension is ``not_applicable``.
+    """
+
+    if not isinstance(rule_package, ContractRef):
+        raise InvalidDataRequestError("trading-status rule_package must be a ContractRef")
+    if not isinstance(limitation, str) or not limitation.strip():
+        raise InvalidDataRequestError("trading-status limitation must be non-blank")
+    declarations = dict(capability_declarations or {})
+    if capability_declarations is None:
+        declarations = {
+            dimension: "not_applicable"
+            for dimension in _TRADING_STATUS_DIMENSIONS
+        }
+    if set(declarations) != set(_TRADING_STATUS_DIMENSIONS):
+        raise InvalidDataRequestError(
+            "trading-status capability declarations must cover all dimensions"
+        )
+    if any(value not in _TRADING_STATUS_REQUIREMENTS for value in declarations.values()):
+        raise InvalidDataRequestError(
+            "trading-status capability declarations contain an invalid requirement"
+        )
+    required = tuple(
+        dimension
+        for dimension in _TRADING_STATUS_DIMENSIONS
+        if declarations[dimension] == "required"
+    )
+    not_applicable = tuple(
+        dimension
+        for dimension in _TRADING_STATUS_DIMENSIONS
+        if declarations[dimension] == "not_applicable"
+    )
+    return {
+        "model": "requires_facts" if required else "not_modeled",
+        "rule_package": {"key": rule_package.key, "version": rule_package.version},
+        "required_dimensions": required,
+        "not_applicable_dimensions": not_applicable,
+        "provider_required": bool(required),
+        "coverage_required": bool(required),
+        "limitation": limitation,
+    }
+
+
+def _normalize_trading_status_summary(
+    value: Mapping[str, object] | None,
+    rule_package: ContractRef,
+) -> Mapping[str, object]:
+    """Normalize a report-provided status summary to the stable wire shape."""
+
+    if value is None:
+        return MappingProxyType(build_trading_status_summary(rule_package))
+    if not isinstance(value, Mapping):
+        raise InvalidDataRequestError("trading_status must be a JSON mapping")
+    expected_reference = {
+        "key": rule_package.key,
+        "version": rule_package.version,
+    }
+    supplied_reference = value.get("rule_package")
+    if supplied_reference is not None:
+        if not isinstance(supplied_reference, Mapping) or dict(supplied_reference) != expected_reference:
+            raise InvalidDataRequestError(
+                "trading_status.rule_package must match report.rule_package"
+            )
+    declarations = value.get("capability_declarations")
+    if declarations is not None:
+        if not isinstance(declarations, Mapping):
+            raise InvalidDataRequestError(
+                "trading_status.capability_declarations must be a mapping"
+            )
+        normalized_declarations = {
+            str(key): str(item) for key, item in declarations.items()
+        }
+    else:
+        required = tuple(value.get("required_dimensions", ()))
+        not_applicable = tuple(value.get("not_applicable_dimensions", ()))
+        dimensions = set(required) | set(not_applicable)
+        if dimensions != set(_TRADING_STATUS_DIMENSIONS) or set(required) & set(not_applicable):
+            raise InvalidDataRequestError(
+                "trading_status must declare all dimensions exactly once"
+            )
+        normalized_declarations = {
+            dimension: "required" if dimension in required else "not_applicable"
+            for dimension in _TRADING_STATUS_DIMENSIONS
+        }
+    return MappingProxyType(
+        build_trading_status_summary(
+            rule_package,
+            capability_declarations=normalized_declarations,
+            limitation=value.get("limitation", TRADING_STATUS_LIMITATION),
+        )
+    )
+
+
+def _trading_status_machine_content(
+    value: Mapping[str, object],
+) -> dict[str, object]:
+    """Return only machine semantics; presentation limitation is excluded."""
+
+    return {
+        key: value[key]
+        for key in (
+            "model",
+            "rule_package",
+            "required_dimensions",
+            "not_applicable_dimensions",
+            "provider_required",
+            "coverage_required",
+        )
+    }
 
 
 def _freeze_domain_json(value: object, field_name: str) -> object:
@@ -810,6 +940,9 @@ class DataPreflightReport:
     definition_usage_by_date: tuple[Mapping[str, object], ...] = ()
     calendar_summary: Mapping[str, object] | None = None
     session_summary: Mapping[str, object] | None = None
+    # The report-facing trading-status capability summary reuses this report
+    # DTO; it is not a second status snapshot or fact store.
+    trading_status: Mapping[str, object] | None = None
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     report_hash: str = ""
 
@@ -1653,6 +1786,11 @@ class DataPreflightReport:
         )
         if not isinstance(self.rule_package, ContractRef):
             raise InvalidDataRequestError("rule_package must be a ContractRef")
+        object.__setattr__(
+            self,
+            "trading_status",
+            _normalize_trading_status_summary(self.trading_status, self.rule_package),
+        )
         if self.rule_exception_set is not None and not isinstance(
             self.rule_exception_set, ContractRef
         ):
@@ -2038,6 +2176,7 @@ class DataPreflightReport:
             ],
             "instrument_mapping_coverage": self.instrument_mapping_coverage,
             "instrument_rule_fact_summary": self.instrument_rule_fact_summary,
+            "trading_status": self.trading_status,
             "lookback_session_bar_coverage": self.lookback_session_bar_coverage,
             "bar_validity_summary": self.bar_validity_summary,
             "missing_bars": self.missing_bars,
@@ -2172,8 +2311,9 @@ class DataPreflightReport:
         """Build the hash-relevant machine content of this report.
 
         Excluded deliberately: ``generated_at``, issue ``message`` texts,
-        and ``resolved_calendar_definitions`` (their semantics are already
-        covered by the calendar session signature).
+        trading-status ``limitation`` text, and ``resolved_calendar_definitions``
+        (their semantics are already covered by the calendar session
+        signature).
         """
 
         def sessions_payload(points: Sequence[SessionPoint]) -> list[dict[str, object]]:
@@ -2328,6 +2468,7 @@ class DataPreflightReport:
             "coverage_reports": [
                 report.machine_content() for report in self.coverage_reports
             ],
+            "trading_status": _trading_status_machine_content(self.trading_status),
             "source_revisions": self.source_revisions,
             "issues": [issue.machine_fields() for issue in self.issues],
             # Candidate membership is deliberately absent.  These fields

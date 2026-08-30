@@ -161,6 +161,10 @@ class PreflightContext:
     dynamic_scope_resolver: object | None = None
     calendar_resolver: object | None = None
     coverage_qualifier: object | None = None
+    # The fixed rule preflight report is optional for dynamic-only requests,
+    # but when supplied it is the only authority allowed to decide whether
+    # STATUS belongs in this request's capability set.
+    rule_preflight_report: object | None = None
     # A caller that already opened the authoritative session may pass its
     # immutable provider report.  This prevents a second calendar read while
     # the service binds profile metadata and performs the session comparison.
@@ -207,6 +211,20 @@ class PreflightOutcome:
         fixtures = tuple(self.fixtures)
         if any(not isinstance(item, InternalFixture) for item in fixtures):
             raise InvalidDataRequestError("outcome fixtures must be InternalFixture values")
+        if (
+            self.profile.allow_fixture_only
+            and DataCapability.STATUS not in self.report.required_capabilities
+        ):
+            # Keep an optional status substitute out of the outcome itself as
+            # a second defensive boundary.  The service filters it before
+            # validation; this guard also protects callers that construct an
+            # outcome directly and would otherwise change its hash.
+            fixtures = tuple(
+                fixture
+                for fixture in fixtures
+                if str(getattr(fixture.capability, "value", fixture.capability))
+                != FIXTURE_TRADING_STATUS
+            )
         object.__setattr__(
             self,
             "fixtures",
@@ -384,6 +402,13 @@ class PreflightOutcome:
         rules = coverage_by_capability.get(DataCapability.RULES.value)
         metadata.update(
             {
+                # Keep the first-phase trading-status model visible in the
+                # operator-facing capability summary.  The canonical report
+                # already carries this value (and hashes only its machine
+                # fields); exposing it here keeps preflight JSON consistent
+                # with the adapter summary without creating a second fact
+                # store or implying STATUS coverage.
+                "trading_status": self.report.trading_status,
                 "instrument_mapping_coverage": mappings,
                 "instrument_rule_fact_summary": rules,
                 "lookback_session_bar_coverage": bars,
@@ -433,6 +458,7 @@ class PreflightOutcome:
                 "run_kind": self.profile.run_kind,
                 "preflight_profile": self.profile_reference,
                 "report_hash": self.report_hash,
+                "trading_status": self.report.trading_status,
                 "title": "内部链路验收" if internal else "正式回测预检",
                 "message": (
                     "内部链路验收预检已通过。"
@@ -1000,6 +1026,65 @@ def _initial_issue(item: object) -> PreflightIssue:
     )
 
 
+def _rule_status_requirement_issue(
+    request: DataPreflightRequest | DataRequest,
+    rule_preflight_report: object | None,
+) -> PreflightIssue | None:
+    """Validate request STATUS against an already-frozen rule snapshot.
+
+    This check intentionally runs before any provider, manifest, calendar,
+    or status-fact read.  A request cannot use a client-selected STATUS bit
+    to override the applicability declared by its point-in-time rule
+    segments; disagreement is a hard, deterministic contract failure.
+    """
+
+    if rule_preflight_report is None:
+        return None
+    bundle = getattr(rule_preflight_report, "snapshot_bundle", None)
+    if bundle is None:
+        # A blocked report is handled by the existing rule/fixed gate.  It is
+        # important not to reinterpret its lack of a bundle as all N/A.
+        return None
+    dimensions = getattr(
+        rule_preflight_report, "required_trading_status_dimensions", None
+    )
+    if dimensions is None:
+        dimensions = {
+            dimension
+            for segment in getattr(bundle, "instrument_segments", ())
+            for dimension, requirement in getattr(
+                segment, "capability_declarations", {}
+            ).items()
+            if requirement == "required"
+        }
+    try:
+        required_dimensions = tuple(sorted(set(dimensions)))
+    except (TypeError, ValueError):
+        # A malformed report cannot prove a capability decision.  Leave its
+        # own rule admission error to block the request rather than inventing
+        # an applicability result here.
+        return None
+    actual = DataCapability.STATUS in request.required_capabilities
+    expected = bool(required_dimensions)
+    if actual == expected:
+        return None
+    return _issue(
+        "trading_status_capability_requirement_mismatch",
+        "请求能力与冻结规则中的交易状态适用性不一致，已在数据提供方读取前阻断回测。",
+        field="required_capabilities",
+        details={
+            "reason_code": "trading_status_capability_requirement_mismatch",
+            "required_status_dimensions": required_dimensions,
+            "expected_status": expected,
+            "actual_status": actual,
+            "required_capabilities": tuple(
+                item.value for item in request.required_capabilities
+            ),
+            "rule_snapshot_hash": getattr(rule_preflight_report, "snapshot_hash", None),
+        },
+    )
+
+
 class DataPreflightService:
     """Compose Phase 2a preflight facts and enforce page/session gates."""
 
@@ -1108,6 +1193,7 @@ class DataPreflightService:
                         "dynamic_scope_resolver",
                         "calendar_resolver",
                         "coverage_qualifier",
+                        "rule_preflight_report",
                         "base_report",
                     )
                     if hasattr(value, name)
@@ -1193,6 +1279,34 @@ class DataPreflightService:
                     details={"error_type": type(exc).__name__},
                 ) from exc
         return tuple(result)
+
+    @staticmethod
+    def _consumed_fixtures(
+        profile: PreflightProfile,
+        request: DataPreflightRequest | DataRequest,
+        fixtures: Sequence[InternalFixture],
+    ) -> tuple[InternalFixture, ...]:
+        """Keep only fixture evidence consumed by this request.
+
+        A shared internal fixture bundle may contain trading-status evidence
+        for another capability path.  When STATUS is absent from the frozen
+        request, that evidence must not become a report source, a fixture
+        gate, or a qualification-hash input.  Formal profiles retain the
+        original tuple so their existing fixture-forbidden gate still fails
+        closed rather than silently accepting an attached fixture.
+        """
+
+        if (
+            not profile.allow_fixture_only
+            or DataCapability.STATUS in request.required_capabilities
+        ):
+            return tuple(fixtures)
+        return tuple(
+            fixture
+            for fixture in fixtures
+            if str(getattr(fixture.capability, "value", fixture.capability))
+            != FIXTURE_TRADING_STATUS
+        )
 
     def _fixture_issues(
         self,
@@ -1312,6 +1426,18 @@ class DataPreflightService:
         """Require named substitutes when a provider lacks an applicable gate."""
 
         if not profile.allow_fixture_only:
+            return ()
+        needs_capability_manifest = (
+            DataCapability.ACTIONS in request.required_capabilities
+            or DataCapability.STATUS in request.required_capabilities
+            or request.consistency_mode is ConsistencyMode.TRANSITIONAL_REPEATABLE_READ
+        )
+        if not needs_capability_manifest:
+            # A request that needs neither an optional fact family nor a
+            # consistency-mode substitute has no reason to inspect the
+            # provider manifest.  In particular, an ETF request whose frozen
+            # rule segments are all ``not_applicable`` must not turn an
+            # unavailable STATUS manifest into a preflight dependency.
             return ()
         declared: set[str] = set()
         modes: set[ConsistencyMode] = set()
@@ -1639,7 +1765,11 @@ class DataPreflightService:
         request = ctx.request
         fixed_ids = self._fixed_ids(ctx)
         try:
-            fixtures = self._fixtures(ctx)
+            fixtures = self._consumed_fixtures(
+                profile,
+                request,
+                self._fixtures(ctx),
+            )
         except DataContractError as exc:
             report = _minimal_blocked_report(
                 request,
@@ -1699,11 +1829,22 @@ class DataPreflightService:
                     field="max_lookback_sessions",
                     details={"requested": maximum, "maximum": MAX_LOOKBACK_SESSIONS},
                 )
-            )
-        provider = ctx.provider or self.provider
-        pre_read_issues.extend(
-            self._required_fixture_issues(profile, request, provider, fixtures)
         )
+        provider = ctx.provider or self.provider
+        status_requirement_issue = _rule_status_requirement_issue(
+            request,
+            ctx.rule_preflight_report,
+        )
+        if status_requirement_issue is not None:
+            pre_read_issues.append(status_requirement_issue)
+        # The rule snapshot is the cheaper and earlier authority for STATUS
+        # applicability.  Do not inspect a provider manifest after that
+        # contract has already failed: the mismatch must remain a pure
+        # request/snapshot decision and must not trigger provider I/O.
+        if not pre_read_issues:
+            pre_read_issues.extend(
+                self._required_fixture_issues(profile, request, provider, fixtures)
+            )
         if pre_read_issues:
             # Profile/fixture/lookback failures are all pre-read gates.  Do
             # not call the dynamic scope provider after one has already

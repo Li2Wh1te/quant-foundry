@@ -2099,6 +2099,10 @@ class DeterministicBacktestRunner:
         # Frozen trading facts observed from engine views; later phases
         # without a view (submit, account) reuse exactly these values.
         self._instrument_facts: dict[UUID, InstrumentFacts] = {}
+        # Formal rule-snapshot runs retain the normalized execution facts
+        # used for each instrument/session.  Legacy fixture runs continue to
+        # use only ``InstrumentFacts`` and never populate this map.
+        self._execution_facts: dict[tuple[UUID, date], Any] = {}
         self._events: list[EventEnvelope] = []
         self._equity_curve: list[EquitySample] = []
         self._decisions: list[Any] = []
@@ -4351,6 +4355,94 @@ class DeterministicBacktestRunner:
                 )
             )
 
+    def _handoff_dynamic_rule_segments(
+        self,
+        target_ids: Sequence[UUID],
+        *,
+        context: PhaseContext,
+        decision: Any,
+    ) -> None:
+        """Require current frozen rule segments before dynamic orders exist.
+
+        Dynamic and hybrid targets are selected at runtime, so the earlier
+        universe snapshot is not itself an execution-rule handoff.  Before
+        the interpreter can create an intent, every selected target must be
+        resolved through the admitted ``RunRuleSnapshotBundle`` for the
+        current PIT session.  This deliberately leaves legacy fixed-scope
+        fixtures on their compatibility path while making the formal dynamic
+        path fail closed instead of falling back to ``InstrumentFacts``.
+        """
+
+        if not target_ids:
+            return
+        bound = self._step_universes.get(context.step_sequence)
+        if not self._is_formal_dynamic_scope(bound=bound):
+            return
+
+        from app.instruments.rule_snapshots import RunRuleSnapshotBundle
+
+        bundle = self._rule_snapshot_bundle
+        first_target = min(set(target_ids), key=str)
+        if not isinstance(bundle, RunRuleSnapshotBundle):
+            self._raise_final_qualification_error(
+                "universe_capability_missing",
+                instrument_id=first_target,
+                context=context,
+                decision=decision,
+                candidate=None,
+                failed_check="rule_snapshot_segment_handoff",
+                reason_codes=("rule_snapshot_bundle_missing",),
+                expected="RunRuleSnapshotBundle",
+                actual=None,
+            )
+
+        try:
+            # The bundle is verified again at the execution boundary because
+            # the object may have crossed a persistence or process boundary
+            # after admission.
+            bundle.verify_hash()
+        except DomainValidationError as exc:
+            self._raise_final_qualification_error(
+                "universe_capability_missing",
+                instrument_id=first_target,
+                context=context,
+                decision=decision,
+                candidate=None,
+                failed_check="rule_snapshot_segment_handoff",
+                reason_codes=("rule_snapshot_bundle_invalid",),
+                expected="verified RunRuleSnapshotBundle",
+                actual={"error_type": type(exc).__name__},
+            )
+
+        for instrument_id in sorted(set(target_ids), key=str):
+            try:
+                # Check coverage explicitly so a missing current segment is
+                # mapped to the dynamic-universe error contract instead of
+                # leaking a generic DomainValidationError from segment_for.
+                bundle.segment_for(instrument_id, context.session_date)
+            except DomainValidationError as exc:
+                self._raise_final_qualification_error(
+                    "universe_capability_missing",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=None,
+                    failed_check="rule_snapshot_segment_handoff",
+                    reason_codes=("rule_snapshot_segment_missing",),
+                    expected={
+                        "instrument_id": str(instrument_id),
+                        "session_date": context.session_date.isoformat(),
+                    },
+                    actual={
+                        "snapshot_hash": bundle.snapshot_hash,
+                        "segment_count": len(bundle.instrument_segments),
+                        "error_type": type(exc).__name__,
+                    },
+                )
+            # Reuse the normal policy projection so the exact selected
+            # segment is cached and appears in the existing run audit.
+            self.execution_policy_for(instrument_id, context.session_date)
+
     def _raise_final_qualification_error(
         self,
         code: str,
@@ -4974,6 +5066,9 @@ class DeterministicBacktestRunner:
                     )
                 ),
             }
+            snapshot["trading_status"] = self._trading_status_component_snapshot(
+                bundle
+            )
         if (
             self._universe_scope_resolution is not None
             or self._universe_scope_snapshot_hash is not None
@@ -4989,6 +5084,71 @@ class DeterministicBacktestRunner:
         return MappingProxyType(
             {str(key): _freeze_payload(value) for key, value in snapshot.items()}
         )
+
+    @staticmethod
+    def _trading_status_component_snapshot(bundle: Any) -> Mapping[str, Any]:
+        """Build the stable run-level trading-status model summary.
+
+        The summary intentionally contains rule declarations and references,
+        but no provider/source/coverage claim.  In the first ETF model all
+        dimensions are N/A, so an absent status source is a deliberate model
+        boundary rather than evidence that the instrument was tradable.
+        """
+
+        from app.backtesting.execution_facts import ALL_DIMENSIONS
+
+        segments = tuple(getattr(bundle, "instrument_segments", ()))
+        required: set[str] = set()
+        not_applicable: set[str] = set()
+        segment_payload: list[dict[str, Any]] = []
+        for segment in sorted(
+            segments,
+            key=lambda item: (
+                str(getattr(item, "instrument_id", "")),
+                str(getattr(item, "effective_from", "")),
+            ),
+        ):
+            declarations = {
+                dimension: str(getattr(segment, "capability_declarations", {}).get(dimension))
+                for dimension in ALL_DIMENSIONS
+                if dimension in getattr(segment, "capability_declarations", {})
+            }
+            required.update(
+                dimension
+                for dimension, value in declarations.items()
+                if value == "required"
+            )
+            not_applicable.update(
+                dimension
+                for dimension, value in declarations.items()
+                if value == "not_applicable"
+            )
+            segment_payload.append(
+                {
+                    "instrument_id": str(getattr(segment, "instrument_id", "")),
+                    "effective_from": getattr(
+                        segment, "effective_from", None
+                    ),
+                    "effective_to": getattr(segment, "effective_to", None),
+                    "capability_declarations": declarations,
+                    "resolution_hash": getattr(segment, "resolution_hash", None),
+                }
+            )
+        reference = getattr(bundle, "rule_package_reference", None)
+        reference_payload = {
+            "key": getattr(reference, "key", None),
+            "version": getattr(reference, "version", None),
+        }
+        return {
+            "model": "not_modeled" if not required else "requires_facts",
+            "rule_package": reference_payload,
+            "required_dimensions": tuple(sorted(required)),
+            "not_applicable_dimensions": tuple(sorted(not_applicable)),
+            "provider_required": bool(required),
+            "coverage_required": bool(required),
+            "limitation": "首期 ETF 日线模型不模拟逐标的交易状态",
+            "segments": tuple(segment_payload),
+        }
 
     def _universe_audit_summary(self) -> Mapping[str, Any]:
         """Project candidate audit evidence onto an existing result JSON shape."""
@@ -5406,6 +5566,86 @@ class DeterministicBacktestRunner:
             )
         return view
 
+    def _formal_execution_facts(
+        self,
+        *,
+        instrument_id: UUID,
+        calendar_id: str,
+        session_date: date,
+        policy: Any,
+    ) -> Any:
+        """Normalize formal rule applicability without reading status data.
+
+        The first ETF model declares all three trading-status dimensions as
+        ``not_applicable``.  Its formal runtime path therefore passes an
+        intentionally empty status-fact sequence to the shared normalizer;
+        the frozen rule segment, rather than an ``InstrumentFacts`` boolean
+        or an empty provider response, supplies the N/A meaning.  If a future
+        segment declares any dimension ``required``, the same normalizer
+        fails closed until a separately delivered status-fact producer is
+        available.
+        """
+
+        from app.backtesting.execution_facts import (
+            ExecutionFactsBlockedError,
+            evaluate_execution_facts,
+        )
+
+        bundle = self._rule_snapshot_bundle
+        cutoff = getattr(bundle, "data_cutoff", None)
+        if cutoff is None:
+            raise DomainValidationError(
+                "formal rule-snapshot execution requires a frozen data_cutoff"
+            )
+        normalized, issues = evaluate_execution_facts(
+            instrument_id,
+            calendar_id=calendar_id,
+            session_date=session_date,
+            applicability=policy.capability_declarations,
+            # T19 deliberately does not add a production trading-status
+            # query.  Empty facts are valid only for explicit N/A dimensions.
+            status_facts=(),
+            data_cutoff=cutoff,
+            rule_package_reference=policy.package_reference,
+            rule_resolution_hash=policy.resolution_hash,
+        )
+        if issues:
+            raise ExecutionFactsBlockedError(issues)
+        if normalized is None:  # Defensive guard for a malformed adapter.
+            raise DomainValidationError(
+                "execution-fact normalization returned no facts without issues"
+            )
+        self._execution_facts[(instrument_id, session_date)] = normalized
+        return normalized
+
+    def _formal_market_state(
+        self,
+        view: EngineDataView,
+        *,
+        instrument_id: UUID,
+        session_date: date,
+        timestamp: datetime,
+        policy: Any,
+    ) -> MarketState:
+        """Build an opening state from frozen rules and the raw quote only."""
+
+        from app.backtesting.execution_facts import market_state_from_execution_facts
+
+        instrument_facts = view.facts(instrument_id)
+        quote = view.quote(instrument_id)
+        facts = self._formal_execution_facts(
+            instrument_id=instrument_id,
+            calendar_id=instrument_facts.calendar_id,
+            session_date=session_date,
+            policy=policy,
+        )
+        return market_state_from_execution_facts(
+            facts,
+            open_price=quote.open_price if quote is not None else None,
+            price_tick=policy.price_tick,
+            timestamp=timestamp,
+        )
+
     def _phase_observe_open(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
@@ -5447,25 +5687,48 @@ class DeterministicBacktestRunner:
                 order.expire(reason)
                 policy_rejections.append((order.order_id, reason))
             active = eligible
-        market_states = {
-            order.instrument_id: (
-                view.market_state(
-                    order.instrument_id, timestamp=context.decision_time
-                )
-            )
-            for order in active
-        }
         if policy_by_instrument:
-            from dataclasses import replace as dataclass_replace
-
-            # The market view supplies current session facts, while the
-            # trading-critical tick is frozen by the run rule snapshot.
+            # Formal runs must derive every trading-status gate from the
+            # frozen rule declaration.  ``InstrumentFacts`` remains the
+            # source of the named calendar only; its legacy status booleans
+            # are intentionally ignored here.
             market_states = {
-                instrument_id: dataclass_replace(
-                    state,
-                    price_tick=policy_by_instrument[instrument_id].price_tick,
+                instrument_id: self._formal_market_state(
+                    view,
+                    instrument_id=instrument_id,
+                    session_date=context.session_date,
+                    timestamp=context.decision_time,
+                    policy=policy_by_instrument[instrument_id],
                 )
-                for instrument_id, state in market_states.items()
+                for instrument_id in sorted(
+                    {order.instrument_id for order in active}, key=str
+                )
+            }
+        else:
+            if self._is_formal_dynamic_scope(
+                bound=self._step_universes.get(context.step_sequence)
+            ):
+                # A formal dynamic/hybrid order can only exist after the
+                # submit-time rule-segment handoff.  Reaching this branch
+                # without a bundle indicates an invalid runtime state; never
+                # match it through legacy InstrumentFacts booleans.
+                raise _universe_capability_error(
+                    "formal dynamic/hybrid matching requires a frozen rule snapshot",
+                    details={
+                        "reason_code": "rule_snapshot_bundle_missing",
+                        "phase": "match",
+                    },
+                )
+            # Legacy in-memory fixtures have no formal rule snapshot and keep
+            # their historical explicit ``InstrumentFacts`` compatibility
+            # path.  This branch is never used by a formal run.
+            market_states = {
+                order.instrument_id: (
+                    view.market_state(
+                        order.instrument_id, timestamp=context.decision_time
+                    )
+                )
+                for order in active
             }
         match_context = MatchContext.from_portfolio(
             self._portfolio, currency=self._currency
@@ -6080,6 +6343,9 @@ class DeterministicBacktestRunner:
         self._final_validate_targets(
             tuple(target_ids), context=context, decision=decision
         )
+        self._handoff_dynamic_rule_segments(
+            tuple(target_ids), context=context, decision=decision
+        )
         register_dynamic = getattr(
             self._view_factory, "register_runtime_instrument_ids", None
         )
@@ -6100,8 +6366,11 @@ class DeterministicBacktestRunner:
             from dataclasses import replace as dataclass_replace
 
             # Sizing must use the frozen lot size.  Session facts remain the
-            # source of explicit status/calendar values, but a live rule row
-            # can never silently replace the run snapshot.
+            # source of the named calendar only, while the formal trading
+            # status path is normalized from the frozen applicability
+            # declaration before any order is staged.  A future required
+            # dimension therefore fails closed at order creation rather than
+            # entering a permissive runtime with legacy booleans.
             for instrument_id in instrument_ids:
                 policy = self.execution_policy_for(
                     instrument_id, context.session_date
@@ -6111,6 +6380,12 @@ class DeterministicBacktestRunner:
                     raise DomainValidationError(
                         f"instrument facts are missing for {instrument_id}"
                     )
+                self._formal_execution_facts(
+                    instrument_id=instrument_id,
+                    calendar_id=fact.calendar_id,
+                    session_date=context.session_date,
+                    policy=policy,
+                )
                 facts[instrument_id] = dataclass_replace(
                     fact, board_lot=policy.lot_size
                 )

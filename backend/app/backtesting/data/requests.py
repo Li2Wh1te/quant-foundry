@@ -32,6 +32,7 @@ from app.backtesting.data.errors import (
     InternalPreflightFixtureOutOfScopeError,
     InternalPreflightProfileMismatchError,
     InvalidDataRequestError,
+    TradingStatusCapabilityRequirementMismatchError,
     LookbackSessionsLimitExceededError,
     UniversePreflightHashMismatchError,
 )
@@ -2323,6 +2324,42 @@ class DataRequest(DataPreflightRequest):
                 raise _Invalid(
                     "rule preflight report does not belong to this request",
                     details={"mismatched_fields": sorted(rule_mismatches)},
+                )
+            # STATUS is a request capability only when the frozen rule
+            # segments explicitly require at least one trading-status
+            # dimension.  Validate this after the report/snapshot identity
+            # checks and before the frozen DataRequest is constructed; this
+            # prevents a client or provider manifest from silently adding or
+            # removing STATUS after rule facts have become authoritative.
+            snapshot_bundle = rule_preflight_report.snapshot_bundle
+            required_status_dimensions = tuple(
+                sorted(
+                    {
+                        dimension
+                        for segment in snapshot_bundle.instrument_segments
+                        for dimension, requirement in segment.capability_declarations.items()
+                        if requirement == "required"
+                    }
+                )
+            )
+            request_requires_status = DataCapability.STATUS in request.required_capabilities
+            if bool(required_status_dimensions) != request_requires_status:
+                raise TradingStatusCapabilityRequirementMismatchError(
+                    "frozen rule applicability and request capabilities disagree",
+                    details={
+                        "reason_code": "trading_status_capability_requirement_mismatch",
+                        "required_status_dimensions": required_status_dimensions,
+                        "request_required_capabilities": tuple(
+                            item.value for item in request.required_capabilities
+                        ),
+                        "expected_status": bool(required_status_dimensions),
+                        "actual_status": request_requires_status,
+                        "rule_package_reference": {
+                            "key": request.rule_package.key,
+                            "version": request.rule_package.version,
+                        },
+                        "rule_snapshot_hash": rule_preflight_report.snapshot_hash,
+                    },
                 )
             resolved_rule_snapshot_hash = rule_preflight_report.snapshot_hash
         elif rule_preflight_report is not None:

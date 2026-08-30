@@ -217,6 +217,15 @@ def evaluate_calendar_capability_gate(
     statement and is not inferred from ``unknown``.
     """
 
+    status_required = DataCapability.STATUS in request.required_capabilities
+    if not status_required:
+        # The frozen rule snapshot is the authority for applicability.  When
+        # it does not require the STATUS family, this gate must be a true
+        # no-op: reading a provider manifest or resolving any status
+        # declaration would manufacture irrelevant unknown evidence and could
+        # let an unavailable status source block an otherwise valid request.
+        return (), ()
+
     ids = tuple(snapshot.calendar_ids)
     # The canonical snapshot scope is the union of both fixed-id sets.  Using
     # ``or`` here would drop mandatory ids whenever static ids are present.
@@ -225,7 +234,6 @@ def evaluate_calendar_capability_gate(
             (*request.static_instrument_ids, *request.mandatory_instrument_ids)
         )
     )
-    status_required = DataCapability.STATUS in request.required_capabilities
     issues: list[PreflightIssue] = []
     evidence: list[Mapping[str, object]] = []
     resolver = getattr(provider, "resolve_capability", None)

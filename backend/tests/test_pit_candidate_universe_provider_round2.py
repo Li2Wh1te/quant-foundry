@@ -28,6 +28,9 @@ from app.backtesting.data.requests import (
     UniverseQueryPolicy,
 )
 from app.backtesting.data.errors import InvalidDataRequestError
+from app.backtesting.data.universe import (
+    CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH,
+)
 from app.strategy_protocol.data_view import InstrumentCandidateDTO
 from tests.test_backtesting_memory_provider import _rule_report_for
 from tests.test_pit_candidate_universe_provider import (
@@ -49,6 +52,7 @@ class _QualificationSource:
         self.dataset = dataset
         self.bad = bad or {}
         self.queries: list[UniverseQuery] = []
+        self.qualification_requests = []
 
     def resolve_dynamic_universe_scope(self, request):
         del request
@@ -59,6 +63,7 @@ class _QualificationSource:
         return self.dataset.instruments
 
     def qualify_instrument(self, request):
+        self.qualification_requests.append(request)
         reports = []
         failed = self.bad.get(request.instrument_id, set())
         for capability in request.required_capabilities:
@@ -131,6 +136,117 @@ def _query(intent, report, *, day=DAYS[0], mode=None, cutoff=None):
 class RealChunkQualificationTests(unittest.TestCase):
     """Candidate qualification is proven through the real chunk boundary."""
 
+    def test_required_candidate_status_without_request_is_filtered_and_audited(self):
+        """A candidate rule cannot widen the frozen qualification request."""
+
+        dataset, first, second = _dataset()
+        required_status = {
+            "suspension": "required",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        dataset = replace(
+            dataset,
+            instruments=(
+                replace(dataset.instrument(first), trading_status_policy=required_status),
+                dataset.instrument(second),
+            ),
+        )
+        source = _QualificationSource(dataset)
+        provider = MemoryDataProvider(dataset, universe_provider=source)
+        intent = _intent()
+        report, request, _, chunk = _admitted(provider, intent)
+
+        rows = chunk.universe(_query(intent, report))
+
+        self.assertEqual(
+            tuple(row.instrument_id for row in rows),
+            (second,),
+        )
+        self.assertNotIn(DataCapability.STATUS, request.required_capabilities)
+        self.assertTrue(source.qualification_requests)
+        self.assertTrue(
+            all(
+                DataCapability.STATUS not in item.required_capabilities
+                for item in source.qualification_requests
+            )
+        )
+        self.assertEqual(
+            chunk.universe_filter_reason_counts[
+                CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH
+            ],
+            1,
+        )
+        record = next(
+            item
+            for item in chunk.universe_filter_records
+            if item["instrument_id"] == str(first)
+        )
+        self.assertEqual(
+            record["required_status_dimensions"],
+            ("suspension",),
+        )
+        self.assertEqual(
+            record["evidence_summary"]["required_status_dimensions"],
+            ("suspension",),
+        )
+
+    def test_unrequested_invalid_status_report_does_not_filter_all_na_candidates(self):
+        """A broad provider result cannot impose an unused STATUS gate."""
+
+        dataset, first, second = _dataset()
+        not_applicable = {
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        dataset = replace(
+            dataset,
+            instruments=tuple(
+                replace(spec, trading_status_policy=not_applicable)
+                for spec in dataset.instruments
+            ),
+        )
+
+        class UnexpectedStatusReport(_QualificationSource):
+            def qualify_instrument(self, request):
+                result = super().qualify_instrument(request)
+                return replace(
+                    result,
+                    qualification_hash="",
+                    coverage_reports=result.coverage_reports
+                    + (
+                        DataCoverageReport(
+                            requested_window=request.history_envelope,
+                            capability=DataCapability.STATUS,
+                            instrument_ids=(request.instrument_id,),
+                            expected_count=1,
+                            complete_count=0,
+                            partial_count=0,
+                            invalid_count=0,
+                            unavailable_count=1,
+                            quality_status=QualityStatus.UNAVAILABLE,
+                        ),
+                    ),
+                )
+
+        source = UnexpectedStatusReport(dataset)
+        provider = MemoryDataProvider(dataset, universe_provider=source)
+        intent = _intent()
+        report, request, _, chunk = _admitted(provider, intent)
+
+        self.assertNotIn(DataCapability.STATUS, request.required_capabilities)
+        rows = chunk.universe(_query(intent, report))
+
+        self.assertEqual(
+            tuple(row.instrument_id for row in rows),
+            tuple(sorted((first, second), key=str)),
+        )
+        self.assertNotIn(
+            "candidate_status_incomplete",
+            chunk.universe_filter_reason_counts,
+        )
+
     def test_rules_bar_actions_and_status_failures_filter_only_the_bad_rows(self):
         dataset, first, second = _dataset()
         # The first spec carries the wrong rule package; the second has all
@@ -159,7 +275,7 @@ class RealChunkQualificationTests(unittest.TestCase):
         self.assertIn("rule_package_mismatch", reasons)
         self.assertIn("candidate_market_data_incomplete", reasons)
         self.assertIn("candidate_corporate_action_incomplete", reasons)
-        self.assertIn("candidate_status_incomplete", reasons)
+        self.assertNotIn("candidate_status_incomplete", reasons)
 
     def test_empty_actions_evidence_is_not_a_negative_proof(self):
         dataset, first, second = _dataset()

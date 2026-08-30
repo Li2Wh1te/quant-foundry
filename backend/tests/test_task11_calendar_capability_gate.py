@@ -328,6 +328,23 @@ class CalendarCapabilityGateTest(unittest.TestCase):
         )
         self.assertTrue(all(issue.title == "能力声明无效" for issue in required_issues))
 
+    def test_status_not_required_skips_manifest_and_all_status_resolvers(self):
+        class UnexpectedStatusReadProvider:
+            def capability_manifest(self):
+                raise AssertionError("STATUS manifest must not be read")
+
+            def resolve_capability(self, *_args, **_kwargs):
+                raise AssertionError("STATUS capability must not be resolved")
+
+        issues, evidence = evaluate_calendar_capability_gate(
+            UnexpectedStatusReadProvider(),
+            make_request(status_required=False),
+            make_snapshot(),
+        )
+
+        self.assertEqual(issues, ())
+        self.assertEqual(evidence, ())
+
     def test_manifest_without_status_fails_closed_even_with_declarations(self):
         declarations = tuple(
             declaration(

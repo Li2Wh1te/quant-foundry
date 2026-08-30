@@ -39,7 +39,9 @@ from app.backtesting.data.requests import (
     CoverageQualificationRequest,
     DataCapability,
     DateRange,
+    FORMAL_PROFILE,
     INTERNAL_LINK_ACCEPTANCE_PROFILE,
+    InternalFixture,
     PriceBasis,
     QueryBoundary,
     QualityStatus,
@@ -117,6 +119,21 @@ def make_factor_row(point_date, source_code="510300.SH", factor="1.050"):
         trade_date=point_date,
         adj_factor=Decimal(factor),
         updated_at=datetime(2026, 8, 20, 2, 0, tzinfo=UTC),
+    )
+
+
+def make_status_fixture() -> InternalFixture:
+    """Build a valid named status fixture for the explicit STATUS path."""
+
+    return InternalFixture(
+        fixture_key="trading_status",
+        fixture_version=1,
+        capability="trading_status",
+        instrument_ids=(INSTRUMENT_ID,),
+        start_date=SESSIONS[0],
+        end_date=SESSIONS[-1],
+        proof_summary="explicit trading-status fixture",
+        content_hash="d" * 64,
     )
 
 
@@ -455,7 +472,14 @@ class AdjustmentPolicyTestCase(unittest.TestCase):
 class SummaryAndHashTestCase(unittest.TestCase):
     """Matrix items 9-10: revision sensitivity and hash stability."""
 
-    def build_summary(self, *, bar_stamp, factor_stamp):
+    def build_summary(
+        self,
+        *,
+        bar_stamp,
+        factor_stamp,
+        trading_status_limitation=None,
+        trading_status_applicability=None,
+    ):
         stores = FakeStores(
             mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
             bar_rows=[make_bar_row(day) for day in SESSIONS],
@@ -468,7 +492,7 @@ class SummaryAndHashTestCase(unittest.TestCase):
             row["updated_at"] = factor_stamp
         bars_by = {INSTRUMENT_ID: [day for day in SESSIONS]}
         factors_by = {INSTRUMENT_ID: list(SESSIONS)}
-        return adapter.preflight_summary(
+        values = dict(
             instrument_ids=[INSTRUMENT_ID],
             expected_sessions=SESSIONS,
             bars_by_instrument=bars_by,
@@ -476,6 +500,11 @@ class SummaryAndHashTestCase(unittest.TestCase):
             daily_rows=list(stores.bar_rows),
             factor_rows=list(stores.factor_rows),
         )
+        if trading_status_limitation is not None:
+            values["trading_status_limitation"] = trading_status_limitation
+        if trading_status_applicability is not None:
+            values["trading_status_applicability"] = trading_status_applicability
+        return adapter.preflight_summary(**values)
 
     def test_report_hash_stable_for_identical_facts(self) -> None:
         stamp = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
@@ -497,6 +526,84 @@ class SummaryAndHashTestCase(unittest.TestCase):
             second["source_revisions"]["daily_bars"]["latest_observed_at"],
             stamp_b.isoformat(),
         )
+
+    def test_trading_status_summary_is_explicit_without_status_facts(self) -> None:
+        stamp = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        summary = self.build_summary(bar_stamp=stamp, factor_stamp=stamp)
+        trading_status = summary["trading_status"]
+
+        self.assertEqual(trading_status["model"], "not_modeled")
+        self.assertEqual(
+            trading_status["rule_package"],
+            {"key": "china_listed_etf_rules", "version": 1},
+        )
+        self.assertEqual(trading_status["required_dimensions"], [])
+        self.assertEqual(
+            trading_status["not_applicable_dimensions"],
+            ["suspension", "opening_availability", "price_limit_tradability"],
+        )
+        self.assertFalse(trading_status["provider_required"])
+        self.assertFalse(trading_status["coverage_required"])
+        self.assertTrue(trading_status["limitation"])
+        for key in ("source", "coverage", "status"):
+            self.assertNotIn(key, trading_status)
+
+    def test_trading_status_limitation_is_excluded_but_declaration_is_hashed(self) -> None:
+        stamp = datetime(2026, 8, 21, 2, 0, tzinfo=UTC)
+        first = self.build_summary(
+            bar_stamp=stamp,
+            factor_stamp=stamp,
+            trading_status_limitation="首期模型不模拟交易状态",
+        )
+        second = self.build_summary(
+            bar_stamp=stamp,
+            factor_stamp=stamp,
+            trading_status_limitation="交易状态事实不在本次摘要范围内",
+        )
+        required = self.build_summary(
+            bar_stamp=stamp,
+            factor_stamp=stamp,
+            trading_status_applicability={
+                "suspension": "required",
+                "opening_availability": "not_applicable",
+                "price_limit_tradability": "not_applicable",
+            },
+        )
+
+        self.assertEqual(first["report_hash"], second["report_hash"])
+        self.assertNotEqual(first["report_hash"], required["report_hash"])
+
+    def test_unrequested_status_fixture_is_absent_from_summary(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[make_bar_row(day) for day in SESSIONS],
+        )
+        values = dict(
+            instrument_ids=[INSTRUMENT_ID],
+            expected_sessions=SESSIONS,
+            bars_by_instrument={INSTRUMENT_ID: list(SESSIONS)},
+            daily_rows=list(stores.bar_rows),
+        )
+        plain = make_adapter(stores).preflight_summary(**values)
+        unrequested = make_adapter(stores).preflight_summary(
+            **values,
+            fixtures=(make_status_fixture(),),
+        )
+
+        self.assertEqual(unrequested["fixtures"], [])
+        self.assertNotIn("status", unrequested["coverage"])
+        self.assertEqual(plain["report_hash"], unrequested["report_hash"])
+
+        requested = make_adapter(stores).preflight_summary(
+            **values,
+            fixtures=(make_status_fixture(),),
+            required_capabilities=(DataCapability.BARS, DataCapability.STATUS),
+        )
+        self.assertEqual(
+            [item["capability"] for item in requested["fixtures"]],
+            ["trading_status"],
+        )
+        self.assertNotIn("status", requested["coverage"])
 
 
 class ResultRecordIntegrationTestCase(unittest.TestCase):
@@ -546,6 +653,19 @@ class ResultRecordIntegrationTestCase(unittest.TestCase):
         self.assertIn(
             "tushare_adj_factor_native",
             item.capabilities["adjustment_series_policy"]["key"],
+        )
+        persisted_trading_status = item.coverage["trading_status"]
+        self.assertEqual(
+            persisted_trading_status["model"],
+            summary["trading_status"]["model"],
+        )
+        self.assertEqual(
+            persisted_trading_status["rule_package"],
+            summary["trading_status"]["rule_package"],
+        )
+        self.assertEqual(
+            tuple(persisted_trading_status["not_applicable_dimensions"]),
+            tuple(summary["trading_status"]["not_applicable_dimensions"]),
         )
         # The activation audit rides the coverage payload.
         validation = item.coverage["adjustment_series_validation"]
@@ -615,7 +735,13 @@ class NoNetworkTestCase(unittest.TestCase):
 class QualificationProjectionTestCase(unittest.TestCase):
     """The ETF adapter implements the shared single-instrument port."""
 
-    def _request(self):
+    def _request(
+        self,
+        *,
+        required_capabilities=(DataCapability.BARS,),
+        required_fixture_capabilities=(),
+        fixtures=(),
+    ):
         window = DateRange(SESSIONS[0], SESSIONS[-1])
         return CoverageQualificationRequest(
             instrument_id=INSTRUMENT_ID,
@@ -624,10 +750,12 @@ class QualificationProjectionTestCase(unittest.TestCase):
             formal_envelope=window,
             warmup_envelope=None,
             history_envelope=None,
-            required_capabilities=(DataCapability.BARS,),
+            required_capabilities=required_capabilities,
             query_boundary=BOUNDARY,
             preflight_profile=INTERNAL_LINK_ACCEPTANCE_PROFILE,
             resolved_calendar_ids=("XSHG",),
+            required_fixture_capabilities=required_fixture_capabilities,
+            fixtures=fixtures,
         )
 
     def test_complete_rows_are_eligible(self) -> None:
@@ -653,6 +781,74 @@ class QualificationProjectionTestCase(unittest.TestCase):
         self.assertFalse(result.eligible)
         self.assertEqual(result.coverage_reports[0].quality_status, QualityStatus.INVALID)
         self.assertIn("bar_invalid", result.reason_codes)
+
+    def test_unrequested_status_fixture_is_not_consumed_or_hashed(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[make_bar_row(day) for day in SESSIONS],
+        )
+        request = self._request()
+        plain = make_adapter(stores).qualify(request)
+        with_status_fixture = make_adapter(
+            stores, fixtures=(make_status_fixture(),)
+        ).qualify(request)
+
+        self.assertTrue(with_status_fixture.eligible)
+        self.assertEqual(with_status_fixture.reason_codes, ())
+        self.assertEqual(
+            [item.capability for item in with_status_fixture.coverage_reports],
+            [DataCapability.BARS],
+        )
+        self.assertEqual(with_status_fixture.evidence_summary["fixtures"], ())
+        self.assertEqual(
+            with_status_fixture.evidence_summary["request"]["fixtures"], ()
+        )
+        self.assertEqual(plain.qualification_hash, with_status_fixture.qualification_hash)
+
+    def test_explicit_status_request_retains_existing_fixture_gate(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[make_bar_row(day) for day in SESSIONS],
+        )
+        request = self._request(required_capabilities=(DataCapability.BARS, DataCapability.STATUS))
+
+        missing = make_adapter(stores).qualify(request)
+        self.assertFalse(missing.eligible)
+        self.assertIn("internal_preflight_fixture_missing", missing.reason_codes)
+
+        provided = make_adapter(
+            stores, fixtures=(make_status_fixture(),)
+        ).qualify(request)
+        self.assertTrue(provided.eligible)
+        self.assertEqual(
+            [item.capability for item in provided.coverage_reports],
+            [DataCapability.BARS],
+        )
+        self.assertEqual(
+            [item["capability"] for item in provided.evidence_summary["fixtures"]],
+            ["trading_status"],
+        )
+
+    def test_formal_profile_still_rejects_attached_status_fixture(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[make_bar_row(day) for day in SESSIONS],
+        )
+        request = CoverageQualificationRequest(
+            instrument_id=INSTRUMENT_ID,
+            effective_date=SESSIONS[0],
+            requested_window=DateRange(SESSIONS[0], SESSIONS[-1]),
+            formal_envelope=DateRange(SESSIONS[0], SESSIONS[-1]),
+            warmup_envelope=None,
+            history_envelope=None,
+            required_capabilities=(DataCapability.BARS,),
+            query_boundary=BOUNDARY,
+            preflight_profile=FORMAL_PROFILE,
+            resolved_calendar_ids=("XSHG",),
+        )
+
+        with self.assertRaises(InvalidDataRequestError):
+            make_adapter(stores, fixtures=(make_status_fixture(),)).qualify(request)
 
 
 class WrongSourceCodeTestCase(unittest.TestCase):

@@ -377,6 +377,86 @@ class ReadyPathTestCase(unittest.TestCase):
         self.assertEqual(first.semantic_hash, second.semantic_hash)
 
 
+class FirstPhaseTradingStatusApplicabilityTestCase(unittest.TestCase):
+    """The first ETF model explicitly declares all status dimensions N/A."""
+
+    @staticmethod
+    def _fields_with_declaration(declaration: dict[str, str]) -> dict[str, Any]:
+        values = complete_fields()
+        values["trading_status_applicability"] = declaration
+        return values
+
+    def test_first_phase_etf_declaration_is_all_not_applicable(self) -> None:
+        declaration = {
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        resolution = resolve(
+            [make_fact(fields=self._fields_with_declaration(declaration))]
+        )
+        self.assertIs(resolution.status, ResolutionStatus.READY)
+        self.assertEqual(resolution.capability_declarations, declaration)
+
+    def test_not_applicable_mapping_order_does_not_change_resolution_hash(self) -> None:
+        first = resolve(
+            [
+                make_fact(
+                    fields=self._fields_with_declaration(
+                        {
+                            "suspension": "not_applicable",
+                            "opening_availability": "not_applicable",
+                            "price_limit_tradability": "not_applicable",
+                        }
+                    )
+                )
+            ]
+        )
+        second = resolve(
+            [
+                make_fact(
+                    fields=self._fields_with_declaration(
+                        {
+                            "price_limit_tradability": "not_applicable",
+                            "opening_availability": "not_applicable",
+                            "suspension": "not_applicable",
+                        }
+                    )
+                )
+            ]
+        )
+        self.assertEqual(first.semantic_hash, second.semantic_hash)
+
+    def test_required_change_changes_resolution_hash(self) -> None:
+        na = resolve(
+            [
+                make_fact(
+                    fields=self._fields_with_declaration(
+                        {
+                            "suspension": "not_applicable",
+                            "opening_availability": "not_applicable",
+                            "price_limit_tradability": "not_applicable",
+                        }
+                    )
+                )
+            ]
+        )
+        required = resolve(
+            [
+                make_fact(
+                    fields=self._fields_with_declaration(
+                        {
+                            "suspension": "required",
+                            "opening_availability": "not_applicable",
+                            "price_limit_tradability": "not_applicable",
+                        }
+                    )
+                )
+            ]
+        )
+        self.assertNotEqual(na.semantic_hash, required.semantic_hash)
+
+
 class NamedExceptionTestCase(unittest.TestCase):
     """Example B: exceptions route to alternate facts, never carry values."""
 

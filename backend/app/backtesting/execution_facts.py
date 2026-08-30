@@ -39,6 +39,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from decimal import Decimal
 from enum import StrEnum
 from typing import Mapping, Sequence
 from uuid import UUID
@@ -46,7 +47,7 @@ from uuid import UUID
 from app.backtesting.data.errors import freeze_json
 from app.backtesting.data.facts import TradingStatus
 from app.backtesting.data.requests import QualityStatus
-from app.backtesting.domain import _aware_datetime
+from app.backtesting.domain import DomainValidationError, _aware_datetime
 
 __all__ = [
     "CAPABILITY_DIMENSION_SUSPENSION",
@@ -54,6 +55,7 @@ __all__ = [
     "CAPABILITY_DIMENSION_PRICE_LIMIT_TRADABILITY",
     "DirectionalAvailability",
     "ExecutionFactIssue",
+    "ExecutionFactsBlockedError",
     "InstrumentSessionExecutionFacts",
     "OpeningState",
     "PriceLimitState",
@@ -152,6 +154,46 @@ class ExecutionFactIssue:
         object.__setattr__(self, "details", frozen)
 
 
+class ExecutionFactsBlockedError(DomainValidationError):
+    """Raise one structured runtime error for failed fact normalization.
+
+    ``evaluate_execution_facts`` intentionally returns all dimension issues so
+    preflight can report them together.  Runtime, however, needs to abort the
+    phase with one exception while retaining the complete issue list for the
+    phase failure/audit record.  The first issue is the stable primary code;
+    the complete immutable payload remains available through ``issues`` and
+    ``details``.
+    """
+
+    code = "execution_facts_blocked"
+
+    def __init__(self, issues: Sequence[ExecutionFactIssue]) -> None:
+        normalized = tuple(issues)
+        if not normalized:
+            raise ValueError("ExecutionFactsBlockedError requires an issue")
+        if any(not isinstance(issue, ExecutionFactIssue) for issue in normalized):
+            raise ValueError("issues must contain ExecutionFactIssue values")
+        self.issues = normalized
+        self.code = normalized[0].code
+        self.details = freeze_json(
+            {
+                "issues": [
+                    {
+                        "code": issue.code,
+                        "dimension": issue.dimension,
+                        "message": issue.message,
+                        "details": dict(issue.details),
+                    }
+                    for issue in normalized
+                ]
+            },
+            "details",
+        )
+        super().__init__(
+            "; ".join(issue.message for issue in normalized)
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class InstrumentSessionExecutionFacts:
     """Typed execution facts for one instrument on one session date.
@@ -172,6 +214,42 @@ class InstrumentSessionExecutionFacts:
     sell_allowed: DirectionalAvailability
     price_limit_status: PriceLimitState
     evidence: Mapping[str, object]
+    # These two values identify the frozen rule evidence that produced the
+    # applicability declaration.  They are optional for the original
+    # standalone normalizer API, but formal Runtime construction always
+    # supplies both values and persists them in ``facts_basis``.
+    rule_package_reference: str | None = None
+    resolution_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise ValueError("instrument_id must be a UUID")
+        if not isinstance(self.calendar_id, str) or not self.calendar_id.strip():
+            raise ValueError("calendar_id must be non-blank text")
+        if not isinstance(self.session_date, date) or isinstance(
+            self.session_date, datetime
+        ):
+            raise ValueError("session_date must be a calendar date")
+        for field_name in (
+            "suspension_state",
+            "opening_state",
+            "buy_allowed",
+            "sell_allowed",
+            "price_limit_status",
+        ):
+            if not isinstance(getattr(self, field_name), StrEnum):
+                raise ValueError(f"{field_name} must be a normalized enum value")
+        if not isinstance(self.evidence, Mapping):
+            raise ValueError("evidence must be a mapping")
+        frozen = freeze_json(dict(self.evidence), "evidence")
+        assert isinstance(frozen, Mapping)
+        object.__setattr__(self, "evidence", frozen)
+        for field_name in ("rule_package_reference", "resolution_hash"):
+            value = getattr(self, field_name)
+            if value is not None:
+                if not isinstance(value, str) or not value.strip():
+                    raise ValueError(f"{field_name} must be non-blank text")
+                object.__setattr__(self, field_name, value.strip())
 
 
 def evaluate_execution_facts(
@@ -183,6 +261,7 @@ def evaluate_execution_facts(
     status_facts: Sequence[TradingStatus],
     data_cutoff: datetime,
     rule_package_reference: str | None = None,
+    rule_resolution_hash: str | None = None,
 ) -> tuple[InstrumentSessionExecutionFacts | None, tuple[ExecutionFactIssue, ...]]:
     """Normalize one session's facts into typed states or blocking issues.
 
@@ -203,6 +282,14 @@ def evaluate_execution_facts(
         raise ValueError("session_date must be a calendar date")
     if not isinstance(applicability, Mapping):
         raise ValueError("applicability must be a mapping")
+    # Keep rule provenance as plain JSON-safe text at this boundary.  A
+    # VersionedReference is accepted as a convenience without leaking a
+    # domain object into the immutable evidence payload.
+    rule_package_reference = _reference_text(rule_package_reference)
+    if rule_resolution_hash is not None:
+        if not isinstance(rule_resolution_hash, str) or not rule_resolution_hash.strip():
+            raise ValueError("rule_resolution_hash must be non-blank text")
+        rule_resolution_hash = rule_resolution_hash.strip()
 
     issues: list[ExecutionFactIssue] = []
 
@@ -323,8 +410,9 @@ def evaluate_execution_facts(
                         details={
                             "instrument_id": str(instrument_id),
                             "session_date": session_date.isoformat(),
-                            "applicability": declared,
-                            "rule_package_reference": rule_package_reference,
+                    "applicability": declared,
+                    "rule_package_reference": rule_package_reference,
+                    "resolution_hash": rule_resolution_hash,
                         },
                     )
                 )
@@ -335,6 +423,7 @@ def evaluate_execution_facts(
                 evidence[dimension] = {
                     "applicability": "not_applicable",
                     "rule_package_reference": rule_package_reference,
+                    "resolution_hash": rule_resolution_hash,
                 }
             continue
 
@@ -400,6 +489,7 @@ def evaluate_execution_facts(
             ),
             "quality_status": source_fact.evidence.quality_status.value,
             "rule_package_reference": rule_package_reference,
+            "resolution_hash": rule_resolution_hash,
         }
         evidence[dimension] = record
         if dimension == CAPABILITY_DIMENSION_PRICE_LIMIT_TRADABILITY:
@@ -440,8 +530,24 @@ def evaluate_execution_facts(
             CAPABILITY_DIMENSION_PRICE_LIMIT_TRADABILITY
         ],
         evidence=frozen_evidence,
+        rule_package_reference=rule_package_reference,
+        resolution_hash=rule_resolution_hash,
     )
     return facts_result, ()
+
+
+def _reference_text(value: object) -> str | None:
+    """Project a rule reference to stable text for JSON evidence."""
+
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.strip() or None
+    key = getattr(value, "key", None)
+    version = getattr(value, "version", None)
+    if isinstance(key, str) and isinstance(version, int) and not isinstance(version, bool):
+        return f"{key}@{version}"
+    raise ValueError("rule_package_reference must be text or a versioned reference")
 
 
 def _covers_session(fact: TradingStatus, session_date: date) -> bool:
@@ -567,6 +673,13 @@ def market_state_from_execution_facts(
         "instrument_id": str(facts.instrument_id),
         "calendar_id": facts.calendar_id,
         "session_date": facts.session_date.isoformat(),
+        "rule_package_reference": facts.rule_package_reference,
+        "resolution_hash": facts.resolution_hash,
+        "capability_declarations": {
+            dimension: facts.evidence[dimension].get("applicability")
+            for dimension in ALL_DIMENSIONS
+            if isinstance(facts.evidence.get(dimension), Mapping)
+        },
     }
     facts_basis.update(dict(facts.evidence))
 

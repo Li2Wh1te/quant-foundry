@@ -4890,6 +4890,10 @@ class MemoryDataChunkSession:
     ) -> tuple[str, ...]:
         """Require explicit evidence for every requested fact dimension."""
 
+        from app.backtesting.data.universe import (
+            _candidate_status_policy_requirements,
+        )
+
         reasons: set[str] = set()
         required = set(request.required_capabilities)
         capabilities = getattr(spec, "capabilities", None)
@@ -4898,12 +4902,13 @@ class MemoryDataChunkSession:
         )
         if getattr(action_requirement, "value", action_requirement) == "required":
             required.add(DataCapability.ACTIONS)
-        status_policy = getattr(spec, "trading_status_policy", None)
-        if isinstance(status_policy, Mapping) and any(
-            getattr(value, "value", value) == "required"
-            for value in status_policy.values()
-        ):
-            required.add(DataCapability.STATUS)
+        required_status_dimensions, declaration_valid, declaration_present = (
+            _candidate_status_policy_requirements(None, spec)
+        )
+        if declaration_present and declaration_valid and not required_status_dimensions:
+            # A valid all-N/A candidate does not need status evidence merely
+            # because another candidate caused the run to request STATUS.
+            required.discard(DataCapability.STATUS)
 
         def proven(value: Mapping[str, object] | None) -> bool:
             if not isinstance(value, Mapping):
@@ -5024,21 +5029,15 @@ class MemoryDataChunkSession:
             if capability is not DataCapability.UNIVERSE
         }
         # The rule declaration, not an empty event table, decides whether
-        # action/status evidence is mandatory.  Add those dimensions to the
-        # existing coverage port request when the resolved InstrumentSpec
-        # explicitly requires them.
+        # action evidence is mandatory.  STATUS stays aligned with the
+        # frozen request here: a candidate-only required declaration must be
+        # reported as a capability mismatch, not used to widen this request.
         if spec is None:
             spec = self._candidate_spec_for_query(instrument_id, query)
         capabilities = getattr(spec, "capabilities", None)
         action_requirement = getattr(capabilities, "corporate_action_requirement", None)
         if getattr(action_requirement, "value", action_requirement) == "required":
             required_values.add(DataCapability.ACTIONS)
-        status_policy = getattr(spec, "trading_status_policy", None)
-        if isinstance(status_policy, Mapping) and any(
-            getattr(value, "value", value) == "required"
-            for value in status_policy.values()
-        ):
-            required_values.add(DataCapability.STATUS)
         required = tuple(sorted(required_values, key=lambda item: item.value))
         if not required:
             # A universe query still needs a qualification port invocation;
@@ -5493,6 +5492,7 @@ class MemoryDataChunkSession:
                 "actual",
                 "evidence_summary",
                 "qualification_hash",
+                "required_status_dimensions",
             ):
                 value = getattr(evaluation, name, None)
                 if value is not None:

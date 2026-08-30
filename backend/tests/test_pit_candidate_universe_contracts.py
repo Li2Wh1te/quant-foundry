@@ -27,6 +27,8 @@ from app.backtesting.data.requests import (
 from app.backtesting.data.universe import (
     CANDIDATE_CALENDAR_NOT_PREFLIGHTED,
     CANDIDATE_MARKET_DATA_INCOMPLETE,
+    CANDIDATE_STATUS_INCOMPLETE,
+    CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH,
     CandidateEligibilityContext,
     CandidateInput,
     UniverseScopeStatus,
@@ -235,6 +237,138 @@ class CandidateContractTests(unittest.TestCase):
         self.assertFalse(result.eligible)
         self.assertIn("candidate_market_data_incomplete", result.reason_codes)
         self.assertIn("candidate_rule_incomplete", result.reason_codes)
+
+    def test_unrequested_status_evidence_is_ignored_for_dynamic_candidates(self) -> None:
+        """Optional status observations cannot change dynamic membership."""
+
+        context = CandidateEligibilityContext(
+            effective_date=date(2026, 1, 5),
+            data_cutoff=datetime(2026, 1, 6, tzinfo=UTC),
+            resolved_calendar_ids=("SSE",),
+            market_scope=MarketScope(exchanges=("SSE",), asset_classes=("etf",)),
+            scope_mode=InstrumentScopeMode.DYNAMIC,
+            required_capabilities=(DataCapability.BARS,),
+        )
+        for status_evidence in (
+            {},
+            {"complete": False, "quality_status": "invalid"},
+        ):
+            with self.subTest(status_evidence=status_evidence):
+                candidate = CandidateInput(
+                    instrument_id=uuid4(),
+                    calendar_id="SSE",
+                    trading_code="510300",
+                    name="ETF",
+                    display_name="ETF",
+                    asset_class="etf",
+                    exchange="SSE",
+                    identity_evidence={"complete": True, "calendar_id": "SSE"},
+                    mapping_evidence={"complete": True},
+                    rule_evidence={"valid": True},
+                    market_data_evidence={"complete": True},
+                    status_evidence=status_evidence,
+                    trading_status_policy={
+                        "suspension": "not_applicable",
+                        "opening_availability": "not_applicable",
+                        "price_limit_tradability": "not_applicable",
+                    },
+                    reason_codes=(CANDIDATE_STATUS_INCOMPLETE,),
+                )
+
+                result = evaluate_candidate(candidate, context)
+
+                self.assertTrue(result.eligible)
+                self.assertNotIn(CANDIDATE_STATUS_INCOMPLETE, result.reason_codes)
+
+    def test_required_candidate_status_without_request_is_audited_mismatch(self) -> None:
+        """A candidate rule cannot widen the frozen request capability set."""
+
+        context = CandidateEligibilityContext(
+            effective_date=date(2026, 1, 5),
+            data_cutoff=datetime(2026, 1, 6, tzinfo=UTC),
+            resolved_calendar_ids=("SSE",),
+            market_scope=MarketScope(exchanges=("SSE",), asset_classes=("etf",)),
+            scope_mode=InstrumentScopeMode.DYNAMIC,
+            required_capabilities=(DataCapability.BARS,),
+        )
+        candidate = CandidateInput(
+            instrument_id=uuid4(),
+            calendar_id="SSE",
+            trading_code="510300",
+            name="ETF",
+            display_name="ETF",
+            asset_class="etf",
+            exchange="SSE",
+            identity_evidence={"complete": True, "calendar_id": "SSE"},
+            mapping_evidence={"complete": True},
+            rule_evidence={"valid": True},
+            market_data_evidence={"complete": True},
+            trading_status_policy={
+                "suspension": "required",
+                "opening_availability": "not_applicable",
+                "price_limit_tradability": "not_applicable",
+            },
+            status_evidence={"complete": False, "quality_status": "invalid"},
+        )
+
+        result = evaluate_candidate(candidate, context)
+
+        self.assertFalse(result.eligible)
+        self.assertEqual(
+            result.reason_codes,
+            (CANDIDATE_STATUS_CAPABILITY_REQUIREMENT_MISMATCH,),
+        )
+        self.assertEqual(result.required_status_dimensions, ("suspension",))
+        self.assertEqual(result.candidate_required_status_dimensions, ("suspension",))
+        self.assertEqual(
+            result.as_dict()["required_status_dimensions"],
+            ("suspension",),
+        )
+        self.assertEqual(
+            result.evidence_summary["required_status_dimensions"],
+            ("suspension",),
+        )
+
+    def test_required_status_evidence_still_fails_closed(self) -> None:
+        """A requested status dimension requires a positive fact proof."""
+
+        context = CandidateEligibilityContext(
+            effective_date=date(2026, 1, 5),
+            data_cutoff=datetime(2026, 1, 6, tzinfo=UTC),
+            resolved_calendar_ids=("SSE",),
+            market_scope=MarketScope(exchanges=("SSE",), asset_classes=("etf",)),
+            scope_mode=InstrumentScopeMode.DYNAMIC,
+            required_capabilities=(DataCapability.BARS, DataCapability.STATUS),
+        )
+        for status_evidence in (
+            {"complete": False, "quality_status": "unknown"},
+            {"complete": True, "status": "not_applicable"},
+        ):
+            with self.subTest(status_evidence=status_evidence):
+                candidate = CandidateInput(
+                    instrument_id=uuid4(),
+                    calendar_id="SSE",
+                    trading_code="510300",
+                    name="ETF",
+                    display_name="ETF",
+                    asset_class="etf",
+                    exchange="SSE",
+                    identity_evidence={"complete": True, "calendar_id": "SSE"},
+                    mapping_evidence={"complete": True},
+                    rule_evidence={"valid": True},
+                    market_data_evidence={"complete": True},
+                    trading_status_policy={
+                        "suspension": "required",
+                        "opening_availability": "not_applicable",
+                        "price_limit_tradability": "not_applicable",
+                    },
+                    status_evidence=status_evidence,
+                )
+
+                result = evaluate_candidate(candidate, context)
+
+                self.assertFalse(result.eligible)
+                self.assertIn(CANDIDATE_STATUS_INCOMPLETE, result.reason_codes)
 
     def test_universe_audit_rejects_sensitive_evidence_keys(self) -> None:
         with self.assertRaises(InvalidDataRequestError):

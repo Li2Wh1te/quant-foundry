@@ -38,18 +38,25 @@ def _dataset(*, include_second_bar: bool = True) -> tuple[MemoryDataSet, object,
     """Build complete local facts and two PIT specs for the provider tests."""
 
     first, second = uuid4(), uuid4()
+    not_applicable_status = {
+        "suspension": "not_applicable",
+        "opening_availability": "not_applicable",
+        "price_limit_tradability": "not_applicable",
+    }
     specs = (
         make_spec(
             first,
             display=InstrumentDisplay(first, "510300", "ETF A", "ETF A"),
             calendar_id="XSHG",
             rule_package_reference=RULE,
+            trading_status_policy=not_applicable_status,
         ),
         make_spec(
             second,
             display=InstrumentDisplay(second, "510500", "ETF B", "ETF B"),
             calendar_id="XSHG",
             rule_package_reference=RULE,
+            trading_status_policy=not_applicable_status,
         ),
     )
     definition = CalendarDefinition(

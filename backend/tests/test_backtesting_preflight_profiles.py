@@ -165,6 +165,18 @@ class ProfileContractTestCase(unittest.TestCase):
         )
         get_preflight_profile("internal_link_acceptance@1").validate_request(request)
 
+    def test_internal_profile_has_no_implicit_status_fixture_requirement(self) -> None:
+        """A bars-only request is valid without the optional status fixture."""
+
+        request = self._request(uuid4())
+        profile = get_preflight_profile("internal_link_acceptance@1")
+
+        profile.validate_request(request)
+
+        self.assertEqual(request.required_capabilities, (DataCapability.BARS,))
+        self.assertEqual(request.required_fixture_capabilities, ())
+        self.assertEqual(request.fixtures, ())
+
     def _request(self, instrument_id, *, profile=INTERNAL_LINK_ACCEPTANCE_PROFILE, fixtures=(), market_scope=None, required_fixture_capabilities=()):
         window = DateRange(date(2026, 1, 5), date(2026, 1, 7))
         return CoverageQualificationRequest(

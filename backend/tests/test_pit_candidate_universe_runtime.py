@@ -5,6 +5,7 @@ from __future__ import annotations
 import unittest
 from datetime import date
 from datetime import datetime, timezone
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from app.backtesting.result_models import (
@@ -18,7 +19,13 @@ from app.backtesting.data.universe import (
 )
 from app.backtesting.runtime import PhaseExecutionError
 from app.strategy_protocol.data_view import InstrumentCandidateDTO
-from app.backtesting.data.requests import InstrumentScopeMode
+from app.backtesting.data.requests import DataCapability, InstrumentScopeMode
+from app.instruments.domain import VersionedReference
+from app.instruments.rule_snapshots import (
+    FactProvenance,
+    InstrumentRuleSnapshotSegment,
+    RunRuleSnapshotBundle,
+)
 from tests.backtest_runtime_fixture import (
     CountingStrategyView,
     DictMarketData,
@@ -31,6 +38,82 @@ from tests.backtest_runtime_fixture import (
 
 D0 = date(2026, 8, 3)
 D1 = date(2026, 8, 4)
+D2 = date(2026, 8, 5)
+
+_DEFAULT_RULE_SNAPSHOT = object()
+
+
+def _rule_snapshot_segment(
+    instrument_id: UUID = INSTRUMENT_ID,
+) -> InstrumentRuleSnapshotSegment:
+    """Build one complete all-N/A rule segment for formal runtime tests."""
+
+    observed_at = datetime(2026, 8, 1, 12, tzinfo=timezone.utc)
+    return InstrumentRuleSnapshotSegment(
+        instrument_id=instrument_id,
+        effective_from=date(2026, 1, 1),
+        effective_to=None,
+        normal_fact_reference=VersionedReference("etf_rule_fact", 3),
+        exception_fact_reference=None,
+        normalized_values={
+            "lot_size": Decimal("200"),
+            "quantity_precision": 0,
+            "price_precision": 2,
+            "price_tick": Decimal("0.05"),
+            "contract_multiplier": Decimal("1"),
+            "trading_session_template": VersionedReference("cn_etf_session", 1),
+            "settlement_rule_class": "t_plus_1_before_open_match",
+            "sellable_rule": VersionedReference("sell_rule", 1),
+            "fee_categories": ("none",),
+            "currency": "CNY",
+            "order_types": ("market",),
+            "minimum_order_quantity": Decimal("200"),
+            "price_limit_rule": VersionedReference("price_limit_rule", 1),
+            "cash_availability_rule": VersionedReference("cash_rule", 1),
+            "position_availability_rule": VersionedReference("position_rule", 1),
+        },
+        capability_declarations={
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        },
+        provenance={
+            "normal_fact": FactProvenance(
+                fact_reference=VersionedReference("etf_rule_fact", 3),
+                source="exchange_rule_book",
+                source_revision="2026-edition",
+                valid_from=date(2024, 1, 1),
+                valid_to=None,
+                known_at=observed_at,
+                observed_at=observed_at,
+                quality_status="complete",
+                fixture_only=False,
+                content_hash="f" * 64,
+            ).to_payload()
+        },
+        resolution_hash="r" * 64,
+    )
+
+
+def _rule_snapshot_bundle(
+    *,
+    segments=None,
+) -> RunRuleSnapshotBundle:
+    """Build an unbound run snapshot with explicitly supplied segments."""
+
+    return RunRuleSnapshotBundle(
+        rule_package_reference=VersionedReference("china_listed_etf_rules", 1),
+        rule_package_semantic_hash="p" * 64,
+        parser_revision="rule-package-resolver@2",
+        exception_set_reference=None,
+        exception_set_hash=None,
+        data_cutoff=datetime(2026, 8, 1, tzinfo=timezone.utc),
+        instrument_segments=(
+            tuple(segments)
+            if segments is not None
+            else (_rule_snapshot_segment(),)
+        ),
+    )
 
 
 class _CompleteCandidate:
@@ -78,6 +161,20 @@ class _DynamicUniverseQuery:
     def query(self, *, exchanges=None, asset_classes=None):
         del exchanges, asset_classes
         return self._candidates
+
+
+class _NoTradingStatusMarketData(DictMarketData):
+    """Expose a failing status port to prove formal N/A runs never use it."""
+
+    def __init__(self, quotes_by_day) -> None:
+        super().__init__(
+            quotes_by_day,
+            suspended_instruments=(INSTRUMENT_ID,),
+        )
+
+    def trading_status(self, *args, **kwargs):
+        del args, kwargs
+        raise AssertionError("formal N/A runtime must not query trading_status")
 
 
 class _QueryingStrategy(ScriptedStrategy):
@@ -302,6 +399,9 @@ class FinalQualificationRuntimeTests(unittest.TestCase):
         universe_query_override=None,
         session_dates=(D0, D1),
         candidate_eligibility_evaluator=_complete_evaluator,
+        market_data=None,
+        rule_snapshot_bundle=_DEFAULT_RULE_SNAPSHOT,
+        initial_cash="10000",
     ):
         candidate = candidate or _CompleteCandidate(INSTRUMENT_ID)
         quote_values = {
@@ -313,10 +413,14 @@ class FinalQualificationRuntimeTests(unittest.TestCase):
             }
             for index, day in enumerate(session_dates)
         }
+        if market_data is None:
+            market_data = DictMarketData(quote_values)
+        if rule_snapshot_bundle is _DEFAULT_RULE_SNAPSHOT:
+            rule_snapshot_bundle = _rule_snapshot_bundle()
         return build_runner(
             run_id=f"pit-formal-runtime-{uuid4()}",
             axis=build_axis(session_dates),
-            market_data=DictMarketData(quote_values),
+            market_data=market_data,
             strategy_view=CountingStrategyView(
                 {day: str(100 + index) + ".00" for index, day in enumerate(session_dates)}
             ),
@@ -328,6 +432,91 @@ class FinalQualificationRuntimeTests(unittest.TestCase):
             ),
             candidate_eligibility_evaluator=candidate_eligibility_evaluator,
             universe_scope_resolution=_DynamicScope(),
+            rule_snapshot_bundle=rule_snapshot_bundle,
+            initial_cash=initial_cash,
+        )
+
+    def test_dynamic_target_without_rule_snapshot_bundle_fails_before_order_creation(
+        self,
+    ) -> None:
+        runner = self._formal_dynamic_runner(
+            session_dates=(D0, D1, D2),
+            strategy=_QueryingStrategy({0: {str(INSTRUMENT_ID): "2"}}),
+            rule_snapshot_bundle=None,
+        )
+
+        with self.assertRaises(PhaseExecutionError) as raised:
+            runner.run()
+
+        self.assertEqual(raised.exception.error_code, "universe_capability_missing")
+        self.assertEqual(
+            raised.exception.details["failed_check"],
+            "rule_snapshot_segment_handoff",
+        )
+        self.assertIn(
+            "rule_snapshot_bundle_missing",
+            raised.exception.details["reason_codes"],
+        )
+        self.assertEqual(runner._orders, [])
+
+    def test_dynamic_target_without_current_rule_segment_fails_before_order_creation(
+        self,
+    ) -> None:
+        runner = self._formal_dynamic_runner(
+            session_dates=(D0, D1, D2),
+            strategy=_QueryingStrategy({0: {str(INSTRUMENT_ID): "2"}}),
+            rule_snapshot_bundle=_rule_snapshot_bundle(
+                segments=(_rule_snapshot_segment(uuid4()),)
+            ),
+        )
+
+        with self.assertRaises(PhaseExecutionError) as raised:
+            runner.run()
+
+        self.assertEqual(raised.exception.error_code, "universe_capability_missing")
+        self.assertEqual(
+            raised.exception.details["instrument_id"], str(INSTRUMENT_ID)
+        )
+        self.assertIn(
+            "rule_snapshot_segment_missing",
+            raised.exception.details["reason_codes"],
+        )
+        self.assertEqual(runner._orders, [])
+
+    def test_all_na_dynamic_target_uses_handoff_without_trading_status_query(
+        self,
+    ) -> None:
+        candidate = _CompleteCandidate(INSTRUMENT_ID)
+        candidate.status_evidence = {
+            "complete": False,
+            "quality_status": "invalid",
+        }
+        market_data = _NoTradingStatusMarketData(
+            {
+                day: {INSTRUMENT_ID: ("100.00", "100.00")}
+                for day in (D0, D1, D2)
+            }
+        )
+        runner = self._formal_dynamic_runner(
+            candidate=candidate,
+            candidate_eligibility_evaluator=evaluate_candidate,
+            market_data=market_data,
+            session_dates=(D0, D1, D2),
+            strategy=_QueryingStrategy({0: {str(INSTRUMENT_ID): "1"}}),
+            initial_cash="50000",
+        )
+
+        result = runner.run()
+
+        self.assertTrue(
+            any(event.event_type == "fill_created" for event in result.events)
+        )
+        self.assertEqual(
+            runner._execution_facts[(INSTRUMENT_ID, D1)].suspension_state.value,
+            "not_applicable",
+        )
+        self.assertIn(
+            (INSTRUMENT_ID, D0), runner._rule_policy_cache
         )
 
     def test_final_recheck_uses_complete_engine_candidate_and_current_cutoff(self) -> None:
@@ -342,6 +531,48 @@ class FinalQualificationRuntimeTests(unittest.TestCase):
         self.assertIsInstance(final_candidate, _CompleteCandidate)
         self.assertEqual(context.effective_date, D0)
         self.assertEqual(context.data_cutoff, context.effective_at)
+
+    def test_final_recheck_ignores_unrequested_invalid_status_evidence(self) -> None:
+        """A full N/A dynamic target does not need a status qualification port."""
+
+        candidate = _CompleteCandidate(INSTRUMENT_ID)
+        candidate.status_evidence = {
+            "complete": False,
+            "quality_status": "invalid",
+        }
+        runner = self._formal_dynamic_runner(
+            candidate=candidate,
+            candidate_eligibility_evaluator=evaluate_candidate,
+        )
+
+        result = runner.run()
+
+        self.assertEqual(result.universe_target_ids, (str(INSTRUMENT_ID),))
+        self.assertTrue(result.final_qualification_results[0]["eligible"])
+
+    def test_final_recheck_required_status_without_fact_fails_closed(self) -> None:
+        """A required status dimension still blocks before order creation."""
+
+        class RequiredStatusScope(_DynamicScope):
+            required_capabilities = (DataCapability.STATUS,)
+
+        candidate = _CompleteCandidate(INSTRUMENT_ID)
+        candidate.status_evidence = {}
+        runner = self._formal_dynamic_runner(
+            candidate=candidate,
+            candidate_eligibility_evaluator=evaluate_candidate,
+        )
+        runner._universe_scope_resolution = RequiredStatusScope()
+
+        with self.assertRaises(PhaseExecutionError) as raised:
+            runner.run()
+
+        self.assertEqual(raised.exception.error_code, "universe_selected_ineligible")
+        self.assertIn(
+            "candidate_status_incomplete",
+            raised.exception.details["reason_codes"],
+        )
+        self.assertEqual(runner._orders, [])
 
     def test_dynamic_target_requires_strategy_query_result(self) -> None:
         runner = self._formal_dynamic_runner(

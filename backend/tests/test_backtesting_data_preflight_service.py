@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from types import SimpleNamespace
 import unittest
 from uuid import uuid4
 
@@ -104,6 +105,17 @@ def fixture(*, content_hash: str = "a" * 64) -> InternalFixture:
     )
 
 
+def status_fixture() -> InternalFixture:
+    """Create a valid status fixture that is only consumed by STATUS requests."""
+
+    return replace(
+        fixture(),
+        fixture_key="trading_status",
+        capability="trading_status",
+        proof_summary="explicit trading-status fixture",
+    )
+
+
 class FakeProvider:
     """Provider stub whose read count proves pre-read gates short-circuit."""
 
@@ -114,6 +126,21 @@ class FakeProvider:
     def preflight(self, request):
         self.preflight_calls += 1
         return self.report
+
+
+class ManifestProvider(FakeProvider):
+    """Provider stub exposing a manifest without the optional STATUS family."""
+
+    def __init__(self, report):
+        super().__init__(report)
+        self.manifest_calls = 0
+
+    def capability_manifest(self):
+        self.manifest_calls += 1
+        return SimpleNamespace(
+            capabilities=(DataCapability.BARS,),
+            consistency_modes=(ConsistencyMode.TRANSITIONAL_REPEATABLE_READ,),
+        )
 
 
 class PreflightServiceTestCase(unittest.TestCase):
@@ -144,6 +171,43 @@ class PreflightServiceTestCase(unittest.TestCase):
         )
         self.assertNotEqual(outcome.report_hash, changed.report_hash)
         self.assertNotEqual(outcome.report.report_hash, changed.report.report_hash)
+
+    def test_unrequested_status_fixture_is_not_consumed_or_hashed(self) -> None:
+        """Unrequested STATUS evidence cannot alter the preflight identity."""
+
+        provider = ManifestProvider(self.base_report)
+        service = DataPreflightService(provider)
+        request = intent()
+        plain = service.preflight(PreflightContext(request=request, provider=provider))
+        with_unrequested_status = service.preflight(
+            PreflightContext(
+                request=request,
+                provider=provider,
+                fixtures=(status_fixture(),),
+            )
+        )
+
+        self.assertEqual(plain.report_hash, with_unrequested_status.report_hash)
+        self.assertEqual(with_unrequested_status.fixture_sources, ())
+        self.assertEqual(with_unrequested_status.report.fixture_sources, ())
+        self.assertNotIn(
+            "trading_status",
+            with_unrequested_status.as_dict()["details"]["fixture_sources"],
+        )
+
+    def test_run_id_is_persistence_metadata_not_preflight_hash_input(self) -> None:
+        """Persisting the same outcome under another run ID keeps its hash."""
+
+        provider = ManifestProvider(self.base_report)
+        outcome = DataPreflightService(provider).preflight(
+            PreflightContext(request=intent(), provider=provider)
+        )
+        first = outcome.to_result_record(uuid4(), "admission")
+        second = outcome.to_result_record(uuid4(), "admission")
+
+        self.assertNotEqual(first.run_id, second.run_id)
+        self.assertEqual(first.report_hash, second.report_hash)
+        self.assertEqual(first.report_hash, outcome.report_hash)
 
     def test_named_quantity_fixture_allows_ready_and_is_frozen_on_report(self) -> None:
         from app.backtesting.data.sessions import AuthoritativeDataSession
@@ -224,6 +288,168 @@ class PreflightServiceTestCase(unittest.TestCase):
         self.assertEqual(
             serialized["details"]["fixture_sources"][0]["fixture_key"],
             "quantity_action_coverage",
+        )
+
+    def test_request_without_status_does_not_require_status_manifest_fixture_or_coverage(self) -> None:
+        from app.backtesting.data.sessions import AuthoritativeDataSession
+        from tests.test_backtesting_data_session import (
+            COMMON_OPEN,
+            J5,
+            J7,
+            build_provider,
+            make_request,
+        )
+
+        request = replace(
+            make_request(J5, J7, calendar_ids=("SSE", "SZSE"), instrument_id=IID),
+            required_capabilities=(DataCapability.BARS,),
+        )
+        base_report = AuthoritativeDataSession(
+            request=request,
+            calendar_provider=build_provider(COMMON_OPEN, COMMON_OPEN),
+        ).preflight()
+        provider = ManifestProvider(base_report)
+
+        outcome = DataPreflightService(provider).preflight(
+            PreflightContext(request=request, provider=provider)
+        )
+
+        self.assertEqual(outcome.status, PreflightStatus.READY)
+        self.assertEqual(provider.manifest_calls, 1)
+        self.assertNotIn(DataCapability.STATUS, outcome.report.required_capabilities)
+        self.assertEqual(
+            [item.capability for item in outcome.report.coverage_reports], []
+        )
+        self.assertNotIn(
+            "internal_preflight_fixture_missing",
+            {issue.code for issue in outcome.report.issues},
+        )
+        self.assertEqual(outcome.fixture_sources, ())
+
+    def test_bars_only_chunked_request_does_not_inspect_capability_manifest(self) -> None:
+        request = replace(
+            intent(),
+            consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
+            consistency_token_contract=ContractRef("fixture-token", 1),
+        )
+        provider = ManifestProvider(self.base_report)
+        service = DataPreflightService(provider)
+
+        issues = service._required_fixture_issues(
+            service.profile,
+            request,
+            provider,
+            (),
+        )
+
+        self.assertEqual(issues, ())
+        self.assertEqual(provider.manifest_calls, 0)
+
+    def test_rule_snapshot_status_mismatch_blocks_before_manifest_or_provider_read(self) -> None:
+        """STATUS applicability must be decided before any provider I/O."""
+
+        from tests.test_backtesting_data_contract import _rule_report_for
+
+        request = replace(
+            intent(),
+            required_capabilities=(DataCapability.BARS,),
+        )
+        rule_report = _rule_report_for(
+            request,
+            trading_status_applicability={
+                "suspension": "required",
+                "opening_availability": "not_applicable",
+                "price_limit_tradability": "not_applicable",
+            },
+        )
+        provider = ManifestProvider(self.base_report)
+
+        outcome = DataPreflightService(provider).preflight(
+            PreflightContext(
+                request=request,
+                provider=provider,
+                rule_preflight_report=rule_report,
+            )
+        )
+
+        self.assertEqual(outcome.status, PreflightStatus.BLOCKED)
+        self.assertEqual(provider.manifest_calls, 0)
+        self.assertEqual(provider.preflight_calls, 0)
+        issue = next(
+            item
+            for item in outcome.report.issues
+            if item.code == "trading_status_capability_requirement_mismatch"
+        )
+        self.assertEqual(
+            issue.details["reason_code"],
+            "trading_status_capability_requirement_mismatch",
+        )
+        self.assertTrue(issue.details["expected_status"])
+        self.assertFalse(issue.details["actual_status"])
+        self.assertEqual(issue.details["required_status_dimensions"], ("suspension",))
+
+    def test_rule_snapshot_full_na_status_mismatch_blocks_before_provider_read(self) -> None:
+        """A client STATUS bit cannot opt into an all-N/A frozen snapshot."""
+
+        from tests.test_backtesting_data_contract import _rule_report_for
+
+        request = replace(
+            intent(),
+            required_capabilities=(DataCapability.BARS, DataCapability.STATUS),
+        )
+        rule_report = _rule_report_for(request)
+        provider = ManifestProvider(self.base_report)
+
+        outcome = DataPreflightService(provider).preflight(
+            PreflightContext(
+                request=request,
+                provider=provider,
+                rule_preflight_report=rule_report,
+            )
+        )
+
+        self.assertEqual(outcome.status, PreflightStatus.BLOCKED)
+        self.assertEqual(provider.manifest_calls, 0)
+        self.assertEqual(provider.preflight_calls, 0)
+        issue = next(
+            item
+            for item in outcome.report.issues
+            if item.code == "trading_status_capability_requirement_mismatch"
+        )
+        self.assertFalse(issue.details["expected_status"])
+        self.assertTrue(issue.details["actual_status"])
+
+    def test_preflight_json_exposes_not_modeled_trading_status_summary(self) -> None:
+        """Operator preflight JSON includes the explicit first-phase N/A model."""
+
+        provider = ManifestProvider(self.base_report)
+        request = intent()
+        outcome = DataPreflightService(provider).preflight(
+            PreflightContext(request=request, provider=provider)
+        )
+
+        payload = outcome.as_dict()
+        self.assertIn("trading_status", payload)
+        self.assertEqual(payload["trading_status"]["model"], "not_modeled")
+        self.assertEqual(
+            payload["trading_status"]["rule_package"],
+            {"key": RULES.key, "version": RULES.version},
+        )
+        self.assertEqual(payload["trading_status"]["required_dimensions"], [])
+        self.assertEqual(
+            payload["trading_status"]["not_applicable_dimensions"],
+            ["suspension", "opening_availability", "price_limit_tradability"],
+        )
+        self.assertFalse(payload["trading_status"]["provider_required"])
+        self.assertFalse(payload["trading_status"]["coverage_required"])
+        self.assertTrue(payload["trading_status"]["limitation"])
+        self.assertIn("trading_status", payload["details"])
+        self.assertEqual(
+            payload["details"]["trading_status"], payload["trading_status"]
+        )
+        self.assertEqual(
+            payload["details"]["trading_status"]["not_applicable_dimensions"],
+            ["suspension", "opening_availability", "price_limit_tradability"],
         )
 
     def test_unnamed_status_mapping_is_blocked_before_provider_read(self) -> None:

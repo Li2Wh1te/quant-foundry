@@ -30,6 +30,7 @@ from uuid import UUID
 
 from app.backtesting.domain import DomainValidationError, _aware_datetime
 from app.backtesting.execution import MarketState
+from app.backtesting.execution_facts import ALL_DIMENSIONS
 from app.instruments.references import VersionedReference
 from app.instruments.rules.contracts import StrategyRuleDeclaration
 
@@ -156,6 +157,42 @@ def _required_text(value: Any, field_name: str) -> str:
     return value.strip()
 
 
+def _capability_declarations(
+    value: Any, field_name: str = "capability_declarations"
+) -> Mapping[str, str]:
+    """Validate the complete frozen trading-status applicability mapping.
+
+    Applicability is a rule fact, not a runtime/provider preference. A
+    partial mapping would leave the execution path guessing whether an
+    omitted dimension is modeled, so both missing and unknown dimensions are
+    rejected before a policy can be consumed.
+    """
+
+    if not isinstance(value, Mapping):
+        raise ExecutionPolicyError(f"{field_name} must be a mapping")
+    expected = set(ALL_DIMENSIONS)
+    actual = set(value)
+    missing = sorted(expected - actual)
+    unknown = sorted(str(item) for item in actual - expected)
+    if missing:
+        raise ExecutionPolicyError(
+            f"{field_name} is missing dimensions: {', '.join(missing)}"
+        )
+    if unknown:
+        raise ExecutionPolicyError(
+            f"{field_name} contains unknown dimensions: {', '.join(unknown)}"
+        )
+    normalized: dict[str, str] = {}
+    for dimension in ALL_DIMENSIONS:
+        requirement = getattr(value[dimension], "value", value[dimension])
+        if requirement not in ("required", "not_applicable"):
+            raise ExecutionPolicyError(
+                f"{field_name}.{dimension} must be required or not_applicable"
+            )
+        normalized[dimension] = str(requirement)
+    return MappingProxyType(normalized)
+
+
 @dataclass(frozen=True, slots=True)
 class InstrumentExecutionPolicy:
     """Immutable execution-layer view of one instrument's resolved rules.
@@ -192,6 +229,11 @@ class InstrumentExecutionPolicy:
     # silently matching everything; a rule whose declared facts are not
     # provided here can never apply (fail closed).
     fee_applicability_context: Mapping[str, str] = field(default_factory=dict)
+    # The complete trading-status applicability declaration from the frozen
+    # rule segment. This is deliberately separate from legacy
+    # InstrumentFacts booleans: those fields are not authoritative on the
+    # formal rule-snapshot path.
+    capability_declarations: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def package_key(self) -> str:
@@ -280,10 +322,13 @@ class InstrumentExecutionPolicy:
                 values.get("price_limit_rule"), "price_limit_rule"
             ),
             fee_applicability_context=fee_applicability_context,
+            capability_declarations=_capability_declarations(
+                getattr(segment, "capability_declarations", None)
+            ),
         )
 
     def __post_init__(self) -> None:
-        """Normalize and deep-freeze the fee applicability context."""
+        """Normalize and deep-freeze applicability contexts."""
 
         context: dict[str, str] = {}
         for key, value in (self.fee_applicability_context or {}).items():
@@ -298,6 +343,27 @@ class InstrumentExecutionPolicy:
             context[key.strip()] = value.strip()
         object.__setattr__(
             self, "fee_applicability_context", MappingProxyType(context)
+        )
+        object.__setattr__(
+            self,
+            "capability_declarations",
+            _capability_declarations(self.capability_declarations),
+        )
+
+    @property
+    def trading_status_applicability(self) -> Mapping[str, str]:
+        """Compatibility alias for the rule package field name."""
+
+        return self.capability_declarations
+
+    @property
+    def required_status_dimensions(self) -> tuple[str, ...]:
+        """Return required dimensions in deterministic declaration order."""
+
+        return tuple(
+            dimension
+            for dimension in ALL_DIMENSIONS
+            if self.capability_declarations[dimension] == "required"
         )
 
     def validate_order_type(self, order_type: Any) -> str | None:
@@ -367,6 +433,7 @@ class InstrumentExecutionPolicy:
             "fee_categories": tuple(sorted(self.fee_categories)),
             "settlement_rule_class": self.settlement_rule_class,
             "fee_applicability_context": dict(self.fee_applicability_context),
+            "capability_declarations": dict(self.capability_declarations),
         }
 
 
