@@ -17,13 +17,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
+from uuid import UUID
 
 from app.backtesting.calendar_axis import CalendarDefinition, SessionPoint
 from app.backtesting.data.errors import (
     InvalidDataRequestError,
     LookbackSessionsLimitExceededError,
+    freeze_json,
 )
 from app.backtesting.data.facts import (
     AdjustedSeriesPoint,
@@ -38,7 +41,17 @@ from app.backtesting.data.facts import (
     TradingRule,
     TradingStatus,
 )
-from app.backtesting.data.reports import DataCoverageReport, DataPreflightReport
+from app.backtesting.data.reports import (
+    DataCoverageReport,
+    DataPreflightReport,
+    canonical_json,
+    canonical_hash,
+)
+from app.backtesting.data.universe import (
+    CandidateEligibility,
+    CandidateEligibilityContext,
+    UniverseScopeResolution,
+)
 from app.backtesting.data.requests import (
     AdjustedSeriesQuery,
     BarQuery,
@@ -53,6 +66,8 @@ from app.backtesting.data.requests import (
     DataPreflightRequest,
     DataRequest,
     DataValueQuery,
+    CapabilitySource,
+    CoverageQualificationRequest,
     InstrumentMappingQuery,
     InstrumentQuery,
     MAX_LOOKBACK_SESSIONS,
@@ -71,16 +86,266 @@ from app.backtesting.data.requests import (
 )
 
 __all__ = [
+    "CapabilityAvailability",
+    "CapabilitySource",
+    "CandidateQualificationPort",
     "ConsistencyTokenStatus",
     "CoverageEnvelope",
+    "CoverageQualificationPort",
+    "CoverageQualificationResult",
     "DataCapabilityManifest",
     "DataChunkSession",
     "DataConsistencyContext",
     "DataConsistencyEvidence",
     "DataProvider",
     "DataSession",
+    "DynamicUniversePreflightPort",
+    "InstrumentCoverageQualification",
     "PitAnalysisGateway",
+    "UniversePreflightGateway",
+    "UniverseScopeProvider",
 ]
+
+
+# The manifest vocabulary is shared with request/profile contracts.
+CapabilityAvailability = CapabilitySource
+
+
+def _qualification_json_safe(value: object) -> object:
+    """Convert common contract values to JSON scalars before freezing."""
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, Mapping):
+        return {str(key): _qualification_json_safe(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_qualification_json_safe(item) for item in value]
+    return value
+
+
+_QUALIFICATION_HASH_EXCLUDED_KEYS = frozenset(
+    {
+        "message",
+        "title",
+        "generated_at",
+        "run_id",
+        "created_at",
+        "elapsed",
+        "duration",
+        "raw_token",
+        "token",
+        "credential",
+    }
+)
+
+
+def _qualification_business_value(value: object) -> object:
+    """Remove volatile/display-only metadata before hashing evidence."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _qualification_business_value(item)
+            for key, item in value.items()
+            if str(key).lower() not in _QUALIFICATION_HASH_EXCLUDED_KEYS
+        }
+    if isinstance(value, (list, tuple)):
+        return [_qualification_business_value(item) for item in value]
+    return value
+
+
+def _qualification_sensitive_key(value: object) -> str | None:
+    """Find credential-shaped keys in result evidence."""
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = str(key).lower().replace("-", "_")
+            if any(
+                marker in normalized
+                for marker in ("token", "secret", "password", "credential", "api_key", "authorization")
+            ):
+                return str(key)
+            found = _qualification_sensitive_key(item)
+            if found is not None:
+                return found
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            found = _qualification_sensitive_key(item)
+            if found is not None:
+                return found
+    return None
+
+
+@dataclass(frozen=True, slots=True)
+class InstrumentCoverageQualification:
+    """Auditable result for one stable instrument at one PIT boundary.
+
+    This is deliberately a result DTO, not another coverage fact or report.
+    Providers may attach several existing :class:`DataCoverageReport`
+    instances (for example raw bars and adjusted series); the DTO only
+    aggregates their outcome and preserves machine evidence for task 15.
+    """
+
+    instrument_id: UUID
+    eligible: bool
+    coverage_reports: tuple[DataCoverageReport, ...]
+    reason_codes: tuple[str, ...]
+    evidence_summary: Mapping[str, object]
+    qualification_hash: str = ""
+    # Runtime metadata is retained for callers that need to attach the result
+    # to an operation, but is deliberately excluded from ``machine_content``
+    # and therefore cannot perturb qualification identity.
+    run_id: UUID | None = None
+    generated_at: datetime | None = None
+    message: str | None = None
+    request: CoverageQualificationRequest | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise InvalidDataRequestError("instrument_id must be a UUID")
+        if type(self.eligible) is not bool:
+            raise InvalidDataRequestError("eligible must be a boolean")
+        if self.run_id is not None and not isinstance(self.run_id, UUID):
+            raise InvalidDataRequestError("run_id must be a UUID when provided")
+        if self.generated_at is not None:
+            object.__setattr__(
+                self,
+                "generated_at",
+                _aware_datetime(self.generated_at, "generated_at"),
+            )
+        if self.message is not None and (
+            not isinstance(self.message, str) or not self.message.strip()
+        ):
+            raise InvalidDataRequestError("message must be non-blank text when provided")
+        if self.request is not None and not isinstance(
+            self.request, CoverageQualificationRequest
+        ):
+            raise InvalidDataRequestError(
+                "request must be a CoverageQualificationRequest when provided"
+            )
+        reports = tuple(self.coverage_reports)
+        if any(not isinstance(item, DataCoverageReport) for item in reports):
+            raise InvalidDataRequestError(
+                "coverage_reports entries must be DataCoverageReport instances"
+            )
+        # Stable report order is part of the qualification result.  A provider
+        # returning the same report twice would make an otherwise equivalent
+        # result input-order dependent, so duplicate logical reports are not
+        # silently removed.
+        if len({canonical_json(item.machine_content()) for item in reports}) != len(reports):
+            raise InvalidDataRequestError("coverage_reports must not repeat a logical report")
+        object.__setattr__(
+            self,
+            "coverage_reports",
+            tuple(
+                sorted(
+                    reports,
+                    key=lambda item: (
+                        item.sort_key,
+                        canonical_json(item.machine_content()),
+                    ),
+                )
+            ),
+        )
+        if self.eligible and not reports:
+            raise InvalidDataRequestError(
+                "an eligible qualification must carry coverage reports"
+            )
+
+        codes: list[str] = []
+        for code in self.reason_codes:
+            if not isinstance(code, str) or not code.strip():
+                raise InvalidDataRequestError("reason_codes entries must be non-blank text")
+            codes.append(code.strip())
+        object.__setattr__(self, "reason_codes", tuple(sorted(set(codes))))
+
+        if not isinstance(self.evidence_summary, Mapping):
+            raise InvalidDataRequestError("evidence_summary must be a mapping")
+        sensitive_key = _qualification_sensitive_key(self.evidence_summary)
+        if sensitive_key is not None:
+            raise InvalidDataRequestError(
+                "evidence_summary must not contain credentials or access tokens",
+                details={"field": "evidence_summary", "key": sensitive_key},
+            )
+        try:
+            frozen = freeze_json(
+                _qualification_json_safe(dict(self.evidence_summary)),
+                "evidence_summary",
+            )
+        except (TypeError, ValueError) as exc:
+            raise InvalidDataRequestError("evidence_summary must contain JSON values") from exc
+        if not isinstance(frozen, Mapping):  # pragma: no cover - defensive
+            raise InvalidDataRequestError("evidence_summary must be a JSON object")
+        object.__setattr__(self, "evidence_summary", frozen)
+
+        computed = canonical_hash(self.machine_content())
+        if self.qualification_hash:
+            if (
+                not isinstance(self.qualification_hash, str)
+                or len(self.qualification_hash) != 64
+                or any(character not in "0123456789abcdef" for character in self.qualification_hash)
+            ):
+                raise InvalidDataRequestError(
+                    "qualification_hash must be a lowercase SHA-256 digest"
+                )
+            if self.qualification_hash != computed:
+                raise InvalidDataRequestError(
+                    "qualification_hash does not match qualification content"
+                )
+        object.__setattr__(self, "qualification_hash", computed)
+
+    @property
+    def status(self) -> str:
+        """Compact candidate status for adapters that avoid booleans in UI."""
+
+        return "eligible" if self.eligible else "ineligible"
+
+    @property
+    def filtered(self) -> bool:
+        """Whether this candidate should be filtered by task 15."""
+
+        return not self.eligible
+
+    @property
+    def is_eligible(self) -> bool:
+        """Compatibility alias for consumers using predicate vocabulary."""
+
+        return self.eligible
+
+    @property
+    def evidence(self) -> Mapping[str, object]:
+        """Compatibility alias for the auditable evidence summary."""
+
+        return self.evidence_summary
+
+    def machine_content(self) -> dict[str, object]:
+        """Return hash-relevant content, excluding derived hash and wording."""
+
+        return {
+            "instrument_id": str(self.instrument_id),
+            "eligible": self.eligible,
+            "request": (
+                self.request.machine_content() if self.request is not None else None
+            ),
+            "coverage_reports": [item.machine_content() for item in self.coverage_reports],
+            "reason_codes": list(self.reason_codes),
+            "evidence_summary": _qualification_business_value(self.evidence_summary),
+        }
+
+    def as_dict(self) -> dict[str, object]:
+        """Return the stable JSON-safe wire projection."""
+
+        payload = _qualification_json_safe(self.machine_content())
+        assert isinstance(payload, dict)
+        payload["qualification_hash"] = self.qualification_hash
+        return payload
+
+
+# The shorter result name is retained as a semantic alias, not a second DTO.
+CoverageQualificationResult = InstrumentCoverageQualification
 
 
 # ---------------------------------------------------------------------------
@@ -114,6 +379,10 @@ class DataCapabilityManifest:
     consistency_token_contracts: tuple[ContractRef, ...]
     supported_chunk_policies: tuple[ContractRef, ...]
     capabilities: tuple[DataCapability, ...]
+    # Provenance is explicit so an internal fixture cannot be mistaken for a
+    # production capability.  The mapping is optional for legacy manifests;
+    # omitted entries are intentionally ``unavailable`` rather than inferred.
+    capability_sources: Mapping[DataCapability, CapabilitySource | str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -233,6 +502,70 @@ class DataCapabilityManifest:
             "capabilities",
             _sorted_unique_enum(self.capabilities, DataCapability, "capabilities"),
         )
+        raw_sources = self.capability_sources or {}
+        if not isinstance(raw_sources, Mapping):
+            raise InvalidDataRequestError("capability_sources must be a mapping")
+        normalized_sources: dict[DataCapability, CapabilitySource] = {}
+        for capability, source in raw_sources.items():
+            if not isinstance(capability, DataCapability):
+                raise InvalidDataRequestError(
+                    "capability_sources keys must be DataCapability"
+                )
+            try:
+                normalized_source = (
+                    source
+                    if isinstance(source, CapabilitySource)
+                    else CapabilitySource(source)
+                )
+            except (TypeError, ValueError) as exc:
+                raise InvalidDataRequestError(
+                    "capability_sources values must be production, fixture, "
+                    "transitional, or unavailable"
+                ) from exc
+            normalized_sources[capability] = normalized_source
+        # Every declared capability must have an explicit provenance marker;
+        # capabilities absent from the manifest are recorded as unavailable
+        # only through ``capability_source()`` and are never advertised.
+        missing_sources = set(self.capabilities) - set(normalized_sources)
+        if missing_sources:
+            normalized_sources.update(
+                {capability: CapabilitySource.UNAVAILABLE for capability in missing_sources}
+            )
+        # Include every known capability in the provenance view.  An omitted
+        # family is explicitly ``unavailable`` rather than silently absent.
+        normalized_sources.update(
+            {
+                capability: CapabilitySource.UNAVAILABLE
+                for capability in DataCapability
+                if capability not in normalized_sources
+            }
+        )
+        object.__setattr__(
+            self,
+            "capability_sources",
+            MappingProxyType(
+                dict(sorted(normalized_sources.items(), key=lambda item: item[0].value))
+            ),
+        )
+
+    def capability_source(self, capability: DataCapability) -> CapabilitySource:
+        """Return explicit provenance, defaulting to unavailable."""
+
+        if not isinstance(capability, DataCapability):
+            raise InvalidDataRequestError("capability must be a DataCapability")
+        return self.capability_sources.get(capability, CapabilitySource.UNAVAILABLE)
+
+    @property
+    def capability_provenance(self) -> Mapping[DataCapability, CapabilitySource]:
+        """Vocabulary alias for ``capability_sources``."""
+
+        return self.capability_sources
+
+    @property
+    def capability_status(self) -> Mapping[DataCapability, CapabilitySource]:
+        """Stable alias used by report/profile consumers."""
+
+        return self.capability_sources
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +864,74 @@ class DataConsistencyEvidence:
 
 
 @runtime_checkable
+class UniverseScopeProvider(Protocol):
+    """Provider boundary for resolving a dynamic scope before execution.
+
+    Implementations may read their own authoritative stores, but the
+    returned ``UniverseScopeResolution`` must contain only finite named
+    calendars and non-sensitive capability evidence.  Strategy callbacks and
+    candidate enumeration are intentionally absent from this protocol.
+    """
+
+    def resolve_dynamic_universe_scope(
+        self, request: DataPreflightRequest
+    ) -> "UniverseScopeResolution":
+        """Resolve dynamic/hybrid range capability and its named calendars."""
+        ...
+
+
+# Vocabulary aliases retained as one structural protocol; callers must not
+# create a second semantic scope model merely because an adapter uses a
+# different name.
+DynamicUniversePreflightPort = UniverseScopeProvider
+UniversePreflightGateway = UniverseScopeProvider
+
+
+@runtime_checkable
+class CandidateQualificationPort(Protocol):
+    """Read-only single-candidate qualification port.
+
+    A port returns a pre-resolved candidate result; it does not produce a
+    dynamic universe and does not decide whether a request itself is blocked.
+    """
+
+    def qualify_candidate(
+        self, candidate: object, context: "CandidateEligibilityContext"
+    ) -> "CandidateEligibility":
+        """Evaluate one candidate under the supplied frozen PIT context."""
+        ...
+
+
+@runtime_checkable
+class CoverageQualificationPort(Protocol):
+    """Task-16A coverage qualification boundary consumed by task 15.
+
+    The keyword form keeps the port usable by task-15 adapters without
+    importing a concrete service.  Implementations may additionally accept a
+    ready :class:`CoverageQualificationRequest` as their first positional
+    argument for convenience; the semantics are identical.
+    """
+
+    def qualify_instrument(
+        self,
+        *,
+        instrument_id: UUID,
+        effective_date: date,
+        requested_window: object,
+        required_capabilities: tuple[DataCapability, ...],
+        query_boundary: object,
+        resolved_calendar_ids: tuple[str, ...],
+        preflight_profile: object,
+        formal_envelope: object | None = None,
+        warmup_envelope: object | None = None,
+        history_envelope: object | None = None,
+    ) -> InstrumentCoverageQualification:
+        """Return an immutable instrument coverage qualification result."""
+        ...
+
+
+
+@runtime_checkable
 class DataProvider(Protocol):
     """Structural source of capability, preflight, and session access."""
 
@@ -538,7 +939,13 @@ class DataProvider(Protocol):
         """Return the static structured capability manifest."""
         ...
 
-    def preflight(self, request: DataPreflightRequest) -> DataPreflightReport:
+    def preflight(
+        self,
+        request: DataPreflightRequest,
+        *,
+        profile: object | None = None,
+        fixtures: tuple[object, ...] = (),
+    ) -> DataPreflightReport:
         """Run the page/API admission preflight for an unresolved intent."""
         ...
 

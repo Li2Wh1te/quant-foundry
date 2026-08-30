@@ -196,7 +196,10 @@ class BacktestDecisionRecord(_RunBoundRecord):
     validation_issues: Mapped[list] = mapped_column(
         JsonType,
         nullable=False,
-        comment="Structured validation issues when the decision was rejected.",
+        comment=(
+            "Structured validation issues when the decision was rejected; "
+            "candidate PIT qualification evidence uses this existing JSON field."
+        ),
     )
     duration_ms: Mapped[Decimal | None] = mapped_column(
         Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),

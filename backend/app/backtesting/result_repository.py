@@ -80,6 +80,12 @@ class ResultFilterError(ResultRepositoryError):
     """A filter is not supported by the requested result kind."""
 
 
+class InternalResultNotVisibleError(ResultFilterError):
+    """A Phase 2a internal run was addressed through a formal read path."""
+
+    code = "internal_result_not_visible"
+
+
 class ResultRecordConflictError(Exception):
     """The row violates the run-scoped uniqueness contract."""
 
@@ -932,13 +938,26 @@ def _summary_dto_from_record(
 
 
 def _preflight_record(dto: BacktestDataPreflightDto) -> dict[str, Any]:
+    """Project one preflight DTO onto the existing result-table columns.
+
+    ``backtest_data_preflight`` predates the Phase 2a run-kind contract and
+    intentionally has no new physical columns.  Keep the labels in one
+    reserved, structured JSON object so old migrations remain valid while
+    visibility checks can still make a server-side decision from the
+    authoritative report rows.
+    """
+
+    capabilities = _thaw_json(dict(dto.capabilities))
+    if not isinstance(capabilities, dict):
+        capabilities = {}
+    capabilities["__preflight__"] = _thaw_json(dict(dto.preflight_metadata))
     return {
         "run_id": dto.run_id,
         "phase": dto.phase.value,
         "status": dto.status,
         "report_hash": dto.report_hash,
         "hash_schema_version": dto.hash_schema_version,
-        "capabilities": _thaw_json(dict(dto.capabilities)),
+        "capabilities": capabilities,
         "calendar_summary": _thaw_json(dict(dto.calendar_summary)),
         "session_summary": _thaw_json(dict(dto.session_summary)),
         "pit_status": dto.pit_status,
@@ -1209,6 +1228,41 @@ class BacktestResultRepository:
             raise ValueError("cursor_signing_key must be non-blank text")
         self.session = session
         self._signing_key = cursor_signing_key
+
+    def get_run_visibility(self, run_id: UUID | str) -> str:
+        """Return ``formal`` or ``internal`` from the authoritative report rows.
+
+        There is no separate run table in this phase.  The preflight report is
+        the existing run-bound authority, and its reserved metadata is the
+        only source used here.  Legacy rows without metadata retain the
+        historical formal-compatible behavior.
+        """
+
+        run_uuid = _require_uuid("run_id", run_id)
+        rows = self.session.scalars(
+            select(BacktestDataPreflightResultRecord).where(
+                BacktestDataPreflightResultRecord.run_id == run_uuid
+            )
+        )
+        for row in rows:
+            capabilities = row.capabilities
+            metadata = capabilities.get("__preflight__") if isinstance(capabilities, Mapping) else None
+            if isinstance(metadata, Mapping) and metadata.get("run_kind") == "internal_link_acceptance":
+                return "internal"
+        return "formal"
+
+    def _assert_visible_run(
+        self,
+        run_id: UUID,
+        *,
+        include_internal: bool,
+    ) -> None:
+        """Enforce formal-default visibility for every result kind."""
+
+        if self.get_run_visibility(run_id) == "internal" and not include_internal:
+            raise InternalResultNotVisibleError(
+                "internal link-acceptance results are not visible through formal result queries"
+            )
 
     # -- writes ------------------------------------------------------------
 
@@ -1523,10 +1577,17 @@ class BacktestResultRepository:
     def get_analysis_summary(
         self,
         run_id: UUID | str,
+        *,
+        include_internal: bool = False,
     ) -> BacktestAnalysisSummaryDto | None:
         """Read the single analysis summary bound to one run."""
 
         run_uuid = _require_uuid("run_id", run_id)
+        # Formal analysis/result reads must not expose Phase 2a internal
+        # artifacts.  Internal operators use the explicit preflight/result
+        # path with ``include_internal`` at the owning API boundary.
+        if self.get_run_visibility(run_uuid) == "internal" and not include_internal:
+            return None
         record = self.session.scalars(
             select(BacktestAnalysisSummaryRecord).where(
                 BacktestAnalysisSummaryRecord.run_id == run_uuid
@@ -1546,6 +1607,7 @@ class BacktestResultRepository:
         limit: int = DEFAULT_PAGE_SIZE,
         cursor: str | None = None,
         query_context: Mapping[str, Any] | None = None,
+        include_internal: bool = False,
         **raw_filters: Any,
     ) -> CursorPage:
         """Return one stable page of results for a run.
@@ -1561,6 +1623,12 @@ class BacktestResultRepository:
 
         spec = get_result_kind_spec(kind)
         run_uuid = _require_uuid("run_id", run_id)
+        if not isinstance(include_internal, bool):
+            raise ResultFilterError("include_internal must be a boolean")
+        # query_context is caller-controlled pagination/filter evidence.  It
+        # must never grant access; only the explicit server-owned argument at
+        # this repository boundary may opt into internal artifacts.
+        self._assert_visible_run(run_uuid, include_internal=include_internal)
         checked_limit = normalize_limit(limit)
 
         filters: dict[str, str] = {}
@@ -1578,6 +1646,11 @@ class BacktestResultRepository:
             filters=filters,
             query_context=query_context,
         )
+        # Visibility is part of the query semantics.  Binding it into the
+        # cursor digest prevents an internal cursor from being replayed via a
+        # formal call (or vice versa).
+        if include_internal:
+            payload["include_internal"] = True
 
         if cursor is None:
             return self._read_first_page(spec, payload, run_uuid, filters, checked_limit)
@@ -1818,6 +1891,7 @@ class BacktestResultRepository:
 
 __all__ = [
     "BacktestResultRepository",
+    "InternalResultNotVisibleError",
     "ResultFilterError",
     "ResultRecordConflictError",
     "ResultRepositoryError",

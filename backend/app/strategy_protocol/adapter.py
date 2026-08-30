@@ -169,6 +169,20 @@ def known_instrument_ids(context: DecisionContext) -> set[UUID]:
     """
 
     ids = {position.instrument_id for position in context.portfolio.positions}
-    for candidate in context.universe.query():
-        ids.add(candidate.instrument_id)
+    universe = getattr(context, "universe", None)
+    query = getattr(universe, "query", None)
+    if not callable(query):
+        raise StrategyProtocolError(
+            "strategy decision context must expose a bound universe query"
+        )
+    # The query facade is step-bound and internally cached.  Calling it here
+    # validates that every target is either a current PIT candidate or an
+    # independently held position; it never scans a run-wide catalogue.
+    for candidate in tuple(query()):
+        instrument_id = getattr(candidate, "instrument_id", None)
+        if not isinstance(instrument_id, UUID):
+            raise StrategyProtocolError(
+                "strategy universe returned a candidate without instrument_id"
+            )
+        ids.add(instrument_id)
     return ids

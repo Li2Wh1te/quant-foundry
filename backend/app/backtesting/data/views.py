@@ -36,6 +36,7 @@ from app.backtesting.calendar_axis import normalize_calendar_id
 from app.backtesting.data.errors import (
     InvalidDataRequestError,
     ProviderContractViolationError,
+    UniverseProviderContractViolationError,
     UniverseCalendarNotPreflightedError,
     UnsupportedCapabilityError,
 )
@@ -58,6 +59,7 @@ from app.backtesting.data.requests import (
     QueryBoundary,
     TradingRuleQuery,
     TradingStatusQuery,
+    UniverseQuery as DataUniverseQuery,
 )
 
 __all__ = [
@@ -66,6 +68,349 @@ __all__ = [
     "EngineDataView",
     "require_preflighted_calendar_ids",
 ]
+
+
+def _candidate_dto_from_spec(spec):
+    """Project one complete PIT instrument spec onto the strategy DTO.
+
+    ``InstrumentSpec`` is the engine-side source of truth.  This helper keeps
+    the projection deliberately narrow: source codes, rule internals and raw
+    corporate-action payloads never cross into strategy code.  All three
+    display labels must be present in the already-resolved PIT fact; missing
+    identity labels remain a candidate-level qualification failure and are not
+    fabricated from a current catalogue snapshot.
+    """
+
+    from app.instruments.domain import InstrumentSpec
+    from app.strategy_protocol.data_view import InstrumentCandidateDTO
+
+    if isinstance(spec, InstrumentCandidateDTO):
+        # Re-project even an already-shaped DTO so provider metadata cannot
+        # smuggle source codes, internal fact ids, or raw rule payloads across
+        # the strategy boundary.  The public candidate contract is exactly
+        # the six display/identity fields below.
+        instrument_id = spec.instrument_id
+        trading_code = spec.trading_code
+        name = spec.name
+        display_name = spec.display_name
+        asset_class = spec.asset_class
+        exchange = spec.exchange
+        return InstrumentCandidateDTO(
+            instrument_id=instrument_id,
+            trading_code=trading_code,
+            name=name,
+            display_name=display_name,
+            asset_class=asset_class,
+            exchange=exchange,
+        )
+
+    if isinstance(spec, InstrumentSpec):
+        display = spec.display
+        trading_code = display.trading_code
+        name = display.name
+        display_name = display.display_name
+        instrument_id = spec.instrument_id
+        asset_class = spec.asset_class
+        exchange = spec.exchange
+    else:
+        # A task-15 provider may expose an already-resolved candidate input
+        # rather than the full spec.  Accept that narrow, immutable shape only
+        # when all fields needed by the DTO are explicit; no source-code or
+        # current-catalogue lookup is performed here.
+        instrument_id = getattr(spec, "instrument_id", None)
+        trading_code = getattr(spec, "trading_code", None)
+        name = getattr(spec, "name", None)
+        display_name = getattr(spec, "display_name", None)
+        asset_class = getattr(spec, "asset_class", None)
+        exchange = getattr(spec, "exchange", None)
+        if not isinstance(instrument_id, UUID):
+            raise ProviderContractViolationError(
+                "universe provider returned a non-InstrumentSpec row"
+            )
+    # The DTO is a projection of a complete PIT display fact.  Filling a
+    # missing label from another label would silently turn an incomplete
+    # historical mapping into a valid-looking candidate, which is expressly
+    # forbidden by the universe contract.
+    if not all(
+        type(value) is str and value.strip()
+        for value in (
+            trading_code,
+            name,
+            display_name,
+            asset_class,
+            exchange,
+        )
+    ):
+        raise UniverseProviderContractViolationError(
+            "PIT candidate display identity is incomplete",
+            details={"instrument_id": str(instrument_id), "reason_code": "identity_mapping_incomplete"},
+        )
+    return InstrumentCandidateDTO(
+        instrument_id=instrument_id,
+        trading_code=trading_code,
+        name=name,
+        display_name=display_name,
+        asset_class=asset_class,
+        exchange=exchange,
+    )
+
+
+def _candidate_projection_key(candidate) -> tuple[str, ...]:
+    """Stable six-field tie-break for duplicate strategy projections."""
+
+    return (
+        candidate.trading_code,
+        candidate.name,
+        candidate.display_name,
+        candidate.asset_class,
+        candidate.exchange,
+    )
+
+
+class _ChunkUniverseQuery:
+    """Strategy-facing, read-only wrapper over one bound PIT universe query."""
+
+    __slots__ = ("__view", "__query", "__cache", "__queried")
+
+    def __init__(self, view: "ChunkStrategyDataView", query: DataUniverseQuery):
+        object.__setattr__(self, "_ChunkUniverseQuery__view", view)
+        object.__setattr__(self, "_ChunkUniverseQuery__query", query)
+        object.__setattr__(self, "_ChunkUniverseQuery__cache", {})
+        object.__setattr__(self, "_ChunkUniverseQuery__queried", False)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("universe query is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("universe query is read-only")
+
+    @property
+    def effective_date(self):
+        """The bound PIT identity date (read-only diagnostic metadata)."""
+
+        return self.__query.effective_date
+
+    @property
+    def boundary(self):
+        """The bound QueryBoundary (read-only diagnostic metadata)."""
+
+        return self.__query.boundary
+
+    @property
+    def market_scope(self):
+        """The frozen market scope; strategies cannot replace it."""
+
+        return self.__query.market_scope
+
+    @property
+    def universe_query_policy(self):
+        """The versioned candidate-set policy frozen into this query."""
+
+        return self.__query.universe_query_policy
+
+    @property
+    def scope_snapshot_hash(self):
+        """Optional immutable admission hash carried by the bound query."""
+
+        return getattr(self.__query, "universe_scope_snapshot_hash", None)
+
+    @property
+    def filter_reason_counts(self):
+        """Expose immutable candidate-filter counts for audit consumers."""
+
+        chunk = getattr(self.__view, "_ChunkStrategyDataView__chunk", None)
+        value = getattr(chunk, "universe_filter_reason_counts", {})
+        return MappingProxyType(dict(value))
+
+    @property
+    def filter_summary(self):
+        """Expose provider filter evidence without exposing source objects."""
+
+        chunk = getattr(self.__view, "_ChunkStrategyDataView__chunk", None)
+        value = getattr(chunk, "candidate_filter_summary", None)
+        if value is None:
+            return MappingProxyType(
+                {
+                    "reason_counts": self.filter_reason_counts,
+                    "records": (),
+                    "query_hash": None,
+                }
+            )
+        return MappingProxyType(dict(value))
+
+    def for_step(
+        self,
+        *,
+        effective_date: date | None = None,
+        data_cutoff: datetime | None = None,
+        session_date: date | None = None,
+        decision_time: datetime | None = None,
+    ) -> "_ChunkUniverseQuery":
+        """Derive a fresh PIT query for exactly one decision step.
+
+        The frozen policy, market scope, exception set, calendar ids, and
+        optional scope hash are copied verbatim.  Only the two step
+        coordinates are replaced, and the data contract validates that the
+        resulting cutoff cannot move later than the run's bound.
+        """
+
+        del session_date
+        query = self.__query
+        step_date = effective_date if effective_date is not None else query.effective_date
+        step_cutoff = data_cutoff if data_cutoff is not None else (
+            decision_time if decision_time is not None else query.boundary.data_cutoff
+        )
+        knowledge_as_of = query.boundary.knowledge_as_of
+        if knowledge_as_of is not None and knowledge_as_of > step_cutoff:
+            # A step may narrow the cognition cutoff together with the
+            # physical cutoff; it may never carry a knowledge time later than
+            # the instant being queried.
+            knowledge_as_of = step_cutoff
+        begin_step = getattr(
+            self._ChunkUniverseQuery__view._ChunkStrategyDataView__chunk,
+            "begin_decision_step",
+            None,
+        )
+        if callable(begin_step):
+            begin_step(step_date)
+        boundary = QueryBoundary(
+            data_cutoff=step_cutoff,
+            knowledge_as_of=knowledge_as_of,
+            include_cutoff_day=query.boundary.include_cutoff_day,
+        )
+        return _ChunkUniverseQuery(
+            self.__view,
+            DataUniverseQuery(
+                rule=query.rule,
+                market_scope=query.market_scope,
+                effective_date=step_date,
+                boundary=boundary,
+                allowed_calendar_ids=query.allowed_calendar_ids,
+                universe_query_policy=query.universe_query_policy,
+                rule_exception_set=query.rule_exception_set,
+                qualification_policy_version=query.qualification_policy_version,
+                qualification_policy=getattr(query, "qualification_policy", None),
+                scope_mode=query.scope_mode,
+                universe_scope_snapshot_hash=getattr(
+                    query, "universe_scope_snapshot_hash", None
+                ),
+                rule_package_reference=getattr(query, "rule_package_reference", None),
+                frozen_calendar_ids=getattr(query, "frozen_calendar_ids", ()),
+            ),
+        )
+
+    def query(self, *, exchanges=None, asset_classes=None):
+        """Return immutable PIT candidate DTOs after strategy filters."""
+
+        query = self._ChunkUniverseQuery__query
+        # A failed narrowing request must not leave the previous query's
+        # dynamic IDs usable if a strategy catches the exception and tries a
+        # different data entry point.
+        self._clear_authorized_candidates()
+        # Strategy filters are a narrowing operation only.  Reject values
+        # outside the frozen market scope instead of silently broadening it.
+        scope = query.market_scope
+        def _labels(value, name):
+            if value is None:
+                return None
+            if isinstance(value, (str, bytes)):
+                raise InvalidDataRequestError(f"{name} must be an iterable of strings")
+            try:
+                labels = tuple(sorted({item for item in value}))
+            except (TypeError, AttributeError) as exc:
+                raise InvalidDataRequestError(f"{name} must be an iterable of strings") from exc
+            if any(type(item) is not str or not item.strip() for item in labels):
+                raise InvalidDataRequestError(f"{name} entries must be non-blank strings")
+            return tuple(item.strip() for item in labels)
+
+        requested_exchanges = _labels(exchanges, "exchanges")
+        requested_assets = _labels(asset_classes, "asset_classes")
+        if requested_exchanges is not None and scope.exchanges:
+            outside = sorted(set(requested_exchanges) - set(scope.exchanges))
+            if outside:
+                raise InvalidDataRequestError(
+                    "strategy exchange filter widens the frozen market scope",
+                    details={"outside_scope_exchanges": outside},
+                )
+        if requested_assets is not None and scope.asset_classes:
+            outside = sorted(set(requested_assets) - set(scope.asset_classes))
+            if outside:
+                raise InvalidDataRequestError(
+                    "strategy asset-class filter widens the frozen market scope",
+                    details={"outside_scope_asset_classes": outside},
+                )
+        cache_key = (requested_exchanges, requested_assets)
+        cache = self.__cache
+        if cache_key in cache:
+            self._bind_authorized_candidates(query, cache[cache_key])
+            object.__setattr__(self, "_ChunkUniverseQuery__queried", True)
+            return cache[cache_key]
+        specs = self._ChunkUniverseQuery__view._query_universe_specs(query)
+        rows = []
+        for spec in specs:
+            if requested_exchanges is not None and spec.exchange not in requested_exchanges:
+                continue
+            if requested_assets is not None and spec.asset_class not in requested_assets:
+                continue
+            try:
+                rows.append(_candidate_dto_from_spec(spec))
+            except UniverseProviderContractViolationError:
+                # Incomplete display facts are candidate-level failures.  The
+                # underlying query already recorded the reason summary; no
+                # malformed DTO may reach strategy code.
+                continue
+        # De-duplicate by stable identity with a value-based tie-break.  The
+        # provider may expose more than one source/display version for one
+        # identity; selecting by input order would make strategy results
+        # depend on database iteration order.
+        by_id = {}
+        for row in rows:
+            current = by_id.get(row.instrument_id)
+            key = _candidate_projection_key(row)
+            if current is None or key < _candidate_projection_key(current):
+                by_id[row.instrument_id] = row
+        result = tuple(
+            by_id[instrument_id]
+            for instrument_id in sorted(by_id, key=str)
+        )
+        # The chunk is the authorization owner.  Bind exactly the narrowed
+        # result, not the unfiltered provider result, so a strategy cannot
+        # query one exchange and then read another exchange through bars().
+        self._bind_authorized_candidates(query, result)
+        cache[cache_key] = result
+        object.__setattr__(self, "_ChunkUniverseQuery__queried", True)
+        return result
+
+    def _bind_authorized_candidates(self, query, candidates) -> None:
+        """Pass the narrowed candidate ids to the owning chunk session."""
+
+        binder = getattr(
+            self._ChunkUniverseQuery__view,
+            "_authorize_step_candidates",
+            None,
+        )
+        if callable(binder):
+            binder(
+                tuple(candidate.instrument_id for candidate in candidates),
+                query=query,
+            )
+
+    def _clear_authorized_candidates(self) -> None:
+        """Clear current-step dynamic authorization before validation."""
+
+        clearer = getattr(
+            self._ChunkUniverseQuery__view._ChunkStrategyDataView__chunk,
+            "clear_step_candidate_authorization",
+            None,
+        )
+        if callable(clearer):
+            clearer()
+
+    @property
+    def has_queried(self) -> bool:
+        """Whether this bound query has served at least one result."""
+
+        return self.__queried
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +533,8 @@ class ChunkStrategyDataView:
         "_ChunkStrategyDataView__data_cutoff",
         "_ChunkStrategyDataView__adjustment_gate",
         "_ChunkStrategyDataView__include_cutoff_day",
+        "_ChunkStrategyDataView__effective_date",
+        "_ChunkStrategyDataView__bound_universe_query",
     )
 
     def __init__(
@@ -198,6 +545,9 @@ class ChunkStrategyDataView:
         data_cutoff: datetime,
         adjustment_gate=None,
         include_cutoff_day: bool = False,
+        effective_date: date | None = None,
+        universe_query: DataUniverseQuery | None = None,
+        step_key: object | None = None,
     ) -> None:
         if not callable(getattr(chunk, "bars", None)):
             raise InvalidDataRequestError(
@@ -240,6 +590,30 @@ class ChunkStrategyDataView:
             "_ChunkStrategyDataView__include_cutoff_day",
             include_cutoff_day,
         )
+        if effective_date is None:
+            effective_date = self._ChunkStrategyDataView__data_cutoff.date()
+        if not isinstance(effective_date, date) or isinstance(effective_date, datetime):
+            raise InvalidDataRequestError("effective_date must be a calendar date")
+        if universe_query is not None and not isinstance(
+            universe_query, DataUniverseQuery
+        ):
+            raise InvalidDataRequestError("universe_query must be a UniverseQuery")
+        object.__setattr__(
+            self,
+            "_ChunkStrategyDataView__effective_date",
+            effective_date,
+        )
+        object.__setattr__(
+            self,
+            "_ChunkStrategyDataView__bound_universe_query",
+            universe_query,
+        )
+        # Opening a new strategy view is the explicit step boundary for the
+        # chunk.  Real chunks clear dynamic ids here; old synthetic chunks
+        # simply lack this optional hook and keep their existing behaviour.
+        begin_step = getattr(chunk, "begin_decision_step", None)
+        if callable(begin_step):
+            begin_step(step_key)
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError(
@@ -250,6 +624,18 @@ class ChunkStrategyDataView:
         raise AttributeError(
             "strategy query facades are read-only; query conditions cannot be deleted"
         )
+
+    @property
+    def data_cutoff(self) -> datetime:
+        """The immutable strategy visibility cutoff for this step."""
+
+        return self.__data_cutoff
+
+    @property
+    def effective_date(self) -> date:
+        """The immutable PIT identity date for this step."""
+
+        return self.__effective_date
 
     # ------------------------------------------------------------------
     # StrategyDataView protocol surface
@@ -621,11 +1007,88 @@ class ChunkStrategyDataView:
         return tuple(result)
 
     def universe(self, query=None):
-        """Dynamic candidate sets are not served by this task package."""
+        """Return a strategy-facing PIT universe query facade.
 
-        raise UnsupportedCapabilityError(
-            "this run's provider does not serve dynamic universe queries"
+        The lower-level chunk owns the immutable request boundary and the
+        candidate qualification/filtering.  This view only projects complete
+        ``InstrumentSpec`` rows to the narrow strategy DTO.  Supplying a
+        pre-built :class:`~app.backtesting.data.requests.UniverseQuery` is the
+        preferred path; when omitted, a bound query is derived from the
+        chunk's frozen request and this view's cutoff date for compatibility
+        with strategy protocol callers.
+        """
+
+        if query is None:
+            query = self._ChunkStrategyDataView__bound_universe_query
+        if query is None:
+            request = getattr(self._ChunkStrategyDataView__chunk, "_session", None)
+            request = getattr(request, "_request", None)
+            if request is None:
+                raise InvalidDataRequestError(
+                    "a bound UniverseQuery is required for this strategy view"
+                )
+            query = DataUniverseQuery(
+                rule=request.rule_package,
+                market_scope=request.market_scope,
+                effective_date=self._ChunkStrategyDataView__effective_date,
+                boundary=QueryBoundary(
+                    data_cutoff=self._ChunkStrategyDataView__data_cutoff,
+                    knowledge_as_of=(
+                        min(
+                            request.query_boundary.knowledge_as_of,
+                            self._ChunkStrategyDataView__data_cutoff,
+                        )
+                        if request.query_boundary.knowledge_as_of is not None
+                        else None
+                    ),
+                    include_cutoff_day=self._ChunkStrategyDataView__include_cutoff_day,
+                ),
+                allowed_calendar_ids=tuple(
+                    getattr(request, "resolved_calendar_ids", ())
+                ),
+                universe_query_policy=getattr(
+                    request, "universe_query_policy", None
+                ),
+                rule_exception_set=request.rule_exception_set,
+                qualification_policy_version=getattr(
+                    request, "qualification_policy_version", None
+                ),
+                scope_mode=getattr(request, "instrument_scope_mode", None),
+                universe_scope_snapshot_hash=getattr(
+                    request, "universe_scope_snapshot_hash", None
+                ),
+            )
+        if not isinstance(query, DataUniverseQuery):
+            raise InvalidDataRequestError("query must be a UniverseQuery")
+        return _ChunkUniverseQuery(self, query)
+
+    def _query_universe_specs(self, query: DataUniverseQuery):
+        """Delegate one immutable universe query to the wrapped chunk."""
+
+        reader = getattr(self._ChunkStrategyDataView__chunk, "universe", None)
+        if not callable(reader):
+            raise UnsupportedCapabilityError(
+                "this run's provider does not serve dynamic universe queries"
+            )
+        return tuple(reader(query))
+
+    def _authorize_step_candidates(self, instrument_ids, *, query):
+        """Bind a strategy-filtered candidate set to this chunk, if supported.
+
+        The generic strategy facade can still be used with older synthetic
+        chunks that have no authorization hook.  Real data chunks implement
+        the hook and validate that every id belongs to the exact provider
+        result for this bound PIT query before making it readable through any
+        other data method.
+        """
+
+        authorizer = getattr(
+            self._ChunkStrategyDataView__chunk,
+            "authorize_step_candidates",
+            None,
         )
+        if callable(authorizer):
+            authorizer(instrument_ids, query=query)
 
     # ------------------------------------------------------------------
 

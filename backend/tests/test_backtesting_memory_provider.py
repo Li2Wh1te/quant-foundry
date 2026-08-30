@@ -84,6 +84,10 @@ from app.instruments.domain import (
     InstrumentSpec,
     VersionedReference,
 )
+from app.instruments.rules.contracts import (
+    StrategyRuleDeclaration,
+    TradingStatusRequirement,
+)
 
 RULES = ContractRef(key="rules.fixture", version=1)
 TOKEN_CONTRACT = ContractRef(key="memory_revision_vector", version=1)
@@ -188,6 +192,34 @@ def make_spec(instrument_id: UUID) -> InstrumentSpec:
         minimum_order_quantity="100",
         contract_multiplier="1",
         trading_session_template=VersionedReference(key="fixture_template", version=1),
+        trading_hours={
+            "timezone": "Asia/Shanghai",
+            "sessions": (
+                (time(9, 30), time(11, 30)),
+                (time(13, 0), time(15, 0)),
+            ),
+        },
+        settlement_rule_class="t1_before_open_match",
+        sellable_rule=StrategyRuleDeclaration(
+            ("sell_limited_by_available_position",)
+        ),
+        fee_categories=frozenset({"commission"}),
+        trading_status_policy={
+            "suspension": TradingStatusRequirement.REQUIRED,
+            "opening_availability": TradingStatusRequirement.REQUIRED,
+            "price_limit_tradability": TradingStatusRequirement.REQUIRED,
+        },
+        order_types=frozenset({"limit"}),
+        price_limit_rule=VersionedReference(
+            key="fixture_price_limit_rule", version=1
+        ),
+        cash_availability_rule=VersionedReference(
+            key="fixture_cash_availability_rule", version=1
+        ),
+        position_availability_rule=VersionedReference(
+            key="fixture_position_availability_rule", version=1
+        ),
+        rule_package_reference=VersionedReference(key="fixture_rules", version=1),
         valid_from=datetime(2000, 1, 1, tzinfo=timezone.utc),
         valid_to=None,
         capabilities=InstrumentCapabilities(

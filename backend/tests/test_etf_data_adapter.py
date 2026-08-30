@@ -36,7 +36,10 @@ from app.backtesting.data.errors import (
 )
 from app.backtesting.data.facts import AdjustedSeriesPoint, Bar
 from app.backtesting.data.requests import (
+    CoverageQualificationRequest,
+    DataCapability,
     DateRange,
+    INTERNAL_LINK_ACCEPTANCE_PROFILE,
     PriceBasis,
     QueryBoundary,
     QualityStatus,
@@ -607,6 +610,49 @@ class NoNetworkTestCase(unittest.TestCase):
                             name == prefix or name.startswith(prefix + "."),
                             f"{module.__name__} imports {name}",
                         )
+
+
+class QualificationProjectionTestCase(unittest.TestCase):
+    """The ETF adapter implements the shared single-instrument port."""
+
+    def _request(self):
+        window = DateRange(SESSIONS[0], SESSIONS[-1])
+        return CoverageQualificationRequest(
+            instrument_id=INSTRUMENT_ID,
+            effective_date=SESSIONS[0],
+            requested_window=window,
+            formal_envelope=window,
+            warmup_envelope=None,
+            history_envelope=None,
+            required_capabilities=(DataCapability.BARS,),
+            query_boundary=BOUNDARY,
+            preflight_profile=INTERNAL_LINK_ACCEPTANCE_PROFILE,
+            resolved_calendar_ids=("XSHG",),
+        )
+
+    def test_complete_rows_are_eligible(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[make_bar_row(day) for day in SESSIONS],
+        )
+        result = make_adapter(stores).qualify(self._request())
+        self.assertTrue(result.eligible)
+        self.assertEqual(result.coverage_reports[0].complete_count, len(SESSIONS))
+
+    def test_invalid_source_row_remains_invalid(self) -> None:
+        stores = FakeStores(
+            mappings=[make_mapping("510300.SH", date(2020, 1, 1))],
+            bar_rows=[
+                make_bar_row(
+                    SESSIONS[0],
+                    open=Decimal("0"),
+                )
+            ],
+        )
+        result = make_adapter(stores).qualify(self._request())
+        self.assertFalse(result.eligible)
+        self.assertEqual(result.coverage_reports[0].quality_status, QualityStatus.INVALID)
+        self.assertIn("bar_invalid", result.reason_codes)
 
 
 class WrongSourceCodeTestCase(unittest.TestCase):

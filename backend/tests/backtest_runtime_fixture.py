@@ -325,6 +325,9 @@ def build_runner(
     analysis_engine=None,
     pit_data_gateway=None,
     rule_snapshot_bundle=None,
+    universe_query_override=None,
+    candidate_eligibility_evaluator=None,
+    universe_scope_resolution=None,
 ):
     """Assemble a fully wired runner with zero slippage and zero fees.
 
@@ -356,11 +359,17 @@ def build_runner(
 
     view_factory = BacktestViewFactory(
         strategy_view=strategy_view,
-        universe_query=universe_query(
-            candidates if candidates is not None else [make_candidate()]
+        universe_query=(
+            universe_query_override
+            if universe_query_override is not None
+            else universe_query(
+                candidates if candidates is not None else [make_candidate()]
+            )
         ),
         engine_market_data=market_data,
         scope_instrument_ids=tuple(scope_instrument_ids),
+        candidate_eligibility_evaluator=candidate_eligibility_evaluator,
+        universe_scope_resolution=universe_scope_resolution,
     )
     execution_model = RecordingExecutionModel(
         execution_model
@@ -448,6 +457,8 @@ def build_runner(
         analysis_admission=analysis_admission,
         pit_data_gateway=pit_data_gateway,
         rule_snapshot_bundle=rule_snapshot_bundle,
+        candidate_eligibility_evaluator=candidate_eligibility_evaluator,
+        universe_scope_resolution=universe_scope_resolution,
     )
 
 

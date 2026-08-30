@@ -17,7 +17,6 @@ rules that every implementation shares:
 
 from __future__ import annotations
 
-import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -180,7 +179,10 @@ class InstrumentCandidateDTO:
 
     ``instrument_id`` must be a real UUID (the stable identity strategies
     submit targets with); trading code, name, and display name are non-blank
-    display-only strings.  ``metadata`` holds deep-frozen JSON values.
+    display-only strings.  The six fields below are the complete strategy
+    surface.  Provider evidence, source codes, rule references, and raw fact
+    identifiers stay on the engine-side qualification object and are never
+    attached as an open-ended metadata mapping.
     """
 
     instrument_id: UUID
@@ -189,7 +191,6 @@ class InstrumentCandidateDTO:
     display_name: str
     asset_class: str
     exchange: str
-    metadata: Mapping[str, object] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -206,51 +207,23 @@ class InstrumentCandidateDTO:
             # from the provider into strategy-visible objects.
             if type(value) is not str or not value.strip():
                 raise ValueError(f"{field_name} must be a non-blank string")
-        # Metadata accepts JSON values only: mappings and sequences are
-        # deep-frozen, scalars are kept, and non-JSON objects (sets, custom
-        # classes) are rejected so nothing mutable can reach strategy code.
-        if not isinstance(self.metadata, Mapping):
-            raise ValueError("metadata must be a mapping")
-        frozen: dict[str, object] = {}
-        for key, value in self.metadata.items():
-            frozen[_freeze_key(key)] = _freeze_meta(value)
-        object.__setattr__(self, "metadata", MappingProxyType(frozen))
 
 
-def _freeze_meta(value: object) -> object:
-    """Recursively freeze one metadata value, rejecting non-JSON objects.
+def _candidate_projection_key(candidate: InstrumentCandidateDTO) -> tuple[str, ...]:
+    """Return the stable tie-break key used for duplicate identities.
 
-    Only exact JSON scalar types are accepted: subclasses of ``int``/``str``
-    etc. can carry mutable attributes and must not pass through as scalars.
-    Floats must be finite — NaN and infinities are not standard JSON numbers
-    and would break deterministic comparison and strict serialization.
+    Only the six strategy-visible fields participate.  This keeps duplicate
+    handling deterministic without allowing engine evidence or source-code
+    metadata to influence the strategy projection.
     """
 
-    if value is None or type(value) in (str, bool, int):
-        return value
-    if type(value) is float:
-        if not math.isfinite(value):
-            raise ValueError("metadata float values must be finite")
-        return value
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {_freeze_key(key): _freeze_meta(item) for key, item in value.items()}
-        )
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze_meta(item) for item in value)
-    raise ValueError(
-        "metadata values must be JSON scalars, mappings, or sequences"
+    return (
+        candidate.trading_code,
+        candidate.name,
+        candidate.display_name,
+        candidate.asset_class,
+        candidate.exchange,
     )
-
-
-def _freeze_key(key: object) -> str:
-    """Validate one metadata key, rejecting str subclasses."""
-
-    if type(key) is not str:
-        # A str subclass could smuggle mutable attributes into the frozen
-        # mapping, so only exact strings are accepted.
-        raise ValueError("metadata keys must be plain strings")
-    return key
 
 
 @runtime_checkable
@@ -454,6 +427,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
         "__session_resolver",
         "__pit_reader",
         "__pit_source",
+        "__universe",
     )
 
     def __init__(
@@ -467,6 +441,7 @@ class StrategyDataDTO(_ReadOnlyFacade):
         session_resolver: object | None = None,
         pit_reader: object | None = None,
         pit_source: str | None = None,
+        universe: "UniverseQuery | UniverseQueryDTO | None" = None,
     ) -> None:
         if (
             isinstance(max_lookback_sessions, bool)
@@ -517,6 +492,58 @@ class StrategyDataDTO(_ReadOnlyFacade):
             "_StrategyDataDTO__pit_source",
             pit_source.strip() if isinstance(pit_source, str) else None,
         )
+        # The candidate facade is optional for compatibility with strategy
+        # providers that only expose historical bars.  When supplied it is
+        # wrapped exactly once so repeated calls inside one decision receive
+        # the same immutable candidate view and cannot replace its bound PIT
+        # query.  We deliberately do not manufacture a candidate set here:
+        # only an already-bound provider query may supply dynamic identities.
+        if universe is not None and not isinstance(
+            universe, (UniverseQuery, UniverseQueryDTO)
+        ):
+            raise ValueError("universe must implement UniverseQuery")
+        if isinstance(universe, UniverseQueryDTO):
+            universe_dto = universe
+        elif universe is not None:
+            universe_dto = UniverseQueryDTO(universe)
+        else:
+            universe_dto = None
+        object.__setattr__(self, "_StrategyDataDTO__universe", universe_dto)
+
+    @property
+    def universe(self) -> "UniverseQueryDTO":
+        """Return the immutable candidate query bound to this decision.
+
+        A strategy data facade may be constructed without a universe by old
+        callers.  In that case, fail explicitly instead of returning an empty
+        set which could be mistaken for a valid dynamic result.
+        """
+
+        universe = self.__universe
+        if universe is None:
+            candidate_provider = getattr(self.__view, "universe", None)
+            if not callable(candidate_provider):
+                from app.backtesting.data.errors import UnsupportedCapabilityError
+
+                raise UnsupportedCapabilityError(
+                    "this strategy data view does not expose a PIT universe"
+                )
+            candidate_provider = candidate_provider()
+            if isinstance(candidate_provider, UniverseQueryDTO):
+                universe = candidate_provider
+            elif isinstance(candidate_provider, UniverseQuery):
+                universe = UniverseQueryDTO(candidate_provider)
+            else:
+                raise InvalidProviderResultError(
+                    "strategy data view returned an invalid universe query"
+                )
+            # Cache the facade on this immutable object using the same
+            # construction-time-only ``object.__setattr__`` convention as the
+            # other private slots.  The underlying per-step view remains the
+            # owner of PIT data; this only avoids replacing the wrapper on
+            # repeated strategy access.
+            object.__setattr__(self, "_StrategyDataDTO__universe", universe)
+        return universe
 
     def bars(
         self,
@@ -1547,10 +1574,18 @@ class UniverseQueryDTO(_ReadOnlyFacade):
     strategies can never receive mutable or duplicated candidates.
     """
 
-    __slots__ = ("__query",)
+    __slots__ = ("__query", "__cache", "__queried")
 
     def __init__(self, query: UniverseQuery) -> None:
+        if not isinstance(query, UniverseQuery):
+            raise ValueError("query must implement UniverseQuery")
         object.__setattr__(self, "_UniverseQueryDTO__query", query)
+        # The cache belongs to one DTO instance, which is one decision-step
+        # view.  A subsequent step must receive a new DTO with a new bound
+        # effective date/data cutoff; keeping the cache here prevents repeated
+        # calls in a single step from observing mutable provider state.
+        object.__setattr__(self, "_UniverseQueryDTO__cache", {})
+        object.__setattr__(self, "_UniverseQueryDTO__queried", False)
 
     def query(
         self,
@@ -1560,23 +1595,106 @@ class UniverseQueryDTO(_ReadOnlyFacade):
     ) -> tuple[InstrumentCandidateDTO, ...]:
         """Return PIT-eligible candidates as an immutable sorted tuple."""
 
+        def _labels(value: Iterable[str] | None, field_name: str):
+            if value is None:
+                return None
+            if isinstance(value, (str, bytes)):
+                raise InvalidDataRequestError(
+                    f"{field_name} must be an iterable of strings"
+                )
+            try:
+                labels = tuple(sorted(set(value)))
+            except TypeError as exc:
+                raise InvalidDataRequestError(
+                    f"{field_name} must be an iterable of strings"
+                ) from exc
+            if any(type(item) is not str or not item.strip() for item in labels):
+                raise InvalidDataRequestError(
+                    f"{field_name} entries must be non-blank strings"
+                )
+            return tuple(item.strip() for item in labels)
+
+        normalized_exchanges = _labels(exchanges, "exchanges")
+        normalized_assets = _labels(asset_classes, "asset_classes")
+        cache_key = (normalized_exchanges, normalized_assets)
+        cache = self.__cache
+        if cache_key in cache:
+            object.__setattr__(self, "_UniverseQueryDTO__queried", True)
+            return cache[cache_key]
+
         result = self._UniverseQueryDTO__query.query(
-            exchanges=exchanges, asset_classes=asset_classes
+            exchanges=normalized_exchanges, asset_classes=normalized_assets
         )
         candidates = tuple(result)
-        seen: set[UUID] = set()
+        by_id: dict[UUID, InstrumentCandidateDTO] = {}
         for candidate in candidates:
             if not isinstance(candidate, InstrumentCandidateDTO):
                 raise InvalidProviderResultError(
                     "universe provider returned a non-candidate row"
                 )
-            if candidate.instrument_id in seen:
-                raise InvalidProviderResultError(
-                    f"universe provider returned duplicate instrument_id "
-                    f"{candidate.instrument_id}"
-                )
-            seen.add(candidate.instrument_id)
-        return tuple(sorted(candidates, key=lambda c: str(c.instrument_id)))
+            # A provider may return the same stable identity more than once
+            # while source-code/display versions are being reconciled.  Pick
+            # one deterministic projection by its complete six-field value;
+            # never let physical input order decide which code reaches a
+            # strategy.  The engine-side source remains responsible for
+            # retaining the richer evidence for the discarded row.
+            current = by_id.get(candidate.instrument_id)
+            if current is None or _candidate_projection_key(candidate) < _candidate_projection_key(current):
+                by_id[candidate.instrument_id] = candidate
+        normalized = tuple(
+            by_id[instrument_id]
+            for instrument_id in sorted(by_id, key=str)
+        )
+        cache[cache_key] = normalized
+        object.__setattr__(self, "_UniverseQueryDTO__queried", True)
+        return normalized
+
+    @property
+    def has_queried(self) -> bool:
+        """Whether this decision-step facade has served a candidate query."""
+
+        return self.__queried
+
+    @property
+    def effective_date(self):
+        """Read-only effective date when the provider exposes one."""
+
+        return getattr(self.__query, "effective_date", None)
+
+    @property
+    def boundary(self):
+        """Read-only QueryBoundary when the provider exposes one."""
+
+        return getattr(self.__query, "boundary", None)
+
+    @property
+    def scope_snapshot_hash(self):
+        """Read-only admission hash for audit and runtime checks."""
+
+        return getattr(
+            self.__query,
+            "universe_scope_snapshot_hash",
+            getattr(self.__query, "scope_snapshot_hash", None),
+        )
+
+    def for_step(self, **coordinates: object) -> "UniverseQueryDTO":
+        """Create a fresh DTO when the underlying provider supports step binding.
+
+        A bound query is the unit of PIT isolation.  This forwarding helper is
+        intentionally optional for legacy static providers; those providers
+        simply report that no step-aware operation exists instead of allowing
+        callers to mutate the existing DTO.
+        """
+
+        binder = getattr(self.__query, "for_step", None)
+        if not callable(binder):
+            raise AttributeError("this universe provider is not step-bindable")
+        bound = binder(**coordinates)
+        if not isinstance(bound, UniverseQuery):
+            raise InvalidProviderResultError(
+                "universe provider returned an invalid step-bound query"
+            )
+        return UniverseQueryDTO(bound)
 
 
 @dataclass(frozen=True, slots=True)

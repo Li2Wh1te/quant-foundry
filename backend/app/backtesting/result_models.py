@@ -172,6 +172,43 @@ def _json_payload(value: Mapping[str, Any] | None, field_name: str) -> Mapping[s
     return frozen
 
 
+def _reject_preflight_sensitive_keys(value: Any, field_name: str) -> None:
+    """Reject raw credentials/tokens from persisted preflight evidence.
+
+    Digests and capability labels are safe audit values; raw token material,
+    credentials, and secrets are not.  This recursive guard is intentionally
+    key based because the result DTO only accepts JSON-shaped evidence and
+    must fail before SQLAlchemy gets a chance to persist it.
+    """
+
+    forbidden = {
+        "token",
+        "raw_token",
+        "access_token",
+        "credential",
+        "credentials",
+        "secret",
+        "password",
+        "api_key",
+        "access_key",
+    }
+
+    def visit(item: Any, path: str) -> None:
+        if isinstance(item, Mapping):
+            for key, child in item.items():
+                normalized = str(key).strip().lower()
+                if normalized in forbidden:
+                    raise DomainValidationError(
+                        f"{field_name} must not contain raw credential/token field {path}.{key}"
+                    )
+                visit(child, f"{path}.{key}")
+        elif isinstance(item, (list, tuple)):
+            for index, child in enumerate(item):
+                visit(child, f"{path}[{index}]")
+
+    visit(value, field_name)
+
+
 def _formal_timeline_payload(
     value: Mapping[str, Any], field_name: str
 ) -> Mapping[str, Any]:
@@ -488,7 +525,11 @@ class BacktestDecisionRecord:
     mode: str
     validation_status: DecisionValidationStatus
     targets: Mapping[str, Any] = field(default_factory=lambda: MappingProxyType({}))
-    validation_issues: Sequence[str] = ()
+    # The existing JSON column is also the audit surface for structured
+    # candidate qualification evidence.  Legacy callers may keep supplying
+    # plain strings; final PIT rechecks add JSON mappings without requiring a
+    # candidate-specific table or migration.
+    validation_issues: Sequence[str | Mapping[str, Any]] = ()
     duration_ms: Decimal | int | str | None = None
     error: str | None = None
 
@@ -510,13 +551,35 @@ class BacktestDecisionRecord:
             ),
         )
         object.__setattr__(self, "targets", _json_payload(self.targets, "targets"))
-        normalized_issues = tuple(
-            issue if isinstance(issue, str) and issue.strip() else None
-            for issue in self.validation_issues
-        )
+        if self.validation_issues is None or isinstance(
+            self.validation_issues, (str, bytes, bytearray)
+        ):
+            raise DomainValidationError("validation_issues must be a sequence")
+        normalized_issues: list[Any] = []
+        for index, issue in enumerate(self.validation_issues):
+            if isinstance(issue, str):
+                if not issue.strip():
+                    raise DomainValidationError(
+                        "validation_issues must contain non-blank text"
+                    )
+                normalized_issues.append(issue.strip())
+                continue
+            if isinstance(issue, Mapping):
+                frozen_issue = _frozen_json(
+                    issue, f"validation_issues[{index}]"
+                )
+                if not isinstance(frozen_issue, Mapping):
+                    raise DomainValidationError(
+                        "validation_issues mapping entries must be JSON objects"
+                    )
+                normalized_issues.append(frozen_issue)
+                continue
+            raise DomainValidationError(
+                "validation_issues entries must be non-blank text or JSON mappings"
+            )
         if any(issue is None for issue in normalized_issues):
             raise DomainValidationError("validation_issues must contain non-blank text")
-        object.__setattr__(self, "validation_issues", normalized_issues)
+        object.__setattr__(self, "validation_issues", tuple(normalized_issues))
         object.__setattr__(
             self, "duration_ms", _optional_decimal(self.duration_ms, "duration_ms")
         )
@@ -1295,6 +1358,19 @@ class BacktestDataPreflightRecord:
     pit_status: str | None = None
     coverage: Mapping[str, Any] | None = None
     source_revisions: Mapping[str, Any] | None = None
+    # Phase 2a keeps these run-bound labels in the existing preflight JSON
+    # projection.  They are DTO fields as well, so admission/session callers
+    # cannot accidentally persist an unlabeled internal report.
+    run_kind: str = "backtest_run"
+    preflight_profile_key: str = "formal"
+    preflight_profile_version: int = 1
+    admission_report_hash: str | None = None
+    session_report_hash: str | None = None
+    hash_match: bool | None = None
+    report_diff: Sequence[Mapping[str, Any]] | None = None
+    failure_phase: str | None = None
+    fixture_sources: Mapping[str, Any] | None = None
+    scope_summary: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -1318,10 +1394,98 @@ class BacktestDataPreflightRecord:
             object.__setattr__(
                 self, name, _json_payload(getattr(self, name), name)
             )
+        run_kind = _required_text(self.run_kind, "run_kind")
+        if run_kind not in {"backtest_run", "internal_link_acceptance"}:
+            raise DomainValidationError("run_kind is not supported by the result contract")
+        object.__setattr__(self, "run_kind", run_kind)
+        profile_key = _required_text(
+            self.preflight_profile_key, "preflight_profile_key"
+        )
+        if profile_key not in {"formal", "internal_link_acceptance"}:
+            raise DomainValidationError("preflight_profile_key is not supported")
+        object.__setattr__(self, "preflight_profile_key", profile_key)
+        if (
+            isinstance(self.preflight_profile_version, bool)
+            or not isinstance(self.preflight_profile_version, int)
+            or self.preflight_profile_version < 1
+        ):
+            raise DomainValidationError(
+                "preflight_profile_version must be a positive integer"
+            )
+        if run_kind == "internal_link_acceptance" and (
+            profile_key != "internal_link_acceptance"
+            or self.preflight_profile_version != 1
+        ):
+            raise DomainValidationError(
+                "internal_link_acceptance runs require profile internal_link_acceptance@1"
+            )
+        if run_kind == "backtest_run" and (
+            profile_key != "formal" or self.preflight_profile_version != 1
+        ):
+            raise DomainValidationError(
+                "formal runs require profile formal@1"
+            )
+        for name in ("admission_report_hash", "session_report_hash", "failure_phase"):
+            object.__setattr__(self, name, _optional_text(getattr(self, name), name))
+        if self.hash_match is not None and not isinstance(self.hash_match, bool):
+            raise DomainValidationError("hash_match must be a boolean when provided")
+        if self.report_diff is None:
+            object.__setattr__(self, "report_diff", ())
+        else:
+            if isinstance(self.report_diff, (str, bytes)):
+                raise DomainValidationError("report_diff must be a sequence of mappings")
+            normalized_diff = tuple(
+                _json_payload(item, "report_diff entry")
+                for item in self.report_diff
+            )
+            object.__setattr__(self, "report_diff", normalized_diff)
+        for name in ("fixture_sources", "scope_summary"):
+            object.__setattr__(self, name, _json_payload(getattr(self, name), name))
+
+        # The service stores only bounded evidence in these fields.  Reject
+        # raw token/credential keys at the DTO boundary so a caller cannot
+        # accidentally turn an audit JSON column into a secret sink.
+        for name in (
+            "capabilities",
+            "calendar_summary",
+            "session_summary",
+            "coverage",
+            "source_revisions",
+            "fixture_sources",
+            "scope_summary",
+        ):
+            _reject_preflight_sensitive_keys(getattr(self, name), name)
 
     @property
     def cursor_sort_key(self) -> tuple[str]:
         return (self.phase.value,)
+
+    @property
+    def preflight_profile(self) -> str:
+        """Return the stable ``key@version`` profile reference."""
+
+        return f"{self.preflight_profile_key}@{self.preflight_profile_version}"
+
+    @property
+    def preflight_metadata(self) -> Mapping[str, Any]:
+        """Return the machine metadata used for visibility enforcement."""
+
+        return MappingProxyType(
+            {
+                "run_kind": self.run_kind,
+                "preflight_profile_key": self.preflight_profile_key,
+                "preflight_profile_version": self.preflight_profile_version,
+                "preflight_profile": self.preflight_profile,
+                "qualification_hash": self.report_hash,
+                "admission_report_hash": self.admission_report_hash,
+                "session_report_hash": self.session_report_hash,
+                "hash_match": self.hash_match,
+                "report_diff": self.report_diff,
+                "failure_phase": self.failure_phase,
+                "fixture_sources": self.fixture_sources,
+                "scope_summary": self.scope_summary,
+            }
+        )
 
 
 @dataclass(frozen=True, slots=True)

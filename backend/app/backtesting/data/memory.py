@@ -24,9 +24,11 @@ Key constraints implemented here (frozen by data-contract version 1):
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from datetime import date, datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, time, timedelta
+from collections import Counter
 import json
+import inspect
 from types import MappingProxyType
 from typing import Mapping, Sequence
 from uuid import UUID
@@ -48,6 +50,7 @@ from app.backtesting.calendar_axis import (
     CAPABILITY_PRICE_LIMIT_TRADABILITY,
     InMemoryCalendarAxisDataProvider,
     SessionPoint,
+    normalize_calendar_id,
     resolve_calendar_axis,
 )
 from app.backtesting.domain import _aware_datetime
@@ -60,6 +63,12 @@ from app.backtesting.data.errors import (
     HistoryIncompleteError,
     InvalidDataRequestError,
     ProviderContractViolationError,
+    UniverseCalendarNotPreflightedError,
+    UniverseCapabilityMissingError,
+    UniversePitBoundaryViolationError,
+    UniversePreflightHashMismatchError,
+    UniverseProviderContractViolationError,
+    UniverseScopeUnresolvedError,
     UnsupportedCapabilityError,
     CalendarContractError,
     CalendarPreflightResourceLimitExceededError,
@@ -71,6 +80,7 @@ from app.backtesting.data.protocols import (
     DataCapabilityManifest,
     DataConsistencyContext,
     DataConsistencyEvidence,
+    InstrumentCoverageQualification,
 )
 from app.backtesting.data.reports import (
     DataCoverageReport,
@@ -86,6 +96,7 @@ from app.backtesting.data.requests import (
     MAX_LOOKBACK_SESSIONS,
     AdjustedSeriesQuery,
     BarQuery,
+    CapabilitySource,
     ConsistencyMode,
     ConsistencyValidation,
     ContractRef,
@@ -93,6 +104,7 @@ from app.backtesting.data.requests import (
     CoverageQuery,
     DataCapability,
     DataChunkQuery,
+    CoverageQualificationRequest,
     DataPreflightRequest,
     DataRequest,
     DataValueQuery,
@@ -101,6 +113,15 @@ from app.backtesting.data.requests import (
     InstrumentQuery,
     InstrumentScopeMode,
     IssueSeverity,
+    InternalFixture,
+    InternalFixtureCapability,
+    FORMAL_PROFILE,
+    INTERNAL_LINK_ACCEPTANCE_PROFILE,
+    INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY,
+    FORMAL_PROFILE,
+    FORMAL_PROFILE_KEY,
+    PreflightProfile,
+    PreflightProfileRegistry,
     PitSupport,
     PreflightStatus,
     PriceBasis,
@@ -110,6 +131,7 @@ from app.backtesting.data.requests import (
     TradingRuleQuery,
     TradingStatusQuery,
     UniverseQuery,
+    UniverseQueryPolicy,
 )
 from app.backtesting.data.sessions import (
     DataSessionState,
@@ -188,7 +210,10 @@ def _calendar_issue_code(
     }.get(code, code.upper())
 
 _SERVABLE_CHUNK_FACT_TYPES = frozenset(
-    {DataCapability.BARS, DataCapability.COVERAGE}
+    # Universe reads are immutable metadata reads bound to the same chunk
+    # consistency context.  They do not widen the formal chunk and therefore
+    # can safely participate in the declared token fact set.
+    {DataCapability.BARS, DataCapability.COVERAGE, DataCapability.UNIVERSE}
 )
 """Fact types one chunk can actually serve in the first version.
 
@@ -238,6 +263,14 @@ class MemoryDataSet:
     calendar_bindings: tuple[object, ...] = ()
     calendar_capabilities: tuple[object, ...] = ()
     calendar_source_priorities: tuple[object, ...] = ()
+    # Explicit internal-link substitutes are injected by tests/callers.  The
+    # dataset never derives a fixture from an empty table or an adapter
+    # default, which keeps fixture evidence distinguishable from production.
+    fixtures: tuple[InternalFixture, ...] = ()
+    # Optional versioned PIT rows are kept separate from the legacy fixed
+    # table.  They are only used when an explicit universe source is injected;
+    # a dataset never promotes these rows to a dynamic catalogue by itself.
+    pit_instruments: tuple[object, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -258,6 +291,36 @@ class MemoryDataSet:
             "calendar_source_priorities",
         ):
             object.__setattr__(self, name, tuple(getattr(self, name)))
+        fixtures = tuple(self.fixtures)
+        if any(not isinstance(item, InternalFixture) for item in fixtures):
+            raise InvalidDataRequestError(
+                "fixtures entries must be InternalFixture instances"
+            )
+        fixture_keys = {
+            (item.fixture_key, item.fixture_version, item.capability)
+            for item in fixtures
+        }
+        if len(fixture_keys) != len(fixtures):
+            raise InvalidDataRequestError(
+                "fixtures must not repeat one key/version/capability"
+            )
+        object.__setattr__(
+            self,
+            "fixtures",
+            tuple(
+                sorted(
+                    fixtures,
+                    key=lambda item: (
+                        item.capability,
+                        item.fixture_key,
+                        str(item.fixture_version),
+                        item.start_date,
+                        item.end_date,
+                    ),
+                )
+            ),
+        )
+        object.__setattr__(self, "pit_instruments", tuple(self.pit_instruments))
 
         definitions = tuple(self.calendar_definitions)
         object.__setattr__(
@@ -295,18 +358,74 @@ class MemoryDataSet:
         )
 
         instruments = tuple(self.instruments)
-        instrument_map: dict[UUID, InstrumentSpec] = {}
+        # Keep all non-overlapping PIT versions for one stable identity.  A
+        # duplicate interval is ambiguous and remains a fixture contract
+        # violation; unlike the old one-row map this representation can
+        # answer historical identity/display queries without current-row
+        # fallback.
+        grouped_instruments: dict[UUID, list[InstrumentSpec]] = {}
         for spec in instruments:
-            if spec.instrument_id in instrument_map:
+            instrument_id = getattr(spec, "instrument_id", None)
+            if not isinstance(instrument_id, UUID):
                 raise InvalidDataRequestError(
-                    "duplicate instrument identity in dataset",
-                    details={"instrument_id": str(spec.instrument_id)},
+                    "instrument rows must carry a UUID instrument_id"
                 )
-            instrument_map[spec.instrument_id] = spec
+            grouped_instruments.setdefault(instrument_id, []).append(spec)
+        for instrument_id, versions in grouped_instruments.items():
+            ordered = sorted(
+                versions,
+                key=lambda item: (
+                    getattr(item, "valid_from", datetime.min.replace(tzinfo=UTC)),
+                    getattr(item, "valid_to", None)
+                    or datetime.max.replace(tzinfo=UTC),
+                    str(getattr(item, "rule_package_reference", "")),
+                ),
+            )
+            for previous, current in zip(ordered, ordered[1:]):
+                previous_end = getattr(previous, "valid_to", None)
+                current_start = getattr(current, "valid_from", None)
+                if previous_end is None or current_start < previous_end:
+                    raise InvalidDataRequestError(
+                        "versioned instrument intervals overlap",
+                        details={"instrument_id": str(instrument_id)},
+                    )
         object.__setattr__(
             self,
             "instruments",
-            tuple(sorted(instruments, key=lambda item: str(item.instrument_id))),
+            tuple(
+                sorted(
+                    instruments,
+                    key=lambda item: (
+                        str(item.instrument_id),
+                        getattr(item, "valid_from", datetime.min.replace(tzinfo=UTC)),
+                        getattr(item, "valid_to", None)
+                        or datetime.max.replace(tzinfo=UTC),
+                    ),
+                )
+            ),
+        )
+        object.__setattr__(
+            self,
+            "_instrument_versions",
+            MappingProxyType(
+                {
+                    instrument_id: tuple(
+                        sorted(
+                            versions,
+                            key=lambda item: (
+                                getattr(
+                                    item,
+                                    "valid_from",
+                                    datetime.min.replace(tzinfo=UTC),
+                                ),
+                                getattr(item, "valid_to", None)
+                                or datetime.max.replace(tzinfo=UTC),
+                            ),
+                        )
+                    )
+                    for instrument_id, versions in grouped_instruments.items()
+                }
+            ),
         )
 
         bars = tuple(self.bars)
@@ -397,12 +516,55 @@ class MemoryDataSet:
         return self._calendar_axis_provider
 
     def instrument(self, instrument_id: UUID) -> InstrumentSpec | None:
-        """Return the spec for one stable identity, or ``None``."""
+        """Return the latest fixed-fixture spec for one stable identity."""
 
-        for spec in self.instruments:
-            if spec.instrument_id == instrument_id:
-                return spec
-        return None
+        versions = self._instrument_versions.get(instrument_id, ())
+        return versions[-1] if versions else None
+
+    def instrument_at(
+        self,
+        instrument_id: UUID,
+        effective_at: datetime,
+        data_cutoff: datetime | None = None,
+    ) -> InstrumentSpec | None:
+        """Resolve one versioned spec at an explicit PIT coordinate.
+
+        ``effective_at`` selects the market-valid interval; ``known_at`` on a
+        richer fixture row, when present, is additionally bounded by
+        ``data_cutoff``.  No current row is used when no version covers the
+        requested date.
+        """
+
+        if not isinstance(instrument_id, UUID):
+            raise InvalidDataRequestError("instrument_id must be a UUID")
+        effective = _aware_datetime(effective_at, "effective_at")
+        cutoff = (
+            _aware_datetime(data_cutoff, "data_cutoff")
+            if data_cutoff is not None
+            else None
+        )
+        candidates = []
+        for spec in self._instrument_versions.get(instrument_id, ()):
+            valid_from = getattr(spec, "valid_from", None)
+            valid_to = getattr(spec, "valid_to", None)
+            if valid_from is not None and effective < valid_from:
+                continue
+            if valid_to is not None and effective >= valid_to:
+                continue
+            known_at = getattr(spec, "known_at", None)
+            if cutoff is not None and known_at is not None and known_at > cutoff:
+                continue
+            candidates.append(spec)
+        if not candidates:
+            return None
+        return max(
+            candidates,
+            key=lambda item: (
+                getattr(item, "valid_from", datetime.min.replace(tzinfo=UTC)),
+                getattr(item, "fact_version", 0),
+                str(getattr(item, "rule_package_reference", "")),
+            ),
+        )
 
     def bars_in_range(
         self,
@@ -473,9 +635,12 @@ class MemoryDataSet:
 class MemoryDataProvider:
     """Deterministic in-memory implementation of :class:`DataProvider`.
 
-    The provider declares exactly the capabilities ``CALENDARS``, ``BARS``,
-    and ``COVERAGE``; every other capability fails fast with
-    ``unsupported_capability`` both at preflight and on chunk queries.
+    The legacy fixture manifest declares ``CALENDARS``, ``BARS``, and
+    ``COVERAGE``.  Its immutable instrument table also provides the explicit
+    in-memory PIT universe used by task-15 internal-link tests.  Universe is
+    intentionally handled as a separate opt-in request capability rather than
+    being silently inferred for old fixed-only requests, so older fixtures
+    retain their original manifest and admission behaviour.
 
     ``invalidate_revision()`` is a **test-only** control that advances the
     internal revision counter so outstanding chunk tokens expire; it must
@@ -487,6 +652,19 @@ class MemoryDataProvider:
         dataset: MemoryDataSet,
         *,
         capability_manifest_version: int = 1,
+        fixtures: Sequence[InternalFixture] = (),
+        internal_fixtures: Sequence[InternalFixture] = (),
+        universe_provider: object | None = None,
+        instrument_spec_provider: object | None = None,
+        qualification_provider: object | None = None,
+        spec_provider: object | None = None,
+        candidate_provider: object | None = None,
+        universe_query_provider: object | None = None,
+        pit_source: object | None = None,
+        universe_scope_resolver: object | None = None,
+        scope_resolver: object | None = None,
+        universe_scope_provider: object | None = None,
+        coverage_qualification_provider: object | None = None,
     ) -> None:
         if not isinstance(dataset, MemoryDataSet):
             raise InvalidDataRequestError("dataset must be a MemoryDataSet")
@@ -506,11 +684,139 @@ class MemoryDataProvider:
         self._manifest_version = capability_manifest_version
         self._revision = 0
         self._read_count = 0
+        # Profile resolution is kept in the provider as a pure registry
+        # lookup.  It never invokes preflight services or reads mutable
+        # strategy state.
+        self._profile_registry = PreflightProfileRegistry()
+        # Admission reports do not currently carry a profile field in the
+        # frozen DataRequest.  Keep the selected profile keyed by the
+        # immutable report hash so the same provider can reproduce an
+        # internal-link session re-check without silently downgrading it to
+        # formal@1.  Unknown hashes intentionally fall back to formal.
+        self._admission_profiles: dict[str, PreflightProfile] = {}
+        supplied_fixtures = tuple(fixtures) + tuple(internal_fixtures)
+        if any(not isinstance(item, InternalFixture) for item in supplied_fixtures):
+            raise InvalidDataRequestError(
+                "fixtures entries must be InternalFixture instances"
+            )
+        combined_fixtures = tuple(dataset.fixtures) + supplied_fixtures
+        by_fixture_key: dict[tuple[str, object, str], InternalFixture] = {}
+        for fixture in combined_fixtures:
+            key = (fixture.fixture_key, fixture.fixture_version, fixture.capability)
+            if key in by_fixture_key and by_fixture_key[key] != fixture:
+                raise InvalidDataRequestError(
+                    "duplicate internal fixture key/version/capability"
+                )
+            by_fixture_key[key] = fixture
+        self._fixtures = tuple(
+            sorted(
+                by_fixture_key.values(),
+                key=lambda item: (
+                    item.capability,
+                    item.fixture_key,
+                    str(item.fixture_version),
+                ),
+            )
+        )
+        self._universe_read_count = 0
+        # Dynamic candidate reads require an explicit PIT source.  The local
+        # ``MemoryDataSet.instruments`` table is intentionally *not* a current
+        # catalogue fallback: one current ``InstrumentSpec`` cannot answer a
+        # historical effective-date/data-cutoff query.  Keep the source roles
+        # separate so a single-instrument qualification port is never
+        # mistaken for a universe enumerator.
+        self._universe_provider = next(
+            (
+                value
+                for value in (
+                    universe_provider,
+                    universe_query_provider,
+                    candidate_provider,
+                    pit_source,
+                    qualification_provider
+                    if callable(getattr(qualification_provider, "query", None))
+                    else None,
+                )
+                if value is not None
+            ),
+            None,
+        )
+        self._pit_spec_provider = (
+            instrument_spec_provider
+            if instrument_spec_provider is not None
+            else spec_provider
+            if spec_provider is not None
+            else (
+                self._universe_provider
+                if any(
+                    callable(getattr(self._universe_provider, name, None))
+                    for name in (
+                        "resolve_spec",
+                        "resolve_instrument",
+                        "resolve_identity",
+                    )
+                )
+                else None
+            )
+        )
+        self._coverage_qualification_provider = (
+            coverage_qualification_provider
+            if coverage_qualification_provider is not None
+            else (
+                qualification_provider
+                if qualification_provider is not None
+                else self._universe_provider
+                if self._universe_provider is not None
+                and any(
+                    callable(getattr(self._universe_provider, name, None))
+                    for name in (
+                        "qualify_instrument",
+                        "qualify",
+                        "coverage_qualification",
+                    )
+                )
+                else None
+            )
+        )
+        self._universe_scope_provider = (
+            universe_scope_resolver
+            if universe_scope_resolver is not None
+            else scope_resolver
+            if scope_resolver is not None
+            else universe_scope_provider
+            if universe_scope_provider is not None
+            else self._universe_provider
+            if self._universe_provider is not None
+            and any(
+                callable(getattr(self._universe_provider, name, None))
+                for name in (
+                    "resolve_dynamic_universe_scope",
+                    "resolve_scope",
+                    "scope_resolution",
+                )
+            )
+            else None
+        )
+        self._universe_supported = self._has_universe_query_method(
+            self._universe_provider
+        )
 
         asset_classes = (
             sorted({spec.asset_class for spec in dataset.instruments}) or ["equity"]
         )
-        served = (DataCapability.CALENDARS, DataCapability.BARS, DataCapability.COVERAGE)
+        served_base = (
+            DataCapability.CALENDARS,
+            DataCapability.BARS,
+            DataCapability.COVERAGE,
+        )
+        # Preserve the historical fixture manifest for callers that only use
+        # fixed bars.  A caller supplying a concrete PIT universe source opts
+        # into the explicit task-15 capability declaration.
+        served = (
+            (*served_base, DataCapability.UNIVERSE)
+            if self._universe_supported
+            else served_base
+        )
         self._manifest = DataCapabilityManifest(
             provider_key=dataset.provider_key,
             manifest_version=capability_manifest_version,
@@ -533,6 +839,26 @@ class MemoryDataProvider:
             consistency_token_contracts=(CHUNK_TOKEN_CONTRACT,),
             supported_chunk_policies=(CHUNK_POLICY,),
             capabilities=served,
+            capability_sources={
+                **{
+                    capability: CapabilitySource.FIXTURE for capability in served
+                },
+                # The in-memory universe is an explicit immutable fixture
+                # source, not a production market catalogue.
+                DataCapability.UNIVERSE: CapabilitySource.FIXTURE,
+                **{
+                    DataCapability.ACTIONS: CapabilitySource.FIXTURE
+                    for fixture in self._fixtures
+                    if fixture.capability
+                    == InternalFixtureCapability.QUANTITY_ACTION_COVERAGE.value
+                },
+                **{
+                    DataCapability.STATUS: CapabilitySource.FIXTURE
+                    for fixture in self._fixtures
+                    if fixture.capability
+                    == InternalFixtureCapability.TRADING_STATUS.value
+                },
+            },
         )
 
     # ------------------------------------------------------------------
@@ -546,10 +872,463 @@ class MemoryDataProvider:
         return self._dataset
 
     @property
+    def fixtures(self) -> tuple[InternalFixture, ...]:
+        """Explicit internal substitute facts attached to this fixture provider."""
+
+        return self._fixtures
+
+    @property
     def read_count(self) -> int:
         """How many times the bar index has been accessed (test observability)."""
 
         return self._read_count
+
+    @property
+    def universe_read_count(self) -> int:
+        """How many PIT universe scans the fixture has performed."""
+
+        return self._universe_read_count
+
+    @staticmethod
+    def _has_universe_query_method(source: object | None) -> bool:
+        """Return whether ``source`` explicitly enumerates PIT candidates."""
+
+        if source is None:
+            return False
+        if callable(source):
+            return True
+        return any(
+            callable(getattr(source, name, None))
+            for name in (
+                "query_candidates",
+                "query",
+                "candidates",
+                "resolve_candidates",
+                "resolve_universe",
+            )
+        )
+
+    @staticmethod
+    def _has_qualification_method(source: object | None) -> bool:
+        """Return whether ``source`` consumes a single-candidate port."""
+
+        if source is None:
+            return False
+        return any(
+            callable(getattr(source, name, None))
+            for name in (
+                "qualify_candidate",
+                "qualify_instrument",
+                "qualify",
+                "coverage_qualification",
+                "resolve_qualification",
+            )
+        )
+
+    @staticmethod
+    def _has_coverage_qualification_method(source: object | None) -> bool:
+        """Return whether ``source`` exposes the typed 16A coverage port."""
+
+        if source is None:
+            return False
+        return any(
+            callable(getattr(source, name, None))
+            for name in (
+                "qualify_instrument",
+                "coverage_qualification",
+                "qualify",
+            )
+        )
+
+    def supports_universe(self) -> bool:
+        """Return the fixture's explicit PIT-universe capability declaration."""
+
+        return self._universe_supported
+
+    def resolve_dynamic_universe_scope(
+        self,
+        request: DataPreflightRequest,
+        *,
+        profile: PreflightProfile | str | ContractRef | None = None,
+    ):
+        """Resolve the finite named calendar scope for dynamic/hybrid runs.
+
+        This is an admission-only operation.  It never enumerates candidates
+        through strategy code and never performs network I/O.  The richer
+        ``UniverseScopeResolution`` value object is imported lazily so the
+        memory fixture remains usable during staged task-package imports.
+        """
+
+        if not isinstance(request, DataPreflightRequest):
+            raise InvalidDataRequestError("request must be a DataPreflightRequest")
+        selected_profile = self._profile_registry.resolve(
+            profile if profile is not None else FORMAL_PROFILE
+        )
+        internal_profile = (
+            selected_profile.reference == INTERNAL_LINK_ACCEPTANCE_PROFILE
+        )
+        from app.backtesting.data.universe import (
+            UniverseScopeIssue,
+            UniverseScopeResolution,
+            UniverseScopeStatus,
+        )
+
+        mode = request.instrument_scope_mode
+        def canonical_ids(values: Sequence[str]) -> tuple[str, ...]:
+            try:
+                return tuple(sorted({normalize_calendar_id(value) for value in values}))
+            except Exception as exc:
+                raise UniverseScopeUnresolvedError(
+                    "the dynamic scope contains an invalid calendar id"
+                ) from exc
+
+        fixed_ids = _fixed_authorized_ids(request)
+        fixed_calendar_ids = {
+            spec.calendar_id
+            for instrument_id in fixed_ids
+            if (spec := self._dataset.instrument(instrument_id)) is not None
+        }
+        if mode is InstrumentScopeMode.FIXED:
+            calendar_ids = canonical_ids(tuple(fixed_calendar_ids))
+        elif not self._universe_supported or DataCapability.UNIVERSE not in request.required_capabilities:
+            issue = UniverseScopeIssue(
+                code="universe_capability_missing",
+                message="Provider 未提供动态候选查询和资格证明能力。",
+                field="provider",
+                details={
+                    "capability": DataCapability.UNIVERSE.value,
+                    "declared": DataCapability.UNIVERSE in request.required_capabilities,
+                },
+            )
+            return UniverseScopeResolution(
+                status=UniverseScopeStatus.BLOCKED,
+                market_scope=request.market_scope,
+                universe_query_policy=request.universe_query_policy,
+                rule_package_reference=request.rule_package,
+                rule_exception_set_reference=request.rule_exception_set,
+                qualification_policy_version=request.qualification_policy_version,
+                resolved_calendar_ids=canonical_ids(tuple(fixed_calendar_ids)),
+                capability_summary={"universe": "missing"},
+                source_evidence={"provider_key": self._dataset.provider_key},
+                issues=(issue,),
+                scope_mode=mode,
+                data_cutoff=request.query_boundary.data_cutoff,
+            )
+        else:
+            source = self._universe_provider
+            if not self._universe_supported:
+                issue = UniverseScopeIssue(
+                    code="universe_capability_missing",
+                    message="Provider 未提供动态候选查询能力。",
+                    field="provider",
+                    details={
+                        "provider_type": (
+                            type(source).__name__ if source is not None else None
+                        )
+                    },
+                )
+                return UniverseScopeResolution(
+                    status=UniverseScopeStatus.BLOCKED,
+                    market_scope=request.market_scope,
+                    universe_query_policy=request.universe_query_policy,
+                    rule_package_reference=request.rule_package,
+                    rule_exception_set_reference=request.rule_exception_set,
+                    qualification_policy_version=request.qualification_policy_version,
+                    resolved_calendar_ids=canonical_ids(tuple(fixed_calendar_ids)),
+                    capability_summary={"universe": "missing"},
+                    source_evidence={"provider_key": self._dataset.provider_key},
+                    issues=(issue,),
+                    scope_mode=mode,
+                    data_cutoff=request.query_boundary.data_cutoff,
+                )
+            if not self._has_coverage_qualification_method(
+                self._coverage_qualification_provider
+            ) and not self._has_coverage_qualification_method(source):
+                issue = UniverseScopeIssue(
+                    code="universe_capability_missing",
+                    message="Provider 未提供动态候选查询能力。",
+                    field="provider",
+                    details={"provider_type": type(source).__name__},
+                )
+                return UniverseScopeResolution(
+                    status=UniverseScopeStatus.BLOCKED,
+                    market_scope=request.market_scope,
+                    universe_query_policy=request.universe_query_policy,
+                    rule_package_reference=request.rule_package,
+                    rule_exception_set_reference=request.rule_exception_set,
+                    qualification_policy_version=request.qualification_policy_version,
+                    resolved_calendar_ids=canonical_ids(tuple(fixed_calendar_ids)),
+                    capability_summary={"universe": "missing"},
+                    source_evidence={"provider_key": self._dataset.provider_key},
+                    issues=(issue,),
+                    scope_mode=mode,
+                    data_cutoff=request.query_boundary.data_cutoff,
+                )
+            try:
+                dynamic_calendar_ids = self._dynamic_scope_calendar_ids(request)
+            except UniverseScopeUnresolvedError as exc:
+                issue = UniverseScopeIssue(
+                    code=exc.code,
+                    message="动态候选范围必须由显式 scope resolver 返回具名日历。",
+                    field="resolved_calendar_ids",
+                    details=dict(getattr(exc, "details", {}) or {}),
+                )
+                return UniverseScopeResolution(
+                    status=UniverseScopeStatus.BLOCKED,
+                    market_scope=request.market_scope,
+                    universe_query_policy=request.universe_query_policy,
+                    rule_package_reference=request.rule_package,
+                    rule_exception_set_reference=request.rule_exception_set,
+                    qualification_policy_version=request.qualification_policy_version,
+                    resolved_calendar_ids=canonical_ids(tuple(fixed_calendar_ids)),
+                    capability_summary={"universe": "available"},
+                    source_evidence={"provider_key": self._dataset.provider_key},
+                    issues=(issue,),
+                    scope_mode=mode,
+                    data_cutoff=request.query_boundary.data_cutoff,
+                )
+            calendar_ids = canonical_ids(
+                tuple(fixed_calendar_ids | set(dynamic_calendar_ids))
+            )
+        if not calendar_ids:
+            issue = UniverseScopeIssue(
+                code="universe_scope_unresolved",
+                message="动态候选范围无法解析出有限具名交易日历。",
+                field="resolved_calendar_ids",
+                details={"provider_key": self._dataset.provider_key},
+            )
+            return UniverseScopeResolution(
+                status=UniverseScopeStatus.BLOCKED,
+                market_scope=request.market_scope,
+                universe_query_policy=request.universe_query_policy,
+                rule_package_reference=request.rule_package,
+                rule_exception_set_reference=request.rule_exception_set,
+                qualification_policy_version=request.qualification_policy_version,
+                resolved_calendar_ids=(),
+                capability_summary={"universe": "available"},
+                source_evidence={"provider_key": self._dataset.provider_key},
+                issues=(issue,),
+                scope_mode=mode,
+                data_cutoff=request.query_boundary.data_cutoff,
+            )
+        # A named scope is not sufficient for admission: task-11's strict
+        # compatibility resolver must prove the participating calendar axis
+        # before this scope can be marked ready.  This call consumes the
+        # explicit ids returned above and never discovers calendars from rows.
+        axis = resolve_calendar_axis(
+            self._dataset.calendar_axis_provider,
+            policy_key=POLICY_KEY_STRICT_COMPATIBLE,
+            policy_version=POLICY_VERSION_STRICT_COMPATIBLE,
+            start_date=request.requested_window.start_date,
+            end_date=request.requested_window.end_date,
+            calendar_ids=calendar_ids,
+        )
+        axis_ready = (
+            axis.status is CalendarAxisStatus.COMPATIBLE
+            and bool(axis.session_signature)
+            and not axis.differences
+        )
+        axis_issues = () if axis_ready else (
+            UniverseScopeIssue(
+                code="universe_scope_unresolved",
+                message="动态范围缺少任务包 11 strict_compatible@1 日历兼容性证明。",
+                field="calendar_axis",
+                details={
+                    "resolved_calendar_ids": calendar_ids,
+                    "differences": tuple(
+                        difference.evidence()
+                        for difference in axis.differences
+                    ),
+                },
+            ),
+        )
+        formal_issues = () if internal_profile else (
+            UniverseScopeIssue(
+                code="universe_capability_missing",
+                message="formal 动态候选生产能力尚未完整交付，已阻断请求。",
+                field="preflight_profile",
+                details={"preflight_profile": selected_profile.profile},
+            ),
+        )
+        return UniverseScopeResolution(
+            status=(
+                UniverseScopeStatus.READY
+                if axis_ready and internal_profile
+                else UniverseScopeStatus.BLOCKED
+            ),
+            market_scope=request.market_scope,
+            universe_query_policy=request.universe_query_policy,
+            rule_package_reference=request.rule_package,
+            rule_exception_set_reference=request.rule_exception_set,
+            qualification_policy_version=request.qualification_policy_version,
+            resolved_calendar_ids=calendar_ids,
+            capability_summary={
+                "universe": "available",
+                "pit_identity": "available",
+                "identity": "available",
+                "mapping": "available",
+                "rules": "available",
+                "market_data": "available",
+                "qualification": "explicit_single_instrument_port",
+            },
+            source_evidence={
+                "provider_key": self._dataset.provider_key,
+                "fixture_revision": self._dataset.fixture_revision,
+                "preflight_profile": selected_profile.profile,
+            },
+            scope_mode=mode,
+            data_cutoff=request.query_boundary.data_cutoff,
+            calendar_session_signature=(axis.session_signature if axis_ready else None),
+            calendar_axis_resolution=axis,
+            issues=(*axis_issues, *formal_issues),
+        )
+
+    @staticmethod
+    def _invoke_universe_method(method, query: UniverseQuery):
+        """Invoke a candidate source using only the arguments it declares.
+
+        Internal-link providers intentionally have small, dependency-free
+        interfaces.  Signature binding lets the fixture consume either the
+        canonical ``query(query)`` shape or an equivalent keyword-oriented
+        port without catching and hiding a provider's own runtime errors.
+        """
+
+        values = {
+            "query": query,
+            "universe_query": query,
+            "effective_date": query.effective_date,
+            "data_cutoff": query.boundary.data_cutoff,
+            "boundary": query.boundary,
+            "market_scope": query.market_scope,
+            "rule": query.rule,
+            "rule_package": query.rule,
+            "universe_query_policy": query.universe_query_policy,
+            "rule_exception_set": query.rule_exception_set,
+            "qualification_policy_version": query.qualification_policy_version,
+            "allowed_calendar_ids": query.allowed_calendar_ids,
+            "scope_mode": query.scope_mode,
+        }
+        try:
+            signature = inspect.signature(method)
+        except (TypeError, ValueError):
+            return method(query)
+        parameters = signature.parameters
+        if any(item.kind is inspect.Parameter.VAR_KEYWORD for item in parameters.values()):
+            return method(**values)
+        kwargs = {
+            name: values[name]
+            for name, parameter in parameters.items()
+            if name in values
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        required_positional = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+            or (
+                parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and parameter.default is inspect.Parameter.empty
+                and parameter.name not in kwargs
+            )
+        ]
+        if required_positional:
+            return method(query)
+        return method(**kwargs)
+
+    def _universe_source_rows(self, query: UniverseQuery) -> tuple[object, ...]:
+        """Read one immutable candidate source without network access."""
+
+        self._universe_read_count += 1
+        source = self._universe_provider
+        if source is None:
+            # ``MemoryDataSet.instruments`` is the fixed-spec fixture, not a
+            # PIT universe catalogue.  Returning it here would make a
+            # dynamic query silently use today's/current rows and would make
+            # future identity facts visible at historical effective dates.
+            raise UniverseCapabilityMissingError(
+                "a dynamic PIT universe requires an explicitly injected source",
+                details={"reason_code": "pit_universe_source_missing"},
+            )
+        method = None
+        for name in (
+            "query_candidates",
+            "query",
+            "candidates",
+            "resolve_candidates",
+            "resolve_universe",
+        ):
+            candidate = getattr(source, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None and callable(source):
+            method = source
+        if method is None:
+            # A single-instrument qualification port cannot enumerate a
+            # universe.  Iterating ``dataset.instruments`` here would turn a
+            # current fixed-spec table into an implicit dynamic catalogue and
+            # would make the result depend on the table's physical rows.
+            raise UniverseCapabilityMissingError(
+                "the configured PIT source does not expose a universe query",
+                details={"provider_type": type(source).__name__},
+            )
+        if method is None:
+            raise UniverseCapabilityMissingError(
+                "the configured universe provider does not expose a query method",
+                details={"provider_type": type(source).__name__},
+            )
+        try:
+            result = self._invoke_universe_method(method, query)
+        except (UniverseCapabilityMissingError, UniverseScopeUnresolvedError):
+            raise
+        except UnsupportedCapabilityError as exc:
+            raise UniverseCapabilityMissingError(
+                "the configured universe provider does not support PIT universe queries",
+                details={
+                    "provider_type": type(source).__name__,
+                    "cause_code": getattr(exc, "code", "unsupported_capability"),
+                },
+            ) from exc
+        except Exception as exc:
+            raise UniverseProviderContractViolationError(
+                "the configured universe provider failed while reading a PIT query",
+                details={
+                    "provider_type": type(source).__name__,
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+        if result is None:
+            return ()
+        if isinstance(result, Mapping):
+            result = tuple(result.values())
+        else:
+            for name in (
+                "candidates",
+                "eligible_candidates",
+                "specs",
+                "rows",
+                "results",
+            ):
+                nested = getattr(result, name, None)
+                if nested is not None and not isinstance(result, (str, bytes)):
+                    result = nested
+                    break
+        if isinstance(result, (str, bytes)):
+            raise UniverseProviderContractViolationError(
+                "the configured universe provider returned text instead of candidate rows"
+            )
+        try:
+            return tuple(result)
+        except (UniverseCapabilityMissingError, UniverseScopeUnresolvedError):
+            raise
+        except Exception as exc:
+            raise UniverseProviderContractViolationError(
+                "the configured universe provider returned a non-iterable result"
+                if isinstance(exc, TypeError)
+                else "the configured universe provider failed while iterating rows",
+                details={"provider_type": type(source).__name__, "error_type": type(exc).__name__},
+            ) from exc
 
     def capability_manifest(self) -> DataCapabilityManifest:
         """Return the static structured capability manifest."""
@@ -566,12 +1345,500 @@ class MemoryDataProvider:
         self._revision += 1
         return self._revision
 
-    def preflight(self, request: DataPreflightRequest) -> DataPreflightReport:
-        """Run admission preflight and return the frozen report."""
+    def preflight(
+        self,
+        request: DataPreflightRequest,
+        *,
+        profile: PreflightProfile | str | ContractRef | None = None,
+        fixtures: Sequence[InternalFixture] = (),
+    ) -> DataPreflightReport:
+        """Run admission preflight and return the frozen report.
+
+        ``profile``/``fixtures`` are optional compatibility hooks for the
+        Phase-2a internal-link acceptance path.  Existing callers retain the
+        original formal preflight semantics when they omit both arguments.
+        """
 
         if not isinstance(request, DataPreflightRequest):
             raise InvalidDataRequestError("request must be a DataPreflightRequest")
-        return self._build_preflight_report(request)
+        selected_profile: PreflightProfile | None = None
+        if profile is not None:
+            if isinstance(profile, PreflightProfile):
+                registered = self._profile_registry.resolve(profile.reference)
+                if registered != profile:
+                    raise InvalidDataRequestError(
+                        "profile definition does not match the registered profile",
+                        details={"reason_code": "internal_preflight_profile_mismatch"},
+                    )
+                selected_profile = registered
+            else:
+                selected_profile = self._profile_registry.resolve(profile)
+        profile_fixtures = tuple(self._fixtures) + tuple(fixtures)
+        if any(not isinstance(item, InternalFixture) for item in profile_fixtures):
+            raise InvalidDataRequestError(
+                "fixtures entries must be InternalFixture instances"
+            )
+        report = self._build_preflight_report(
+            request,
+            profile=selected_profile,
+            fixtures=profile_fixtures,
+        )
+        self._admission_profiles[report.report_hash] = (
+            selected_profile
+            if selected_profile is not None
+            else self._profile_registry.resolve(FORMAL_PROFILE)
+        )
+        return report
+
+    def _profile_for_admission(self, admission_hash: str) -> PreflightProfile:
+        """Return the profile used to create one report hash."""
+
+        return self._admission_profiles.get(
+            admission_hash,
+            self._profile_registry.resolve(FORMAL_PROFILE),
+        )
+
+    def qualify(
+        self, request: CoverageQualificationRequest
+    ) -> InstrumentCoverageQualification:
+        """Evaluate one typed coverage-qualification request.
+
+        This is the protocol-object spelling used by task-15 adapters.  The
+        implementation is deliberately limited to one stable instrument; it
+        never enumerates a market scope or invokes a user strategy.
+        """
+
+        if not isinstance(request, CoverageQualificationRequest):
+            raise InvalidDataRequestError(
+                "request must be a CoverageQualificationRequest"
+            )
+        return self.qualify_instrument(request)
+
+    def qualify_instrument(
+        self,
+        request: CoverageQualificationRequest | UUID | None = None,
+        **kwargs: object,
+    ) -> InstrumentCoverageQualification:
+        """Return one immutable candidate qualification result.
+
+        A ready ``CoverageQualificationRequest`` is preferred.  The keyword
+        form exists for the task-15 protocol adapter and constructs exactly
+        the same request object before any fixture/index access.  In either
+        form this method accepts only a stable ``instrument_id`` and never a
+        source code, strategy callback, or dynamic candidate collection.
+        """
+
+        if isinstance(request, CoverageQualificationRequest):
+            if kwargs:
+                raise InvalidDataRequestError(
+                    "qualification request and keyword fields cannot be mixed"
+                )
+            qualification_request = request
+        else:
+            values = dict(kwargs)
+            if request is not None:
+                if not isinstance(request, UUID):
+                    raise InvalidDataRequestError(
+                        "instrument_id must be a UUID"
+                    )
+                values["instrument_id"] = request
+            try:
+                instrument_id = values["instrument_id"]
+                effective_date = values["effective_date"]
+                required_capabilities = values["required_capabilities"]
+                query_boundary = values["query_boundary"]
+                resolved_calendar_ids = values["resolved_calendar_ids"]
+            except KeyError as exc:
+                raise InvalidDataRequestError(
+                    f"missing qualification field: {exc.args[0]}"
+                ) from exc
+            requested_window = values.get("requested_window")
+            if not isinstance(requested_window, DateRange):
+                raise InvalidDataRequestError(
+                    "requested_window must be a DateRange"
+                )
+            formal_envelope = values.get("formal_envelope", requested_window)
+            warmup_envelope = values.get("warmup_envelope")
+            history_envelope = values.get("history_envelope") or formal_envelope
+            if not isinstance(formal_envelope, DateRange):
+                raise InvalidDataRequestError("formal_envelope must be a DateRange")
+            if warmup_envelope is not None and not isinstance(warmup_envelope, DateRange):
+                raise InvalidDataRequestError(
+                    "warmup_envelope must be a DateRange or None"
+                )
+            if not isinstance(history_envelope, DateRange):
+                raise InvalidDataRequestError(
+                    "history_envelope must be a DateRange"
+                )
+            qualification_request = CoverageQualificationRequest(
+                instrument_id=instrument_id,
+                effective_date=effective_date,
+                requested_window=requested_window,
+                formal_envelope=formal_envelope,
+                warmup_envelope=warmup_envelope,
+                history_envelope=history_envelope,
+                required_capabilities=required_capabilities,
+                query_boundary=query_boundary,
+                preflight_profile=values.get(
+                    "preflight_profile", INTERNAL_LINK_ACCEPTANCE_PROFILE
+                ),
+                resolved_calendar_ids=resolved_calendar_ids,
+                run_kind=values.get("run_kind"),
+                rule_package=values.get("rule_package"),
+                rule_exception_set=values.get("rule_exception_set"),
+                market_scope=values.get("market_scope"),
+                universe_query_policy=values.get("universe_query_policy"),
+                qualification_policy_version=values.get(
+                    "qualification_policy_version"
+                ),
+                required_fixture_capabilities=values.get(
+                    "required_fixture_capabilities", ()
+                ),
+                fixtures=values.get("fixtures", ()),
+                frequency=values.get("frequency", "1d"),
+            )
+
+        profile = self._profile_registry.resolve(
+            qualification_request.preflight_profile
+        )
+        fixtures = self._fixtures + tuple(qualification_request.fixtures)
+        profile.validate_request(qualification_request)
+        self._validate_qualification_profile(profile, qualification_request, fixtures)
+        instrument_id = qualification_request.instrument_id
+        spec = self._dataset.instrument_at(
+            instrument_id,
+            datetime.combine(
+                qualification_request.effective_date,
+                time.min,
+                tzinfo=UTC,
+            ),
+            qualification_request.query_boundary.data_cutoff,
+        )
+        if spec is None:
+            return InstrumentCoverageQualification(
+                instrument_id=instrument_id,
+                eligible=False,
+                coverage_reports=(),
+                reason_codes=(ISSUE_INSTRUMENT_NOT_FOUND,),
+                evidence_summary={
+                    "profile": profile.profile,
+                    "request": qualification_request.machine_content(),
+                },
+            )
+
+        reasons: list[str] = []
+        if spec.calendar_id not in qualification_request.resolved_calendar_ids:
+            reasons.append("calendar_not_preflighted")
+        if not self._scope_contains_spec(qualification_request.market_scope, spec):
+            reasons.append("instrument_outside_scope")
+        valid_from = getattr(spec, "valid_from", None)
+        valid_to = getattr(spec, "valid_to", None)
+        if isinstance(valid_from, datetime):
+            valid_from = valid_from.date()
+        if isinstance(valid_to, datetime):
+            valid_to = valid_to.date()
+        if (
+            isinstance(valid_from, date)
+            and qualification_request.effective_date < valid_from
+        ) or (
+            isinstance(valid_to, date)
+            and qualification_request.effective_date >= valid_to
+        ):
+            reasons.append("instrument_not_effective")
+
+        reports: list[DataCoverageReport] = []
+        # Record every validated fixture, including one that substitutes a
+        # capability not explicitly requested by this single-instrument call;
+        # profile evidence must still affect the qualification hash.
+        fixture_evidence: list[Mapping[str, object]] = [
+            fixture.as_dict() for fixture in fixtures
+        ]
+        for capability in qualification_request.required_capabilities:
+            fixture = self._fixture_for_capability(
+                capability, qualification_request, fixtures
+            )
+            if capability not in self._manifest.capabilities and fixture is None:
+                # This is a request/provider contract failure rather than a
+                # candidate-level missing row: the provider cannot answer the
+                # requested dimension for any instrument.
+                raise UnsupportedCapabilityError(
+                    "the memory provider cannot qualify the requested capability",
+                    details={
+                        "capability": capability.value,
+                        "reason_code": "coverage_provider_capability_missing",
+                    },
+                )
+            if fixture is not None:
+                reports.append(
+                    self._fixture_coverage_report(
+                        capability, qualification_request, fixture
+                    )
+                )
+                continue
+            if capability in (
+                DataCapability.BARS,
+                DataCapability.COVERAGE,
+                DataCapability.CALENDARS,
+            ):
+                reports.append(
+                    self._memory_coverage_report(
+                        instrument_id, capability, qualification_request
+                    )
+                )
+            else:
+                # The memory fixture has no source rows for other declared
+                # dimensions.  Reaching this branch would mean a manifest
+                # accidentally advertised an unsupported family.
+                raise UnsupportedCapabilityError(
+                    "the memory provider advertised an unimplemented capability",
+                    details={"capability": capability.value},
+                )
+
+        for report in reports:
+            if report.quality_status is QualityStatus.PARTIAL:
+                reasons.append("coverage_incomplete")
+            elif report.quality_status is QualityStatus.INVALID:
+                reasons.append("coverage_invalid")
+            elif report.quality_status is QualityStatus.UNAVAILABLE:
+                reasons.append("coverage_unavailable")
+
+        evidence_summary = {
+            "profile": profile.profile,
+            "run_kind": profile.run_kind,
+            "instrument_id": str(instrument_id),
+            "calendar_id": spec.calendar_id,
+            "requested_window": {
+                "start_date": qualification_request.requested_window.start_date,
+                "end_date": qualification_request.requested_window.end_date,
+            },
+            "fixtures": fixture_evidence,
+            "capability_sources": {
+                capability.value: (
+                    CapabilitySource.FIXTURE.value
+                    if self._fixture_for_capability(capability, qualification_request, fixtures)
+                    is not None
+                    else self._manifest.capability_source(capability).value
+                )
+                for capability in qualification_request.required_capabilities
+            },
+        }
+        return InstrumentCoverageQualification(
+            instrument_id=instrument_id,
+            eligible=not reasons and all(
+                report.quality_status is QualityStatus.COMPLETE for report in reports
+            ),
+            coverage_reports=tuple(reports),
+            reason_codes=tuple(sorted(set(reasons))),
+            evidence_summary=evidence_summary,
+            request=qualification_request,
+        )
+
+    def _validate_qualification_profile(
+        self,
+        profile: PreflightProfile,
+        request: CoverageQualificationRequest,
+        fixtures: Sequence[InternalFixture],
+    ) -> None:
+        """Enforce profile/run-kind and explicit fixture boundaries."""
+
+        if request.preflight_profile != profile.reference:
+            raise InvalidDataRequestError(
+                "qualification request profile does not match the registry",
+                details={"reason_code": "internal_preflight_profile_mismatch"},
+            )
+        # The profile owns the run-kind mapping; clients cannot select an
+        # alternate run kind through a free-form qualification argument.
+        if profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY and not profile.allow_fixture_only:
+            raise InvalidDataRequestError(
+                "internal_link_acceptance@1 must permit only explicit fixtures",
+                details={"reason_code": "internal_preflight_profile_mismatch"},
+            )
+        fixtures = tuple(fixtures)
+        if profile.key == FORMAL_PROFILE_KEY and fixtures:
+            raise InvalidDataRequestError(
+                "formal@1 rejects fixture_only facts",
+                details={"reason_code": "formal_fixture_not_allowed"},
+            )
+        for fixture in fixtures:
+            if not isinstance(fixture, InternalFixture):
+                raise InvalidDataRequestError("fixtures entries must be InternalFixture")
+            if not profile.accepts_fixture(fixture):
+                raise InvalidDataRequestError(
+                    "fixture is not registered for the selected profile",
+                    details={
+                        "reason_code": "internal_preflight_fixture_missing",
+                        "fixture_key": fixture.fixture_key,
+                        "fixture_version": fixture.fixture_version,
+                        "capability": fixture.capability,
+                    },
+                )
+            if not fixture.covers(request):
+                raise InvalidDataRequestError(
+                    "fixture does not cover the qualification request",
+                    details={
+                        "reason_code": "internal_preflight_fixture_out_of_scope",
+                        "fixture_key": fixture.fixture_key,
+                        "fixture_version": fixture.fixture_version,
+                        "instrument_id": str(request.instrument_id),
+                    },
+                )
+        missing_fixture_capabilities = set(request.required_fixture_capabilities) - {
+            fixture.capability for fixture in fixtures
+        }
+        if missing_fixture_capabilities:
+            raise InvalidDataRequestError(
+                "a named internal fixture is required but was not supplied",
+                details={
+                    "reason_code": "internal_preflight_fixture_missing",
+                    "capabilities": sorted(missing_fixture_capabilities),
+                },
+            )
+
+    @staticmethod
+    def _scope_contains_spec(scope: object, spec: InstrumentSpec) -> bool:
+        """Apply only explicit scope axes; never infer a missing axis."""
+
+        if scope is None:
+            return True
+        return (
+            (not scope.markets or getattr(spec, "market", None) in scope.markets)
+            and (not scope.exchanges or spec.exchange in scope.exchanges)
+            and (not scope.asset_classes or spec.asset_class in scope.asset_classes)
+            and (not scope.currencies or spec.currency in scope.currencies)
+        )
+
+    @staticmethod
+    def _fixture_for_capability(
+        capability: DataCapability,
+        request: CoverageQualificationRequest,
+        fixtures: Sequence[InternalFixture] = (),
+    ) -> InternalFixture | None:
+        """Find one explicitly required fixture for a generic capability."""
+
+        aliases = {
+            DataCapability.ACTIONS: InternalFixtureCapability.QUANTITY_ACTION_COVERAGE.value,
+            DataCapability.STATUS: InternalFixtureCapability.TRADING_STATUS.value,
+        }
+        expected = aliases.get(capability)
+        if expected is None:
+            return None
+        candidates = tuple(fixtures) if fixtures else tuple(request.fixtures)
+        for fixture in candidates:
+            if expected is None or fixture.capability == expected:
+                return fixture
+        return None
+
+    def _qualification_session_dates(
+        self, request: CoverageQualificationRequest
+    ) -> tuple[date, ...]:
+        """Use only explicitly resolved open calendar sessions."""
+
+        envelope = request.history_envelope or request.formal_envelope
+        allowed = set(request.resolved_calendar_ids)
+        dates = {
+            fact.session_date
+            for fact in self._dataset.calendar_facts
+            if fact.calendar_id in allowed
+            and fact.is_open
+            and envelope.start_date <= fact.session_date <= envelope.end_date
+        }
+        return tuple(sorted(dates))
+
+    def _memory_coverage_report(
+        self,
+        instrument_id: UUID,
+        capability: DataCapability,
+        request: CoverageQualificationRequest,
+    ) -> DataCoverageReport:
+        """Project memory Bar/session fixtures into the existing report DTO."""
+
+        days = self._qualification_session_dates(request)
+        complete = partial = invalid = unavailable = 0
+        missing: list[date] = []
+        revisions: dict[str, set[str]] = {}
+        for day in days:
+            if capability is DataCapability.CALENDARS:
+                calendar_facts = tuple(
+                    fact
+                    for fact in self._dataset.calendar_facts
+                    if fact.session_date == day
+                    and fact.calendar_id in request.resolved_calendar_ids
+                    and fact.is_open
+                )
+                if calendar_facts:
+                    complete += 1
+                else:
+                    unavailable += 1
+                    missing.append(day)
+                continue
+            bar = self._dataset.bar_at(
+                instrument_id, request.frequency, PriceBasis.RAW, day
+            )
+            if bar is None:
+                unavailable += 1
+                missing.append(day)
+                continue
+            status = bar.evidence.quality_status
+            if status is QualityStatus.COMPLETE:
+                complete += 1
+            elif status is QualityStatus.PARTIAL:
+                partial += 1
+                missing.append(day)
+            elif status is QualityStatus.INVALID:
+                invalid += 1
+                missing.append(day)
+            else:
+                unavailable += 1
+                missing.append(day)
+            revision = bar.evidence.source_revision
+            if revision:
+                revisions.setdefault(bar.evidence.source, set()).add(revision)
+        expected = len(days)
+        if invalid:
+            quality = QualityStatus.INVALID
+        elif partial or unavailable:
+            quality = QualityStatus.PARTIAL if complete or partial else QualityStatus.UNAVAILABLE
+        elif expected:
+            quality = QualityStatus.COMPLETE
+        else:
+            quality = QualityStatus.UNAVAILABLE
+        return DataCoverageReport(
+            requested_window=(request.history_envelope or request.formal_envelope),
+            capability=capability,
+            instrument_ids=(instrument_id,),
+            expected_count=expected,
+            complete_count=complete,
+            partial_count=partial,
+            invalid_count=invalid,
+            unavailable_count=unavailable,
+            quality_status=quality,
+            missing_ranges=_merge_missing_ranges(missing),
+            source_revisions={
+                source: ",".join(sorted(values))
+                for source, values in sorted(revisions.items())
+            },
+        )
+
+    @staticmethod
+    def _fixture_coverage_report(
+        capability: DataCapability,
+        request: CoverageQualificationRequest,
+        fixture: InternalFixture,
+    ) -> DataCoverageReport:
+        """Represent a named fixture as explicit complete evidence only."""
+
+        return DataCoverageReport(
+            requested_window=(request.history_envelope or request.formal_envelope),
+            capability=capability,
+            instrument_ids=(request.instrument_id,),
+            expected_count=1,
+            complete_count=1,
+            partial_count=0,
+            invalid_count=0,
+            unavailable_count=0,
+            quality_status=QualityStatus.COMPLETE,
+            source_revisions={fixture.fixture_key: str(fixture.fixture_version)},
+        )
 
     def open_session(self, request: DataRequest) -> "MemoryDataSession":
         """Open an authoritative session bound to this provider's facts."""
@@ -613,7 +1880,11 @@ class MemoryDataProvider:
         )
 
     def _collect_common_preflight_issues(
-        self, request: DataPreflightRequest
+        self,
+        request: DataPreflightRequest,
+        *,
+        profile: PreflightProfile | None = None,
+        fixtures: Sequence[InternalFixture] = (),
     ) -> tuple[list[PreflightIssue], tuple[UUID, ...]]:
         """Run provider/request admission gates shared by both calendar paths."""
 
@@ -674,8 +1945,27 @@ class MemoryDataProvider:
                     field="consistency_token_contract",
                 )
             )
+        dynamic_mode = request.instrument_scope_mode is not InstrumentScopeMode.FIXED
+        universe_requested = DataCapability.UNIVERSE in request.required_capabilities
         for capability in request.required_capabilities:
-            if capability not in self._manifest.capabilities:
+            # ``UNIVERSE`` is served by the explicit immutable instrument
+            # source below even though the legacy manifest predates task 15.
+            # All other capability declarations remain manifest-driven.
+            if capability not in self._manifest.capabilities and not (
+                capability is DataCapability.UNIVERSE
+                and self._universe_supported
+            ) and not (
+                capability
+                in {
+                    DataCapability.ACTIONS,
+                    DataCapability.STATUS,
+                }
+                and self._has_coverage_qualification_method(
+                    self._coverage_qualification_provider
+                )
+            ) and not self._fixture_satisfies_capability(
+                capability, request, profile, fixtures
+            ):
                 issues.append(
                     PreflightIssue(
                         code=ISSUE_UNSUPPORTED_CAPABILITY,
@@ -689,20 +1979,44 @@ class MemoryDataProvider:
                         details={"capability": capability.value},
                     )
                 )
-        # Only the frozen fixed scope is supported: dynamic and hybrid runs
-        # depend on the universe capability this fixture does not serve.
-        if request.instrument_scope_mode is not InstrumentScopeMode.FIXED:
+        # Dynamic/hybrid requests are admitted only when the caller explicitly
+        # declares the universe capability.  This keeps the legacy fixed-only
+        # fixture contract deterministic while ensuring a missing Provider
+        # capability blocks the complete request rather than filtering every
+        # candidate away.
+        if dynamic_mode and (not universe_requested or not self._universe_supported):
             issues.append(
                 PreflightIssue(
                     code=ISSUE_UNSUPPORTED_CAPABILITY,
                     severity=IssueSeverity.ERROR,
                     scope="instrument_scope",
                     message=(
-                        f"内存 Provider 仅支持固定标的范围，不支持 "
-                        f"{request.instrument_scope_mode.value} 范围模式"
+                        "动态候选范围要求 Provider 显式提供 PIT Universe 能力，"
+                        "当前请求未满足能力门禁"
                     ),
                     field="instrument_scope_mode",
-                    details={"scope_mode": request.instrument_scope_mode.value},
+                    details={
+                        "scope_mode": request.instrument_scope_mode.value,
+                        "capability": DataCapability.UNIVERSE.value,
+                        "capability_declared": universe_requested,
+                    },
+                )
+            )
+            # Keep the legacy ``unsupported_capability`` issue for existing
+            # consumers, while publishing the task-15 stable request-level
+            # code that distinguishes a missing universe provider from a
+            # single filtered candidate.
+            issues.append(
+                PreflightIssue(
+                    code="universe_capability_missing",
+                    severity=IssueSeverity.ERROR,
+                    scope="instrument_scope",
+                    message="动态候选 Provider 能力缺失，已阻断请求。",
+                    field="required_capabilities",
+                    details={
+                        "cause_code": "universe_capability_missing",
+                        "capability": DataCapability.UNIVERSE.value,
+                    },
                 )
             )
         if request.frequency not in self._manifest.supported_frequencies:
@@ -727,11 +2041,7 @@ class MemoryDataProvider:
                     )
                 )
 
-        scope_ids = tuple(
-            dict.fromkeys(
-                [*request.static_instrument_ids, *request.mandatory_instrument_ids]
-            )
-        )
+        scope_ids = tuple(sorted(_fixed_authorized_ids(request), key=str))
         known_ids = {spec.instrument_id for spec in self._dataset.instruments}
         for instrument_id in scope_ids:
             if instrument_id not in known_ids:
@@ -747,13 +2057,410 @@ class MemoryDataProvider:
                 )
         return issues, scope_ids
 
+    @staticmethod
+    def _fixture_scope_covers_request(
+        fixture: InternalFixture, request: DataPreflightRequest
+    ) -> bool:
+        """Check fixture bounds against fixed request subjects and dates."""
+
+        fixed_ids = _fixed_authorized_ids(request)
+        if fixed_ids and fixture.instrument_ids:
+            if not set(fixed_ids).issubset(set(fixture.instrument_ids)):
+                return False
+        elif fixed_ids and fixture.scope:
+            scoped_ids = fixture.scope.get("instrument_ids", ())
+            if scoped_ids and not set(str(item) for item in fixed_ids).issubset(
+                set(str(item) for item in scoped_ids)
+            ):
+                return False
+        return (
+            fixture.start_date <= request.requested_window.start_date
+            and fixture.end_date >= request.requested_window.end_date
+        )
+
+    @staticmethod
+    def _fixture_capability_for_data_capability(
+        capability: DataCapability,
+    ) -> str | None:
+        """Map only profile-approved substitute dimensions."""
+
+        return {
+            DataCapability.ACTIONS: InternalFixtureCapability.QUANTITY_ACTION_COVERAGE.value,
+            DataCapability.STATUS: InternalFixtureCapability.TRADING_STATUS.value,
+        }.get(capability)
+
+    def _fixture_satisfies_capability(
+        self,
+        capability: DataCapability,
+        request: DataPreflightRequest,
+        profile: PreflightProfile | None,
+        fixtures: Sequence[InternalFixture],
+    ) -> bool:
+        """Whether a valid internal fixture substitutes one missing family."""
+
+        if profile is None or not profile.allow_fixture_only:
+            return False
+        expected = self._fixture_capability_for_data_capability(capability)
+        if expected is None:
+            return False
+        return any(
+            fixture.capability == expected
+            and profile.accepts_fixture(fixture)
+            and self._fixture_scope_covers_request(fixture, request)
+            for fixture in fixtures
+        )
+
+    def _profile_issues(
+        self,
+        profile: PreflightProfile,
+        request: DataPreflightRequest,
+        fixtures: Sequence[InternalFixture],
+    ) -> list[PreflightIssue]:
+        """Project profile/fixture contract failures into report issues."""
+
+        issues: list[PreflightIssue] = []
+        if profile.key == INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY:
+            if profile.reference != INTERNAL_LINK_ACCEPTANCE_PROFILE:
+                issues.append(
+                    PreflightIssue(
+                        code="internal_preflight_profile_mismatch",
+                        severity=IssueSeverity.ERROR,
+                        scope="profile",
+                        message="内部链路验收仅允许精确的 internal_link_acceptance@1 profile。",
+                        field="preflight_profile",
+                        details={
+                            "expected": f"{INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY}@1",
+                            "actual": profile.profile,
+                        },
+                    )
+                )
+            if profile.run_kind != INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY:
+                issues.append(
+                    PreflightIssue(
+                        code="internal_preflight_profile_mismatch",
+                        severity=IssueSeverity.ERROR,
+                        scope="profile",
+                        message="内部链路验收 profile 的 run kind 不匹配，已阻断预检。",
+                        field="run_kind",
+                        details={"expected": INTERNAL_LINK_ACCEPTANCE_PROFILE_KEY, "actual": profile.run_kind},
+                    )
+                )
+            if profile.allow_degraded:
+                issues.append(
+                    PreflightIssue(
+                        code="internal_preflight_degraded_forbidden",
+                        severity=IssueSeverity.ERROR,
+                        scope="profile",
+                        message="内部链路验收不允许 degraded 状态，已阻断预检。",
+                        field="allow_degraded",
+                    )
+                )
+        elif profile.key == FORMAL_PROFILE_KEY and fixtures:
+            issues.append(
+                PreflightIssue(
+                    code="internal_preflight_profile_mismatch",
+                    severity=IssueSeverity.ERROR,
+                    scope="profile",
+                    message="formal@1 不接受 fixture_only 内部事实，已阻断预检。",
+                    field="fixtures",
+                    details={"reason_code": "formal_fixture_not_allowed"},
+                )
+            )
+        for fixture in fixtures:
+            if not profile.accepts_fixture(fixture):
+                issues.append(
+                    PreflightIssue(
+                        code="internal_preflight_fixture_missing",
+                        severity=IssueSeverity.ERROR,
+                        scope="fixtures",
+                        message="内部替代事实未获当前 profile 具名许可，已阻断预检。",
+                        field="fixture_key",
+                        details={
+                            "fixture_key": fixture.fixture_key,
+                            "fixture_version": fixture.fixture_version,
+                            "capability": fixture.capability,
+                        },
+                    )
+                )
+            elif not self._fixture_scope_covers_request(fixture, request):
+                issues.append(
+                    PreflightIssue(
+                        code="internal_preflight_fixture_out_of_scope",
+                        severity=IssueSeverity.ERROR,
+                        scope="fixtures",
+                        message="内部替代事实的标的或日期范围未完整覆盖请求，已阻断预检。",
+                        field="scope",
+                        details={
+                            "fixture_key": fixture.fixture_key,
+                            "fixture_version": fixture.fixture_version,
+                            "scope": fixture.scope,
+                            "requested": {
+                                "instrument_ids": [
+                                    str(item) for item in _fixed_authorized_ids(request)
+                                ],
+                                "start_date": request.requested_window.start_date.isoformat(),
+                                "end_date": request.requested_window.end_date.isoformat(),
+                            },
+                        },
+                    )
+                )
+            else:
+                # A valid fixture is audit evidence, not a blocker.  Keeping
+                # its exact key/version/scope in the existing issue payload
+                # makes the report hash sensitive to fixture changes without
+                # creating a second report or coverage table.
+                issues.append(
+                    PreflightIssue(
+                        code="internal_fixture_used",
+                        severity=IssueSeverity.WARNING,
+                        scope="fixtures",
+                        message="内部链路验收使用了已具名、范围完整的内部替代事实。",
+                        field="fixture_key",
+                        details=json.loads(canonical_json(fixture.machine_content())),
+                    )
+                )
+
+        # A missing approved fixture is a distinct profile failure.  It is
+        # intentionally emitted only for substitute dimensions that are
+        # explicitly requested; an empty actions table is never interpreted as
+        # a negative proof.
+        if profile.allow_fixture_only:
+            for capability in request.required_capabilities:
+                expected = self._fixture_capability_for_data_capability(capability)
+                if expected is None:
+                    continue
+                if not self._fixture_satisfies_capability(
+                    capability, request, profile, fixtures
+                ):
+                    issues.append(
+                        PreflightIssue(
+                            code="internal_preflight_fixture_missing",
+                            severity=IssueSeverity.ERROR,
+                            scope="fixtures",
+                            message="请求所需的具名内部替代事实缺失或范围不足，已阻断预检。",
+                            field="fixtures",
+                            details={
+                                "capability": expected,
+                                "requested_window": {
+                                    "start_date": request.requested_window.start_date.isoformat(),
+                                    "end_date": request.requested_window.end_date.isoformat(),
+                                },
+                            },
+                        )
+                    )
+        return issues
+
+    def _dynamic_scope_calendar_ids(
+        self, request: DataPreflightRequest
+    ) -> tuple[str, ...]:
+        """Read only the explicit dynamic-scope resolver result.
+
+        Calendar ids are an admission fact, not something a memory adapter
+        may discover by scanning candidate rows or all calendar definitions.
+        A source without a resolver therefore fails closed at request level.
+        """
+
+        resolver = self._universe_scope_provider
+        if resolver is None:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe requires an explicit scope resolver",
+                details={
+                    "provider_type": (
+                        type(self._universe_provider).__name__
+                        if self._universe_provider is not None
+                        else None
+                    )
+                },
+            )
+        method = resolver if callable(resolver) else None
+        if method is None:
+            for name in (
+                "resolve_dynamic_universe_scope",
+                "resolve_scope",
+                "scope_resolution",
+            ):
+                candidate = getattr(resolver, name, None)
+                if callable(candidate):
+                    method = candidate
+                    break
+        if method is None:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope provider has no resolver method",
+                details={"provider_type": type(resolver).__name__},
+            )
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        try:
+            if any(
+                parameter.kind is inspect.Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            ) or "request" in parameters:
+                resolution = method(request=request)
+            else:
+                resolution = method(request)
+        except (UniverseScopeUnresolvedError, UniverseCapabilityMissingError):
+            raise
+        except Exception as exc:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope resolver failed",
+                details={"error_type": type(exc).__name__},
+            ) from exc
+        if resolution is None:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope resolver returned no resolution"
+            )
+        status = (
+            resolution.get("status")
+            if isinstance(resolution, Mapping)
+            else getattr(resolution, "status", None)
+        )
+        status_value = getattr(status, "value", status)
+        if status_value not in (None, "ready"):
+            issue_code = (
+                resolution.get("primary_issue_code")
+                if isinstance(resolution, Mapping)
+                else getattr(resolution, "primary_issue_code", None)
+            )
+            if issue_code == "universe_capability_missing":
+                raise UniverseCapabilityMissingError(
+                    "the dynamic universe scope provider reported missing capability"
+                )
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope provider reported a blocked resolution",
+                details={"issue_code": issue_code},
+            )
+        resolved = (
+            resolution.get("resolved_calendar_ids")
+            if isinstance(resolution, Mapping)
+            else getattr(resolution, "resolved_calendar_ids", None)
+        )
+        if resolved is None:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope did not provide named calendars"
+            )
+        try:
+            normalized = tuple(
+                sorted({normalize_calendar_id(item) for item in resolved})
+            )
+        except Exception as exc:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope returned invalid calendar ids"
+            ) from exc
+        if not normalized:
+            raise UniverseScopeUnresolvedError(
+                "the dynamic universe scope returned an empty calendar set"
+            )
+        return normalized
+
+    @staticmethod
+    def _universe_report_summary(
+        request: DataPreflightRequest,
+        *,
+        calendar_ids: Sequence[str],
+        resolution: object | None,
+        filtered_reason_counts: Mapping[str, int] | None = None,
+    ) -> Mapping[str, object]:
+        """Build the JSON-safe report projection for candidate scope facts."""
+
+        def reference(value: object) -> object:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            return {"key": value.key, "version": value.version}
+
+        scope = request.market_scope
+        return {
+            "scope_mode": request.instrument_scope_mode.value,
+            "market_scope": {
+                "markets": scope.markets,
+                "exchanges": scope.exchanges,
+                "asset_classes": scope.asset_classes,
+                "currencies": scope.currencies,
+            },
+            "universe_query_policy": [
+                reference(item)
+                for item in request.universe_query_policy.candidate_set_rules
+            ],
+            "qualification_policy": reference(
+                getattr(request, "qualification_policy_version", None)
+            ),
+            "resolved_calendar_ids": tuple(calendar_ids),
+            "provider_capability_status": (
+                dict(getattr(resolution, "capability_summary", {}) or {})
+                if resolution is not None
+                else {}
+            ),
+            "filtered_reason_counts": dict(filtered_reason_counts or {}),
+            "scope_snapshot_hash": (
+                getattr(resolution, "snapshot_hash", None)
+                if resolution is not None
+                else getattr(request, "universe_scope_snapshot_hash", None)
+            ),
+        }
+
     def _build_preflight_report(
         self,
         request: DataPreflightRequest,
         *,
         frozen_calendar_ids: tuple[str, ...] | None = None,
+        profile: PreflightProfile | None = None,
+        fixtures: Sequence[InternalFixture] = (),
     ) -> DataPreflightReport:
-        issues, scope_ids = self._collect_common_preflight_issues(request)
+        issues, scope_ids = self._collect_common_preflight_issues(
+            request, profile=profile, fixtures=fixtures
+        )
+        if profile is not None:
+            issues.extend(self._profile_issues(profile, request, fixtures))
+        universe_scope_resolution = None
+        if request.instrument_scope_mode is not InstrumentScopeMode.FIXED:
+            try:
+                universe_scope_resolution = self.resolve_dynamic_universe_scope(
+                    request,
+                    profile=profile,
+                )
+                if (
+                    frozen_calendar_ids is not None
+                    and tuple(sorted(set(frozen_calendar_ids)))
+                    != tuple(universe_scope_resolution.resolved_calendar_ids)
+                ):
+                    issues.append(
+                        PreflightIssue(
+                            code="universe_preflight_hash_mismatch",
+                            severity=IssueSeverity.ERROR,
+                            scope="instrument_scope",
+                            message="动态候选范围日历集合与冻结快照不一致，已阻断请求。",
+                            field="resolved_calendar_ids",
+                            details={
+                                "expected": tuple(sorted(set(frozen_calendar_ids))),
+                                "actual": universe_scope_resolution.resolved_calendar_ids,
+                            },
+                        )
+                    )
+                for scope_issue_item in universe_scope_resolution.issues:
+                    issues.append(
+                        PreflightIssue(
+                            code=scope_issue_item.code,
+                            severity=IssueSeverity.ERROR,
+                            scope="instrument_scope",
+                            message=scope_issue_item.message,
+                            field=scope_issue_item.field,
+                            details=dict(scope_issue_item.details),
+                        )
+                    )
+            except (UniverseScopeUnresolvedError, UniverseCapabilityMissingError) as exc:
+                issues.append(
+                    PreflightIssue(
+                        code=exc.code,
+                        severity=IssueSeverity.ERROR,
+                        scope="instrument_scope",
+                        message="动态候选范围预检无法完成，已阻断请求。",
+                        field="provider",
+                        details=dict(getattr(exc, "details", {}) or {}),
+                    )
+                )
 
         # Task-11's canonical PIT path is opt-in for datasets that carry the
         # versioned calendar metadata (registry/definition/fact provenance).
@@ -770,6 +2477,7 @@ class MemoryDataProvider:
                 frozen_calendar_ids=frozen_calendar_ids,
                 initial_issues=issues,
                 scope_ids=scope_ids,
+                universe_scope_resolution=universe_scope_resolution,
             )
         # A dataset that carries canonical task-11 metadata is a strict
         # provider.  It must not silently fall back to the legacy UTC-date
@@ -788,15 +2496,44 @@ class MemoryDataProvider:
         if frozen_calendar_ids is not None:
             calendar_ids = tuple(sorted(set(frozen_calendar_ids)))
         else:
-            calendar_ids = tuple(
-                sorted(
-                    {
-                        spec.calendar_id
-                        for instrument_id in scope_ids
-                        if (spec := self._dataset.instrument(instrument_id)) is not None
-                    }
+            fixed_calendar_ids = {
+                spec.calendar_id
+                for instrument_id in scope_ids
+                if (spec := self._dataset.instrument(instrument_id)) is not None
+            }
+            if request.instrument_scope_mode is InstrumentScopeMode.FIXED:
+                calendar_ids = tuple(sorted(fixed_calendar_ids))
+            elif DataCapability.UNIVERSE in request.required_capabilities and self._universe_supported:
+                # Dynamic calendars come only from the already-resolved,
+                # explicit scope provider.  Do not invoke a second resolver
+                # here (and never inspect candidate rows to discover ids).
+                dynamic_ids = (
+                    universe_scope_resolution.resolved_calendar_ids
+                    if universe_scope_resolution is not None
+                    and getattr(universe_scope_resolution, "status", None)
+                    is not None
+                    and getattr(
+                        getattr(universe_scope_resolution, "status", None),
+                        "value",
+                        getattr(universe_scope_resolution, "status", None),
+                    )
+                    == "ready"
+                    else ()
                 )
-            )
+                calendar_ids = tuple(sorted(fixed_calendar_ids | set(dynamic_ids)))
+                if not calendar_ids:
+                    issues.append(
+                        PreflightIssue(
+                            code="universe_scope_unresolved",
+                            severity=IssueSeverity.ERROR,
+                            scope="instrument_scope",
+                            message="动态候选范围无法解析出有限具名交易日历，已阻断回测。",
+                            field="resolved_calendar_ids",
+                            details={"cause_code": "universe_scope_unresolved"},
+                        )
+                    )
+            else:
+                calendar_ids = tuple(sorted(fixed_calendar_ids))
         warmup_resolution: WarmupResolution | None = None
         if calendar_ids:
             axis = resolve_calendar_axis(
@@ -875,6 +2612,41 @@ class MemoryDataProvider:
             session_signature = ""
             differences = ()
 
+        if (
+            universe_scope_resolution is not None
+            and axis is not None
+            and axis.status is CalendarAxisStatus.COMPATIBLE
+        ):
+            # Scope discovery and strict calendar resolution are separate
+            # reads, but a ready dynamic report must freeze both as one task-15
+            # admission object.  Rebuilding the immutable value also refreshes
+            # its snapshot hash with the authoritative session signature.
+            universe_scope_resolution = replace(
+                universe_scope_resolution,
+                calendar_session_signature=axis.session_signature,
+                calendar_axis_resolution=axis,
+                snapshot_hash="",
+            )
+        expected_scope_hash = getattr(request, "universe_scope_snapshot_hash", None)
+        if (
+            expected_scope_hash is not None
+            and universe_scope_resolution is not None
+            and universe_scope_resolution.snapshot_hash != expected_scope_hash
+        ):
+            issues.append(
+                PreflightIssue(
+                    code="universe_preflight_hash_mismatch",
+                    severity=IssueSeverity.ERROR,
+                    scope="instrument_scope",
+                    message="动态候选范围快照已变化，已阻断请求。",
+                    field="universe_scope_snapshot_hash",
+                    details={
+                        "expected": expected_scope_hash,
+                        "actual": universe_scope_resolution.snapshot_hash,
+                    },
+                )
+            )
+
         blocked = any(issue.severity is IssueSeverity.ERROR for issue in issues)
         # Keep the report internally consistent: a blocked run must never
         # mount a *ready* warmup resolution (the report contract forbids
@@ -934,6 +2706,9 @@ class MemoryDataProvider:
             rule_exception_set=request.rule_exception_set,
             static_instrument_ids=request.static_instrument_ids,
             mandatory_instrument_ids=request.mandatory_instrument_ids,
+            non_zero_initial_position_instrument_ids=getattr(
+                request, "non_zero_initial_position_instrument_ids", ()
+            ),
             strategy_price_bases=request.strategy_price_bases,
             engine_price_basis=request.engine_price_basis,
             data_contract_version=request.data_contract_version,
@@ -953,6 +2728,31 @@ class MemoryDataProvider:
             ),
             calendar_axis_differences=differences,
             query_boundary=request.query_boundary,
+            qualification_policy_version=getattr(
+                request, "qualification_policy_version", None
+            ),
+            universe_eligibility_policy_version=getattr(
+                request, "qualification_policy_version", None
+            ),
+            universe_scope_snapshot_hash=(
+                universe_scope_resolution.snapshot_hash
+                if universe_scope_resolution is not None
+                else getattr(request, "universe_scope_snapshot_hash", None)
+            ),
+            universe_eligibility_summary=(
+                self._universe_report_summary(
+                    request,
+                    calendar_ids=(
+                        universe_scope_resolution.resolved_calendar_ids
+                        if universe_scope_resolution is not None
+                        else calendar_ids
+                    ),
+                    resolution=universe_scope_resolution,
+                )
+                if universe_scope_resolution is not None
+                else None
+            ),
+            universe_scope_resolution=universe_scope_resolution,
         )
 
     def _build_cutoff_required_report(
@@ -996,6 +2796,9 @@ class MemoryDataProvider:
             rule_exception_set=request.rule_exception_set,
             static_instrument_ids=request.static_instrument_ids,
             mandatory_instrument_ids=request.mandatory_instrument_ids,
+            non_zero_initial_position_instrument_ids=getattr(
+                request, "non_zero_initial_position_instrument_ids", ()
+            ),
             strategy_price_bases=request.strategy_price_bases,
             engine_price_basis=request.engine_price_basis,
             data_contract_version=request.data_contract_version,
@@ -1018,6 +2821,7 @@ class MemoryDataProvider:
         frozen_calendar_ids: tuple[str, ...] | None = None,
         initial_issues: Sequence[PreflightIssue] = (),
         scope_ids: Sequence[UUID] | None = None,
+        universe_scope_resolution: object | None = None,
     ) -> DataPreflightReport:
         """Build the task-11 @2 report from one immutable snapshot attempt."""
 
@@ -1034,13 +2838,41 @@ class MemoryDataProvider:
         if frozen_calendar_ids is not None:
             calendar_ids = tuple(sorted(set(frozen_calendar_ids)))
         else:
-            calendar_ids = tuple(
-                sorted({
-                    spec.calendar_id
-                    for instrument_id in scope_ids
-                    if (spec := self._dataset.instrument(instrument_id)) is not None
-                })
-            )
+            fixed_calendar_ids = {
+                spec.calendar_id
+                for instrument_id in scope_ids
+                if (spec := self._dataset.instrument(instrument_id)) is not None
+            }
+            if request.instrument_scope_mode is InstrumentScopeMode.FIXED:
+                calendar_ids = tuple(sorted(fixed_calendar_ids))
+            elif DataCapability.UNIVERSE in request.required_capabilities and self._universe_supported:
+                # Reuse the explicit scope result computed by the outer
+                # admission path.  A blocked/missing result contributes no
+                # dynamic calendars and must not trigger a catalogue scan.
+                dynamic_ids = (
+                    universe_scope_resolution.resolved_calendar_ids
+                    if universe_scope_resolution is not None
+                    and getattr(
+                        getattr(universe_scope_resolution, "status", None),
+                        "value",
+                        getattr(universe_scope_resolution, "status", None),
+                    )
+                    == "ready"
+                    else ()
+                )
+                calendar_ids = tuple(sorted(fixed_calendar_ids | set(dynamic_ids)))
+                if not calendar_ids:
+                    issue = PreflightIssue(
+                        code="universe_scope_unresolved",
+                        severity=IssueSeverity.ERROR,
+                        scope="instrument_scope",
+                        message="动态候选范围无法解析出有限具名交易日历，已阻断回测。",
+                        field="resolved_calendar_ids",
+                        details={"cause_code": "universe_scope_unresolved"},
+                    )
+                    initial_issues = (*initial_issues, issue)
+            else:
+                calendar_ids = tuple(sorted(fixed_calendar_ids))
         issue_list: list[PreflightIssue] = list(initial_issues)
         snapshot: CalendarSnapshot | None = None
         axis = None
@@ -1048,7 +2880,7 @@ class MemoryDataProvider:
         # must short-circuit the strict snapshot read.  This keeps the
         # prepare+batch budget intact and prevents an invalid request from
         # being accepted by the calendar-only branch.
-        if not issue_list:
+        if not any(issue.severity is IssueSeverity.ERROR for issue in issue_list):
             try:
                 snapshot_request = CalendarSnapshotRequest(
                     calendar_ids=calendar_ids,
@@ -1152,7 +2984,10 @@ class MemoryDataProvider:
                     )
             issue_list.extend(self._mandatory_coverage_issues(request, axis.resolved_sessions))
 
-        blocked = bool(issue_list)
+        # Warnings such as ``internal_fixture_used`` are audit evidence and
+        # must not block the internal profile; only hard errors close the
+        # request.  Existing formal gates all use error severity.
+        blocked = any(issue.severity is IssueSeverity.ERROR for issue in issue_list)
         if blocked:
             # A blocked report may retain the warmup issue evidence in the
             # outer issue list, but never mounts a ready warmup resolution.
@@ -1164,6 +2999,43 @@ class MemoryDataProvider:
             if request.query_boundary is not None else None
         )
         calendar_session_signature = "" if axis is None or axis.status is CalendarAxisStatus.INCOMPATIBLE else axis.session_signature
+        if (
+            universe_scope_resolution is not None
+            and axis is not None
+            and axis.status is CalendarAxisStatus.COMPATIBLE
+        ):
+            # Keep the canonical snapshot path aligned with the legacy memory
+            # path: the report consumes one scope object carrying the exact
+            # strict-axis result that produced its calendar signature.
+            universe_scope_resolution = replace(
+                universe_scope_resolution,
+                calendar_session_signature=axis.session_signature,
+                calendar_axis_resolution=axis,
+                snapshot_hash="",
+            )
+        expected_scope_hash = getattr(request, "universe_scope_snapshot_hash", None)
+        if (
+            expected_scope_hash is not None
+            and universe_scope_resolution is not None
+            and universe_scope_resolution.snapshot_hash != expected_scope_hash
+        ):
+            issue_list.append(
+                PreflightIssue(
+                    code="universe_preflight_hash_mismatch",
+                    severity=IssueSeverity.ERROR,
+                    scope="instrument_scope",
+                    message="动态候选范围快照已变化，已阻断请求。",
+                    field="universe_scope_snapshot_hash",
+                    details={
+                        "expected": expected_scope_hash,
+                        "actual": universe_scope_resolution.snapshot_hash,
+                    },
+                )
+            )
+            blocked = True
+            formal = ()
+            warmup = ()
+            warmup_resolution = None
         revision_digest = axis.calendar_revision_digest if axis is not None else None
         snapshot_fingerprint = snapshot.snapshot_fingerprint if snapshot is not None else None
         semantic_signature = axis.calendar_semantic_signature if axis is not None else None
@@ -1299,6 +3171,27 @@ class MemoryDataProvider:
             definition_usage_by_date=usage,
             calendar_summary=calendar_summary,
             session_summary=session_summary,
+            qualification_policy_version=getattr(
+                request, "qualification_policy_version", None
+            ),
+            universe_eligibility_policy_version=getattr(
+                request, "qualification_policy_version", None
+            ),
+            universe_scope_snapshot_hash=(
+                getattr(universe_scope_resolution, "snapshot_hash", None)
+                if universe_scope_resolution is not None
+                else getattr(request, "universe_scope_snapshot_hash", None)
+            ),
+            universe_eligibility_summary=(
+                self._universe_report_summary(
+                    request,
+                    calendar_ids=calendar_ids,
+                    resolution=universe_scope_resolution,
+                )
+                if universe_scope_resolution is not None
+                else None
+            ),
+            universe_scope_resolution=universe_scope_resolution,
         )
 
     def _resolved_definitions(
@@ -1417,6 +3310,8 @@ class MemoryDataProvider:
             return bool(self._dataset.calendar_facts)
         if capability is DataCapability.COVERAGE:
             return True
+        if capability is DataCapability.UNIVERSE:
+            return self._universe_supported
         return False
 
     def _token_digest(
@@ -1457,10 +3352,114 @@ class MemoryDataProvider:
         }
         return canonical_hash(payload)
 
+    def resolve_pit_spec(
+        self,
+        instrument_id: UUID,
+        *,
+        effective_at: datetime,
+        data_cutoff: datetime,
+    ) -> InstrumentSpec | None:
+        """Resolve one complete spec from the explicitly injected PIT source."""
+
+        if not isinstance(instrument_id, UUID):
+            raise InvalidDataRequestError("instrument_id must be a UUID")
+        effective = _aware_datetime(effective_at, "effective_at")
+        cutoff = _aware_datetime(data_cutoff, "data_cutoff")
+        source = self._pit_spec_provider
+        if source is None:
+            return self._dataset.instrument_at(instrument_id, effective, cutoff)
+        method = None
+        for name in (
+            "resolve_spec",
+            "resolve_instrument",
+            "resolve_identity",
+            "resolve",
+        ):
+            candidate = getattr(source, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None:
+            return None
+        values = {
+            "instrument_id": instrument_id,
+            "effective_at": effective,
+            "effective_date": effective.date(),
+            "data_cutoff": cutoff,
+        }
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            result = method(instrument_id)
+        else:
+            kwargs = {
+                name: value
+                for name, value in values.items()
+                if name in parameters
+                and parameters[name].kind
+                in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+            positional = [
+                parameter
+                for parameter in parameters.values()
+                if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+                or (
+                    parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                    and parameter.default is inspect.Parameter.empty
+                    and parameter.name not in kwargs
+                )
+            ]
+            result = method(instrument_id, **kwargs) if positional else method(**kwargs)
+        if isinstance(result, InstrumentSpec):
+            return result
+        for name in ("spec", "instrument_spec", "candidate_spec"):
+            nested = getattr(result, name, None)
+            if isinstance(nested, InstrumentSpec):
+                return nested
+        return None
+
 
 # ---------------------------------------------------------------------------
 # Session
 # ---------------------------------------------------------------------------
+
+
+def _fixed_authorized_ids(request: object) -> frozenset[UUID]:
+    """Return the immutable fixed authorization union for one run.
+
+    Admission normally folds non-zero initial positions into
+    ``mandatory_instrument_ids``.  The defensive aliases below also accept
+    newer request objects that retain the source position ids explicitly; this
+    keeps the permission boundary correct during the task-15 migration without
+    introducing a second request model in this module.
+    """
+
+    values: set[UUID] = set()
+    for field_name in (
+        "static_instrument_ids",
+        "mandatory_instrument_ids",
+        "non_zero_initial_position_instrument_ids",
+    ):
+        raw = getattr(request, field_name, ()) or ()
+        if isinstance(raw, Mapping):
+            raw = raw.keys()
+        for item in raw:
+            if isinstance(item, UUID):
+                values.add(item)
+    initial_positions = getattr(request, "initial_positions", None)
+    if isinstance(initial_positions, Mapping):
+        for instrument_id, position in initial_positions.items():
+            if not isinstance(instrument_id, UUID):
+                continue
+            quantity = getattr(position, "quantity", position)
+            try:
+                if quantity is not None and quantity != 0:
+                    values.add(instrument_id)
+            except Exception:
+                # Malformed position inputs are validated by the run
+                # admission layer; they must not broaden this data boundary.
+                continue
+    return frozenset(values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1489,6 +3488,12 @@ class MemoryDataSession:
         self._report: DataPreflightReport | None = None
         self._resolved_sessions: tuple[SessionPoint, ...] | None = None
         self._warmup_sessions: tuple[SessionPoint, ...] | None = None
+        # Session authorization is split into an immutable fixed union and a
+        # mutable-per-step dynamic set.  The latter can only be populated by a
+        # successful universe query and is reset whenever a new bound query is
+        # evaluated; it never changes the frozen request or calendar axis.
+        self._fixed_authorized_instrument_ids = _fixed_authorized_ids(request)
+        self._step_candidate_authorized_instrument_ids: frozenset[UUID] = frozenset()
         # Pinned once when the preflight completes: under the transitional
         # repeatable-read mode every chunk of this run must validate against
         # this ONE snapshot, so a revision between chunks fails the next
@@ -1579,6 +3584,104 @@ class MemoryDataSession:
             ),
         )
 
+    @property
+    def fixed_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """The fixed IDs authorized for every chunk of this run."""
+
+        return self._fixed_authorized_instrument_ids
+
+    @property
+    def fixed_authorized_ids(self) -> frozenset[UUID]:
+        """Short audit alias for ``fixed_authorized_instrument_ids``."""
+
+        return self.fixed_authorized_instrument_ids
+
+    @property
+    def step_candidate_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Dynamic IDs authorized by the most recent step universe query."""
+
+        return self._step_candidate_authorized_instrument_ids
+
+    @property
+    def step_candidate_authorized_ids(self) -> frozenset[UUID]:
+        """Short audit alias for current-step dynamic authorization."""
+
+        return self.step_candidate_authorized_instrument_ids
+
+    @property
+    def authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Read-only union exposed for audit and permission assertions."""
+
+        return frozenset(
+            self._fixed_authorized_instrument_ids
+            | self._step_candidate_authorized_instrument_ids
+        )
+
+    def authorize_step_candidates(self, instrument_ids, *, query=None) -> None:
+        """Set the current step's dynamic authorization after universe query.
+
+        This method is intentionally narrow: it accepts only UUID identities,
+        requires a completed preflight, and never mutates the fixed scope.  A
+        chunk owns the final subset check, so strategies cannot forge an id by
+        calling this implementation directly with an unrelated candidate.
+        """
+
+        self._assert_not_closed()
+        if self._state is not DataSessionState.READY:
+            raise InvalidDataRequestError(
+                "step candidate authorization requires a ready data session"
+            )
+        values = tuple(instrument_ids or ())
+        normalized = frozenset(item for item in values if isinstance(item, UUID))
+        if len(normalized) != len(values):
+            raise InvalidDataRequestError(
+                "step candidate authorization requires UUID instrument ids"
+            )
+        if normalized and query is None:
+            raise InvalidDataRequestError(
+                "dynamic step candidates require the bound UniverseQuery result"
+            )
+        if query is not None:
+            result_ids = getattr(query, "authorized_instrument_ids", None)
+            if result_ids is None:
+                result_ids = getattr(query, "candidate_ids", None)
+            if result_ids is None:
+                raise InvalidDataRequestError(
+                    "dynamic step candidates require a query result with identities"
+                )
+            if not normalized.issubset(set(result_ids)):
+                raise InvalidDataRequestError(
+                    "step candidates are not contained in the bound universe result"
+                )
+        self._step_candidate_authorized_instrument_ids = normalized
+
+    # Vocabulary aliases keep adapters independent of the concrete memory
+    # fixture name while preserving one authorization implementation.
+    bind_step_candidates = authorize_step_candidates
+    authorize_step_candidate_ids = authorize_step_candidates
+
+    def clear_step_candidate_authorization(self) -> None:
+        """Remove dynamic access until the next successful universe query."""
+
+        self._assert_not_closed()
+        if self._state is not DataSessionState.READY:
+            raise InvalidDataRequestError(
+                "step candidate authorization requires a ready data session"
+            )
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        self._session._step_candidate_authorized_instrument_ids = frozenset()
+
+    def begin_decision_step(self, step_key: object | None = None) -> None:
+        """Start a decision-step authorization epoch for session-level audits."""
+
+        self._assert_not_closed()
+        if self._state is not DataSessionState.READY:
+            raise InvalidDataRequestError(
+                "decision-step authorization requires a ready data session"
+            )
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        del step_key
+
     def preflight(
         self, request: DataPreflightRequest | None = None
     ) -> DataPreflightReport:
@@ -1607,6 +3710,9 @@ class MemoryDataSession:
                 # The calendars frozen at admission are authoritative; the
                 # re-check must not silently re-derive a different axis.
                 frozen_calendar_ids=self._request.resolved_calendar_ids,
+                profile=self._provider._profile_for_admission(
+                    self._request.admission_preflight_hash
+                ),
             )
         except CalendarPreflightResourceLimitExceededError:
             # A session-level resource overrun has no report, cursor, or
@@ -1626,6 +3732,10 @@ class MemoryDataSession:
             if report.status is PreflightStatus.BLOCKED
             else DataSessionState.READY
         )
+        # Dynamic authorization starts empty for every authoritative
+        # preflight.  A candidate can enter a chunk only after that chunk's
+        # current-step universe query proves it eligible.
+        self._step_candidate_authorized_instrument_ids = frozenset()
         # Freeze the repeatable-read revision vector exactly once, before
         # the run starts: all chunks of this session share it.
         if self._state is DataSessionState.READY:
@@ -1768,6 +3878,7 @@ class MemoryDataSession:
             issued_digest=issued_digest,
             revision_snapshot=revision_snapshot,
             digest_spec=digest_spec,
+            fixed_authorized_instrument_ids=self._fixed_authorized_instrument_ids,
         )
 
 
@@ -1799,6 +3910,7 @@ class MemoryDataChunkSession:
         issued_digest: str | None,
         revision_snapshot: tuple[object, ...] | None = None,
         digest_spec: dict[str, object],
+        fixed_authorized_instrument_ids: frozenset[UUID] | None = None,
     ) -> None:
         self._provider = provider
         self._session = session
@@ -1812,6 +3924,17 @@ class MemoryDataChunkSession:
         self._issued_digest = issued_digest
         self._revision_snapshot = revision_snapshot
         self._digest_spec = digest_spec
+        self._fixed_authorized_instrument_ids = frozenset(
+            fixed_authorized_instrument_ids
+            if fixed_authorized_instrument_ids is not None
+            else _fixed_authorized_ids(session._request)
+        )
+        self._step_candidate_authorized_instrument_ids: frozenset[UUID] = frozenset()
+        self._universe_cache: dict[UniverseQuery, tuple[InstrumentSpec, ...]] = {}
+        self._universe_specs: dict[UUID, InstrumentSpec] = {}
+        self._universe_filter_reason_counts: dict[str, int] = {}
+        self._universe_filter_records: list[Mapping[str, object]] = []
+        self._universe_last_query_hash: str | None = None
         self._validation: ConsistencyTokenStatus | None = None
         self._closed = False
         mode = session._request.consistency_mode
@@ -1856,6 +3979,19 @@ class MemoryDataChunkSession:
 
         self._closed = True
 
+    def begin_decision_step(self, step_key: object | None = None) -> None:
+        """Reset dynamic authorization for a new decision step.
+
+        The fixed authorization remains immutable for the chunk lifetime.
+        ``step_key`` is intentionally advisory: callers may pass a sequence or
+        timestamp for diagnostics, but no user value can widen the scope.
+        """
+
+        self._assert_open()
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        self._session._step_candidate_authorized_instrument_ids = frozenset()
+        del step_key
+
     def _assert_open(self) -> None:
         if self._closed:
             raise DataSessionClosedError(
@@ -1870,6 +4006,128 @@ class MemoryDataChunkSession:
         """Persistable non-sensitive evidence about this chunk."""
 
         return self._evidence
+
+    @property
+    def fixed_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Fixed identities allowed for every operation in this chunk."""
+
+        return self._fixed_authorized_instrument_ids
+
+    @property
+    def fixed_authorized_ids(self) -> frozenset[UUID]:
+        """Short audit alias for ``fixed_authorized_instrument_ids``."""
+
+        return self.fixed_authorized_instrument_ids
+
+    @property
+    def step_candidate_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Dynamic identities admitted by the current bound universe query."""
+
+        return self._step_candidate_authorized_instrument_ids
+
+    @property
+    def step_candidate_authorized_ids(self) -> frozenset[UUID]:
+        """Short audit alias for current-step dynamic authorization."""
+
+        return self.step_candidate_authorized_instrument_ids
+
+    @property
+    def authorized_instrument_ids(self) -> frozenset[UUID]:
+        """The read-only union of fixed and current-step identities."""
+
+        return frozenset(
+            self._fixed_authorized_instrument_ids
+            | self._step_candidate_authorized_instrument_ids
+        )
+
+    @property
+    def universe_filter_reason_counts(self) -> Mapping[str, int]:
+        """Stable candidate-level filter counts from the latest query calls."""
+
+        return MappingProxyType(dict(self._universe_filter_reason_counts))
+
+    @property
+    def universe_filter_records(self) -> tuple[Mapping[str, object], ...]:
+        """JSON-safe candidate filter evidence for audit projections."""
+
+        return tuple(self._universe_filter_records)
+
+    @property
+    def universe_last_query_hash(self) -> str | None:
+        """Deterministic hash of the latest bound PIT universe query."""
+
+        return self._universe_last_query_hash
+
+    @property
+    def universe_query_hash(self) -> str | None:
+        """Compatibility alias for the latest bound universe query hash."""
+
+        return self.universe_last_query_hash
+
+    @property
+    def candidate_filter_summary(self) -> Mapping[str, object]:
+        """Return JSON-safe counts and row evidence for the latest query."""
+
+        return MappingProxyType(
+            {
+                "reason_counts": MappingProxyType(
+                    dict(self._universe_filter_reason_counts)
+                ),
+                "records": tuple(self._universe_filter_records),
+                "query_hash": self._universe_last_query_hash,
+            }
+        )
+
+    def authorize_step_candidates(self, instrument_ids, *, query=None) -> None:
+        """Replace dynamic authorization with a validated current-step set.
+
+        Only identities returned by the corresponding bound query may be
+        supplied.  Fixed IDs remain independently authorized, and passing an
+        empty set intentionally removes all dynamic access for the step.
+        """
+
+        self._guard_business_query("authorize_step_candidates")
+        values = tuple(instrument_ids or ())
+        if any(not isinstance(item, UUID) for item in values):
+            raise InvalidDataRequestError(
+                "step candidate authorization requires UUID instrument ids"
+            )
+        normalized = frozenset(values)
+        if normalized and query is None:
+            raise InvalidDataRequestError(
+                "dynamic step candidates require the bound UniverseQuery result"
+            )
+        if query is not None:
+            if not isinstance(query, UniverseQuery):
+                raise InvalidDataRequestError("query must be a UniverseQuery")
+            available = {
+                spec.instrument_id
+                for spec in self._universe_cache.get(query, ())
+            }
+            if not normalized.issubset(available):
+                raise InvalidDataRequestError(
+                    "step authorization includes an identity not returned by "
+                    "the bound universe query",
+                    details={
+                        "unknown_instrument_ids": sorted(
+                            str(item) for item in normalized - available
+                        )
+                    },
+                )
+        self._step_candidate_authorized_instrument_ids = normalized
+        self._session._step_candidate_authorized_instrument_ids = normalized
+
+    # Keep one implementation while accepting the vocabulary used by the
+    # strategy/session adapters in task-15 acceptance tests.
+    bind_step_candidates = authorize_step_candidates
+    authorize_step_candidate_ids = authorize_step_candidates
+
+    def clear_step_candidate_authorization(self) -> None:
+        """Remove dynamic access until the next successful universe query."""
+
+        self._guard_business_query("clear_step_candidate_authorization")
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        self._session._step_candidate_authorized_instrument_ids = frozenset()
 
     def validate_consistency(self) -> ConsistencyTokenStatus:
         """Validate the chunk token; must precede any business query."""
@@ -1951,15 +4209,16 @@ class MemoryDataChunkSession:
         return token_status
 
     def _authorized_instrument_ids(self) -> frozenset[UUID]:
-        """The instrument scope frozen into the run's official request.
+        """Return fixed plus current-step dynamic read authorization.
 
-        Queries may only touch instruments the run was admitted for; the
-        dataset holding more fixtures must not widen the authorization.
+        The dataset may contain many candidate fixtures, but only fixed ids
+        admitted at run creation and ids returned by the current bound
+        universe query are readable through instrument/bar/coverage methods.
         """
 
-        request = self._session._request
         return frozenset(
-            [*request.static_instrument_ids, *request.mandatory_instrument_ids]
+            self._fixed_authorized_instrument_ids
+            | self._step_candidate_authorized_instrument_ids
         )
 
     def _require_authorized_instruments(self, instrument_ids, operation: str) -> None:
@@ -1977,7 +4236,7 @@ class MemoryDataChunkSession:
         if strangers:
             raise InvalidDataRequestError(
                 f"{operation} requested instruments outside the run's "
-                "frozen fixed scope",
+                    "frozen fixed/current-step scope",
                 details={
                     "unauthorized_instrument_ids": [
                         str(instrument_id) for instrument_id in strangers
@@ -2055,6 +4314,955 @@ class MemoryDataChunkSession:
     # Business queries
     # ------------------------------------------------------------------
 
+    def _universe_query_cache_key(self, query: UniverseQuery) -> str:
+        """Create a stable cache key from all frozen PIT query semantics."""
+
+        request = self._session._request
+        def reference(value: object) -> object:
+            if value is None:
+                return None
+            if isinstance(value, str):
+                return value
+            return {"key": value.key, "version": value.version}
+
+        return canonical_json(
+            {
+                "rule": {
+                    "key": query.rule.key,
+                    "version": query.rule.version,
+                },
+                "market_scope": {
+                    "markets": query.market_scope.markets,
+                    "exchanges": query.market_scope.exchanges,
+                    "asset_classes": query.market_scope.asset_classes,
+                    "currencies": query.market_scope.currencies,
+                },
+                "effective_date": query.effective_date,
+                "data_cutoff": query.boundary.data_cutoff,
+                "knowledge_as_of": query.boundary.knowledge_as_of,
+                "include_cutoff_day": query.boundary.include_cutoff_day,
+                "allowed_calendar_ids": query.allowed_calendar_ids,
+                "universe_query_policy": [
+                    {
+                        "key": item.key,
+                        "version": item.version,
+                    }
+                    for item in query.universe_query_policy.candidate_set_rules
+                ],
+                "rule_exception_set": reference(query.rule_exception_set),
+                "qualification_policy_version": reference(
+                    query.qualification_policy_version
+                ),
+                "scope_mode": (
+                    query.scope_mode.value if query.scope_mode is not None else None
+                ),
+                # Keep this field in the payload as a guard against a future
+                # request implementation accidentally sharing a cache across
+                # providers with different admission semantics.
+                "request_provider": request.provider_key,
+            }
+        )
+
+    def _validate_universe_query_boundary(self, query: UniverseQuery) -> None:
+        """Reject any query that attempts to replace the run's frozen scope."""
+
+        request = self._session._request
+        expected_scope_mode = getattr(request, "instrument_scope_mode", None)
+        if query.scope_mode is not None and query.scope_mode is not expected_scope_mode:
+            raise UniversePitBoundaryViolationError(
+                "universe query scope mode differs from the frozen request",
+                details={
+                    "expected": expected_scope_mode.value
+                    if expected_scope_mode is not None
+                    else None,
+                    "actual": query.scope_mode.value,
+                },
+            )
+        if query.rule != request.rule_package:
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen rule package",
+                details={
+                    "expected": {
+                        "key": request.rule_package.key,
+                        "version": request.rule_package.version,
+                    },
+                    "actual": {"key": query.rule.key, "version": query.rule.version},
+                },
+            )
+        if query.market_scope != request.market_scope:
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen market scope"
+            )
+        expected_universe_policy = getattr(
+            request, "universe_query_policy", UniverseQueryPolicy()
+        )
+        if query.universe_query_policy != expected_universe_policy:
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen universe query policy",
+                details={
+                    "expected": [
+                        {
+                            "key": item.key,
+                            "version": item.version,
+                        }
+                        for item in expected_universe_policy.candidate_set_rules
+                    ],
+                    "actual": [
+                        {
+                            "key": item.key,
+                            "version": item.version,
+                        }
+                        for item in query.universe_query_policy.candidate_set_rules
+                    ],
+                },
+            )
+        if query.rule_exception_set != getattr(request, "rule_exception_set", None):
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen rule exception set"
+            )
+        expected_policy = getattr(request, "qualification_policy_version", None)
+        if query.qualification_policy_version != expected_policy:
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen qualification policy"
+            )
+        expected_hash = getattr(request, "universe_scope_snapshot_hash", None)
+        if expected_hash is not None and query.universe_scope_snapshot_hash != expected_hash:
+            raise UniversePreflightHashMismatchError(
+                "universe query scope snapshot hash differs from the frozen request",
+                details={
+                    "expected": expected_hash,
+                    "actual": query.universe_scope_snapshot_hash,
+                },
+            )
+        expected_calendars = set()
+        for value in getattr(request, "resolved_calendar_ids", ()):
+            try:
+                from app.backtesting.calendar_axis import normalize_calendar_id
+
+                expected_calendars.add(normalize_calendar_id(value))
+            except Exception:
+                expected_calendars.add(value)
+        actual_calendars = set(query.allowed_calendar_ids)
+        query_scope_mode = query.scope_mode or expected_scope_mode
+        if (
+            actual_calendars - expected_calendars
+            or (
+                query_scope_mode is not InstrumentScopeMode.FIXED
+                and actual_calendars != expected_calendars
+            )
+        ):
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot replace the frozen preflighted calendars",
+                details={
+                    "expected_calendar_ids": sorted(expected_calendars),
+                    "actual_calendar_ids": sorted(actual_calendars),
+                },
+            )
+        expected_boundary = request.query_boundary
+        # A step query may narrow the run's visibility to the current
+        # decision cutoff.  It may never move that cutoff later; omission of a
+        # strict cognition cutoff is allowed only when the frozen request did
+        # not declare one.
+        if query.boundary.data_cutoff > expected_boundary.data_cutoff or (
+            expected_boundary.knowledge_as_of is not None
+            and (
+                query.boundary.knowledge_as_of is None
+                or query.boundary.knowledge_as_of
+                > expected_boundary.knowledge_as_of
+            )
+        ):
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot widen the frozen QueryBoundary",
+                details={
+                    "expected_data_cutoff": expected_boundary.data_cutoff.isoformat(),
+                    "actual_data_cutoff": query.boundary.data_cutoff.isoformat(),
+                },
+            )
+        if query.boundary.include_cutoff_day and not expected_boundary.include_cutoff_day:
+            raise UniversePitBoundaryViolationError(
+                "universe query cannot make an unproven cutoff day visible",
+                details={
+                    "cutoff_date": query.boundary.cutoff_date.isoformat(),
+                    "include_cutoff_day": query.boundary.include_cutoff_day,
+                },
+            )
+        if not (
+            request.requested_window.start_date
+            <= query.effective_date
+            <= request.requested_window.end_date
+        ):
+            raise UniversePitBoundaryViolationError(
+                "universe effective_date is outside the frozen run window",
+                details={
+                    "expected": {
+                        "start_date": request.requested_window.start_date.isoformat(),
+                        "end_date": request.requested_window.end_date.isoformat(),
+                    },
+                    "actual": query.effective_date.isoformat(),
+                },
+            )
+
+    @staticmethod
+    def _extract_universe_candidate(row: object) -> tuple[InstrumentSpec | None, tuple[str, ...]]:
+        """Extract a spec and any precomputed qualification reasons."""
+
+        if isinstance(row, InstrumentSpec):
+            return row, ()
+        if isinstance(row, tuple) and len(row) == 2:
+            # A lightweight provider may return ``(spec, qualification)``;
+            # normalize that shape without defining a second qualification
+            # model in the memory adapter.
+            left, right = row
+            if isinstance(left, InstrumentSpec):
+                right_spec, right_reasons = MemoryDataChunkSession._extract_universe_candidate(right)
+                return left, right_reasons
+            if isinstance(right, InstrumentSpec):
+                left_spec, left_reasons = MemoryDataChunkSession._extract_universe_candidate(left)
+                return right, left_reasons
+        # Task-13's immutable qualification result intentionally remains the
+        # source of truth.  Duck typing avoids importing that provider module
+        # into the memory fixture and keeps this adapter usable with its
+        # aliases (InstrumentEligibility/SingleInstrumentQualification).
+        spec = getattr(row, "spec", None)
+        if spec is None:
+            for name in ("instrument_spec", "candidate_spec", "candidate"):
+                candidate = getattr(row, name, None)
+                if isinstance(candidate, InstrumentSpec):
+                    spec = candidate
+                    break
+        reasons = getattr(row, "reason_codes", ())
+        if not reasons:
+            issues = getattr(row, "issues", ())
+            reasons = tuple(
+                getattr(issue, "code", str(issue))
+                for issue in (issues or ())
+            )
+        if spec is not None and not isinstance(spec, InstrumentSpec):
+            raise UniverseProviderContractViolationError(
+                "universe provider qualification returned a non-InstrumentSpec"
+            )
+        eligible = getattr(row, "eligible", None)
+        if spec is None and eligible is None and not hasattr(row, "status"):
+            raise UniverseProviderContractViolationError(
+                "universe provider returned neither an InstrumentSpec nor a qualification result"
+            )
+        if eligible is False and not reasons:
+            reasons = ("candidate_ineligible",)
+        return spec, tuple(sorted({str(reason) for reason in reasons if reason}))
+
+    @staticmethod
+    def _stable_source_row_key(row: object, spec: InstrumentSpec) -> tuple[str, ...]:
+        """Build a value-only tie-break for duplicate stable identities."""
+
+        display = getattr(spec, "display", None)
+        values = (
+            getattr(display, "trading_code", "") if display is not None else "",
+            getattr(display, "name", "") if display is not None else "",
+            getattr(display, "display_name", "") if display is not None else "",
+            getattr(spec, "asset_class", ""),
+            getattr(spec, "exchange", ""),
+            str(getattr(spec, "valid_from", "")),
+            str(getattr(spec, "valid_to", "")),
+            str(getattr(row, "known_at", "")),
+            str(getattr(row, "effective_date", "")),
+        )
+        return tuple(str(value) for value in values)
+
+    def _candidate_filter_reasons(
+        self,
+        spec: InstrumentSpec,
+        query: UniverseQuery,
+        precomputed_reasons: Sequence[str],
+        row: object | None = None,
+    ) -> tuple[str, ...]:
+        """Apply only identity, scope, and PIT-boundary checks.
+
+        Coverage, rule, action, and trading-status qualification belongs to
+        the injected task-13/16A port.  Keeping this helper free of Bar or
+        corporate-action reads is intentional: the memory chunk is an
+        adapter, not a second fact-qualification implementation.
+        """
+
+        reasons = set(precomputed_reasons)
+        request = self._session._request
+        try:
+            effective_at = datetime.combine(query.effective_date, time.min, tzinfo=UTC)
+            if spec.valid_from > effective_at or (
+                spec.valid_to is not None and effective_at >= spec.valid_to
+            ):
+                reasons.add("identity_not_valid_at_effective_date")
+        except (TypeError, AttributeError):
+            reasons.add("identity_fact_invalid")
+
+        display = spec.display
+        if any(
+            type(value) is not str or not value.strip()
+            for value in (display.trading_code, display.name, display.display_name)
+        ):
+            reasons.add("identity_mapping_incomplete")
+
+        scope = query.market_scope
+        if scope.exchanges and spec.exchange not in scope.exchanges:
+            reasons.add("market_scope_exchange")
+        if scope.asset_classes and spec.asset_class not in scope.asset_classes:
+            reasons.add("market_scope_asset_class")
+        if scope.currencies and spec.currency not in scope.currencies:
+            reasons.add("market_scope_currency")
+        if scope.markets and spec.exchange not in scope.markets:
+            reasons.add("market_scope_market")
+
+        try:
+            calendar_id = normalize_calendar_id(spec.calendar_id)
+        except Exception:
+            reasons.add("identity_calendar_invalid")
+            calendar_id = None
+        scope_mode = query.scope_mode or getattr(
+            request, "instrument_scope_mode", InstrumentScopeMode.FIXED
+        )
+        if scope_mode is not InstrumentScopeMode.FIXED:
+            if not query.allowed_calendar_ids or calendar_id not in set(query.allowed_calendar_ids):
+                reasons.add("universe_calendar_not_preflighted")
+
+        if spec.rule_package_reference != query.rule:
+            reasons.add("rule_package_mismatch")
+        expected_exception = query.rule_exception_set
+        if expected_exception is not None and spec.rule_exception_reference not in (
+            None,
+            expected_exception,
+        ):
+            reasons.add("rule_exception_mismatch")
+
+        # Source rows may carry explicit PIT coordinates in addition to the
+        # complete InstrumentSpec.  Reject future knowledge or a row resolved
+        # for another effective date; never substitute the current spec.
+        source = row if row is not None else spec
+        effective_value = getattr(source, "effective_date", None)
+        if effective_value is None:
+            effective_at = getattr(source, "effective_at", None)
+            if isinstance(effective_at, datetime):
+                effective_value = effective_at.date()
+        if effective_value is not None:
+            if effective_value != query.effective_date:
+                reasons.add("universe_pit_boundary_violation")
+        provenance_rows = [source]
+        for name in (
+            "identity_fact",
+            "display_fact",
+            "mapping",
+            "identity_resolution",
+            "qualification",
+        ):
+            nested = getattr(source, name, None)
+            if nested is not None:
+                provenance_rows.append(nested)
+        for provenance in provenance_rows:
+            known_at = getattr(provenance, "known_at", None)
+            if known_at is None:
+                identity_evidence = getattr(provenance, "identity_evidence", None)
+                if isinstance(identity_evidence, Mapping):
+                    known_at = identity_evidence.get("known_at")
+            if known_at is None:
+                continue
+            try:
+                if isinstance(known_at, str):
+                    known_at = datetime.fromisoformat(known_at)
+                if not isinstance(known_at, datetime) or known_at.tzinfo is None:
+                    reasons.add("universe_pit_boundary_violation")
+                elif known_at > query.boundary.data_cutoff:
+                    reasons.add("universe_pit_boundary_violation")
+            except (TypeError, ValueError):
+                reasons.add("universe_pit_boundary_violation")
+        return tuple(sorted(reasons))
+
+    @staticmethod
+    def _qualification_report_evidence(report: object) -> Mapping[str, object]:
+        """Project one existing coverage report into evaluator evidence."""
+
+        quality = getattr(report, "quality_status", None)
+        quality_value = getattr(quality, "value", quality)
+        expected = getattr(report, "expected_count", None)
+        complete_count = getattr(report, "complete_count", None)
+        complete = quality_value == "complete"
+        if (
+            not complete
+            and isinstance(expected, int)
+            and isinstance(complete_count, int)
+            and expected > 0
+        ):
+            complete = complete_count >= expected
+        return {
+            "complete": bool(complete),
+            "quality_status": quality_value,
+            "expected_count": expected,
+            "complete_count": complete_count,
+            "partial_count": getattr(report, "partial_count", None),
+            "invalid_count": getattr(report, "invalid_count", None),
+            "unavailable_count": getattr(report, "unavailable_count", None),
+            "missing_ranges": getattr(report, "missing_ranges", ()),
+        }
+
+    @classmethod
+    def _qualification_evidence(
+        cls,
+        result: object,
+        required_capabilities: Sequence[DataCapability],
+        spec: InstrumentSpec,
+    ) -> dict[str, Mapping[str, object]]:
+        """Map a port result to the evaluator's named evidence dimensions."""
+
+        evidence: dict[str, Mapping[str, object]] = {}
+        reports = tuple(getattr(result, "coverage_reports", ()) or ())
+        for report in reports:
+            capability = getattr(report, "capability", None)
+            capability_value = getattr(capability, "value", capability)
+            projected = cls._qualification_report_evidence(report)
+            if capability_value in ("bars", "coverage"):
+                evidence["market_data_evidence"] = projected
+            elif capability_value == "actions":
+                evidence["corporate_action_evidence"] = projected
+                evidence["quantity_action_coverage_evidence"] = projected
+            elif capability_value == "status":
+                evidence["status_evidence"] = projected
+            elif capability_value == "rules":
+                evidence["rule_evidence"] = projected
+            elif capability_value == "mappings":
+                evidence["mapping_evidence"] = projected
+
+        summary = getattr(result, "evidence_summary", None)
+        if isinstance(summary, Mapping):
+            for name in (
+                "identity_evidence",
+                "mapping_evidence",
+                "rule_evidence",
+                "market_data_evidence",
+                "corporate_action_evidence",
+                "quantity_action_coverage_evidence",
+                "status_evidence",
+            ):
+                value = summary.get(name)
+                if isinstance(value, Mapping):
+                    evidence.setdefault(name, value)
+            # Some existing 16A ports publish one nested coverage summary
+            # instead of one mapping per capability.  It remains a source
+            # result, not a reason to inspect Bars here.
+            for name in ("coverage", "bars", "market_data"):
+                value = summary.get(name)
+                if isinstance(value, Mapping):
+                    evidence.setdefault("market_data_evidence", value)
+
+        capabilities = getattr(spec, "capabilities", None)
+        action_requirement = getattr(capabilities, "corporate_action_requirement", None)
+        action_value = getattr(action_requirement, "value", action_requirement)
+        if action_value == "not_applicable":
+            evidence.setdefault(
+                "corporate_action_evidence",
+                {"applicability": "not_applicable", "explicit": True},
+            )
+            evidence.setdefault(
+                "quantity_action_coverage_evidence",
+                {"applicability": "not_applicable", "explicit": True},
+            )
+        status_policy = getattr(spec, "trading_status_policy", None)
+        if isinstance(status_policy, Mapping) and status_policy:
+            values = {
+                getattr(value, "value", value)
+                for value in status_policy.values()
+            }
+            if values and values <= {"not_applicable"}:
+                evidence.setdefault(
+                    "status_evidence",
+                    {"applicability": "not_applicable", "explicit": True},
+                )
+        return evidence
+
+    @staticmethod
+    def _qualification_result_reason_codes(result: object) -> tuple[str, ...]:
+        """Read stable reason codes from an existing qualification result."""
+
+        values: list[str] = []
+        for item in getattr(result, "reason_codes", ()) or ():
+            value = getattr(item, "value", item)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        for issue in getattr(result, "issues", ()) or ():
+            value = getattr(issue, "code", None)
+            if isinstance(value, str) and value.strip():
+                values.append(value.strip())
+        return tuple(sorted(set(values)))
+
+    @staticmethod
+    def _required_qualification_reasons(
+        result: object,
+        evidence: Mapping[str, Mapping[str, object]],
+        request: DataRequest,
+        spec: InstrumentSpec,
+    ) -> tuple[str, ...]:
+        """Require explicit evidence for every requested fact dimension."""
+
+        reasons: set[str] = set()
+        required = set(request.required_capabilities)
+
+        def proven(value: Mapping[str, object] | None) -> bool:
+            if not isinstance(value, Mapping):
+                return False
+            applicability = value.get("applicability")
+            if (
+                getattr(applicability, "value", applicability) == "not_applicable"
+                and value.get("explicit") is True
+            ):
+                return True
+            for name in ("complete", "covered", "available", "valid", "eligible"):
+                if value.get(name) is True:
+                    return True
+            quality = value.get("quality_status")
+            return getattr(quality, "value", quality) == "complete"
+
+        if DataCapability.BARS in required and not proven(
+            evidence.get("market_data_evidence")
+        ):
+            reasons.add("candidate_market_data_incomplete")
+        if DataCapability.COVERAGE in required and not proven(
+            evidence.get("market_data_evidence")
+        ):
+            reasons.add("candidate_market_data_incomplete")
+        if DataCapability.ACTIONS in required and not proven(
+            evidence.get("corporate_action_evidence")
+        ):
+            reasons.add("candidate_corporate_action_incomplete")
+        if DataCapability.ACTIONS in required and not proven(
+            evidence.get("quantity_action_coverage_evidence")
+        ):
+            reasons.add("candidate_quantity_action_coverage_incomplete")
+        if DataCapability.STATUS in required and not proven(
+            evidence.get("status_evidence")
+        ):
+            reasons.add("candidate_status_incomplete")
+        if DataCapability.RULES in required and not proven(
+            evidence.get("rule_evidence")
+        ):
+            reasons.add("candidate_rule_incomplete")
+        if DataCapability.MAPPINGS in required and not proven(
+            evidence.get("mapping_evidence")
+        ):
+            reasons.add("candidate_mapping_incomplete")
+        return tuple(sorted(reasons))
+
+    @staticmethod
+    def _invoke_qualification_method(
+        method,
+        qualification_request: CoverageQualificationRequest,
+    ) -> object:
+        """Invoke one existing qualification port without guessing arguments."""
+
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            return method(qualification_request)
+        if "request" in parameters:
+            parameter = parameters["request"]
+            if parameter.kind in (
+                inspect.Parameter.POSITIONAL_ONLY,
+                inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            ):
+                return method(qualification_request)
+        values = {
+            name: getattr(qualification_request, name)
+            for name in CoverageQualificationRequest.__dataclass_fields__
+        }
+        if any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in parameters.values()
+        ):
+            return method(**values)
+        kwargs = {
+            name: values[name]
+            for name, parameter in parameters.items()
+            if name in values
+            and parameter.kind
+            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+        }
+        required_positional = [
+            parameter
+            for parameter in parameters.values()
+            if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+            or (
+                parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                and parameter.default is inspect.Parameter.empty
+                and parameter.name not in kwargs
+            )
+        ]
+        if required_positional:
+            return method(qualification_request)
+        return method(**kwargs)
+
+    def _build_qualification_request(
+        self,
+        instrument_id: UUID,
+        query: UniverseQuery,
+        spec: InstrumentSpec | None = None,
+    ) -> CoverageQualificationRequest:
+        """Build a single immutable coverage request from the frozen query."""
+
+        request = self._session._request
+        required_values = {
+            capability
+            for capability in request.required_capabilities
+            if capability is not DataCapability.UNIVERSE
+        }
+        # The rule declaration, not an empty event table, decides whether
+        # action/status evidence is mandatory.  Add those dimensions to the
+        # existing coverage port request when the resolved InstrumentSpec
+        # explicitly requires them.
+        if spec is None:
+            spec = self._candidate_spec_for_query(instrument_id, query)
+        capabilities = getattr(spec, "capabilities", None)
+        action_requirement = getattr(capabilities, "corporate_action_requirement", None)
+        if getattr(action_requirement, "value", action_requirement) == "required":
+            required_values.add(DataCapability.ACTIONS)
+        status_policy = getattr(spec, "trading_status_policy", None)
+        if isinstance(status_policy, Mapping) and any(
+            getattr(value, "value", value) == "required"
+            for value in status_policy.values()
+        ):
+            required_values.add(DataCapability.STATUS)
+        required = tuple(sorted(required_values, key=lambda item: item.value))
+        if not required:
+            # A universe query still needs a qualification port invocation;
+            # COVERAGE is the narrow generic dimension for an otherwise
+            # metadata-only dynamic request.
+            required = (DataCapability.COVERAGE,)
+        profile = (
+            INTERNAL_LINK_ACCEPTANCE_PROFILE
+            if self._provider.fixtures
+            else FORMAL_PROFILE
+        )
+        return CoverageQualificationRequest(
+            instrument_id=instrument_id,
+            effective_date=query.effective_date,
+            requested_window=request.requested_window,
+            formal_envelope=request.requested_window,
+            warmup_envelope=None,
+            history_envelope=request.requested_window,
+            required_capabilities=required,
+            query_boundary=query.boundary,
+            preflight_profile=profile,
+            resolved_calendar_ids=query.allowed_calendar_ids,
+            rule_package=query.rule_package_reference or query.rule,
+            rule_exception_set=query.rule_exception_set,
+            market_scope=query.market_scope,
+            universe_query_policy=query.universe_query_policy,
+            qualification_policy_version=query.qualification_policy_version,
+            required_fixture_capabilities=tuple(
+                fixture.capability for fixture in self._provider.fixtures
+            ),
+            fixtures=self._provider.fixtures,
+            frequency=request.frequency,
+        )
+
+    def _candidate_spec_for_query(
+        self,
+        instrument_id: UUID,
+        query: UniverseQuery,
+    ) -> InstrumentSpec | None:
+        """Resolve a spec only from the explicit PIT source when available."""
+
+        provider = self._provider._pit_spec_provider
+        if provider is None:
+            return self._provider.dataset.instrument_at(
+                instrument_id,
+                datetime.combine(query.effective_date, time.min, tzinfo=UTC),
+                query.boundary.data_cutoff,
+            )
+        method = None
+        for name in (
+            "resolve_spec",
+            "resolve_instrument",
+            "resolve_identity",
+            "resolve",
+        ):
+            candidate = getattr(provider, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None:
+            return None
+        values = {
+            "instrument_id": instrument_id,
+            "effective_at": datetime.combine(
+                query.effective_date, time.min, tzinfo=UTC
+            ),
+            "effective_date": query.effective_date,
+            "data_cutoff": query.boundary.data_cutoff,
+            "rule_package_reference": query.rule,
+            "rule": query.rule,
+        }
+        try:
+            parameters = inspect.signature(method).parameters
+        except (TypeError, ValueError):
+            result = method(instrument_id)
+        else:
+            kwargs = {
+                name: value
+                for name, value in values.items()
+                if name in parameters
+                and parameters[name].kind
+                in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            }
+            positional = [
+                parameter
+                for parameter in parameters.values()
+                if parameter.kind is inspect.Parameter.POSITIONAL_ONLY
+                or (
+                    parameter.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+                    and parameter.default is inspect.Parameter.empty
+                    and parameter.name not in kwargs
+                )
+            ]
+            result = method(instrument_id, **kwargs) if positional else method(**kwargs)
+        if isinstance(result, InstrumentSpec):
+            return result
+        for name in ("spec", "instrument_spec", "candidate_spec"):
+            nested = getattr(result, name, None)
+            if isinstance(nested, InstrumentSpec):
+                return nested
+        return None
+
+    def _evaluate_dynamic_candidate(
+        self,
+        row: object,
+        spec: InstrumentSpec,
+        query: UniverseQuery,
+        precomputed_reasons: Sequence[str],
+    ) -> tuple[bool, tuple[str, ...], object | None]:
+        """Consume existing PIT qualification ports for one candidate.
+
+        The chunk owns only request-bound identity/scope checks.  Coverage,
+        corporate-action, quantity, and status evidence is supplied by the
+        injected single-instrument qualification port; this method never
+        scans the Bar or action tables itself.
+        """
+
+        from app.backtesting.data.universe import (
+            CandidateEligibilityContext,
+            evaluate_candidate,
+        )
+
+        request = self._session._request
+        qualification_source = self._provider._coverage_qualification_provider
+        method = None
+        for name in (
+            "qualify_instrument",
+            "coverage_qualification",
+            "qualify",
+        ):
+            candidate = getattr(qualification_source, name, None)
+            if callable(candidate):
+                method = candidate
+                break
+        if method is None:
+            raise UniverseCapabilityMissingError(
+                "dynamic candidates require an explicit single-instrument qualification port",
+                details={"instrument_id": str(spec.instrument_id)},
+            )
+        qualification_request = self._build_qualification_request(
+            spec.instrument_id, query, spec
+        )
+        try:
+            qualification = self._invoke_qualification_method(
+                method, qualification_request
+            )
+        except (UniverseCapabilityMissingError, UnsupportedCapabilityError):
+            raise UniverseCapabilityMissingError(
+                "the configured qualification port cannot answer this PIT request",
+                details={"instrument_id": str(spec.instrument_id)},
+            )
+        except Exception as exc:
+            raise UniverseProviderContractViolationError(
+                "the configured qualification port failed for a PIT candidate",
+                details={
+                    "instrument_id": str(spec.instrument_id),
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
+        if qualification is None:
+            raise UniverseProviderContractViolationError(
+                "the configured qualification port returned no result",
+                details={"instrument_id": str(spec.instrument_id)},
+            )
+        result_id = getattr(qualification, "instrument_id", spec.instrument_id)
+        if result_id != spec.instrument_id:
+            raise UniverseProviderContractViolationError(
+                "qualification result instrument_id does not match the candidate",
+                details={
+                    "expected": str(spec.instrument_id),
+                    "actual": str(result_id),
+                },
+            )
+
+        display = spec.display
+        effective_at = datetime.combine(query.effective_date, time.min, tzinfo=UTC)
+        identity_interval_valid = (
+            spec.valid_from <= effective_at
+            and (spec.valid_to is None or effective_at < spec.valid_to)
+        )
+        payload: dict[str, object] = {
+            "spec": spec,
+            "qualification": qualification,
+            "coverage_qualification": qualification,
+            "reason_codes": tuple(precomputed_reasons)
+            + self._qualification_result_reason_codes(qualification),
+            "identity_evidence": {
+                "complete": bool(
+                    identity_interval_valid
+                    and spec.calendar_id
+                    and spec.asset_class
+                    and spec.exchange
+                    and spec.currency
+                ),
+                "calendar_id": spec.calendar_id,
+            },
+            "mapping_evidence": {
+                "complete": all(
+                    type(value) is str and value.strip()
+                    for value in (
+                        display.trading_code,
+                        display.name,
+                        display.display_name,
+                    )
+                )
+            },
+            "rule_evidence": {
+                "valid": spec.rule_package_reference == query.rule,
+                "rule_package_reference": spec.rule_package_reference,
+            },
+        }
+        for name in (
+            "calendar_id",
+            "effective_date",
+            "effective_at",
+            "known_at",
+            "eligible",
+            "status",
+            "identity_status",
+            "mapping_status",
+            "rule_status",
+            "identity_evidence",
+            "mapping_evidence",
+            "rule_evidence",
+            "market_data_evidence",
+            "corporate_action_evidence",
+            "quantity_action_coverage_evidence",
+            "status_evidence",
+        ):
+            if name not in payload and hasattr(row, name):
+                payload[name] = getattr(row, name)
+        payload.update(
+            {
+                name: value
+                for name, value in self._qualification_evidence(
+                    qualification,
+                    qualification_request.required_capabilities,
+                    spec,
+                ).items()
+                if name not in payload
+            }
+        )
+        context = CandidateEligibilityContext(
+            effective_date=query.effective_date,
+            data_cutoff=query.boundary.data_cutoff,
+            market_scope=query.market_scope,
+            universe_query_policy=query.universe_query_policy,
+            rule_package_reference=query.rule,
+            rule_exception_set_reference=query.rule_exception_set,
+            qualification_policy_version=query.qualification_policy_version,
+            resolved_calendar_ids=query.allowed_calendar_ids,
+            scope_mode=query.scope_mode or request.instrument_scope_mode,
+            required_capabilities=qualification_request.required_capabilities,
+            requested_window=request.requested_window,
+            query_boundary=query.boundary,
+            universe_scope_snapshot_hash=query.universe_scope_snapshot_hash,
+            fixed_authorized_instrument_ids=tuple(
+                sorted(self._fixed_authorized_instrument_ids, key=str)
+            ),
+        )
+        candidate_qualifier = getattr(qualification_source, "qualify_candidate", None)
+        if callable(candidate_qualifier):
+            try:
+                parameters = inspect.signature(candidate_qualifier).parameters
+                if "candidate" in parameters or "context" in parameters:
+                    kwargs = {
+                        name: value
+                        for name, value in (
+                            ("candidate", payload),
+                            ("context", context),
+                        )
+                        if name in parameters
+                    }
+                    candidate_result = candidate_qualifier(**kwargs)
+                else:
+                    candidate_result = candidate_qualifier(payload, context)
+            except Exception as exc:
+                raise UniverseProviderContractViolationError(
+                    "the configured candidate qualification provider failed",
+                    details={"error_type": type(exc).__name__},
+                ) from exc
+            if candidate_result is None:
+                raise UniverseProviderContractViolationError(
+                    "the configured candidate qualification provider returned no result"
+                )
+            payload["candidate_qualification"] = candidate_result
+
+        evaluation = evaluate_candidate(payload, context)
+        missing = self._required_qualification_reasons(
+            qualification,
+            self._qualification_evidence(
+                qualification,
+                qualification_request.required_capabilities,
+                spec,
+            ),
+            qualification_request,
+            spec,
+        )
+        reasons = tuple(sorted(set(evaluation.reason_codes) | set(missing)))
+        explicit_eligible = getattr(qualification, "eligible", None)
+        if explicit_eligible is False and not reasons:
+            reasons = ("candidate_qualification_unavailable",)
+        return not reasons, reasons, evaluation
+
+    def _record_universe_filter(
+        self,
+        row: object,
+        reasons: Sequence[str],
+        evaluation: object | None = None,
+    ) -> None:
+        """Accumulate stable candidate-level filter evidence."""
+
+        for reason in reasons:
+            self._universe_filter_reason_counts[reason] = (
+                self._universe_filter_reason_counts.get(reason, 0) + 1
+            )
+        instrument_id = getattr(row, "instrument_id", None)
+        spec = getattr(row, "spec", None)
+        if instrument_id is None and spec is not None:
+            instrument_id = getattr(spec, "instrument_id", None)
+        record: dict[str, object] = {
+            "instrument_id": str(instrument_id) if isinstance(instrument_id, UUID) else None,
+            "reason_codes": tuple(reasons),
+        }
+        if evaluation is not None:
+            for name in (
+                "calendar_id",
+                "failed_check",
+                "expected",
+                "actual",
+                "evidence_summary",
+                "qualification_hash",
+            ):
+                value = getattr(evaluation, name, None)
+                if value is not None:
+                    record[name] = value
+        self._universe_filter_records.append(MappingProxyType(record))
+
     def instruments(self, query: InstrumentQuery) -> tuple[InstrumentSpec, ...]:
         """Resolve full specs for known identities valid at ``effective_at``."""
 
@@ -2063,7 +5271,13 @@ class MemoryDataChunkSession:
         self._require_authorized_instruments(query.instrument_ids, "instruments")
         rows: list[InstrumentSpec] = []
         for instrument_id in query.instrument_ids:
-            spec = self._provider.dataset.instrument(instrument_id)
+            spec = self._universe_specs.get(instrument_id)
+            if spec is None:
+                spec = self._provider.resolve_pit_spec(
+                    instrument_id,
+                    effective_at=query.effective_at,
+                    data_cutoff=query.boundary.data_cutoff,
+                )
             if spec is None:
                 continue
             if spec.valid_from > query.effective_at:
@@ -2091,9 +5305,220 @@ class MemoryDataChunkSession:
         )
 
     def universe(self, query: UniverseQuery) -> tuple[InstrumentSpec, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not implement universe queries"
+        """Return PIT-qualified candidates for the current decision step.
+
+        The provider scans only immutable local facts.  Candidate-level
+        incompleteness is accumulated in the filter summary and omitted from
+        the result; malformed provider output or an unbound query remains a
+        request-level contract error.  The selected rows are de-duplicated by
+        stable ``instrument_id`` and returned in deterministic order.
+        """
+
+        self._guard_business_query("universe")
+        self._require_query_type(query, UniverseQuery, "universe")
+        request = self._session._request
+        scope_mode = query.scope_mode or request.instrument_scope_mode
+        # A static query reads only the already-admitted fixed set and does
+        # not require a dynamic-universe fact token.  Dynamic/hybrid queries
+        # must have declared UNIVERSE in the chunk token.
+        if scope_mode is not InstrumentScopeMode.FIXED:
+            self._require_declared_fact_type(DataCapability.UNIVERSE, "universe")
+        self._validate_universe_query_boundary(query)
+
+        if scope_mode is not InstrumentScopeMode.FIXED and not self._provider.supports_universe():
+            raise UniverseCapabilityMissingError(
+                "the memory provider cannot serve a dynamic PIT universe"
+            )
+        if query.effective_date > self._sessions[-1].session_date:
+            raise UniversePitBoundaryViolationError(
+                "universe effective_date is later than the current chunk",
+                details={
+                    "chunk_last_session_date": self._sessions[-1].session_date.isoformat(),
+                    "effective_date": query.effective_date.isoformat(),
+                },
+            )
+
+        cache_key = self._universe_query_cache_key(query)
+        # UniverseQuery is frozen in the data contract.  A future provider may
+        # carry a non-hashable extension field, so use a deterministic string
+        # fallback rather than allowing cache internals to alter query errors.
+        try:
+            cached = self._universe_cache.get(query)
+            cache_store_key = query
+        except TypeError:
+            cached = self._universe_cache.get(cache_key)
+            cache_store_key = cache_key
+        if cached is not None:
+            self._step_candidate_authorized_instrument_ids = frozenset(
+                spec.instrument_id
+                for spec in cached
+                if spec.instrument_id not in self._fixed_authorized_instrument_ids
+            )
+            self._universe_last_query_hash = cache_key
+            return cached
+
+        # Each bound PIT query owns one audit summary.  Repeated calls hit the
+        # immutable cache above; a new effective-date/cutoff query starts a new
+        # summary instead of mixing counts from unrelated decision steps.
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        self._session._step_candidate_authorized_instrument_ids = frozenset()
+        self._universe_filter_reason_counts = {}
+        self._universe_filter_records = []
+        if scope_mode is InstrumentScopeMode.FIXED:
+            # Fixed mode must not scan the dynamic source at all.  Read only
+            # the identities admitted by the static request scope; mandatory
+            # and opening-position ids stay independently authorized.
+            source_rows = tuple(
+                spec
+                for instrument_id in request.static_instrument_ids
+                if (
+                    spec := self._provider.dataset.instrument_at(
+                        instrument_id,
+                        datetime.combine(
+                            query.effective_date,
+                            time.min,
+                            tzinfo=UTC,
+                        ),
+                        query.boundary.data_cutoff,
+                    )
+                )
+                is not None
+            )
+        else:
+            dynamic_rows = self._provider._universe_source_rows(query)
+            if scope_mode is InstrumentScopeMode.HYBRID:
+                # Hybrid semantics are an explicit set union.  The dynamic
+                # source is not required to echo static rows; fixed rows are
+                # resolved from the run's frozen PIT source and then merged.
+                fixed_rows = tuple(
+                    spec
+                    for instrument_id in request.static_instrument_ids
+                    if (
+                        spec := self._provider.dataset.instrument_at(
+                            instrument_id,
+                            datetime.combine(
+                                query.effective_date,
+                                time.min,
+                                tzinfo=UTC,
+                            ),
+                            query.boundary.data_cutoff,
+                        )
+                    )
+                    is not None
+                )
+                source_rows = fixed_rows + tuple(dynamic_rows)
+            else:
+                source_rows = tuple(dynamic_rows)
+        # Sort before de-duplication so duplicate identity handling is
+        # independent of source/database iteration order.  Malformed rows are
+        # still rejected below rather than being hidden by the sort.
+        keyed_rows = []
+        for row in source_rows:
+            candidate_id = getattr(row, "instrument_id", None)
+            candidate_spec = row if isinstance(row, InstrumentSpec) else getattr(row, "spec", None)
+            if candidate_id is None and isinstance(candidate_spec, InstrumentSpec):
+                candidate_id = candidate_spec.instrument_id
+            if candidate_id is None and isinstance(row, tuple) and len(row) == 2:
+                left, right = row
+                candidate_id = getattr(left, "instrument_id", None) or getattr(right, "instrument_id", None)
+                if candidate_id is None:
+                    candidate_spec = left if isinstance(left, InstrumentSpec) else right
+                    candidate_id = getattr(candidate_spec, "instrument_id", None)
+            if not isinstance(candidate_id, UUID):
+                # Preserve the row for _extract_universe_candidate so its
+                # provider-contract error remains the authoritative failure.
+                keyed_rows.append(("", "", row))
+                continue
+            if not isinstance(candidate_spec, InstrumentSpec):
+                try:
+                    candidate_spec, _ = self._extract_universe_candidate(row)
+                except UniverseProviderContractViolationError:
+                    keyed_rows.append((str(candidate_id), type(row).__name__, row))
+                    continue
+            row_key = self._stable_source_row_key(row, candidate_spec) if candidate_spec is not None else (type(row).__name__,)
+            keyed_rows.append((str(candidate_id), *row_key, row))
+        keyed_rows.sort(key=lambda item: item[:-1])
+        source_rows = tuple(item[-1] for item in keyed_rows)
+        seen: set[UUID] = set()
+        eligible: list[InstrumentSpec] = []
+        for row in source_rows:
+            spec, precomputed = self._extract_universe_candidate(row)
+            if spec is None:
+                # A qualification result without a complete spec is a
+                # candidate-level failure.  Its reason codes remain auditable
+                # and no placeholder spec is fabricated.
+                self._record_universe_filter(
+                    row, precomputed or ("candidate_ineligible",)
+                )
+                continue
+            if spec.instrument_id in seen:
+                # Code changes and duplicate provider rows must never create a
+                # second identity.  Treat duplicate rows as candidate-level
+                # evidence, retaining the first deterministic row only.
+                self._record_universe_filter(spec, ("duplicate_instrument_id",))
+                continue
+            seen.add(spec.instrument_id)
+            is_static_candidate = spec.instrument_id in request.static_instrument_ids
+            is_fixed_only = (
+                spec.instrument_id in self._fixed_authorized_instrument_ids
+                and not is_static_candidate
+            )
+            if is_fixed_only:
+                # Mandatory and non-zero opening-position identities are fixed
+                # preflight subjects, not dynamic universe members.  They
+                # remain readable as holdings through the fixed permission
+                # layer but are never returned merely because the backing
+                # fixture also contains their spec.
+                self._record_universe_filter(spec, ("not_in_static_scope",))
+                continue
+            if scope_mode is InstrumentScopeMode.FIXED or (
+                scope_mode is InstrumentScopeMode.HYBRID and is_static_candidate
+            ):
+                # Fixed ids have crossed the run-level complete preflight gate,
+                # but their identity/display interval can still expire at a
+                # later decision date.  Recheck only PIT identity, mapping,
+                # scope, calendar, and rule references; fixed coverage facts
+                # remain represented by the frozen preflight snapshot.
+                reasons = self._candidate_filter_reasons(
+                    spec, query, precomputed, row=row
+                )
+                evaluation = None
+            else:
+                reasons = self._candidate_filter_reasons(
+                    spec, query, precomputed, row=row
+                )
+                if reasons:
+                    eligible_flag, evaluation = False, None
+                else:
+                    eligible_flag, reasons, evaluation = self._evaluate_dynamic_candidate(
+                        row, spec, query, precomputed
+                    )
+                if not eligible_flag and not reasons:
+                    reasons = ("candidate_ineligible",)
+            if reasons:
+                self._record_universe_filter(spec, reasons, evaluation)
+                continue
+            # Fixed mode returns only the explicitly static candidate side;
+            # mandatory/initial-position ids remain authorized independently
+            # and are not silently turned into universe members.
+            if scope_mode is InstrumentScopeMode.FIXED and not is_static_candidate:
+                self._record_universe_filter(spec, ("not_in_static_scope",))
+                continue
+            eligible.append(spec)
+            self._universe_specs[spec.instrument_id] = spec
+
+        # In a hybrid run the source includes both static and dynamic rows;
+        # all filtering above is still per-candidate, then stable identity
+        # order defines the single merged result.
+        result = tuple(sorted(eligible, key=lambda item: str(item.instrument_id)))
+        self._universe_cache[cache_store_key] = result
+        self._universe_last_query_hash = cache_key
+        self._step_candidate_authorized_instrument_ids = frozenset(
+            spec.instrument_id
+            for spec in result
+            if spec.instrument_id not in self._fixed_authorized_instrument_ids
         )
+        return result
 
     def bars(self, query: BarQuery) -> tuple[Bar, ...]:
         """Serve bars for an explicit range or a lookback window.

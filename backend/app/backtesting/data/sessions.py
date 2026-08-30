@@ -27,6 +27,7 @@ import json
 from enum import StrEnum
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
+from uuid import UUID
 
 from app.backtesting.calendar_axis import (
     POLICY_KEY_STRICT_COMPATIBLE,
@@ -87,6 +88,35 @@ __all__ = [
     "DataSessionState",
     "evaluate_calendar_capability_gate",
 ]
+
+
+def _fixed_authorized_ids(request: object) -> frozenset[UUID]:
+    """Build the run-level fixed authorization union without I/O."""
+
+    values: set[UUID] = set()
+    for field_name in (
+        "static_instrument_ids",
+        "mandatory_instrument_ids",
+        "non_zero_initial_position_instrument_ids",
+    ):
+        raw = getattr(request, field_name, ()) or ()
+        if isinstance(raw, Mapping):
+            raw = raw.keys()
+        for item in raw:
+            if isinstance(item, UUID):
+                values.add(item)
+    positions = getattr(request, "initial_positions", None)
+    if isinstance(positions, Mapping):
+        for instrument_id, position in positions.items():
+            if not isinstance(instrument_id, UUID):
+                continue
+            quantity = getattr(position, "quantity", position)
+            try:
+                if quantity != 0:
+                    values.add(instrument_id)
+            except Exception:
+                continue
+    return frozenset(values)
 
 
 def _calendar_difference_issue_code(difference: object) -> str:
@@ -697,6 +727,10 @@ class AuthoritativeDataSession:
         capability_manifest_version: int = 1,
         on_ready: Callable[["AuthoritativeDataSession"], None] | None = None,
         on_close: Callable[["AuthoritativeDataSession"], None] | None = None,
+        preflight_service: object | None = None,
+        preflight_context: object | None = None,
+        admission_preflight: object | None = None,
+        admission_report: object | None = None,
     ) -> None:
         if not isinstance(request, DataRequest):
             raise InvalidDataRequestError("request must be a frozen DataRequest")
@@ -706,6 +740,23 @@ class AuthoritativeDataSession:
         self._capability_manifest_version = capability_manifest_version
         self._on_ready = on_ready
         self._on_close = on_close
+        # Optional Phase 2a composition layer.  The calendar/session
+        # implementation remains authoritative for calendar facts; the
+        # service only enriches that immutable report with profile, fixture,
+        # initial-position, and page/session hash evidence.
+        self._preflight_service = preflight_service
+        self._preflight_context = preflight_context
+        if admission_preflight is not None and admission_report is not None and admission_preflight is not admission_report:
+            raise InvalidDataRequestError(
+                "admission_preflight and admission_report cannot disagree"
+            )
+        self._admission_preflight = (
+            admission_preflight
+            if admission_preflight is not None
+            else admission_report
+        )
+        self._preflight_outcome: object | None = None
+        self._session_preflight_decision: object | None = None
         self._state = DataSessionState.CREATED
         self._axis: CalendarAxisResolution | None = None
         self._snapshot: CalendarSnapshot | None = None
@@ -715,6 +766,11 @@ class AuthoritativeDataSession:
         self._report: DataPreflightReport | None = None
         self._closed_resources = False
         self._preflight_done = False
+        # Keep fixed and per-step dynamic authorization separate.  This class
+        # does not itself produce candidates; it only stores the bounded
+        # permission state that a concrete chunk implementation may consume.
+        self._fixed_authorized_instrument_ids = _fixed_authorized_ids(request)
+        self._step_candidate_authorized_instrument_ids: frozenset[UUID] = frozenset()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -743,6 +799,94 @@ class AuthoritativeDataSession:
             self._closed_resources = True
             if self._on_close is not None:
                 self._on_close(self)
+
+    @property
+    def fixed_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Run-level fixed IDs: static, mandatory, and non-zero holdings."""
+
+        return self._fixed_authorized_instrument_ids
+
+    @property
+    def step_candidate_authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Current decision-step dynamic IDs, initially empty."""
+
+        return self._step_candidate_authorized_instrument_ids
+
+    @property
+    def authorized_instrument_ids(self) -> frozenset[UUID]:
+        """Read-only union for concrete chunk permission checks."""
+
+        return frozenset(
+            self._fixed_authorized_instrument_ids
+            | self._step_candidate_authorized_instrument_ids
+        )
+
+    @property
+    def frozen_calendar_ids(self) -> tuple[str, ...]:
+        """The calendar ids frozen by admission; never extended at runtime."""
+
+        return tuple(getattr(self._request, "resolved_calendar_ids", ()))
+
+    def begin_decision_step(self, step_key: object | None = None) -> None:
+        """Start a new decision epoch and clear prior dynamic permissions."""
+
+        if self._state is DataSessionState.CLOSED:
+            raise DataSessionClosedError(
+                "the data session is closed; no decision step may start",
+                details={"session_state": self._state.value},
+            )
+        if self._state is not DataSessionState.READY:
+            raise InvalidDataRequestError(
+                "decision-step authorization requires a ready preflight"
+            )
+        self._step_candidate_authorized_instrument_ids = frozenset()
+        del step_key
+
+    def authorize_step_candidates(self, instrument_ids, *, query=None) -> None:
+        """Record only UUIDs returned by the current bound universe query."""
+
+        if self._state is DataSessionState.CLOSED:
+            raise DataSessionClosedError(
+                "the data session is closed; candidates cannot be authorized",
+                details={"session_state": self._state.value},
+            )
+        if self._state is not DataSessionState.READY:
+            raise InvalidDataRequestError(
+                "step candidate authorization requires a ready preflight"
+            )
+        values = tuple(instrument_ids or ())
+        if any(not isinstance(item, UUID) for item in values):
+            raise InvalidDataRequestError(
+                "step candidate authorization requires UUID instrument ids"
+            )
+        if values and query is None:
+            raise InvalidDataRequestError(
+                "dynamic step candidates require the bound UniverseQuery result"
+            )
+        if query is not None:
+            result_ids = getattr(query, "authorized_instrument_ids", None)
+            if result_ids is None:
+                result_ids = getattr(query, "candidate_ids", None)
+            if result_ids is None:
+                result = getattr(query, "result", None)
+                if result is not None:
+                    result_ids = {
+                        getattr(item, "instrument_id", None)
+                        for item in result
+                    }
+            if result_ids is None or not set(values).issubset(set(result_ids)):
+                raise InvalidDataRequestError(
+                    "step candidates are not contained in the bound universe result"
+                )
+        self._step_candidate_authorized_instrument_ids = frozenset(values)
+
+    bind_step_candidates = authorize_step_candidates
+    authorize_step_candidate_ids = authorize_step_candidates
+
+    def clear_step_candidate_authorization(self) -> None:
+        """Clear dynamic permissions without altering fixed authorization."""
+
+        self.begin_decision_step()
 
     # ------------------------------------------------------------------
     # Frozen results
@@ -797,6 +941,32 @@ class AuthoritativeDataSession:
         return self._report
 
     @property
+    def preflight_outcome(self) -> object | None:
+        """Profile-bound Phase 2a outcome, when a service was supplied."""
+
+        return self._preflight_outcome
+
+    @property
+    def session_preflight_decision(self) -> object | None:
+        """Authoritative page/session decision, when available."""
+
+        return self._session_preflight_decision
+
+    @property
+    def admission_report_hash(self) -> str | None:
+        """Page admission hash associated with this session report."""
+
+        outcome = self._preflight_outcome
+        return getattr(outcome, "admission_report_hash", None)
+
+    @property
+    def session_report_hash(self) -> str | None:
+        """Profile-bound hash of the authoritative session report."""
+
+        outcome = self._preflight_outcome
+        return getattr(outcome, "report_hash", None)
+
+    @property
     def consistency_context(self) -> DataConsistencyContext:
         """The internally bound consistency context of this session."""
 
@@ -823,6 +993,82 @@ class AuthoritativeDataSession:
     # ------------------------------------------------------------------
     # Authoritative preflight
     # ------------------------------------------------------------------
+
+    def _apply_preflight_service(
+        self, report: DataPreflightReport
+    ) -> DataPreflightReport:
+        """Bind the existing authoritative report to Phase 2a metadata.
+
+        The service receives ``base_report`` so it cannot invoke this session
+        recursively.  A supplied admission decision is compared before any
+        strategy hook can run; a changed report is therefore a hard
+        ``data_preflight`` failure with both hashes retained in the outcome.
+        """
+
+        service = self._preflight_service
+        if service is None:
+            return report
+        from dataclasses import replace as _replace
+
+        from app.backtesting.data.preflight_service import PreflightContext
+
+        context = self._preflight_context
+        if context is None:
+            context = PreflightContext(
+                request=self._request,
+                profile=getattr(service, "profile", None),
+                base_report=report,
+            )
+        elif isinstance(context, PreflightContext):
+            context = _replace(context, request=self._request, base_report=report)
+        elif isinstance(context, Mapping):
+            context = dict(context)
+            context["request"] = self._request
+            context["base_report"] = report
+        else:
+            context = PreflightContext(
+                request=self._request,
+                profile=getattr(context, "profile", getattr(service, "profile", None)),
+                provider=getattr(context, "provider", None),
+                fixtures=getattr(context, "fixtures", ()),
+                spec=getattr(context, "spec", None),
+                initial_position_gateway=getattr(
+                    context, "initial_position_gateway", None
+                ),
+                dynamic_scope_resolver=getattr(
+                    context, "dynamic_scope_resolver", None
+                ),
+                calendar_resolver=getattr(context, "calendar_resolver", None),
+                coverage_qualifier=getattr(context, "coverage_qualifier", None),
+                base_report=report,
+            )
+        validate = getattr(service, "validate_session", None)
+        if callable(validate):
+            decision = validate(context, admission=self._admission_preflight)
+            self._session_preflight_decision = decision
+            outcome = getattr(decision, "outcome", None)
+        else:
+            outcome = service.preflight(context, authoritative=True)
+        self._preflight_outcome = outcome
+        enriched = getattr(outcome, "report", None)
+        if not isinstance(enriched, DataPreflightReport):
+            raise ProviderContractViolationError(
+                "preflight service returned an invalid session report"
+            )
+        # Keep the session's public report/state aligned with the service
+        # decision.  In particular a page/session hash mismatch must turn a
+        # previously calendar-ready session into a blocked preflight before
+        # the existing ``on_ready`` callback can notify the engine.
+        self._report = enriched
+        self._resolved_sessions = enriched.resolved_sessions
+        self._warmup_sessions = enriched.warmup_sessions
+        self._warmup_resolution = enriched.warmup_resolution
+        self._state = (
+            DataSessionState.BLOCKED
+            if enriched.status is PreflightStatus.BLOCKED
+            else DataSessionState.READY
+        )
+        return enriched
 
     def preflight(
         self, request: DataPreflightRequest | None = None
@@ -886,7 +1132,7 @@ class AuthoritativeDataSession:
             self._warmup_sessions = ()
             self._preflight_done = True
             self._state = DataSessionState.BLOCKED
-            return self._report
+            return self._apply_preflight_service(self._report)
         if use_strict_snapshot and frozen_request.query_boundary is None:
             # A provider exposing the task-11 snapshot protocol is never
             # allowed to fall back to the legacy per-day resolver.  The
@@ -908,7 +1154,7 @@ class AuthoritativeDataSession:
             self._warmup_sessions = ()
             self._preflight_done = True
             self._state = DataSessionState.BLOCKED
-            return self._report
+            return self._apply_preflight_service(self._report)
         if use_strict_snapshot and frozen_request.query_boundary is not None:
             try:
                 snapshot = open_snapshot(
@@ -992,6 +1238,7 @@ class AuthoritativeDataSession:
                     self._preflight_done = True
                     self._state = DataSessionState.BLOCKED
                     raise
+                self._report = self._apply_preflight_service(self._report)
                 self._resolved_sessions = self._report.resolved_sessions
                 self._warmup_sessions = self._report.warmup_sessions
                 self._warmup_resolution = self._report.warmup_resolution
@@ -1011,7 +1258,7 @@ class AuthoritativeDataSession:
             self._warmup_sessions = ()
             self._preflight_done = True
             self._state = DataSessionState.BLOCKED
-            return self._report
+            return self._apply_preflight_service(self._report)
 
         # 1-2. Resolve the formal window strictly through strict_compatible@1.
         try:
@@ -1189,14 +1436,18 @@ class AuthoritativeDataSession:
             # calendar snapshot evidence.
             query_boundary=frozen_request.query_boundary,
         )
-        self._resolved_sessions = formal_sessions
-        self._warmup_sessions = warmup_sessions
-        self._warmup_resolution = warmup_resolution
+        report = self._apply_preflight_service(report)
+        self._resolved_sessions = report.resolved_sessions
+        self._warmup_sessions = report.warmup_sessions
+        self._warmup_resolution = report.warmup_resolution
         self._report = report
         self._preflight_done = True
         self._state = (
-            DataSessionState.BLOCKED if blocked else DataSessionState.READY
+            DataSessionState.BLOCKED
+            if report.status is PreflightStatus.BLOCKED
+            else DataSessionState.READY
         )
+        self._step_candidate_authorized_instrument_ids = frozenset()
         # The engine-owned strategy start is only notified on success; a
         # blocked preflight never reaches any strategy hook.
         if self._state is DataSessionState.READY and self._on_ready is not None:

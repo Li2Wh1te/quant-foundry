@@ -32,6 +32,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime
 from decimal import Decimal, ROUND_FLOOR
 from enum import StrEnum
+from inspect import Parameter, signature
 from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -128,6 +129,67 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+def _json_safe_runtime_value(value: Any) -> Any:
+    """Convert runtime evidence to the JSON-safe scalar vocabulary.
+
+    Final candidate qualification errors cross the runtime boundary and are
+    persisted through the existing decision ``validation_issues`` JSON field.
+    Keeping this conversion local prevents UUID/date/Decimal objects (and,
+    more importantly, provider or ORM objects) from leaking into that field.
+    """
+
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, Decimal):
+        return str(value)
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None and enum_value is not value:
+        return _json_safe_runtime_value(enum_value)
+    if isinstance(value, Mapping):
+        forbidden_keys = {
+            "token",
+            "raw_token",
+            "access_token",
+            "credential",
+            "credentials",
+            "secret",
+            "password",
+            "api_key",
+            "access_key",
+        }
+        return {
+            str(key): _json_safe_runtime_value(item)
+            for key, item in value.items()
+            if str(key).strip().lower() not in forbidden_keys
+        }
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_runtime_value(item) for item in value]
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    # ``repr`` is deliberately the last resort.  It keeps an error useful
+    # without serialising a provider client, connection, or credential.
+    return repr(value)
+
+
+def _freeze_runtime_evidence(value: Any) -> Any:
+    """Deep-freeze already JSON-safe runtime evidence."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {
+                str(key): _freeze_runtime_evidence(item)
+                for key, item in value.items()
+            }
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_runtime_evidence(item) for item in value)
+    return value
+
+
 class PhaseExecutionError(DomainValidationError):
     """Raised when one phase fails; always carries its exact location.
 
@@ -145,6 +207,8 @@ class PhaseExecutionError(DomainValidationError):
         phase_key: str,
         error_type: str,
         message: str,
+        error_code: str | None = None,
+        details: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__(
             f"phase {phase_key} failed at step {step_sequence}: "
@@ -155,6 +219,20 @@ class PhaseExecutionError(DomainValidationError):
         self.phase_sequence = phase_sequence
         self.phase_key = phase_key
         self.error_type = error_type
+        # Preserve the stable machine code and structured evidence of a data
+        # contract error while retaining the established phase wrapper.  The
+        # result layer can therefore persist the exact failed qualification
+        # without parsing the human-readable exception text.
+        self.error_code = error_code
+        self.details = _freeze_runtime_evidence(
+            _json_safe_runtime_value(dict(details or {}))
+        )
+
+    @property
+    def code(self) -> str | None:
+        """Expose the wrapped stable code using the data-error convention."""
+
+        return self.error_code
 
 
 class SettlementScheduleError(DomainValidationError):
@@ -588,6 +666,9 @@ class BacktestViewFactory:
         adjustment_gate: AdjustmentPolicyGate | None = None,
         display_provider: Any | None = None,
         instrument_display_provider: Any | None = None,
+        candidate_eligibility_evaluator: Any | None = None,
+        universe_scope_resolution: Any | None = None,
+        candidate_evaluator: Any | None = None,
     ) -> None:
         if display_provider is not None and instrument_display_provider is not None:
             raise DomainValidationError(
@@ -603,10 +684,196 @@ class BacktestViewFactory:
             else instrument_display_provider
         )
         self._scope_instrument_ids = tuple(dict.fromkeys(scope_instrument_ids))
+        self._runtime_instrument_ids: set[UUID] = set()
         self._universe_dto = UniverseQueryDTO(universe_query)
+        self._candidate_eligibility_evaluator = candidate_eligibility_evaluator
+        if (
+            self._candidate_eligibility_evaluator is not None
+            and candidate_evaluator is not None
+        ):
+            raise DomainValidationError(
+                "provide only one of candidate_eligibility_evaluator and "
+                "candidate_evaluator"
+            )
+        if self._candidate_eligibility_evaluator is None:
+            self._candidate_eligibility_evaluator = candidate_evaluator
+        self._universe_scope_resolution = universe_scope_resolution
 
     def universe(self) -> UniverseQueryDTO:
         return self._universe_dto
+
+    def universe_for_step(
+        self,
+        *,
+        effective_date: date | None = None,
+        data_cutoff: datetime | None = None,
+        session_date: date | None = None,
+        decision_time: datetime | None = None,
+    ) -> Any:
+        """Return the query bound to one decision's PIT coordinates.
+
+        A provider may implement ``for_step``/``bind`` on its raw query.  The
+        default fixed fixture has no such method and simply returns its
+        immutable query facade.  Runtime still executes that facade once per
+        step, preserving the old fixed-scope behavior without inventing a
+        dynamic catalogue.
+        """
+
+        raw = getattr(self._universe_dto, "_UniverseQueryDTO__query", None)
+        resolver = None
+        for name in ("for_step", "bind_for_step", "bind"):
+            candidate = getattr(raw, name, None)
+            if callable(candidate):
+                resolver = candidate
+                break
+        if resolver is None:
+            # A plain frozen data-layer ``UniverseQuery`` still needs a new
+            # PIT coordinate at each decision.  Clone its value object with
+            # only effective_date/data_cutoff changed; all scope, policy,
+            # exception, and calendar fields remain byte-for-byte frozen.
+            try:
+                from app.backtesting.data.requests import (
+                    QueryBoundary,
+                    UniverseQuery as DataUniverseQuery,
+                )
+
+                if isinstance(raw, DataUniverseQuery):
+                    cutoff = data_cutoff or raw.boundary.data_cutoff
+                    knowledge_as_of = raw.boundary.knowledge_as_of
+                    if knowledge_as_of is not None and knowledge_as_of > cutoff:
+                        knowledge_as_of = cutoff
+                    boundary = QueryBoundary(
+                        data_cutoff=cutoff,
+                        knowledge_as_of=knowledge_as_of,
+                        include_cutoff_day=raw.boundary.include_cutoff_day,
+                    )
+                    return DataUniverseQuery(
+                        rule=raw.rule,
+                        market_scope=raw.market_scope,
+                        effective_date=effective_date or raw.effective_date,
+                        boundary=boundary,
+                        allowed_calendar_ids=raw.allowed_calendar_ids,
+                        rule_exception_set=raw.rule_exception_set,
+                        qualification_policy_version=(
+                            raw.qualification_policy_version
+                        ),
+                        scope_mode=raw.scope_mode,
+                        universe_scope_snapshot_hash=getattr(
+                            raw, "universe_scope_snapshot_hash", None
+                        ),
+                        universe_query_policy=getattr(
+                            raw, "universe_query_policy", None
+                        ),
+                    )
+            except (ImportError, TypeError, ValueError):
+                # Legacy strategy-only universe implementations have no
+                # data-layer query object and continue through the existing
+                # immutable facade.
+                pass
+            return self._universe_dto
+        try:
+            parameters = signature(resolver).parameters
+        except (TypeError, ValueError):
+            return resolver()
+        available = {
+            "effective_date": effective_date,
+            "session_date": session_date or effective_date,
+            "data_cutoff": data_cutoff,
+            "decision_time": decision_time or data_cutoff,
+        }
+        kwargs = {
+            name: value
+            for name, value in available.items()
+            if value is not None
+            and name in parameters
+            and parameters[name].kind
+            in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        }
+        bound = resolver(**kwargs) if kwargs else resolver()
+        return bound
+
+    @property
+    def candidate_eligibility_evaluator(self) -> Any | None:
+        """Optional final candidate qualification port owned by the provider."""
+
+        return self._candidate_eligibility_evaluator
+
+    @property
+    def universe_scope_resolution(self) -> Any | None:
+        """Optional immutable dynamic-scope preflight result."""
+
+        return self._universe_scope_resolution
+
+    @property
+    def fixed_authorized_instrument_ids(self) -> tuple[UUID, ...]:
+        """Expose the admission fixed set as a read-only audit projection."""
+
+        return tuple(sorted(self._scope_instrument_ids, key=str))
+
+    def register_runtime_instrument_ids(
+        self, instrument_ids: Sequence[UUID]
+    ) -> None:
+        """Make final-qualified dynamic identities visible to engine phases.
+
+        The set is an engine read scope only; it never changes the frozen
+        strategy market scope or calendar set.  Runtime calls this after the
+        target check and before the next step's matching/value views are
+        constructed.
+        """
+
+        values = tuple(instrument_ids)
+        if any(not isinstance(value, UUID) for value in values):
+            raise DomainValidationError(
+                "runtime instrument ids must be UUID values"
+            )
+        self._runtime_instrument_ids.update(values)
+
+    def refresh_market_data(
+        self, instrument_ids: Sequence[UUID], session_date: date
+    ) -> tuple[Mapping[UUID, SessionQuote], Mapping[UUID, InstrumentFacts]]:
+        """Read explicit same-session quotes/facts for final order sizing."""
+
+        ids = tuple(sorted(set(instrument_ids), key=str))
+        quotes = self._engine_market_data.session_quotes(ids, session_date)
+        facts = self._engine_market_data.instrument_facts(ids)
+        return quotes, facts
+
+    def strategy_data_view_for_step(
+        self,
+        *,
+        effective_date: date,
+        data_cutoff: datetime,
+        session_date: date | None = None,
+        decision_time: datetime | None = None,
+    ) -> Any:
+        """Bind the strategy data view to one step when the provider supports it."""
+
+        resolver = None
+        for name in ("for_step", "bind_for_step", "bind"):
+            candidate = getattr(self._strategy_view, name, None)
+            if callable(candidate):
+                resolver = candidate
+                break
+        if resolver is None:
+            return self._strategy_view
+        try:
+            parameters = signature(resolver).parameters
+        except (TypeError, ValueError):
+            return resolver()
+        available = {
+            "effective_date": effective_date,
+            "session_date": session_date or effective_date,
+            "data_cutoff": data_cutoff,
+            "decision_time": decision_time or data_cutoff,
+        }
+        kwargs = {
+            name: value
+            for name, value in available.items()
+            if name in parameters
+            and parameters[name].kind
+            in (Parameter.POSITIONAL_OR_KEYWORD, Parameter.KEYWORD_ONLY)
+        }
+        return resolver(**kwargs) if kwargs else resolver()
 
     def candidate_identities(self) -> dict[UUID, InstrumentCandidateDTO]:
         """Return the already-provided candidate DTOs by stable identity.
@@ -666,21 +933,259 @@ class BacktestViewFactory:
         if instruction.data_view is None:
             return None
         if instruction.data_view is DataViewKind.STRATEGY:
+            step_date = date.fromisoformat(step.metadata["session_date"])
+            strategy_view = self.strategy_data_view_for_step(
+                effective_date=step_date,
+                data_cutoff=instruction.timestamp,
+                session_date=step_date,
+                decision_time=instruction.timestamp,
+            )
+            universe = self.universe_for_step(
+                effective_date=step_date,
+                data_cutoff=instruction.timestamp,
+                session_date=step_date,
+                decision_time=instruction.timestamp,
+            )
+            if not callable(getattr(universe, "query", None)):
+                raise _universe_provider_error(
+                    "step universe resolver must return a query facade"
+                )
             return StrategyDataDTO(
-                self._strategy_view,
+                strategy_view,
                 data_cutoff=instruction.timestamp,
                 adjustment_gate=self._adjustment_gate,
+                universe=universe,
             )
         session_date = date.fromisoformat(step.metadata["session_date"])
-        quotes = self._engine_market_data.session_quotes(
-            self._scope_instrument_ids, session_date
+        engine_ids = tuple(
+            sorted(
+                set(self._scope_instrument_ids) | self._runtime_instrument_ids,
+                key=str,
+            )
         )
-        facts = self._engine_market_data.instrument_facts(
-            self._scope_instrument_ids
-        )
+        quotes = self._engine_market_data.session_quotes(engine_ids, session_date)
+        facts = self._engine_market_data.instrument_facts(engine_ids)
         return EngineDataView(
             quotes=quotes, facts=facts, session_date=session_date
         )
+
+
+def _universe_provider_error(
+    message: str, *, details: Mapping[str, Any] | None = None
+) -> Exception:
+    """Build a JSON-safe provider contract error at the runtime boundary."""
+
+    from app.backtesting.data.errors import UniverseProviderContractViolationError
+
+    return UniverseProviderContractViolationError(
+        message,
+        details=_json_safe_runtime_value(dict(details or {})),
+    )
+
+
+def _universe_capability_error(
+    message: str, *, details: Mapping[str, Any] | None = None
+) -> Exception:
+    """Build a request-level missing-universe-capability error."""
+
+    from app.backtesting.data.errors import UniverseCapabilityMissingError
+
+    return UniverseCapabilityMissingError(
+        message,
+        details=_json_safe_runtime_value(dict(details or {})),
+    )
+
+
+def _raw_universe_source(source: Any) -> Any:
+    """Unwrap the known read-only query facades for audit-only inspection."""
+
+    source = getattr(source, "_UniverseQueryDTO__query", source)
+    source = getattr(source, "_ChunkUniverseQuery__query", source)
+    return source
+
+
+@dataclass(frozen=True, slots=True)
+class _RuntimeCandidateEligibilityContext:
+    """Dependency-free fallback context for provider qualification ports."""
+
+    instrument_id: UUID
+    effective_date: date
+    data_cutoff: datetime
+    market_scope: Any | None = None
+    universe_query_policy: Any | None = None
+    rule_package: Any | None = None
+    rule_exception_set: Any | None = None
+    qualification_policy_version: Any | None = None
+    frozen_calendar_ids: tuple[str, ...] = ()
+    scope_mode: Any | None = None
+    candidate: Any | None = None
+
+
+def _project_strategy_candidate(candidate: Any) -> InstrumentCandidateDTO:
+    """Project one complete provider candidate onto the narrow strategy DTO."""
+
+    if isinstance(candidate, InstrumentCandidateDTO):
+        return candidate
+    spec = getattr(candidate, "spec", None)
+    source = spec if spec is not None else candidate
+    instrument_id = getattr(candidate, "instrument_id", None) or getattr(
+        source, "instrument_id", None
+    )
+    display = getattr(source, "display", source)
+    trading_code = getattr(candidate, "trading_code", None) or getattr(
+        display, "trading_code", None
+    )
+    name = getattr(candidate, "name", None) or getattr(display, "name", None)
+    display_name = getattr(candidate, "display_name", None) or getattr(
+        display, "display_name", None
+    )
+    asset_class = getattr(candidate, "asset_class", None) or getattr(
+        source, "asset_class", None
+    )
+    exchange = getattr(candidate, "exchange", None) or getattr(
+        source, "exchange", None
+    )
+    if not isinstance(instrument_id, UUID) or not all(
+        isinstance(value, str) and value.strip()
+        for value in (trading_code, name, display_name, asset_class, exchange)
+    ):
+        raise _universe_provider_error(
+            "universe provider candidate cannot be projected to InstrumentCandidateDTO",
+            details={
+                "candidate_type": type(candidate).__name__,
+                "instrument_id": instrument_id,
+            },
+        )
+    return InstrumentCandidateDTO(
+        instrument_id=instrument_id,
+        trading_code=trading_code,
+        name=name,
+        display_name=display_name,
+        asset_class=asset_class,
+        exchange=exchange,
+    )
+
+
+class _StepBoundUniverse:
+    """Immutable full candidate snapshot plus strategy DTO projection."""
+
+    __slots__ = (
+        "_candidates",
+        "_strategy_candidates",
+        "_source",
+        "_market_scope",
+        "_query_observer",
+    )
+
+    def __init__(
+        self,
+        candidates: Sequence[Any],
+        source: Any | None = None,
+        query_observer: Callable[[tuple[UUID, ...]], None] | None = None,
+    ) -> None:
+        by_id: dict[UUID, Any] = {}
+        for candidate in tuple(candidates):
+            instrument_id = getattr(candidate, "instrument_id", None)
+            if not isinstance(instrument_id, UUID):
+                raise _universe_provider_error(
+                    "universe provider returned a candidate without a stable instrument_id",
+                    details={"candidate_type": type(candidate).__name__},
+                )
+            if instrument_id in by_id:
+                raise _universe_provider_error(
+                    "universe provider returned duplicate candidate identities",
+                    details={"instrument_id": str(instrument_id)},
+                )
+            by_id[instrument_id] = candidate
+        ordered_ids = tuple(sorted(by_id, key=str))
+        object.__setattr__(self, "_candidates", tuple(by_id[item] for item in ordered_ids))
+        object.__setattr__(
+            self,
+            "_strategy_candidates",
+            tuple(_project_strategy_candidate(by_id[item]) for item in ordered_ids),
+        )
+        object.__setattr__(self, "_source", source)
+        raw_source = _raw_universe_source(source)
+        object.__setattr__(self, "_market_scope", getattr(raw_source, "market_scope", None))
+        # The snapshot itself remains immutable.  This callback only records
+        # which rows the strategy-facing ``universe.query()`` actually
+        # returned; it is deliberately separate from the provider's full
+        # candidate snapshot so a strategy cannot authorize an unseen ID by
+        # hard-coding it in a decision.
+        object.__setattr__(self, "_query_observer", query_observer)
+
+    def __setattr__(self, name: str, value: Any) -> None:
+        raise AttributeError("the step-bound universe is read-only")
+
+    def __delattr__(self, name: str) -> None:
+        raise AttributeError("the step-bound universe is read-only")
+
+    @property
+    def candidates(self) -> tuple[Any, ...]:
+        return self._candidates
+
+    @property
+    def strategy_candidates(self) -> tuple[InstrumentCandidateDTO, ...]:
+        return self._strategy_candidates
+
+    @property
+    def source(self) -> Any | None:
+        return self._source
+
+    def query(
+        self,
+        *,
+        exchanges: Sequence[str] | None = None,
+        asset_classes: Sequence[str] | None = None,
+    ) -> tuple[InstrumentCandidateDTO, ...]:
+        """Apply only narrowing filters and update optional chunk permission."""
+
+        def normalize(value: Sequence[str] | None, field_name: str) -> set[str] | None:
+            if value is None:
+                return None
+            if isinstance(value, (str, bytes)):
+                raise DomainValidationError(f"{field_name} must be an iterable of strings")
+            try:
+                result = {item.strip() for item in value}
+            except (AttributeError, TypeError) as exc:
+                raise DomainValidationError(
+                    f"{field_name} must be an iterable of strings"
+                ) from exc
+            if any(not item for item in result):
+                raise DomainValidationError(f"{field_name} entries must be non-blank strings")
+            return result
+
+        exchange_filter = normalize(exchanges, "exchanges")
+        asset_filter = normalize(asset_classes, "asset_classes")
+        scope = self._market_scope
+        if exchange_filter is not None and scope is not None:
+            allowed = set(getattr(scope, "exchanges", ()) or ())
+            if allowed and not exchange_filter.issubset(allowed):
+                raise DomainValidationError("strategy exchange filter widens the frozen market scope")
+        if asset_filter is not None and scope is not None:
+            allowed = set(getattr(scope, "asset_classes", ()) or ())
+            if allowed and not asset_filter.issubset(allowed):
+                raise DomainValidationError("strategy asset-class filter widens the frozen market scope")
+        rows: list[InstrumentCandidateDTO] = []
+        for candidate, projection in zip(self._candidates, self._strategy_candidates):
+            if exchange_filter is not None and getattr(candidate, "exchange", None) not in exchange_filter:
+                continue
+            if asset_filter is not None and getattr(candidate, "asset_class", None) not in asset_filter:
+                continue
+            rows.append(projection)
+        source = self._source
+        raw_source = getattr(source, "_UniverseQueryDTO__query", source)
+        chunk_view = getattr(raw_source, "_ChunkUniverseQuery__view", None)
+        authorizer = getattr(chunk_view, "_authorize_step_candidates", None)
+        if callable(authorizer):
+            authorizer(
+                tuple(item.instrument_id for item in rows),
+                query=getattr(raw_source, "_ChunkUniverseQuery__query", raw_source),
+            )
+        observer = self._query_observer
+        if callable(observer):
+            observer(tuple(item.instrument_id for item in rows))
+        return tuple(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -954,6 +1459,100 @@ class BacktestRunResult:
     # The verified run-level rule snapshot identity, when this runtime was
     # admitted with a formal snapshot bundle.
     rule_snapshot_hash: str | None = None
+    # Candidate-universe audit data is carried through existing run/result
+    # projections rather than a new candidate table.  Mappings are frozen at
+    # construction so a caller cannot rewrite qualification evidence after
+    # the run has completed.
+    universe_scope_snapshot_hash: str | None = None
+    universe_eligibility_summary: Mapping[str, Any] = MappingProxyType({})
+    final_qualification_results: tuple[Mapping[str, Any], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.universe_scope_snapshot_hash is not None:
+            if not isinstance(self.universe_scope_snapshot_hash, str) or not self.universe_scope_snapshot_hash.strip():
+                raise DomainValidationError(
+                    "universe_scope_snapshot_hash must be non-blank text when provided"
+                )
+            if len(self.universe_scope_snapshot_hash.strip()) != 64 or any(
+                character not in "0123456789abcdef"
+                for character in self.universe_scope_snapshot_hash.strip()
+            ):
+                raise DomainValidationError(
+                    "universe_scope_snapshot_hash must be a lowercase SHA-256 digest"
+                )
+            object.__setattr__(
+                self,
+                "universe_scope_snapshot_hash",
+                self.universe_scope_snapshot_hash.strip(),
+            )
+        summary = _freeze_payload(
+            _json_safe_runtime_value(dict(self.universe_eligibility_summary or {}))
+        )
+        if not isinstance(summary, Mapping):
+            raise DomainValidationError(
+                "universe_eligibility_summary must be a mapping"
+            )
+        object.__setattr__(self, "universe_eligibility_summary", summary)
+        normalized_results: list[Mapping[str, Any]] = []
+        for index, result in enumerate(self.final_qualification_results):
+            if not isinstance(result, Mapping):
+                raise DomainValidationError(
+                    f"final_qualification_results[{index}] must be a mapping"
+                )
+            frozen_result = _freeze_payload(
+                _json_safe_runtime_value(dict(result))
+            )
+            if not isinstance(frozen_result, Mapping):
+                raise DomainValidationError(
+                    f"final_qualification_results[{index}] must be a JSON mapping"
+                )
+            normalized_results.append(frozen_result)
+        object.__setattr__(
+            self,
+            "final_qualification_results",
+            tuple(normalized_results),
+        )
+
+    @property
+    def universe_final_rechecks(self) -> tuple[Mapping[str, Any], ...]:
+        """Architecture-name alias for final target qualification evidence."""
+
+        return self.final_qualification_results
+
+    @property
+    def universe_target_ids(self) -> tuple[str, ...]:
+        """Stable selected target identities represented by this result."""
+
+        return tuple(
+            str(item.get("instrument_id"))
+            for item in self.final_qualification_results
+            if isinstance(item, Mapping) and item.get("instrument_id") is not None
+        )
+
+    @property
+    def universe_filtered_reason_counts(self) -> Mapping[str, int]:
+        """Return candidate-level filter counts from the audit summary."""
+
+        value = self.universe_eligibility_summary.get(
+            "filtered_reason_counts", {}
+        )
+        return value if isinstance(value, Mapping) else MappingProxyType({})
+
+    @property
+    def qualification_policy_version(self) -> str | None:
+        """Return the frozen candidate qualification-policy identity."""
+
+        value = self.universe_eligibility_summary.get(
+            "qualification_policy_version"
+        )
+        return value if isinstance(value, str) else None
+
+    @property
+    def resolved_calendar_ids(self) -> tuple[str, ...]:
+        """Return the immutable named calendars used by candidate checks."""
+
+        value = self.universe_eligibility_summary.get("resolved_calendar_ids", ())
+        return tuple(value) if isinstance(value, (tuple, list)) else ()
 
 
 class DeterministicBacktestRunner:
@@ -1007,6 +1606,16 @@ class DeterministicBacktestRunner:
         instrument_display_provider: Any | None = None,
         rule_snapshot_bundle: Any | None = None,
         snapshot_bundle: Any | None = None,
+        # Candidate qualification is optional for legacy fixed-scope
+        # fixtures.  Formal dynamic/hybrid callers may provide the canonical
+        # evaluator and frozen scope resolution through either explicit
+        # arguments or the view factory's equivalent read-only ports.
+        candidate_eligibility_evaluator: Any | None = None,
+        candidate_eligibility: Any | None = None,
+        candidate_evaluator: Any | None = None,
+        universe_scope_resolution: Any | None = None,
+        universe_scope: Any | None = None,
+        fixed_authorized_instrument_ids: Sequence[UUID] | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -1072,6 +1681,105 @@ class DeterministicBacktestRunner:
         self._currency = currency.upper()
         self._settlement_calendar = settlement_calendar
         self._rule_snapshot_bundle = selected_rule_snapshot
+        if (
+            candidate_eligibility_evaluator is not None
+            and candidate_eligibility is not None
+        ):
+            raise DomainValidationError(
+                "provide only one of candidate_eligibility_evaluator and "
+                "candidate_eligibility"
+            )
+        if (
+            candidate_evaluator is not None
+            and (
+                candidate_eligibility_evaluator is not None
+                or candidate_eligibility is not None
+            )
+        ):
+            raise DomainValidationError(
+                "provide only one candidate eligibility evaluator"
+            )
+        if universe_scope_resolution is not None and universe_scope is not None:
+            raise DomainValidationError(
+                "provide only one of universe_scope_resolution and universe_scope"
+            )
+        self._candidate_eligibility_evaluator = (
+            candidate_eligibility_evaluator
+            if candidate_eligibility_evaluator is not None
+            else candidate_eligibility
+            if candidate_eligibility is not None
+            else candidate_evaluator
+        )
+        self._universe_scope_resolution = (
+            universe_scope_resolution
+            if universe_scope_resolution is not None
+            else universe_scope
+        )
+        # Keep the view factory as the dependency boundary: callers that
+        # construct the provider-backed factory can attach the same frozen
+        # scope/evaluator there without duplicating it in runner kwargs.
+        if self._candidate_eligibility_evaluator is None:
+            self._candidate_eligibility_evaluator = getattr(
+                view_factory, "candidate_eligibility_evaluator", None
+            )
+        if self._universe_scope_resolution is None:
+            self._universe_scope_resolution = getattr(
+                view_factory, "universe_scope_resolution", None
+            )
+        if self._universe_scope_resolution is not None:
+            scope_status = self._resolve_attr(
+                self._universe_scope_resolution, ("status",)
+            )
+            scope_status = getattr(scope_status, "value", scope_status)
+            if scope_status not in (None, "ready"):
+                issue_code = self._resolve_attr(
+                    self._universe_scope_resolution,
+                    ("primary_issue_code", "code"),
+                )
+                if issue_code == "universe_capability_missing":
+                    raise _universe_capability_error(
+                        "the dynamic universe scope is missing a required provider capability",
+                        details={"reason_code": issue_code},
+                    )
+                from app.backtesting.data.errors import UniverseScopeUnresolvedError
+
+                raise UniverseScopeUnresolvedError(
+                    "the dynamic universe scope is unresolved",
+                    details={"reason_code": issue_code or "universe_scope_unresolved"},
+                )
+        self._explicit_fixed_authorized_ids = self._normalize_uuid_ids(
+            fixed_authorized_instrument_ids,
+            "fixed_authorized_instrument_ids",
+            allow_none=True,
+        )
+        self._frozen_universe_calendar_ids = self._resolve_frozen_calendar_ids(
+            self._universe_scope_resolution
+        )
+        scope_mode = self._resolve_attr(
+            self._universe_scope_resolution, ("scope_mode",)
+        )
+        scope_mode = getattr(scope_mode, "value", scope_mode)
+        if scope_mode in ("dynamic", "hybrid") and not self._frozen_universe_calendar_ids:
+            from app.backtesting.data.errors import UniverseScopeUnresolvedError
+
+            raise UniverseScopeUnresolvedError(
+                "a dynamic/hybrid runtime requires a finite preflighted calendar set",
+                details={"reason_code": "universe_scope_unresolved"},
+            )
+        self._universe_scope_snapshot_hash = self._resolve_scope_hash(
+            self._universe_scope_resolution
+        )
+        if self._universe_scope_snapshot_hash is None:
+            factory_universe = getattr(view_factory, "_universe_dto", None)
+            raw_universe = getattr(
+                factory_universe, "_UniverseQueryDTO__query", factory_universe
+            )
+            self._universe_scope_snapshot_hash = self._resolve_scope_hash(
+                raw_universe
+            )
+        self._universe_eligibility_policy_version = (
+            self._resolve_policy_version(self._universe_scope_resolution)
+        )
         self._rule_policy_cache: dict[tuple[UUID, date], Any] = {}
         self._used_rule_segments: dict[tuple[UUID, date], str] = {}
         if analysis_admission is not None:
@@ -1319,6 +2027,15 @@ class DeterministicBacktestRunner:
         self._failed = False
 
         self._portfolio = initial_portfolio
+        register_initial = getattr(
+            self._view_factory, "register_runtime_instrument_ids", None
+        )
+        if callable(register_initial):
+            # Opening holdings are fixed preflight subjects even in a
+            # dynamic-only run.  Registering them only broadens the engine's
+            # read set for valuation/matching; it never widens strategy
+            # candidate permissions or the frozen calendar set.
+            register_initial(tuple(self._portfolio.positions))
         self._orders: list[Order] = []
         self._pending_fills: tuple[Fill, ...] = ()
         # Accounting-applied fee accumulator: the analyzer's equity
@@ -1350,14 +2067,36 @@ class DeterministicBacktestRunner:
         self._decisions: list[Any] = []
         self._pending_decision: Any = None
         self._last_marks: dict[UUID, Decimal] = {}
+        # Evidence captured by the engine-side refresh immediately before
+        # final qualification.  This is intentionally keyed by stable ID and
+        # never exposed to strategy code; formal dynamic runs use it to prove
+        # that a target still has current-session market facts.
+        self._final_market_data_evidence: dict[UUID, Mapping[str, Any]] = {}
         # Digest pieces of the most recently completed step, consumed by the
         # next decide phase's PreviousStepDTO.
         self._previous_step: PreviousStepDTO | None = None
         self._step_order_records: list[OrderSummaryDTO] = []
         self._step_fill_summaries: list[FillSummaryDTO] = []
-        self._identities: dict[UUID, InstrumentCandidateDTO] = (
-            view_factory.candidate_identities()
-        )
+        # Candidate identities are intentionally populated per decide step.
+        # Calling ``candidate_identities()`` here would snapshot a dynamic
+        # universe at runner construction and make later PIT dates observe a
+        # stale/current catalogue.  Existing fixed fixtures are still loaded
+        # on the first step by ``_bind_step_universe``.
+        self._identities: dict[UUID, InstrumentCandidateDTO] = {}
+        self._step_universes: dict[int, _StepBoundUniverse] = {}
+        self._step_candidates: dict[int, tuple[Any, ...]] = {}
+        self._final_qualification_results: list[Mapping[str, Any]] = []
+        self._last_final_qualification_failure: Mapping[str, Any] | None = None
+        self._filtered_reason_counts: dict[str, int] = {}
+        self._filter_evidence_records: list[Mapping[str, Any]] = []
+        # Dynamic authorization is earned only by a successful strategy-side
+        # query in the current decision step.  The provider snapshot used to
+        # build the context is intentionally not sufficient to authorize a
+        # hard-coded target.
+        self._step_queried_candidate_ids: dict[int, frozenset[UUID]] = {}
+        self._step_decision_data_cutoffs: dict[int, datetime] = {}
+        self._step_qualification_ports: dict[int, Any] = {}
+        self._last_decision_data_cutoff: datetime | None = None
         if self._display_provider is None:
             # The factory is an explicit dependency boundary.  Only a
             # factory-provided resolver is considered; candidate identities
@@ -1376,6 +2115,2270 @@ class DeterministicBacktestRunner:
 
         bundle = self._rule_snapshot_bundle
         return bundle.snapshot_hash if bundle is not None else None
+
+    @property
+    def universe_scope_snapshot_hash(self) -> str | None:
+        """Return the frozen dynamic-scope hash used by this run."""
+
+        return self._universe_scope_snapshot_hash
+
+    @property
+    def final_qualification_results(self) -> tuple[Mapping[str, Any], ...]:
+        """Return immutable target qualification evidence collected so far."""
+
+        return tuple(self._final_qualification_results)
+
+    @property
+    def final_qualification_failure(self) -> Mapping[str, Any] | None:
+        """Return the latest failed-target evidence, if the run aborted there."""
+
+        return self._last_final_qualification_failure
+
+    @staticmethod
+    def _normalize_uuid_ids(
+        values: Sequence[UUID] | None,
+        field_name: str,
+        *,
+        allow_none: bool = False,
+    ) -> frozenset[UUID]:
+        """Normalize an optional fixed-authority identity collection."""
+
+        if values is None and allow_none:
+            return frozenset()
+        if values is None:
+            raise DomainValidationError(f"{field_name} must be an iterable of UUIDs")
+        if isinstance(values, (str, bytes)):
+            raise DomainValidationError(f"{field_name} must be an iterable of UUIDs")
+        try:
+            normalized = tuple(values)
+        except TypeError as exc:
+            raise DomainValidationError(
+                f"{field_name} must be an iterable of UUIDs"
+            ) from exc
+        if any(not isinstance(value, UUID) for value in normalized):
+            raise DomainValidationError(f"{field_name} entries must be UUIDs")
+        return frozenset(normalized)
+
+    @staticmethod
+    def _resolve_attr(source: Any, names: Sequence[str]) -> Any:
+        """Return the first non-None attribute among a compatibility alias set."""
+
+        if source is None:
+            return None
+        for name in names:
+            value = getattr(source, name, None)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _resolve_frozen_calendar_ids(cls, resolution: Any) -> tuple[str, ...]:
+        """Read canonical calendar IDs from an immutable scope resolution."""
+
+        value = cls._resolve_attr(
+            resolution,
+            (
+                "resolved_calendar_ids",
+                "frozen_calendar_ids",
+                "allowed_calendar_ids",
+            ),
+        )
+        if value is None:
+            return ()
+        if isinstance(value, (str, bytes)):
+            value = (value,)
+        try:
+            values = tuple(value)
+        except TypeError as exc:
+            raise DomainValidationError(
+                "universe scope calendar IDs must be an iterable"
+            ) from exc
+        normalized: set[str] = set()
+        for item in values:
+            if not isinstance(item, str) or not item.strip():
+                raise DomainValidationError(
+                    "universe scope calendar IDs must be non-blank strings"
+                )
+            normalized.add(cls._canonical_calendar_id(item))
+        return tuple(sorted(normalized))
+
+    @staticmethod
+    def _canonical_calendar_id(value: str) -> str:
+        """Normalize a named calendar without deriving it from market labels."""
+
+        try:
+            from app.backtesting.calendar_axis import normalize_calendar_id
+
+            return normalize_calendar_id(value)
+        except Exception:
+            # Legacy fixtures use simple labels that predate task-11's
+            # canonicalizer.  Trimming/casing is the only compatibility
+            # normalization; exchange, code prefix, and asset class are never
+            # used to infer a calendar.
+            return value.strip().upper()
+
+    @classmethod
+    def _resolve_scope_hash(cls, resolution: Any) -> str | None:
+        """Extract a frozen scope hash while ignoring display metadata."""
+
+        value = cls._resolve_attr(
+            resolution,
+            (
+                "snapshot_hash",
+                "scope_snapshot_hash",
+                "universe_scope_snapshot_hash",
+            ),
+        )
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise DomainValidationError(
+                "universe scope snapshot hash must be non-blank text"
+            )
+        return value.strip()
+
+    @classmethod
+    def _resolve_policy_version(cls, resolution: Any) -> str | None:
+        """Extract the qualification-policy identity for runtime audit output."""
+
+        value = cls._resolve_attr(
+            resolution,
+            (
+                "qualification_policy_version",
+                "qualification_policy",
+                "policy_version",
+            ),
+        )
+        if value is None:
+            return None
+        key = getattr(value, "key", None)
+        version = getattr(value, "version", None)
+        if isinstance(key, str) and version is not None:
+            return f"{key}@{version}"
+        return str(value)
+
+    @classmethod
+    def _scope_mode_value(cls, value: Any) -> str | None:
+        """Normalize a scope-mode enum or string for runtime gates."""
+
+        value = getattr(value, "value", value)
+        return value if isinstance(value, str) else None
+
+    def _is_formal_dynamic_scope(
+        self,
+        *,
+        bound: _StepBoundUniverse | None = None,
+        source: Any | None = None,
+    ) -> bool:
+        """Return whether the current candidate path is formal dynamic/hybrid.
+
+        Legacy strategy-only fixtures do not carry a scope mode and retain
+        their historical fixed behavior.  Once admission or a bound data
+        query explicitly says ``dynamic``/``hybrid``, however, the runtime
+        must require a real qualification port and step-earned permissions.
+        """
+
+        resolution = self._universe_scope_resolution
+        mode = self._scope_mode_value(
+            self._resolve_attr(resolution, ("scope_mode",))
+        )
+        if mode in {"dynamic", "hybrid"}:
+            return True
+        if source is None and bound is not None:
+            source = self._source_universe_query(bound)
+        raw_source = _raw_universe_source(source)
+        mode = self._scope_mode_value(
+            self._resolve_attr(raw_source, ("scope_mode",))
+        )
+        if mode in {"dynamic", "hybrid"}:
+            return True
+        policy = self._resolve_attr(
+            raw_source, ("universe_query_policy", "universe_policy")
+        )
+        return bool(getattr(policy, "candidate_set_rules", ()))
+
+    def _record_step_queried_candidates(
+        self, step_sequence: int, instrument_ids: Sequence[UUID]
+    ) -> None:
+        """Record only IDs returned through this step's strategy query."""
+
+        values = tuple(instrument_ids)
+        if any(not isinstance(value, UUID) for value in values):
+            raise DomainValidationError(
+                "strategy universe query returned non-UUID instrument ids"
+            )
+        previous = self._step_queried_candidate_ids.get(step_sequence, frozenset())
+        self._step_queried_candidate_ids[step_sequence] = frozenset(
+            previous | set(values)
+        )
+
+    def _fixed_authorized_ids(self) -> frozenset[UUID]:
+        """Return fixed permissions, including every opening holding."""
+
+        values = set(self._explicit_fixed_authorized_ids)
+        # BacktestViewFactory keeps this tuple private by design; reading it
+        # here only captures the already-admitted fixed scope and does not
+        # expose the underlying provider to strategy code.
+        values.update(
+            value
+            for value in getattr(self._view_factory, "_scope_instrument_ids", ())
+            if isinstance(value, UUID)
+        )
+        values.update(
+            value
+            for value in getattr(self._view_factory, "scope_instrument_ids", ())
+            if isinstance(value, UUID)
+        )
+        values.update(
+            value
+            for value in getattr(
+                self._view_factory, "fixed_authorized_instrument_ids", ()
+            )
+            if isinstance(value, UUID)
+        )
+        values.update(self._portfolio.positions)
+        resolution = self._universe_scope_resolution
+        for name in (
+            "fixed_instrument_ids",
+            "fixed_authorized_instrument_ids",
+            "mandatory_instrument_ids",
+        ):
+            candidate_ids = getattr(resolution, name, ()) if resolution is not None else ()
+            if candidate_ids:
+                values.update(
+                    value for value in candidate_ids if isinstance(value, UUID)
+                )
+        return frozenset(values)
+
+    def _refresh_target_market_data(
+        self, instrument_ids: Sequence[UUID], context: PhaseContext
+    ) -> None:
+        """Load explicit current-close facts after final qualification.
+
+        Dynamic targets are selected after the close valuation view has been
+        constructed.  A provider-backed factory may therefore need one
+        explicit same-session read for sizing; this read happens only after
+        all target qualification checks pass and before any order is built.
+        """
+
+        if not instrument_ids:
+            return
+        requested_ids = tuple(sorted(set(instrument_ids), key=str))
+        # Start with an explicit unavailable record for every requested
+        # identity.  Provider responses replace these entries only when the
+        # returned object has the exact stable identity and expected type.
+        self._final_market_data_evidence = {
+            instrument_id: {
+                "session_date": context.session_date,
+                "data_cutoff": self._step_decision_data_cutoffs.get(
+                    context.step_sequence,
+                    self._last_decision_data_cutoff or context.decision_time,
+                ),
+                "quote_present": False,
+                "close_available": False,
+                "facts_present": False,
+                "complete": False,
+            }
+            for instrument_id in requested_ids
+        }
+        resolver = getattr(self._view_factory, "refresh_market_data", None)
+        if callable(resolver):
+            try:
+                result = resolver(requested_ids, context.session_date)
+            except TypeError:
+                result = resolver(
+                    instrument_ids=requested_ids,
+                    session_date=context.session_date,
+                )
+        else:
+            market = getattr(self._view_factory, "_engine_market_data", None)
+            if market is None:
+                return
+            try:
+                result = (
+                    market.session_quotes(requested_ids, context.session_date),
+                    market.instrument_facts(requested_ids),
+                )
+            except Exception as exc:
+                raise _universe_provider_error(
+                    "engine market data cannot refresh a final-qualified target",
+                    details={"error_type": type(exc).__name__},
+                ) from exc
+        if not isinstance(result, (tuple, list)) or len(result) != 2:
+            raise _universe_provider_error(
+                "refresh_market_data must return (quotes, facts)"
+            )
+        quotes, facts = result
+        if isinstance(quotes, Mapping):
+            for instrument_id, quote in quotes.items():
+                if isinstance(instrument_id, UUID) and isinstance(quote, SessionQuote):
+                    if instrument_id not in self._final_market_data_evidence:
+                        continue
+                    if quote.instrument_id != instrument_id:
+                        raise _universe_provider_error(
+                            "market data quote identity does not match its key",
+                            details={"instrument_id": instrument_id},
+                        )
+                    if quote.close_price is not None:
+                        self._last_marks[instrument_id] = quote.close_price
+                    evidence = dict(self._final_market_data_evidence[instrument_id])
+                    evidence.update(
+                        {
+                            "quote_present": True,
+                            "close_available": quote.close_price is not None,
+                            "quote_evidence": quote.evidence,
+                        }
+                    )
+                    self._final_market_data_evidence[instrument_id] = evidence
+        if isinstance(facts, Mapping):
+            for instrument_id, fact in facts.items():
+                if isinstance(instrument_id, UUID) and isinstance(fact, InstrumentFacts):
+                    if instrument_id not in self._final_market_data_evidence:
+                        continue
+                    if fact.instrument_id != instrument_id:
+                        raise _universe_provider_error(
+                            "instrument facts identity does not match its key",
+                            details={"instrument_id": instrument_id},
+                        )
+                    self._instrument_facts[instrument_id] = fact
+                    evidence = dict(self._final_market_data_evidence[instrument_id])
+                    evidence.update(
+                        {
+                            "facts_present": True,
+                            "calendar_id": fact.calendar_id,
+                            "suspended": fact.suspended,
+                            "buy_allowed": fact.buy_allowed,
+                            "sell_allowed": fact.sell_allowed,
+                        }
+                    )
+                    self._final_market_data_evidence[instrument_id] = evidence
+        for instrument_id, evidence in tuple(
+            self._final_market_data_evidence.items()
+        ):
+            updated = dict(evidence)
+            updated["complete"] = bool(
+                updated.get("quote_present")
+                and updated.get("close_available")
+                and updated.get("facts_present")
+            )
+            self._final_market_data_evidence[instrument_id] = updated
+
+    def _candidate_evaluator(
+        self, *, allow_pure_fallback: bool = True
+    ) -> Any | None:
+        """Resolve the one canonical candidate qualification port.
+
+        ``evaluate_candidate`` is a useful compatibility fallback for legacy
+        in-memory checks, but it is not a provider-owned requalification port:
+        it cannot re-fetch current identity, coverage, action, or status facts.
+        Formal dynamic/hybrid execution therefore asks this method with the
+        fallback disabled and requires an explicitly wired provider port.
+        """
+
+        evaluator = self._candidate_eligibility_evaluator
+        if evaluator is not None:
+            if callable(evaluator):
+                return evaluator
+            if isinstance(evaluator, Mapping):
+                # Small in-memory acceptance fixtures may provide one
+                # already-evaluated result per stable identity.  Treat that
+                # map as a read-only qualification port, not as a second
+                # filtering implementation.
+                def _lookup(candidate=None, instrument_id=None, **_kwargs):
+                    resolved_id = instrument_id or getattr(
+                        candidate, "instrument_id", None
+                    )
+                    return evaluator.get(
+                        resolved_id,
+                        evaluator.get(str(resolved_id)) if resolved_id is not None else None,
+                    )
+
+                return _lookup
+            method = getattr(evaluator, "evaluate_candidate", None)
+            if callable(method):
+                return method
+            method = getattr(evaluator, "evaluate", None)
+            if callable(method):
+                return method
+            for name in (
+                "qualify_candidate",
+                "qualify",
+                "final_qualify",
+                "recheck_candidate",
+                "recheck",
+            ):
+                method = getattr(evaluator, name, None)
+                if callable(method):
+                    return method
+            raise DomainValidationError(
+                "candidate_eligibility_evaluator must be callable or expose "
+                "evaluate_candidate()"
+            )
+        for source in (
+            self._view_factory,
+            self._universe_scope_resolution,
+        ):
+            for name in (
+                "evaluate_candidate",
+                "qualify_candidate",
+                "qualify",
+                "evaluate",
+                "candidate_eligibility",
+                "candidate_eligibility_evaluator",
+                "final_qualify",
+                "recheck_candidate",
+                "recheck",
+            ):
+                candidate = getattr(source, name, None)
+                if callable(candidate):
+                    return candidate
+        for bound in self._step_universes.values():
+            source = self._source_universe_query(bound)
+            for name in (
+                "evaluate_candidate",
+                "qualify_candidate",
+                "qualify",
+                "evaluate",
+                "candidate_eligibility",
+                "candidate_eligibility_evaluator",
+                "final_qualify",
+                "recheck_candidate",
+                "recheck",
+            ):
+                candidate = getattr(source, name, None)
+                if callable(candidate):
+                    return candidate
+                if isinstance(candidate, Mapping):
+                    mapping = candidate
+
+                    def _lookup_from_source(
+                        candidate=None, instrument_id=None, **_kwargs
+                    ):
+                        resolved_id = instrument_id or getattr(
+                            candidate, "instrument_id", None
+                        )
+                        return mapping.get(
+                            resolved_id,
+                            mapping.get(str(resolved_id))
+                            if resolved_id is not None
+                            else None,
+                        )
+
+                    return _lookup_from_source
+        # The pure task-15 evaluator is auto-selected only when the run has
+        # an explicit formal scope resolution or provider-side evidence.  A
+        # legacy strategy-only DTO has no identity/rule/coverage evidence and
+        # must not be misclassified as ineligible merely because those fields
+        # are intentionally hidden from strategy code.
+        has_formal_evidence = self._universe_scope_resolution is not None or any(
+            getattr(self._source_universe_query(bound), name, None) is not None
+            for bound in self._step_universes.values()
+            for name in ("universe_scope_snapshot_hash", "allowed_calendar_ids")
+        ) or any(
+            any(
+                hasattr(candidate, name)
+                for name in (
+                    "spec",
+                    "identity_evidence",
+                    "mapping_evidence",
+                    "rule_evidence",
+                    "market_data_evidence",
+                )
+            )
+            for bound in self._step_universes.values()
+            for candidate in bound.candidates
+        )
+        if allow_pure_fallback and has_formal_evidence:
+            try:
+                from app.backtesting.data.universe import evaluate_candidate
+            except (ImportError, AttributeError):
+                evaluate_candidate = None
+            if callable(evaluate_candidate):
+                return evaluate_candidate
+        return None
+
+    def _verify_scope_snapshot(self, context: PhaseContext) -> None:
+        """Verify the frozen dynamic scope before strategy code can run.
+
+        Scope providers may expose a verifier, a current hash, or both.  The
+        runtime accepts all three forms so the data-layer implementation can
+        remain independent of the phase loop, but every mismatch is surfaced
+        as the same stable machine code.  No changed scope is installed and
+        no time-axis operation is attempted here.
+        """
+
+        resolution = self._universe_scope_resolution
+        if resolution is None:
+            return
+        verifier = self._resolve_attr(
+            resolution,
+            ("verify_hash", "verify_snapshot", "assert_unchanged"),
+        )
+        if callable(verifier):
+            try:
+                verifier()
+            except Exception as exc:
+                if getattr(exc, "code", None) == "universe_preflight_hash_mismatch":
+                    raise
+                self._raise_final_qualification_error(
+                    "universe_preflight_hash_mismatch",
+                    instrument_id=UUID(int=0),
+                    context=context,
+                    decision=self._pending_decision,
+                    candidate=None,
+                    failed_check="scope_snapshot",
+                    reason_codes=("universe_preflight_hash_mismatch",),
+                    expected=self._universe_scope_snapshot_hash,
+                    actual={"error_type": type(exc).__name__, "error": str(exc)},
+                )
+        expected = self._universe_scope_snapshot_hash
+        if expected is None:
+            return
+        current = self._resolve_attr(
+            resolution,
+            (
+                "current_snapshot_hash",
+                "current_scope_snapshot_hash",
+                "current_hash",
+                "observed_snapshot_hash",
+                "snapshot_hash",
+                "scope_snapshot_hash",
+            ),
+        )
+        if current is not None and str(current) != expected:
+            self._raise_final_qualification_error(
+                "universe_preflight_hash_mismatch",
+                instrument_id=UUID(int=0),
+                context=context,
+                decision=self._pending_decision,
+                candidate=None,
+                failed_check="scope_snapshot",
+                reason_codes=("universe_preflight_hash_mismatch",),
+                expected=expected,
+                actual=current,
+            )
+
+    @staticmethod
+    def _source_universe_query(bound: _StepBoundUniverse) -> Any | None:
+        """Return the original query object for immutable boundary evidence."""
+
+        source = bound.source
+        # A ``UniverseQueryDTO`` wraps the data query in a private attribute;
+        # the fallback is intentionally best-effort and never mutates it.
+        source = getattr(source, "_UniverseQueryDTO__query", source)
+        return getattr(source, "_ChunkUniverseQuery__query", source)
+
+    @staticmethod
+    def _clear_prestrategy_universe_authorization(source: Any) -> None:
+        """Undo provider-side eager authorization before strategy execution.
+
+        Some chunk-backed query facades authorize their result as part of
+        ``query()``.  Runtime performs that read to freeze a complete engine
+        snapshot, but the permission must not become effective until the
+        strategy invokes its own bound ``universe.query()``.  The compatibility
+        hooks are intentionally private/read-only and are ignored for simple
+        strategy-only fixtures that do not expose them.
+        """
+
+        pending: list[Any] = [source]
+        seen: set[int] = set()
+        while pending and len(seen) < 8:
+            current = pending.pop(0)
+            if current is None or id(current) in seen:
+                continue
+            seen.add(id(current))
+            clearer = getattr(current, "_clear_authorized_candidates", None)
+            if callable(clearer):
+                clearer()
+            clearer = getattr(current, "clear_step_candidate_authorization", None)
+            if callable(clearer):
+                clearer()
+            for attribute in (
+                "_UniverseQueryDTO__query",
+                "_ChunkUniverseQuery__view",
+                "_ChunkStrategyDataView__chunk",
+            ):
+                nested = getattr(current, attribute, None)
+                if nested is not None:
+                    pending.append(nested)
+
+    def _step_universe_source(self, context: PhaseContext) -> Any:
+        """Resolve a fresh bound universe source for one decide step."""
+
+        for name in ("universe_for_step", "bound_universe", "universe"):
+            resolver = getattr(self._view_factory, name, None)
+            if not callable(resolver):
+                continue
+            if name == "universe":
+                try:
+                    return resolver(
+                        effective_date=context.session_date,
+                        data_cutoff=context.decision_time,
+                    )
+                except TypeError:
+                    return resolver()
+            # Step-aware providers can use either date names or the complete
+            # phase context.  Signature inspection avoids catching a provider
+            # body TypeError and accidentally invoking it twice.
+            try:
+                parameters = signature(resolver).parameters
+            except (TypeError, ValueError):
+                return resolver()
+            kwargs: dict[str, Any] = {}
+            aliases = {
+                "effective_date": context.session_date,
+                "session_date": context.session_date,
+                "decision_date": context.session_date,
+                "data_cutoff": context.decision_time,
+                "decision_time": context.decision_time,
+                "context": context,
+            }
+            for parameter_name, value in aliases.items():
+                parameter = parameters.get(parameter_name)
+                if parameter is not None and parameter.kind in (
+                    Parameter.POSITIONAL_OR_KEYWORD,
+                    Parameter.KEYWORD_ONLY,
+                ):
+                    kwargs[parameter_name] = value
+            if kwargs:
+                return resolver(**kwargs)
+            return resolver()
+        scope_mode = self._resolve_attr(
+            self._universe_scope_resolution, ("scope_mode",)
+        )
+        scope_mode = getattr(scope_mode, "value", scope_mode)
+        if scope_mode in ("dynamic", "hybrid"):
+            raise _universe_capability_error(
+                "view factory does not expose the required PIT UniverseQuery",
+                details={"scope_mode": scope_mode},
+            )
+        raise _universe_provider_error(
+            "view factory does not expose a bound UniverseQuery"
+        )
+
+    def _bind_step_universe(
+        self,
+        context: PhaseContext,
+        *,
+        source_override: Any | None = None,
+    ) -> _StepBoundUniverse:
+        """Query and freeze candidates immediately before strategy execution."""
+
+        existing = self._step_universes.get(context.step_sequence)
+        if existing is not None:
+            return existing
+        self._verify_scope_snapshot(context)
+        source = (
+            source_override
+            if source_override is not None
+            else self._step_universe_source(context)
+        )
+        expected_hash = self._universe_scope_snapshot_hash
+        raw_source = _raw_universe_source(source)
+        source_hash = self._resolve_attr(
+            raw_source,
+            ("snapshot_hash", "scope_snapshot_hash", "universe_scope_snapshot_hash"),
+        )
+        if expected_hash is not None and source_hash is not None and str(source_hash) != expected_hash:
+            self._raise_final_qualification_error(
+                "universe_preflight_hash_mismatch",
+                instrument_id=UUID(int=0),
+                context=context,
+                decision=self._pending_decision,
+                candidate=None,
+                failed_check="scope_snapshot",
+                reason_codes=("universe_preflight_hash_mismatch",),
+                expected=expected_hash,
+                actual=source_hash,
+            )
+        source_effective = getattr(raw_source, "effective_date", None)
+        if source_effective is not None and source_effective != context.session_date:
+            self._raise_final_qualification_error(
+                "universe_pit_boundary_violation",
+                instrument_id=UUID(int=0),
+                context=context,
+                decision=self._pending_decision,
+                candidate=None,
+                failed_check="effective_date",
+                reason_codes=("universe_pit_boundary_violation",),
+                expected=context.session_date,
+                actual=source_effective,
+            )
+        source_boundary = getattr(raw_source, "boundary", None)
+        source_cutoff = getattr(source_boundary, "data_cutoff", None)
+        if source_cutoff is not None and source_cutoff != context.decision_time:
+            self._raise_final_qualification_error(
+                "universe_pit_boundary_violation",
+                instrument_id=UUID(int=0),
+                context=context,
+                decision=self._pending_decision,
+                candidate=None,
+                failed_check="data_cutoff",
+                reason_codes=("universe_pit_boundary_violation",),
+                expected=context.decision_time,
+                actual=source_cutoff,
+            )
+        query_observer = (
+            lambda instrument_ids, step_sequence=context.step_sequence: self._record_step_queried_candidates(
+                step_sequence, instrument_ids
+            )
+        )
+        if isinstance(source, _StepBoundUniverse):
+            # A factory may already return a bound immutable snapshot.  It is
+            # still safe to use it as the provider snapshot, but only a
+            # runtime-created wrapper can observe strategy query results.
+            bound = _StepBoundUniverse(
+                source.candidates,
+                source=source.source,
+                query_observer=query_observer,
+            )
+        elif isinstance(source, (list, tuple)):
+            bound = _StepBoundUniverse(source, query_observer=query_observer)
+        else:
+            # ``UniverseQueryDTO`` is a strategy boundary and validates that
+            # its output is already projected DTO data.  Runtime needs the
+            # provider's complete engine-side rows first, so unwrap only the
+            # known DTO facade for this internal snapshot read; the bound
+            # ``_StepBoundUniverse`` performs the projection afterwards.
+            query_source = getattr(source, "_UniverseQueryDTO__query", source)
+            query_method = getattr(query_source, "query", None)
+            if not callable(query_method):
+                # A chunk facade may itself wrap a typed ``DataUniverseQuery``
+                # (which is a request value, not a strategy query).  Keep the
+                # facade in that case so it can delegate to its owning chunk.
+                query_source = source
+                query_method = getattr(query_source, "query", None)
+            if not callable(query_method):
+                raise _universe_provider_error(
+                    "bound UniverseQuery must expose query()"
+                )
+            try:
+                candidates = query_method()
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                if code == "unsupported_capability":
+                    raise _universe_capability_error(
+                        "the provider cannot serve the frozen universe query",
+                        details={"cause_code": code},
+                    ) from exc
+                raise
+            try:
+                bound = _StepBoundUniverse(
+                    candidates,
+                    source=query_source,
+                    query_observer=query_observer,
+                )
+            except TypeError as exc:
+                raise _universe_provider_error(
+                    "universe provider returned a non-iterable result"
+                ) from exc
+        self._step_universes[context.step_sequence] = bound
+        self._step_candidates[context.step_sequence] = bound.candidates
+        self._capture_universe_filter_evidence(source)
+        for candidate in bound.strategy_candidates:
+            self._identities[candidate.instrument_id] = candidate
+        return bound
+
+    def _capture_universe_filter_evidence(self, source: Any) -> None:
+        """Copy provider-owned filter counts into the run audit summary."""
+
+        sources: list[Any] = [
+            source,
+            getattr(source, "_UniverseQueryDTO__query", source),
+        ]
+        # A chunk-backed strategy facade keeps its chunk private.  The
+        # optional public provider summary is preferred; these narrowly named
+        # compatibility attributes are only read for audit projection and
+        # never used to authorize a target.
+        raw_source = getattr(source, "_UniverseQueryDTO__query", source)
+        view = getattr(raw_source, "_ChunkUniverseQuery__view", None)
+        chunk = getattr(view, "_ChunkStrategyDataView__chunk", None)
+        sources.extend((view, chunk))
+
+        def collect_counts(value: Any) -> Mapping[Any, Any] | None:
+            """Accept both direct count maps and named filter summaries."""
+
+            if not isinstance(value, Mapping):
+                return None
+            for nested_name in (
+                "reason_counts",
+                "filtered_reason_counts",
+                "universe_filtered_reason_counts",
+            ):
+                nested = value.get(nested_name)
+                if isinstance(nested, Mapping):
+                    return nested
+            return value
+
+        def collect_records(value: Any) -> Sequence[Any] | None:
+            if not isinstance(value, Mapping):
+                return None
+            records = value.get("records") or value.get("filters")
+            if isinstance(records, Sequence) and not isinstance(
+                records, (str, bytes)
+            ):
+                return records
+            return None
+
+        for candidate_source in sources:
+            if candidate_source is None:
+                continue
+            counts = self._resolve_attr(
+                candidate_source,
+                (
+                    "universe_filter_reason_counts",
+                    "filtered_reason_counts",
+                    "filter_reason_counts",
+                ),
+            )
+            counts = collect_counts(counts)
+            if counts is None:
+                summary = self._resolve_attr(
+                    candidate_source,
+                    (
+                        "filter_summary",
+                        "candidate_filter_summary",
+                        "universe_filter_summary",
+                    ),
+                )
+                counts = collect_counts(summary)
+            if counts is None:
+                continue
+            summary = self._resolve_attr(
+                candidate_source,
+                (
+                    "filter_summary",
+                    "candidate_filter_summary",
+                    "universe_filter_summary",
+                ),
+            )
+            records = collect_records(summary)
+            if records:
+                self._filter_evidence_records.extend(
+                    item for item in records if isinstance(item, Mapping)
+                )
+            for reason, count in counts.items():
+                if isinstance(count, bool):
+                    continue
+                try:
+                    numeric_count = int(count)
+                except (TypeError, ValueError):
+                    continue
+                if numeric_count < 0:
+                    continue
+                key = str(reason)
+                self._filtered_reason_counts[key] = max(
+                    self._filtered_reason_counts.get(key, 0), numeric_count
+                )
+
+    def _candidate_context(
+        self,
+        *,
+        candidate: Any | None,
+        instrument_id: UUID,
+        context: PhaseContext,
+        bound: _StepBoundUniverse,
+    ) -> Any:
+        """Build the canonical context when available, otherwise a safe fallback."""
+
+        source = self._source_universe_query(bound)
+        scope = self._universe_scope_resolution
+        effective_date = context.session_date
+        data_cutoff = self._step_decision_data_cutoffs.get(
+            context.step_sequence,
+            self._last_decision_data_cutoff or context.decision_time,
+        )
+        source_calendar_ids = tuple(
+            getattr(source, "allowed_calendar_ids", ()) or ()
+        )
+        frozen_calendar_ids = (
+            self._frozen_universe_calendar_ids or source_calendar_ids
+        )
+        values = {
+            "candidate": candidate,
+            "instrument": candidate,
+            "instrument_id": instrument_id,
+            "effective_date": effective_date,
+            "effective_at": context.decision_time,
+            "session_date": effective_date,
+            "data_cutoff": data_cutoff,
+            "data_cutoff_at": data_cutoff,
+            "query_boundary": getattr(source, "boundary", None),
+            "market_scope": getattr(source, "market_scope", None)
+            or getattr(scope, "market_scope", None),
+            "universe_query_policy": getattr(source, "universe_query_policy", None)
+            or getattr(scope, "universe_query_policy", None),
+            "universe_policy": getattr(source, "universe_query_policy", None)
+            or getattr(scope, "universe_query_policy", None),
+            "rule_package": getattr(source, "rule", None)
+            or getattr(scope, "rule_package_reference", None),
+            "rule_package_reference": getattr(source, "rule", None)
+            or getattr(scope, "rule_package_reference", None),
+            "rule_exception_set": getattr(source, "rule_exception_set", None)
+            or getattr(scope, "rule_exception_set_reference", None),
+            "rule_exception_set_reference": getattr(
+                source, "rule_exception_set", None
+            )
+            or getattr(scope, "rule_exception_set_reference", None),
+            "exception_set_reference": getattr(source, "rule_exception_set", None)
+            or getattr(scope, "rule_exception_set_reference", None),
+            "qualification_policy_version": getattr(
+                source, "qualification_policy_version", None
+            )
+            or getattr(scope, "qualification_policy_version", None),
+            "qualification_policy": getattr(
+                source, "qualification_policy_version", None
+            )
+            or getattr(scope, "qualification_policy_version", None),
+            "frozen_calendar_ids": frozen_calendar_ids,
+            "resolved_calendar_ids": frozen_calendar_ids,
+            "frozen_resolved_calendar_ids": frozen_calendar_ids,
+            "scope_mode": getattr(source, "scope_mode", None),
+            "decision_time": context.decision_time,
+            "universe_scope_snapshot_hash": getattr(
+                source, "universe_scope_snapshot_hash", None
+            )
+            or self._universe_scope_snapshot_hash,
+            "fixed_authorized_instrument_ids": tuple(
+                sorted(self._fixed_authorized_ids(), key=str)
+            ),
+            "requested_window": getattr(scope, "requested_window", None),
+            "required_capabilities": tuple(
+                getattr(scope, "required_capabilities", ()) or ()
+            ),
+            "provider_capability_summary": getattr(
+                scope, "capability_summary", {}
+            )
+            or {},
+        }
+        try:
+            from app.backtesting.data.universe import CandidateEligibilityContext
+        except (ImportError, AttributeError):
+            CandidateEligibilityContext = None
+        if CandidateEligibilityContext is not None:
+            try:
+                parameters = signature(CandidateEligibilityContext).parameters
+                kwargs: dict[str, Any] = {}
+                for name, parameter in parameters.items():
+                    if name == "self" or name not in values:
+                        continue
+                    value = values[name]
+                    if value is not None or parameter.default is Parameter.empty:
+                        kwargs[name] = value
+                return CandidateEligibilityContext(**kwargs)
+            except (TypeError, ValueError):
+                # The fallback still carries the same two PIT boundaries and
+                # frozen scope; no data source is consulted here.
+                pass
+        return _RuntimeCandidateEligibilityContext(
+            instrument_id=instrument_id,
+            effective_date=effective_date,
+            data_cutoff=data_cutoff,
+            market_scope=values["market_scope"],
+            universe_query_policy=values["universe_query_policy"],
+            rule_package=values["rule_package"],
+            rule_exception_set=values["rule_exception_set"],
+            qualification_policy_version=values["qualification_policy_version"],
+            frozen_calendar_ids=tuple(values["frozen_calendar_ids"] or ()),
+            scope_mode=values["scope_mode"],
+            candidate=candidate,
+        )
+
+    @staticmethod
+    def _invoke_candidate_evaluator(
+        evaluator: Any,
+        *,
+        candidate: Any | None,
+        instrument_id: UUID,
+        eligibility_context: Any,
+    ) -> Any:
+        """Call one evaluator using its declared signature only once."""
+
+        try:
+            parameters = list(signature(evaluator).parameters.values())
+        except (TypeError, ValueError):
+            return evaluator(candidate, eligibility_context)
+        positional: list[Any] = []
+        kwargs: dict[str, Any] = {}
+        context_values = {
+            name: getattr(eligibility_context, name, None)
+            for name in (
+                "effective_date",
+                "effective_at",
+                "session_date",
+                "data_cutoff",
+                "data_cutoff_at",
+                "query_boundary",
+                "market_scope",
+                "universe_query_policy",
+                "rule_package",
+                "rule_package_reference",
+                "rule_exception_set",
+                "exception_set_reference",
+                "qualification_policy_version",
+                "qualification_policy",
+                "frozen_calendar_ids",
+                "resolved_calendar_ids",
+                "scope_mode",
+                "required_capabilities",
+                "requested_window",
+                "universe_scope_snapshot_hash",
+                "fixed_authorized_instrument_ids",
+                "provider_capability_summary",
+            )
+        }
+        value_by_name = {
+            "candidate": candidate,
+            "instrument": candidate,
+            "instrument_id": instrument_id,
+            "context": eligibility_context,
+            "eligibility_context": eligibility_context,
+            **context_values,
+        }
+        for parameter in parameters:
+            if parameter.kind is Parameter.VAR_POSITIONAL:
+                continue
+            if parameter.kind is Parameter.VAR_KEYWORD:
+                continue
+            if parameter.name in value_by_name:
+                value = value_by_name[parameter.name]
+            elif parameter.default is not Parameter.empty:
+                continue
+            else:
+                # The documented positional form is ``(candidate, context)``.
+                value = candidate if len(positional) == 0 else eligibility_context
+            if parameter.kind is Parameter.POSITIONAL_ONLY:
+                positional.append(value)
+            elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+                # Positional invocation keeps compatibility with simple
+                # fake ports while named invocation preserves unusual names.
+                positional.append(value)
+            elif parameter.kind is Parameter.KEYWORD_ONLY:
+                kwargs[parameter.name] = value
+        return evaluator(*positional, **kwargs)
+
+    @staticmethod
+    def _prepare_evaluator_candidate(
+        candidate: Any | None,
+        evaluator: Any,
+        *,
+        calendar_id: str | None = None,
+    ) -> Any | None:
+        """Restore only JSON-safe candidate evidence for the pure evaluator.
+
+        ``InstrumentCandidateDTO`` deliberately hides the provider's full
+        ``InstrumentSpec`` from strategy code.  When a caller relies on the
+        canonical pure evaluator, a DTO's optional metadata is copied into
+        its existing ``CandidateInput`` adapter; no rules or facts are
+        reimplemented in runtime.
+        """
+
+        if candidate is None:
+            return None
+        if getattr(evaluator, "__module__", "") != "app.backtesting.data.universe":
+            return candidate
+        if not isinstance(candidate, InstrumentCandidateDTO):
+            return candidate
+        try:
+            from app.backtesting.data.universe import CandidateInput
+        except (ImportError, AttributeError):
+            return candidate
+        metadata = candidate.metadata
+        kwargs: dict[str, Any] = {
+            "instrument_id": candidate.instrument_id,
+            "trading_code": candidate.trading_code,
+            "name": candidate.name,
+            "display_name": candidate.display_name,
+            "asset_class": candidate.asset_class,
+            "exchange": candidate.exchange,
+        }
+        if isinstance(metadata, Mapping):
+            for name in (
+                "calendar_id",
+                "currency",
+                "known_at",
+                "effective_date",
+                "eligible",
+                "reason_codes",
+                "identity_evidence",
+                "mapping_evidence",
+                "rule_evidence",
+                "market_data_evidence",
+                "corporate_action_evidence",
+                "quantity_action_coverage_evidence",
+                "status_evidence",
+            ):
+                if name in metadata:
+                    kwargs[name] = metadata[name]
+        if calendar_id is not None and "calendar_id" not in kwargs:
+            kwargs["calendar_id"] = calendar_id
+        try:
+            return CandidateInput(**kwargs)
+        except Exception:
+            # A malformed optional metadata field is reported by the
+            # evaluator/provider contract, never repaired with a default.
+            return candidate
+
+    @staticmethod
+    def _eligibility_payload(result: Any) -> tuple[bool | None, dict[str, Any]]:
+        """Normalize a CandidateEligibility-like result for audit and branching."""
+
+        if isinstance(result, bool):
+            return result, {"eligible": result}
+        if isinstance(result, Mapping):
+            payload = dict(result)
+            eligible = payload.get("eligible")
+            return (
+                eligible if isinstance(eligible, bool) else None,
+                _json_safe_runtime_value(payload),
+            )
+        if result is None:
+            return None, {}
+        payload: dict[str, Any] = {}
+        for name in (
+            "instrument_id",
+            "eligible",
+            "reason_codes",
+            "calendar_id",
+            "identity_evidence",
+            "mapping_evidence",
+            "rule_evidence",
+            "capability_evidence",
+            "provenance",
+            "settlement_evidence",
+            "exception_evidence",
+            "scope_evidence",
+            "market_scope_evidence",
+            "market_data_evidence",
+            "corporate_action_evidence",
+            "quantity_action_coverage_evidence",
+            "status_evidence",
+            "evidence_summary",
+            "coverage_reports",
+            "coverage_qualification",
+            "coverage_result",
+            "qualification_hash",
+            "resolution_hash",
+            "request",
+        ):
+            value = getattr(result, name, None)
+            if value is not None:
+                payload[name] = value
+        to_payload = getattr(result, "as_dict", None)
+        if callable(to_payload):
+            try:
+                rendered = to_payload()
+            except Exception:
+                rendered = None
+            if isinstance(rendered, Mapping):
+                payload.update(rendered)
+        to_payload = getattr(result, "to_payload", None)
+        if callable(to_payload):
+            try:
+                rendered = to_payload()
+            except Exception:
+                rendered = None
+            if isinstance(rendered, Mapping):
+                payload.update(rendered)
+        eligible = payload.get("eligible")
+        return (
+            eligible if isinstance(eligible, bool) else None,
+            _json_safe_runtime_value(payload),
+        )
+
+    @classmethod
+    def _candidate_calendar_id(
+        cls,
+        candidate: Any | None,
+        eligibility_payload: Mapping[str, Any],
+        facts: Mapping[UUID, InstrumentFacts],
+        instrument_id: UUID,
+    ) -> str | None:
+        """Read an explicit candidate calendar, never derive one implicitly."""
+
+        value = getattr(candidate, "calendar_id", None) if candidate is not None else None
+        if value is None and candidate is not None:
+            metadata = getattr(candidate, "metadata", None)
+            if isinstance(metadata, Mapping):
+                value = metadata.get("calendar_id")
+        if value is None:
+            value = eligibility_payload.get("calendar_id")
+        if value is None:
+            fact = facts.get(instrument_id)
+            value = fact.calendar_id if fact is not None else None
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return cls._canonical_calendar_id(value)
+
+    @staticmethod
+    def _invoke_candidate_resolver(
+        resolver: Any,
+        *,
+        instrument_id: UUID,
+        context: PhaseContext,
+        eligibility_context: Any,
+    ) -> Any:
+        """Invoke an engine-side candidate resolver using its declared port."""
+
+        try:
+            parameters = list(signature(resolver).parameters.values())
+        except (TypeError, ValueError):
+            return resolver(instrument_id, eligibility_context)
+        values = {
+            "instrument_id": instrument_id,
+            "candidate_id": instrument_id,
+            "id": instrument_id,
+            "effective_date": context.session_date,
+            "session_date": context.session_date,
+            "decision_date": context.session_date,
+            "effective_at": context.decision_time,
+            "decision_time": context.decision_time,
+            "data_cutoff": getattr(eligibility_context, "data_cutoff", None)
+            or context.decision_time,
+            "data_cutoff_at": getattr(eligibility_context, "data_cutoff", None)
+            or context.decision_time,
+            "context": eligibility_context,
+            "eligibility_context": eligibility_context,
+        }
+        positional: list[Any] = []
+        kwargs: dict[str, Any] = {}
+        for parameter in parameters:
+            if parameter.kind is Parameter.VAR_POSITIONAL:
+                continue
+            if parameter.kind is Parameter.VAR_KEYWORD:
+                continue
+            if parameter.name in values:
+                value = values[parameter.name]
+            elif parameter.default is not Parameter.empty:
+                continue
+            else:
+                # The documented resolver form is ``(instrument_id,
+                # context)``.  Keep this compatibility fallback explicit so
+                # a provider's own body TypeError is never hidden by retries.
+                value = instrument_id if not positional else eligibility_context
+            if parameter.kind is Parameter.POSITIONAL_ONLY:
+                positional.append(value)
+            elif parameter.kind is Parameter.POSITIONAL_OR_KEYWORD:
+                positional.append(value)
+            elif parameter.kind is Parameter.KEYWORD_ONLY:
+                kwargs[parameter.name] = value
+        return resolver(*positional, **kwargs)
+
+    def _resolve_final_candidate(
+        self,
+        *,
+        candidate: Any | None,
+        instrument_id: UUID,
+        context: PhaseContext,
+        bound: _StepBoundUniverse,
+        evaluator: Any,
+        eligibility_context: Any,
+    ) -> Any | None:
+        """Resolve the complete engine-side candidate for final checking.
+
+        The strategy DTO is a projection and must never become the final
+        evaluator's source of truth.  Provider ports may resolve a fresh spec
+        at the current PIT coordinates; otherwise an already complete row
+        from the engine snapshot is acceptable.  A DTO-only path returns
+        ``None`` and is handled as a fail-closed contract violation by the
+        caller.
+        """
+
+        sources: list[Any] = [
+            evaluator,
+            self._view_factory,
+            bound.source,
+            self._source_universe_query(bound),
+            getattr(self._view_factory, "_engine_market_data", None),
+            self._universe_scope_resolution,
+        ]
+        resolver_names = (
+            "resolve_full_candidate",
+            "resolve_candidate",
+            "candidate_for",
+            "get_candidate",
+            "resolve_spec",
+            "spec_for",
+            "get_spec",
+            "resolve_instrument_spec",
+            "instrument_spec_for",
+        )
+        seen: set[int] = set()
+        for source in sources:
+            if source is None or id(source) in seen:
+                continue
+            seen.add(id(source))
+            for name in resolver_names:
+                resolver = getattr(source, name, None)
+                if not callable(resolver):
+                    continue
+                try:
+                    resolved = self._invoke_candidate_resolver(
+                        resolver,
+                        instrument_id=instrument_id,
+                        context=context,
+                        eligibility_context=eligibility_context,
+                    )
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    if code in {
+                        "universe_calendar_not_preflighted",
+                        "universe_pit_boundary_violation",
+                        "universe_preflight_hash_mismatch",
+                        "universe_capability_missing",
+                        "universe_provider_contract_violation",
+                    }:
+                        raise
+                    raise _universe_provider_error(
+                        "engine candidate resolver failed during final qualification",
+                        details={
+                            "resolver": name,
+                            "error_type": type(exc).__name__,
+                        },
+                    ) from exc
+                if resolved is not None:
+                    return resolved
+            # ChunkStrategyDataView keeps the complete provider rows behind
+            # its strategy projection.  Resolve one requested spec through
+            # the chunk's instrument port, which is bounded by the current
+            # step authorization and never exposes the chunk to the strategy.
+            view = getattr(source, "_ChunkUniverseQuery__view", None)
+            chunk = getattr(view, "_ChunkStrategyDataView__chunk", None)
+            if chunk is not None and isinstance(candidate, InstrumentCandidateDTO):
+                try:
+                    from app.backtesting.data.requests import (
+                        InstrumentQuery,
+                        QueryBoundary,
+                    )
+
+                    cutoff = getattr(
+                        eligibility_context,
+                        "data_cutoff",
+                        None,
+                    ) or context.decision_time
+                    resolved_rows = chunk.instruments(
+                        InstrumentQuery(
+                            instrument_ids=(instrument_id,),
+                            effective_at=context.decision_time,
+                            boundary=QueryBoundary(
+                                data_cutoff=cutoff,
+                                include_cutoff_day=True,
+                            ),
+                        )
+                    )
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    if code in {
+                        "universe_target_outside_scope",
+                        "universe_pit_boundary_violation",
+                        "universe_provider_contract_violation",
+                    }:
+                        raise
+                    raise _universe_provider_error(
+                        "engine candidate lookup failed during final qualification",
+                        details={"error_type": type(exc).__name__},
+                    ) from exc
+                for resolved in tuple(resolved_rows or ()):
+                    resolved_id = getattr(resolved, "instrument_id", None)
+                    if resolved_id == instrument_id:
+                        return resolved
+        # A provider may already have supplied a complete candidate row in the
+        # engine snapshot.  A strategy-facing DTO is explicitly excluded.
+        if candidate is None or isinstance(candidate, InstrumentCandidateDTO):
+            return None
+        return candidate
+
+    @staticmethod
+    def _candidate_evidence_value(
+        candidate: Any | None,
+        payload: Mapping[str, Any],
+        name: str,
+    ) -> Any:
+        """Read one evidence section from result, nested summary, or spec."""
+
+        value = payload.get(name)
+        if value is not None:
+            return value
+        summary = payload.get("evidence_summary")
+        if isinstance(summary, Mapping):
+            value = summary.get(name)
+            if value is not None:
+                return value
+        for source in (
+            candidate,
+            getattr(candidate, "spec", None) if candidate is not None else None,
+        ):
+            if source is None:
+                continue
+            value = getattr(source, name, None)
+            if value is not None:
+                return value
+            metadata = getattr(source, "metadata", None)
+            if isinstance(metadata, Mapping) and name in metadata:
+                return metadata[name]
+        return None
+
+    @staticmethod
+    def _evidence_present(value: Any) -> bool:
+        """Return whether a qualification evidence section is non-empty."""
+
+        if value is None:
+            return False
+        if isinstance(value, Mapping):
+            return bool(value)
+        if isinstance(value, (str, bytes, list, tuple, set, frozenset)):
+            return bool(value)
+        return True
+
+    def _missing_final_evidence(
+        self,
+        *,
+        candidate: Any | None,
+        payload: Mapping[str, Any],
+        instrument_id: UUID,
+        context: PhaseContext,
+    ) -> tuple[str, ...]:
+        """List mandatory evidence sections absent from a formal result."""
+
+        required = [
+            "identity_evidence",
+            "mapping_evidence",
+            "rule_evidence",
+            "market_data_evidence",
+            "corporate_action_evidence",
+            "quantity_action_coverage_evidence",
+        ]
+        required_status = False
+        # Status is required when the run explicitly declares that dimension;
+        # full rule policies may also carry a required declaration.
+        mode_source = self._universe_scope_resolution
+        required_caps = self._resolve_attr(
+            mode_source, ("required_capabilities",)
+        ) or ()
+        required_status = any(
+            getattr(item, "value", item) == "status" for item in required_caps
+        )
+        if not required_status:
+            spec = getattr(candidate, "spec", None) or candidate
+            policy = getattr(spec, "trading_status_policy", None)
+            if isinstance(policy, Mapping):
+                required_status = any(
+                    str(getattr(value, "value", value)).lower() == "required"
+                    for value in policy.values()
+                )
+        if required_status:
+            required.append("status_evidence")
+        return tuple(
+            name
+            for name in required
+            if not self._evidence_present(
+                # Formal final qualification must be proven by the current
+                # port result.  Candidate source rows are inputs to that port,
+                # not a substitute when the result omits an evidence section.
+                self._candidate_evidence_value(None, payload, name)
+            )
+        )
+
+    def _final_candidate_pit_issues(
+        self,
+        candidate: Any | None,
+        payload: Mapping[str, Any],
+        *,
+        context: PhaseContext,
+    ) -> tuple[str, str, Any, Any] | None:
+        """Validate explicit candidate PIT coordinates at the final gate."""
+
+        if candidate is None:
+            return None
+        spec = getattr(candidate, "spec", None)
+        sources = (candidate, spec)
+
+        def read(name: str) -> Any:
+            value = payload.get(name)
+            if value is not None:
+                return value
+            summary = payload.get("evidence_summary")
+            if isinstance(summary, Mapping) and summary.get(name) is not None:
+                return summary.get(name)
+            for source in sources:
+                if source is None:
+                    continue
+                value = getattr(source, name, None)
+                if value is not None:
+                    return value
+                metadata = getattr(source, "metadata", None)
+                if isinstance(metadata, Mapping) and metadata.get(name) is not None:
+                    return metadata.get(name)
+            return None
+
+        effective = read("effective_date")
+        if effective is not None:
+            if isinstance(effective, datetime):
+                effective = effective.date()
+            elif isinstance(effective, str):
+                try:
+                    effective = date.fromisoformat(effective[:10])
+                except ValueError:
+                    return (
+                        "universe_pit_boundary_violation",
+                        "effective_date",
+                        context.session_date,
+                        effective,
+                    )
+            if effective != context.session_date:
+                return (
+                    "universe_pit_boundary_violation",
+                    "effective_date",
+                    context.session_date,
+                    effective,
+                )
+        known_at = read("known_at")
+        if known_at is not None:
+            if isinstance(known_at, str):
+                try:
+                    known_at = datetime.fromisoformat(known_at)
+                except ValueError:
+                    return (
+                        "universe_pit_boundary_violation",
+                        "known_at",
+                        "aware datetime <= data_cutoff",
+                        known_at,
+                    )
+            if (
+                not isinstance(known_at, datetime)
+                or known_at.tzinfo is None
+                or known_at.utcoffset() is None
+            ):
+                return (
+                    "universe_pit_boundary_violation",
+                    "known_at",
+                    "aware datetime <= data_cutoff",
+                    known_at,
+                )
+            cutoff = self._step_decision_data_cutoffs.get(
+                context.step_sequence,
+                context.data_cutoff or context.decision_time,
+            )
+            if known_at > cutoff:
+                return (
+                    "universe_pit_boundary_violation",
+                    "known_at",
+                    cutoff,
+                    known_at,
+                )
+        valid_from = read("valid_from")
+        valid_to = read("valid_to")
+        if isinstance(valid_from, datetime):
+            valid_from = valid_from.date()
+        if isinstance(valid_to, datetime):
+            valid_to = valid_to.date()
+        if isinstance(valid_from, date) and context.session_date < valid_from:
+            return (
+                "universe_pit_boundary_violation",
+                "identity_validity_range",
+                f"<= {context.session_date.isoformat()}",
+                valid_from,
+            )
+        if isinstance(valid_to, date) and context.session_date >= valid_to:
+            return (
+                "universe_pit_boundary_violation",
+                "identity_validity_range",
+                f"< {valid_to.isoformat()}",
+                context.session_date,
+            )
+        return None
+
+    def _final_candidate_scope_rule_issue(
+        self,
+        candidate: Any | None,
+        *,
+        instrument_id: UUID,
+        bound: _StepBoundUniverse,
+    ) -> tuple[str, str, Any, Any] | None:
+        """Validate explicit range, rule, exception, and settlement facts."""
+
+        if candidate is None:
+            return None
+        spec = getattr(candidate, "spec", None) or candidate
+        candidate_id = getattr(candidate, "instrument_id", None) or getattr(
+            spec, "instrument_id", None
+        )
+        if candidate_id != instrument_id:
+            return (
+                "universe_provider_contract_violation",
+                "candidate_identity",
+                str(instrument_id),
+                candidate_id,
+            )
+        source = self._source_universe_query(bound)
+        scope = getattr(source, "market_scope", None) or getattr(
+            self._universe_scope_resolution, "market_scope", None
+        )
+        for field_name, scope_name in (
+            ("market", "markets"),
+            ("asset_class", "asset_classes"),
+            ("exchange", "exchanges"),
+            ("currency", "currencies"),
+        ):
+            allowed = tuple(getattr(scope, scope_name, ()) or ()) if scope else ()
+            value = getattr(candidate, field_name, None)
+            if value is None:
+                value = getattr(spec, field_name, None)
+            if allowed and (not isinstance(value, str) or value not in allowed):
+                return (
+                    "universe_selected_ineligible",
+                    "market_scope",
+                    allowed,
+                    value,
+                )
+        settlement = getattr(candidate, "settlement_rule_class", None)
+        if settlement is None:
+            settlement = getattr(spec, "settlement_rule_class", None)
+        if not isinstance(settlement, str) or not settlement.strip():
+            return (
+                "universe_selected_ineligible",
+                "settlement_rule_class",
+                "explicit settlement rule class",
+                settlement,
+            )
+        def reference_token(value: Any) -> str:
+            if isinstance(value, str):
+                return value.strip()
+            return f"{getattr(value, 'key', None)}@{getattr(value, 'version', None)}"
+
+        expected_rule = getattr(source, "rule", None) or getattr(
+            source, "rule_package_reference", None
+        )
+        actual_rule = getattr(candidate, "rule_package_reference", None) or getattr(
+            spec, "rule_package_reference", None
+        )
+        if expected_rule is not None and actual_rule is None:
+            return (
+                "universe_selected_ineligible",
+                "rule_package",
+                reference_token(expected_rule),
+                None,
+            )
+        if expected_rule is not None and actual_rule is not None:
+            expected_token = reference_token(expected_rule)
+            actual_token = reference_token(actual_rule)
+            if expected_token != actual_token:
+                return (
+                    "universe_selected_ineligible",
+                    "rule_package",
+                    expected_token,
+                    actual_token,
+                )
+        expected_exception = getattr(source, "rule_exception_set", None)
+        actual_exception = getattr(candidate, "rule_exception_reference", None) or getattr(
+            spec, "rule_exception_reference", None
+        )
+        if expected_exception is not None and actual_exception is not None:
+            expected_token = reference_token(expected_exception)
+            actual_token = reference_token(actual_exception)
+            if expected_token != actual_token:
+                return (
+                    "universe_selected_ineligible",
+                    "rule_exception_set",
+                    expected_token,
+                    actual_token,
+                )
+        return None
+
+    def _final_validate_targets(
+        self,
+        target_ids: Sequence[UUID],
+        *,
+        context: PhaseContext,
+        decision: Any,
+    ) -> None:
+        """Recheck every selected target before the first order is constructed."""
+
+        bound = self._step_universes.get(context.step_sequence)
+        if bound is None:
+            raise _universe_provider_error(
+                "submit phase has no candidate snapshot for this decision step"
+            )
+        current_candidates = {
+            getattr(candidate, "instrument_id"): candidate
+            for candidate in bound.candidates
+        }
+        fixed_ids = self._fixed_authorized_ids()
+        formal_dynamic = self._is_formal_dynamic_scope(bound=bound)
+        queried_ids = self._step_queried_candidate_ids.get(
+            context.step_sequence, frozenset()
+        )
+        # In formal dynamic/hybrid mode, ``current_candidates`` is only the
+        # engine-side snapshot used to serve the strategy view.  Permission
+        # comes from the IDs that the strategy actually obtained through its
+        # current-step query.  Fixed identities remain independently
+        # authorized for holdings/static obligations.
+        dynamic_allowed_ids = (
+            queried_ids if formal_dynamic else set(current_candidates)
+        )
+        allowed_ids = fixed_ids | set(dynamic_allowed_ids)
+        evaluator = self._step_qualification_ports.get(context.step_sequence)
+        if evaluator is None:
+            evaluator = self._candidate_evaluator(
+                allow_pure_fallback=not formal_dynamic
+            )
+        if formal_dynamic and evaluator is None:
+            self._raise_final_qualification_error(
+                "universe_capability_missing",
+                instrument_id=UUID(int=0),
+                context=context,
+                decision=decision,
+                candidate=None,
+                failed_check="candidate_qualification_port",
+                reason_codes=("candidate_qualification_port_missing",),
+                expected="provider qualification port",
+                actual=None,
+            )
+        allowed_calendars = set(self._frozen_universe_calendar_ids)
+        source = self._source_universe_query(bound)
+        if not allowed_calendars:
+            allowed_calendars.update(
+                self._canonical_calendar_id(value)
+                for value in tuple(getattr(source, "allowed_calendar_ids", ()) or ())
+                if isinstance(value, str) and value.strip()
+            )
+        if not allowed_calendars:
+            allowed_calendars.update(
+                self._canonical_calendar_id(value)
+                for value in tuple(
+                    getattr(self._universe_scope_resolution, "resolved_calendar_ids", ())
+                    or ()
+                )
+                if isinstance(value, str) and value.strip()
+            )
+        # Reject unauthorized targets before touching engine market data.  A
+        # strategy must first earn dynamic permission through its own query;
+        # this keeps even engine-side refreshes outside that permission set.
+        for instrument_id in sorted(set(target_ids), key=str):
+            if (
+                formal_dynamic
+                and instrument_id not in fixed_ids
+                and instrument_id not in queried_ids
+            ):
+                self._raise_final_qualification_error(
+                    "universe_target_outside_scope",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=current_candidates.get(instrument_id),
+                    failed_check="strategy_universe_query",
+                    reason_codes=("universe_target_outside_scope",),
+                    expected="instrument_id_returned_by_current_strategy_universe_query",
+                    actual=str(instrument_id),
+                    calendar_id=self._candidate_calendar_id(
+                        current_candidates.get(instrument_id),
+                        {},
+                        self._instrument_facts,
+                        instrument_id,
+                    ),
+                )
+            if instrument_id not in allowed_ids:
+                self._raise_final_qualification_error(
+                    "universe_target_outside_scope",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=current_candidates.get(instrument_id),
+                    failed_check="scope",
+                    reason_codes=("universe_target_outside_scope",),
+                    expected="fixed_or_current_dynamic_scope",
+                    actual=str(instrument_id),
+                )
+        self._refresh_target_market_data(tuple(target_ids), context)
+        for instrument_id in sorted(set(target_ids), key=str):
+            candidate = current_candidates.get(instrument_id)
+            candidate_calendar_id = self._candidate_calendar_id(
+                candidate,
+                {},
+                self._instrument_facts,
+                instrument_id,
+            )
+            # A target returned by the strategy query must have an engine-side
+            # candidate row.  Never pass a DTO or fabricate a placeholder to
+            # the final qualification port.
+            if formal_dynamic and candidate is None and instrument_id not in fixed_ids:
+                self._raise_final_qualification_error(
+                    "universe_provider_contract_violation",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=None,
+                    failed_check="engine_candidate_snapshot",
+                    reason_codes=("universe_provider_contract_violation",),
+                    expected="complete engine-side candidate",
+                    actual=None,
+                )
+            eligibility_payload: dict[str, Any] = {}
+            eligible = True
+            eligibility_context = self._candidate_context(
+                candidate=candidate,
+                instrument_id=instrument_id,
+                context=context,
+                bound=bound,
+            )
+            final_candidate = self._resolve_final_candidate(
+                candidate=candidate,
+                instrument_id=instrument_id,
+                context=context,
+                bound=bound,
+                evaluator=evaluator,
+                eligibility_context=eligibility_context,
+            )
+            if formal_dynamic and final_candidate is None:
+                self._raise_final_qualification_error(
+                    "universe_provider_contract_violation",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=candidate,
+                    failed_check="engine_candidate_qualification_input",
+                    reason_codes=("universe_provider_contract_violation",),
+                    expected="complete engine-side candidate",
+                    actual={
+                        "candidate_type": type(candidate).__name__
+                        if candidate is not None
+                        else None
+                    },
+                    calendar_id=candidate_calendar_id,
+                )
+            if formal_dynamic:
+                scope_rule_issue = self._final_candidate_scope_rule_issue(
+                    final_candidate,
+                    instrument_id=instrument_id,
+                    bound=bound,
+                )
+                if scope_rule_issue is not None:
+                    (
+                        scope_rule_code,
+                        scope_rule_check,
+                        scope_rule_expected,
+                        scope_rule_actual,
+                    ) = scope_rule_issue
+                    self._raise_final_qualification_error(
+                        scope_rule_code,
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=final_candidate,
+                        failed_check=scope_rule_check,
+                        reason_codes=(scope_rule_code,),
+                        expected=scope_rule_expected,
+                        actual=scope_rule_actual,
+                        calendar_id=candidate_calendar_id,
+                    )
+            pit_issue = self._final_candidate_pit_issues(
+                final_candidate,
+                {},
+                context=context,
+            )
+            if pit_issue is not None:
+                pit_code, pit_check, pit_expected, pit_actual = pit_issue
+                self._raise_final_qualification_error(
+                    pit_code,
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=final_candidate,
+                    failed_check=pit_check,
+                    reason_codes=(pit_code,),
+                    expected=pit_expected,
+                    actual=pit_actual,
+                    calendar_id=candidate_calendar_id,
+                )
+            if evaluator is not None:
+                evaluator_candidate = (
+                    final_candidate if final_candidate is not None else candidate
+                )
+                try:
+                    eligibility = self._invoke_candidate_evaluator(
+                        evaluator,
+                        candidate=self._prepare_evaluator_candidate(
+                            evaluator_candidate,
+                            evaluator,
+                            calendar_id=self._candidate_calendar_id(
+                                evaluator_candidate,
+                                {},
+                                self._instrument_facts,
+                                instrument_id,
+                            ),
+                        ),
+                        instrument_id=instrument_id,
+                        eligibility_context=eligibility_context,
+                    )
+                except Exception as exc:
+                    code = getattr(exc, "code", None)
+                    if code in {
+                        "universe_calendar_not_preflighted",
+                        "universe_pit_boundary_violation",
+                        "universe_target_outside_scope",
+                        "universe_preflight_hash_mismatch",
+                        "universe_selected_ineligible",
+                        "universe_provider_contract_violation",
+                        "universe_capability_missing",
+                    }:
+                        source_details = getattr(exc, "details", {})
+                        source_details = (
+                            dict(source_details)
+                            if isinstance(source_details, Mapping)
+                            else {}
+                        )
+                        source_reasons = source_details.get("reason_codes", ())
+                        if isinstance(source_reasons, str):
+                            source_reasons = (source_reasons,)
+                        if not isinstance(source_reasons, (list, tuple)):
+                            source_reasons = (code,)
+                        self._raise_final_qualification_error(
+                            code,
+                            instrument_id=instrument_id,
+                            context=context,
+                            decision=decision,
+                            candidate=candidate,
+                            failed_check=str(
+                                source_details.get("failed_check") or code
+                            ),
+                            reason_codes=tuple(
+                                str(item) for item in source_reasons
+                            ),
+                            expected=source_details.get("expected", True),
+                            actual=source_details.get(
+                                "actual", {"error_type": type(exc).__name__}
+                            ),
+                            calendar_id=source_details.get(
+                                "calendar_id", candidate_calendar_id
+                            ),
+                        )
+                    self._raise_final_qualification_error(
+                        "universe_selected_ineligible",
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=candidate,
+                        failed_check="candidate_qualification",
+                        reason_codes=(code or type(exc).__name__,),
+                        expected=True,
+                        actual={
+                            "error_type": type(exc).__name__,
+                            "error": str(exc),
+                        },
+                        calendar_id=candidate_calendar_id,
+                    )
+                eligible, eligibility_payload = self._eligibility_payload(eligibility)
+                candidate_calendar_id = self._candidate_calendar_id(
+                    final_candidate,
+                    eligibility_payload,
+                    self._instrument_facts,
+                    instrument_id,
+                )
+                pit_issue = self._final_candidate_pit_issues(
+                    final_candidate,
+                    eligibility_payload,
+                    context=context,
+                )
+                if pit_issue is not None:
+                    pit_code, pit_check, pit_expected, pit_actual = pit_issue
+                    self._raise_final_qualification_error(
+                        pit_code,
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=final_candidate,
+                        failed_check=pit_check,
+                        reason_codes=(pit_code,),
+                        expected=pit_expected,
+                        actual=pit_actual,
+                        calendar_id=candidate_calendar_id,
+                    )
+                reported_id = eligibility_payload.get("instrument_id")
+                if reported_id is not None:
+                    try:
+                        reported_id = UUID(str(reported_id))
+                    except (TypeError, ValueError):
+                        reported_id = None
+                    if reported_id != instrument_id:
+                        self._raise_final_qualification_error(
+                            "universe_provider_contract_violation",
+                            instrument_id=instrument_id,
+                            context=context,
+                            decision=decision,
+                            candidate=final_candidate,
+                            failed_check="candidate_identity",
+                            reason_codes=("universe_provider_contract_violation",),
+                            expected=str(instrument_id),
+                            actual=eligibility_payload.get("instrument_id"),
+                            calendar_id=candidate_calendar_id,
+                        )
+                if eligible is None:
+                    self._raise_final_qualification_error(
+                        "universe_provider_contract_violation",
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=candidate,
+                        failed_check="candidate_qualification_result",
+                        reason_codes=("universe_provider_contract_violation",),
+                        expected="CandidateEligibility with boolean eligible",
+                        actual=eligibility_payload,
+                        calendar_id=candidate_calendar_id,
+                    )
+                if formal_dynamic and eligible:
+                    missing_evidence = self._missing_final_evidence(
+                        candidate=final_candidate,
+                        payload=eligibility_payload,
+                        instrument_id=instrument_id,
+                        context=context,
+                    )
+                    if missing_evidence:
+                        self._raise_final_qualification_error(
+                            "universe_selected_ineligible",
+                            instrument_id=instrument_id,
+                            context=context,
+                            decision=decision,
+                            candidate=final_candidate,
+                            failed_check="qualification_evidence",
+                            reason_codes=(
+                                "candidate_qualification_evidence_missing",
+                            ),
+                            expected={"required_evidence": missing_evidence},
+                            actual={
+                                "available_evidence": sorted(
+                                    name
+                                    for name in (
+                                        "identity_evidence",
+                                        "mapping_evidence",
+                                        "rule_evidence",
+                                        "market_data_evidence",
+                                        "corporate_action_evidence",
+                                        "quantity_action_coverage_evidence",
+                                        "status_evidence",
+                                    )
+                                    if self._evidence_present(
+                                        self._candidate_evidence_value(
+                                            final_candidate,
+                                            eligibility_payload,
+                                            name,
+                                        )
+                                    )
+                                )
+                            },
+                            calendar_id=candidate_calendar_id,
+                        )
+                    market_evidence = self._final_market_data_evidence.get(
+                        instrument_id, {}
+                    )
+                    if not bool(market_evidence.get("complete")):
+                        self._raise_final_qualification_error(
+                            "universe_selected_ineligible",
+                            instrument_id=instrument_id,
+                            context=context,
+                            decision=decision,
+                            candidate=final_candidate,
+                            failed_check="market_data_qualification",
+                            reason_codes=("candidate_market_data_incomplete",),
+                            expected="current-session quote and instrument facts",
+                            actual=market_evidence,
+                            calendar_id=candidate_calendar_id,
+                        )
+                if not eligible:
+                    reason_codes = eligibility_payload.get("reason_codes", ())
+                    if isinstance(reason_codes, str):
+                        reason_codes = (reason_codes,)
+                    if not isinstance(reason_codes, (list, tuple)):
+                        reason_codes = ("candidate_ineligible",)
+                    reason_codes = tuple(str(item) for item in reason_codes)
+                    reason_to_error_code = {
+                        "universe_calendar_not_preflighted": (
+                            "universe_calendar_not_preflighted"
+                        ),
+                        "universe_pit_boundary_violation": (
+                            "universe_pit_boundary_violation"
+                        ),
+                        "universe_target_outside_scope": (
+                            "universe_target_outside_scope"
+                        ),
+                        "universe_preflight_hash_mismatch": (
+                            "universe_preflight_hash_mismatch"
+                        ),
+                    }
+                    qualification_code = next(
+                        (
+                            reason_to_error_code[reason]
+                            for reason in reason_codes
+                            if reason in reason_to_error_code
+                        ),
+                        "universe_selected_ineligible",
+                    )
+                    self._raise_final_qualification_error(
+                        qualification_code,
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=candidate,
+                        failed_check="candidate_qualification",
+                        reason_codes=reason_codes,
+                        expected=True,
+                        actual=eligibility_payload,
+                        calendar_id=candidate_calendar_id,
+                    )
+            else:
+                # Some provider ports return a pre-evaluated immutable
+                # CandidateEligibility row alongside the strategy DTO.  It
+                # is already the canonical result, so honour an explicit
+                # negative flag even when no separate callable was injected.
+                explicit_eligible = getattr(candidate, "eligible", None)
+                if explicit_eligible is False:
+                    reason_codes = getattr(candidate, "reason_codes", ()) or ()
+                    if isinstance(reason_codes, str):
+                        reason_codes = (reason_codes,)
+                    self._raise_final_qualification_error(
+                        "universe_selected_ineligible",
+                        instrument_id=instrument_id,
+                        context=context,
+                        decision=decision,
+                        candidate=candidate,
+                        failed_check="candidate_qualification",
+                        reason_codes=tuple(str(item) for item in reason_codes)
+                        or ("candidate_ineligible",),
+                        expected=True,
+                        actual={
+                            "eligible": False,
+                            "reason_codes": tuple(reason_codes),
+                        },
+                        calendar_id=candidate_calendar_id,
+                    )
+            calendar_id = self._candidate_calendar_id(
+                final_candidate,
+                eligibility_payload,
+                self._instrument_facts,
+                instrument_id,
+            )
+            # A calendar check is mandatory whenever a formal candidate port
+            # or frozen scope is present.  Legacy static fixtures have neither
+            # and continue to use their existing InstrumentFacts path.
+            if (evaluator is not None or allowed_calendars) and (
+                calendar_id is None or calendar_id not in allowed_calendars
+            ):
+                self._raise_final_qualification_error(
+                    "universe_calendar_not_preflighted",
+                    instrument_id=instrument_id,
+                    context=context,
+                    decision=decision,
+                    candidate=candidate,
+                    failed_check="calendar_permission",
+                    reason_codes=("universe_calendar_not_preflighted",),
+                    expected=tuple(sorted(allowed_calendars)),
+                    actual=calendar_id,
+                    calendar_id=calendar_id,
+                )
+            self._final_qualification_results.append(
+                _freeze_runtime_evidence(
+                    {
+                        "instrument_id": str(instrument_id),
+                        "session_date": context.session_date.isoformat(),
+                        "decision_time": context.decision_time.isoformat(),
+                        "data_cutoff": (
+                            self._last_decision_data_cutoff or context.decision_time
+                        ).isoformat(),
+                        "calendar_id": calendar_id,
+                        "eligible": True,
+                        "reason_codes": tuple(
+                            eligibility_payload.get("reason_codes", ())
+                            if isinstance(eligibility_payload, Mapping)
+                            else ()
+                        ),
+                        "evidence_summary": {
+                            **dict(eligibility_payload),
+                            "engine_market_data_evidence": self._final_market_data_evidence.get(
+                                instrument_id, {}
+                            ),
+                        },
+                    }
+                )
+            )
+
+    def _raise_final_qualification_error(
+        self,
+        code: str,
+        *,
+        instrument_id: UUID,
+        context: PhaseContext,
+        decision: Any,
+        candidate: Any | None,
+        failed_check: str,
+        reason_codes: Sequence[str],
+        expected: Any,
+        actual: Any,
+        calendar_id: str | None = None,
+    ) -> None:
+        """Raise one stable error carrying the complete FINAL-07 evidence."""
+
+        del candidate  # The candidate object must never enter persisted details.
+        from app.backtesting.data.errors import (
+            UniverseCapabilityMissingError,
+            UniverseCalendarNotPreflightedError,
+            UniversePreflightHashMismatchError,
+            UniversePitBoundaryViolationError,
+            UniverseProviderContractViolationError,
+            UniverseSelectedIneligibleError,
+            UniverseTargetOutsideScopeError,
+        )
+
+        data_cutoff = self._step_decision_data_cutoffs.get(
+            context.step_sequence,
+            self._last_decision_data_cutoff or context.decision_time,
+        )
+        details = {
+            "instrument_id": str(instrument_id),
+            "session_date": context.session_date.isoformat(),
+            "decision_time": context.decision_time.isoformat(),
+            "data_cutoff": data_cutoff.isoformat(),
+            "calendar_id": calendar_id,
+            "failed_check": failed_check,
+            "reason_codes": list(reason_codes),
+            "expected": expected,
+            "actual": actual,
+            "evidence_summary": {
+                "scope_snapshot_hash": self._universe_scope_snapshot_hash,
+                "qualification_policy_version": self._universe_eligibility_policy_version,
+                "candidate_count": len(self._step_candidates.get(context.step_sequence, ())),
+            },
+            "decision_id": getattr(decision, "decision_id", None),
+        }
+        safe_details = _json_safe_runtime_value(details)
+        self._last_final_qualification_failure = _freeze_runtime_evidence(
+            safe_details
+        )
+        # Keep the failed target in the in-memory result audit even though no
+        # successful ``BacktestRunResult`` is returned after a phase failure.
+        # Failure finalizers can consume this immutable evidence without
+        # re-running the provider or interpreting the decision a second time.
+        self._final_qualification_results.append(
+            _freeze_runtime_evidence(
+                {
+                    **dict(safe_details),
+                    "eligible": False,
+                }
+            )
+        )
+        message = (
+            "策略选中标的未通过订单创建前的 PIT 候选资格复检，"
+            f"instrument_id={instrument_id}，failed_check={failed_check}"
+        )
+        error_types = {
+            "universe_capability_missing": UniverseCapabilityMissingError,
+            "universe_calendar_not_preflighted": UniverseCalendarNotPreflightedError,
+            "universe_preflight_hash_mismatch": UniversePreflightHashMismatchError,
+            "universe_pit_boundary_violation": UniversePitBoundaryViolationError,
+            "universe_provider_contract_violation": UniverseProviderContractViolationError,
+            "universe_target_outside_scope": UniverseTargetOutsideScopeError,
+            "universe_selected_ineligible": UniverseSelectedIneligibleError,
+        }
+        error_cls = error_types.get(code, UniverseSelectedIneligibleError)
+        raise error_cls(message, details=safe_details)
 
     def execution_policy_for(
         self, instrument_id: UUID, effective_at: date | datetime
@@ -1628,6 +4631,11 @@ class DeterministicBacktestRunner:
             completed_through_step_sequence=ordered[-1].sequence,
             analysis_metrics=analysis_metrics,
             rule_snapshot_hash=self.rule_snapshot_hash,
+            universe_scope_snapshot_hash=self._universe_scope_snapshot_hash,
+            universe_eligibility_summary=self._universe_audit_summary(),
+            final_qualification_results=tuple(
+                self._final_qualification_results
+            ),
         )
 
     def build_analysis_failure_snapshot(self, exc: Exception) -> Any:
@@ -1728,6 +4736,8 @@ class DeterministicBacktestRunner:
                 if self._last_analysis_completed_session is not None
                 else None
             ),
+            "universe_scope_snapshot_hash": self._universe_scope_snapshot_hash,
+            "universe_final_qualification_failure": self._last_final_qualification_failure,
         }
 
         snapshot_binding = _bind_failure_snapshot(
@@ -1915,11 +4925,118 @@ class DeterministicBacktestRunner:
                     )
                 ),
             }
+        if (
+            self._universe_scope_resolution is not None
+            or self._universe_scope_snapshot_hash is not None
+            or self._step_universes
+        ):
+            # Candidate scope identity is a component-level audit fact, not
+            # a strategy label.  It is kept alongside existing component
+            # snapshots so result consumers need no new persistence table.
+            snapshot["universe"] = dict(self._universe_audit_summary())
         # The whole snapshot is deep-frozen: nested component records and
         # parameter structures must be as immutable as the events they
         # audit.
         return MappingProxyType(
             {str(key): _freeze_payload(value) for key, value in snapshot.items()}
+        )
+
+    def _universe_audit_summary(self) -> Mapping[str, Any]:
+        """Project candidate audit evidence onto an existing result JSON shape."""
+
+        resolution = self._universe_scope_resolution
+        summary: dict[str, Any] = {
+            "scope_snapshot_hash": self._universe_scope_snapshot_hash,
+            "qualification_policy_version": self._universe_eligibility_policy_version,
+            "resolved_calendar_ids": self._frozen_universe_calendar_ids,
+            "filtered_reason_counts": dict(self._filtered_reason_counts),
+            "universe_filtered_reason_counts": dict(self._filtered_reason_counts),
+            "candidate_count": 0,
+            "universe_candidate_count": 0,
+            "final_qualification_count": len(self._final_qualification_results),
+            "final_rechecks": tuple(self._final_qualification_results),
+            "universe_final_rechecks": tuple(self._final_qualification_results),
+        }
+        if resolution is not None:
+            for name in (
+                "scope_mode",
+                "market_scope",
+                "universe_query_policy",
+                "capability_summary",
+                "source_evidence",
+            ):
+                value = getattr(resolution, name, None)
+                if value is not None:
+                    summary[name] = value
+        # A provider may expose a pre-computed filtering summary.  It is
+        # copied as evidence only; runtime never recomputes or changes its
+        # candidate qualification rules.
+        for bound in self._step_universes.values():
+            source = self._source_universe_query(bound)
+            summary["candidate_count"] = max(
+                int(summary.get("candidate_count", 0)), len(bound.candidates)
+            )
+            summary["universe_candidate_count"] = summary["candidate_count"]
+            value = self._resolve_attr(
+                source,
+                (
+                    "universe_filter_reason_counts",
+                    "filtered_reason_counts",
+                    "filter_reason_counts",
+                ),
+            )
+            if not isinstance(value, Mapping):
+                value = self._resolve_attr(
+                    source,
+                    (
+                        "filter_summary",
+                        "candidate_filter_summary",
+                        "universe_filter_summary",
+                    ),
+                )
+            if isinstance(value, Mapping):
+                for nested_name in (
+                    "reason_counts",
+                    "filtered_reason_counts",
+                    "universe_filtered_reason_counts",
+                ):
+                    nested = value.get(nested_name)
+                    if isinstance(nested, Mapping):
+                        value = nested
+                        break
+            if isinstance(value, Mapping):
+                for reason, count in value.items():
+                    try:
+                        numeric_count = int(count)
+                    except (TypeError, ValueError):
+                        continue
+                    # Providers may expose either a cumulative count or a
+                    # per-step count.  Taking the greatest observed value
+                    # avoids double-counting a cumulative source when the
+                    # result summary walks multiple step snapshots.
+                    self._filtered_reason_counts[str(reason)] = max(
+                        self._filtered_reason_counts.get(str(reason), 0),
+                        numeric_count,
+                    )
+                summary["filtered_reason_counts"] = dict(
+                    sorted(self._filtered_reason_counts.items())
+                )
+                summary["universe_filtered_reason_counts"] = dict(
+                    sorted(self._filtered_reason_counts.items())
+                )
+        if self._filter_evidence_records:
+            summary["filter_records"] = tuple(
+                self._filter_evidence_records
+            )
+            summary["universe_filter_records"] = tuple(
+                self._filter_evidence_records
+            )
+        summary["final_rechecks"] = tuple(self._final_qualification_results)
+        summary["universe_final_rechecks"] = tuple(
+            self._final_qualification_results
+        )
+        return _freeze_runtime_evidence(
+            _json_safe_runtime_value(summary)
         )
 
     # ------------------------------------------------------------------
@@ -1971,6 +5088,8 @@ class DeterministicBacktestRunner:
                         f"the timing policy failed to produce phase "
                         f"instructions for step {step.sequence}: {exc}"
                     ),
+                    error_code=getattr(exc, "code", None),
+                    details=getattr(exc, "details", None),
                 ) from exc
             self._complete_step(step)
 
@@ -2072,6 +5191,8 @@ class DeterministicBacktestRunner:
                 phase_key=instruction.phase.value,
                 error_type=type(exc).__name__,
                 message=str(exc),
+                error_code=getattr(exc, "code", None),
+                details=getattr(exc, "details", None),
             ) from exc
 
     def _event_display_snapshots(
@@ -2796,8 +5917,68 @@ class DeterministicBacktestRunner:
     def _phase_decide(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
-        decision_context = self._build_decision_context(context)
+        # Dynamic candidates are bound once for this decision step, before
+        # strategy code runs.  The bound snapshot is immutable and is also
+        # the permission set used by the submit-time final check.
+        source_override = None
+        strategy_view = context.phase_view
+        if isinstance(strategy_view, StrategyDataDTO):
+            try:
+                source_override = strategy_view.universe
+            except Exception:
+                source_override = None
+        bound_universe = self._bind_step_universe(
+            context, source_override=source_override
+        )
+        decision_cutoff = (
+            context.data_cutoff or context.decision_time
+        )
+        self._last_decision_data_cutoff = decision_cutoff
+        self._step_decision_data_cutoffs[context.step_sequence] = decision_cutoff
+        formal_dynamic = self._is_formal_dynamic_scope(bound=bound_universe)
+        qualification_port = self._candidate_evaluator(
+            allow_pure_fallback=not formal_dynamic
+        )
+        if formal_dynamic and qualification_port is None:
+            # A formal dynamic/hybrid run cannot treat the provider's
+            # context-building snapshot as a qualification proof.  Stop
+            # before invoking strategy code when no provider-owned port can
+            # recheck the current PIT facts.
+            raise _universe_capability_error(
+                "formal dynamic/hybrid execution requires a candidate qualification port",
+                details={
+                    "scope_mode": self._scope_mode_value(
+                        self._resolve_attr(
+                            self._universe_scope_resolution, ("scope_mode",)
+                        )
+                    )
+                    or self._scope_mode_value(
+                        self._resolve_attr(
+                            self._source_universe_query(bound_universe),
+                            ("scope_mode",),
+                        )
+                    ),
+                    "reason_code": "candidate_qualification_port_missing",
+                },
+            )
+        self._step_qualification_ports[context.step_sequence] = qualification_port
+        # The eager provider read above only freezes the complete engine
+        # snapshot.  It must not grant dynamic data access before the strategy
+        # has actually called its own bound ``universe.query()``.
+        if formal_dynamic:
+            self._clear_prestrategy_universe_authorization(
+                bound_universe.source
+                if bound_universe.source is not None
+                else source_override
+            )
+        decision_context = self._build_decision_context(
+            context, bound_universe=bound_universe
+        )
         decision = self._strategy.on_step(decision_context)
+        # The provider may expose filter counts through a chunk-backed query
+        # facade; capture them after strategy filters have run as well as at
+        # snapshot construction time.
+        self._capture_universe_filter_evidence(bound_universe.source)
         decision_id = self._derived_id(f"decision:{context.step_sequence}")
         decision = replace(decision, decision_id=decision_id)
         self._pending_decision = decision
@@ -2813,6 +5994,10 @@ class DeterministicBacktestRunner:
                         for key, value in decision.targets.items()
                     },
                     "reason": decision.reason,
+                    "universe_scope_snapshot_hash": self._universe_scope_snapshot_hash,
+                    "universe_candidate_count": len(
+                        self._step_candidates.get(context.step_sequence, ())
+                    ),
                 },
             )
         ]
@@ -2825,7 +6010,10 @@ class DeterministicBacktestRunner:
             raise DomainValidationError(
                 "submit phase requires a decision from the same step"
             )
-        self._pending_decision = None
+        # A queue delay or an in-memory provider revision may change the
+        # dynamic scope after ``decide``.  Re-verify the admission snapshot
+        # immediately before qualification and order construction.
+        self._verify_scope_snapshot(context)
         # Decision payload keys are instrument-id strings; normalize once so
         # the frozen-facts lookups line up with UUID-keyed state.
         try:
@@ -2833,10 +6021,22 @@ class DeterministicBacktestRunner:
                 key if isinstance(key, UUID) else UUID(str(key))
                 for key in dict(decision.targets or {})
             }
-        except ValueError as exc:
+        except (TypeError, ValueError) as exc:
             raise DomainValidationError(
                 f"decision targets contain an invalid instrument id: {exc}"
             ) from exc
+        # FINAL-* is deliberately before both interpretation/sizing and order
+        # construction.  All selected targets are checked first, so one bad
+        # target can never leave an earlier target's order in ``_orders``.
+        self._final_validate_targets(
+            tuple(target_ids), context=context, decision=decision
+        )
+        register_dynamic = getattr(
+            self._view_factory, "register_runtime_instrument_ids", None
+        )
+        if callable(register_dynamic):
+            register_dynamic(tuple(target_ids))
+        self._pending_decision = None
         instrument_ids = sorted(
             target_ids | set(self._portfolio.positions), key=str
         )
@@ -2878,6 +6078,8 @@ class DeterministicBacktestRunner:
                 "the submit phase requires an effective_from from the timing policy"
             )
         emitted: list[tuple[str, Mapping[str, Any]]] = []
+        staged_orders: list[Order] = []
+        staged_order_records: list[OrderSummaryDTO] = []
         for index, intent in enumerate(intents, start=0):
             intent = replace(
                 intent,
@@ -2894,8 +6096,8 @@ class DeterministicBacktestRunner:
                 ),
                 submitted_at=context.decision_time,
             )
-            self._orders.append(order)
-            self._step_order_records.append(
+            staged_orders.append(order)
+            staged_order_records.append(
                 OrderSummaryDTO(
                     instrument_id=order.instrument_id,
                     side=order.side.value,
@@ -2918,6 +6120,11 @@ class DeterministicBacktestRunner:
                     },
                 )
             )
+        # Commit all order objects only after every intent has been converted
+        # successfully.  Qualification and conversion failures therefore
+        # cannot leave a prefix of this decision's orders in runtime state.
+        self._orders.extend(staged_orders)
+        self._step_order_records.extend(staged_order_records)
         return emitted
 
     # ------------------------------------------------------------------
@@ -2925,7 +6132,10 @@ class DeterministicBacktestRunner:
     # ------------------------------------------------------------------
 
     def _build_decision_context(
-        self, context: PhaseContext
+        self,
+        context: PhaseContext,
+        *,
+        bound_universe: _StepBoundUniverse | None = None,
     ) -> DecisionContext:
         view = context.phase_view
         if not isinstance(view, StrategyDataDTO):
@@ -2936,6 +6146,22 @@ class DeterministicBacktestRunner:
             decision_time=context.decision_time,
             session_date=context.session_date,
         )
+        if bound_universe is None:
+            bound_universe = self._step_universes.get(context.step_sequence)
+        if bound_universe is not None:
+            # The official strategy-facing contract only accepts
+            # InstrumentCandidateDTO values.  A malformed lower-level result
+            # is a provider contract violation, never a best-effort fallback.
+            if not all(
+                isinstance(candidate, InstrumentCandidateDTO)
+                for candidate in bound_universe.strategy_candidates
+            ):
+                raise _universe_provider_error(
+                    "bound universe candidates must be InstrumentCandidateDTO values"
+                )
+            universe = UniverseQueryDTO(bound_universe)
+        else:
+            universe = self._view_factory.universe()
         return DecisionContext(
             step_sequence=context.step_sequence,
             session_date=context.session_date,
@@ -2947,7 +6173,7 @@ class DeterministicBacktestRunner:
             previous_step=self._previous_step
             or PreviousStepDTO(step_sequence=max(context.step_sequence - 1, 0)),
             data=view,
-            universe=self._view_factory.universe(),
+            universe=universe,
         )
 
     def _build_portfolio_dto(self) -> PortfolioDTO:

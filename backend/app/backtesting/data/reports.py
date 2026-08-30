@@ -34,6 +34,7 @@ from app.backtesting.calendar_axis import (
 from app.backtesting.data.errors import (
     CalendarPreflightResourceLimitExceededError,
     InvalidDataRequestError,
+    UniversePreflightHashMismatchError,
     freeze_json,
 )
 from app.backtesting.data.requests import (
@@ -143,6 +144,61 @@ def canonical_hash(value: object) -> str:
     return hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
 
 
+def _freeze_domain_json(value: object, field_name: str) -> object:
+    """Normalize domain scalars before applying the strict JSON freezer.
+
+    Candidate audit evidence naturally contains UUID/date/time/Decimal and
+    enum values.  ``freeze_json`` intentionally accepts only JSON scalars, so
+    convert those domain values with the same canonical serializer used by
+    report hashes rather than leaking Python objects into persisted details.
+    """
+
+    _reject_sensitive_audit_keys(value, field_name)
+    normalized = _canonical_value(value, field_name)
+    return freeze_json(normalized, field_name)
+
+
+_SENSITIVE_AUDIT_KEY_MARKERS = frozenset(
+    {
+        "credential",
+        "credentials",
+        "token",
+        "access_token",
+        "api_key",
+        "api_token",
+        "authorization",
+        "password",
+        "secret",
+        "private_key",
+        "access_key",
+    }
+)
+
+
+def _reject_sensitive_audit_keys(value: object, where: str) -> None:
+    """Reject credential-shaped keys before they enter report JSON.
+
+    Audit projections may preserve hashes and non-sensitive provider context,
+    but a nested credential key must fail closed rather than be redacted after
+    the fact.  Values are never included in the exception details.
+    """
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                continue
+            normalized = key.strip().lower().replace("-", "_").replace(".", "_")
+            if any(marker in normalized for marker in _SENSITIVE_AUDIT_KEY_MARKERS):
+                raise InvalidDataRequestError(
+                    f"{where} contains a sensitive audit key",
+                    details={"field": where, "key": key},
+                )
+            _reject_sensitive_audit_keys(item, f"{where}[{key!r}]")
+    elif isinstance(value, (list, tuple)):
+        for index, item in enumerate(value):
+            _reject_sensitive_audit_keys(item, f"{where}[{index}]")
+
+
 def _require_hash_digest(value: str, field_name: str) -> str:
     """Require a lowercase SHA-256 hex digest."""
 
@@ -248,6 +304,20 @@ class PreflightIssue:
                 "CALENDAR_ID_SET_EMPTY": "未解析到交易日历",
                 "CALENDAR_ID_UNKNOWN": "未知交易日历",
                 "UNIVERSE_CALENDAR_NOT_PREFLIGHTED": "动态日历未预检",
+                "UNIVERSE_SCOPE_UNRESOLVED": "动态候选范围未解析",
+                "UNIVERSE_CAPABILITY_MISSING": "动态候选能力缺失",
+                "UNIVERSE_PIT_BOUNDARY_VIOLATION": "候选超出 PIT 边界",
+                "UNIVERSE_TARGET_OUTSIDE_SCOPE": "候选目标越出范围",
+                "UNIVERSE_SELECTED_INELIGIBLE": "选中候选资格不完整",
+                "UNIVERSE_PREFLIGHT_HASH_MISMATCH": "候选范围预检哈希不一致",
+                "UNIVERSE_PROVIDER_CONTRACT_VIOLATION": "候选 Provider 契约错误",
+                "CANDIDATE_IDENTITY_INCOMPLETE": "候选身份事实不完整",
+                "CANDIDATE_MAPPING_INCOMPLETE": "候选代码映射不完整",
+                "CANDIDATE_RULE_INCOMPLETE": "候选规则资格不完整",
+                "CANDIDATE_MARKET_DATA_INCOMPLETE": "候选行情覆盖不完整",
+                "CANDIDATE_CORPORATE_ACTION_INCOMPLETE": "候选公司行动资格不完整",
+                "CANDIDATE_QUANTITY_ACTION_COVERAGE_INCOMPLETE": "候选数量类覆盖不完整",
+                "CANDIDATE_STATUS_INCOMPLETE": "候选交易状态资格不完整",
                 "UNSUPPORTED_CAPABILITY": "数据能力不支持",
                 "CAPABILITY_DECLARATION_AMBIGUOUS": "能力声明有歧义",
                 "CAPABILITY_DECLARATION_INVALID": "能力声明无效",
@@ -681,6 +751,42 @@ class DataPreflightReport:
     coverage_reports: tuple[DataCoverageReport, ...] = ()
     source_revisions: Mapping[str, str] | None = None
     issues: tuple[PreflightIssue, ...] = ()
+    # Task-16A report-contract fields.  They live on the authoritative report
+    # itself so persistence, hashing, and API projections consume one frozen
+    # source of truth instead of reconstructing profile/coverage metadata in
+    # an orchestration wrapper.
+    run_kind: str | None = None
+    preflight_profile_key: str | None = None
+    preflight_profile_version: int | None = None
+    resolved_instruments: tuple[UUID, ...] = ()
+    instrument_mapping_coverage: Mapping[str, object] | None = None
+    instrument_rule_fact_summary: Mapping[str, object] | None = None
+    lookback_session_bar_coverage: Mapping[str, object] | None = None
+    bar_validity_summary: Mapping[str, object] | None = None
+    missing_bars: tuple[Mapping[str, object], ...] = ()
+    missing_fields: tuple[str, ...] = ()
+    invalid_bars: int | None = None
+    incomplete_rules: int | None = None
+    non_pit_sources: tuple[DataCapability, ...] = ()
+    fixture_sources: tuple[Mapping[str, object], ...] = ()
+    # PIT candidate-universe audit fields.  They are optional so legacy
+    # fixed-scope reports remain source-compatible; dynamic/hybrid providers
+    # populate them from ``UniverseScopeResolution`` without introducing a
+    # candidate-specific persistence model.
+    non_zero_initial_position_instrument_ids: tuple[UUID, ...] = ()
+    # Canonical qualification-policy reference for PIT universe checks.  The
+    # longer ``universe_eligibility_policy_version`` name below is retained as
+    # the report-facing spelling used by the architecture documents.
+    qualification_policy_version: ContractRef | str | None = None
+    qualification_policy: ContractRef | str | None = None
+    universe_eligibility_policy_version: ContractRef | str | None = None
+    universe_eligibility_summary: Mapping[str, object] | None = None
+    universe_scope_snapshot_hash: str | None = None
+    universe_candidate_count: int | None = None
+    universe_filtered_reason_counts: Mapping[str, int] | None = None
+    universe_target_ids: tuple[UUID, ...] = ()
+    universe_final_rechecks: tuple[Mapping[str, object], ...] = ()
+    universe_scope_resolution: object | None = None
     # Warmup-resolution audit fields (task 02-02); ``warmup_sessions_count``
     # above is the requested warmup count.  Defaults are deterministic so
     # reports without a warmup attempt keep one canonical form.
@@ -725,6 +831,381 @@ class DataPreflightReport:
             raise InvalidDataRequestError("requested_window must be a DateRange")
         if not isinstance(self.scope_mode, InstrumentScopeMode):
             raise InvalidDataRequestError("scope_mode must be an InstrumentScopeMode")
+        profile_values = (
+            self.run_kind,
+            self.preflight_profile_key,
+            self.preflight_profile_version,
+        )
+        if any(value is not None for value in profile_values) and any(
+            value is None for value in profile_values
+        ):
+            raise InvalidDataRequestError(
+                "run_kind and preflight profile key/version must be supplied together"
+            )
+        if self.run_kind is not None:
+            object.__setattr__(
+                self, "run_kind", _non_blank_text(self.run_kind, "run_kind")
+            )
+            object.__setattr__(
+                self,
+                "preflight_profile_key",
+                _non_blank_text(
+                    self.preflight_profile_key, "preflight_profile_key"
+                ),
+            )
+            profile_version = self.preflight_profile_version
+            if (
+                isinstance(profile_version, bool)
+                or not isinstance(profile_version, int)
+                or profile_version < 1
+            ):
+                raise InvalidDataRequestError(
+                    "preflight_profile_version must be a positive integer"
+                )
+        resolved_instruments = tuple(self.resolved_instruments)
+        if any(not isinstance(item, UUID) for item in resolved_instruments):
+            raise InvalidDataRequestError(
+                "resolved_instruments must contain UUID values"
+            )
+        object.__setattr__(
+            self,
+            "resolved_instruments",
+            tuple(sorted(set(resolved_instruments), key=str)),
+        )
+        fixture_sources: list[Mapping[str, object]] = []
+        for item in self.fixture_sources:
+            if not isinstance(item, Mapping):
+                raise InvalidDataRequestError(
+                    "fixture_sources entries must be mappings"
+                )
+            frozen = _freeze_domain_json(dict(item), "fixture_sources")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "fixture_sources entries must be JSON mappings"
+                )
+            fixture_sources.append(frozen)
+        object.__setattr__(
+            self,
+            "fixture_sources",
+            tuple(sorted(fixture_sources, key=canonical_json)),
+        )
+        # Candidate-universe fields are normalized here rather than left to
+        # individual providers.  This keeps report hashes independent of
+        # input ordering and keeps every persisted value JSON-safe.
+        for field_name in (
+            "non_zero_initial_position_instrument_ids",
+            "universe_target_ids",
+        ):
+            raw_ids = tuple(getattr(self, field_name))
+            if any(not isinstance(item, UUID) for item in raw_ids):
+                raise InvalidDataRequestError(
+                    f"{field_name} must contain UUID values"
+                )
+            object.__setattr__(self, field_name, tuple(sorted(set(raw_ids), key=str)))
+        policy = self.qualification_policy_version or self.qualification_policy
+        if (
+            self.qualification_policy_version is not None
+            and self.qualification_policy is not None
+            and self.qualification_policy_version != self.qualification_policy
+        ):
+            raise InvalidDataRequestError(
+                "qualification_policy and qualification_policy_version disagree"
+            )
+        display_policy = self.universe_eligibility_policy_version
+        if policy is not None and display_policy is not None and policy != display_policy:
+            raise InvalidDataRequestError(
+                "qualification policy fields disagree"
+            )
+        if policy is None:
+            policy = display_policy
+        object.__setattr__(self, "qualification_policy_version", policy)
+        object.__setattr__(self, "qualification_policy", policy)
+        object.__setattr__(self, "universe_eligibility_policy_version", policy)
+        if policy is not None and not isinstance(policy, (ContractRef, str)):
+            raise InvalidDataRequestError(
+                "universe_eligibility_policy_version must be a ContractRef or text"
+            )
+        if isinstance(policy, str):
+            if not policy.strip():
+                raise InvalidDataRequestError(
+                    "universe_eligibility_policy_version must be non-blank"
+                )
+            policy = policy.strip()
+            object.__setattr__(self, "qualification_policy_version", policy)
+            object.__setattr__(self, "qualification_policy", policy)
+            object.__setattr__(self, "universe_eligibility_policy_version", policy)
+        summary = self.universe_eligibility_summary
+        if summary is not None:
+            if not isinstance(summary, Mapping):
+                raise InvalidDataRequestError(
+                    "universe_eligibility_summary must be a mapping"
+                )
+            frozen_summary = _freeze_domain_json(
+                dict(summary), "universe_eligibility_summary"
+            )
+            if not isinstance(frozen_summary, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "universe_eligibility_summary must be a JSON mapping"
+                )
+            object.__setattr__(self, "universe_eligibility_summary", frozen_summary)
+        scope_hash = self.universe_scope_snapshot_hash
+        if scope_hash is not None:
+            scope_hash = _require_hash_digest(scope_hash, "universe_scope_snapshot_hash")
+            object.__setattr__(self, "universe_scope_snapshot_hash", scope_hash)
+        candidate_count = self.universe_candidate_count
+        if candidate_count is not None and (
+            isinstance(candidate_count, bool)
+            or not isinstance(candidate_count, int)
+            or candidate_count < 0
+        ):
+            raise InvalidDataRequestError(
+                "universe_candidate_count must be a non-negative integer"
+            )
+        counts = self.universe_filtered_reason_counts
+        if counts is not None:
+            if not isinstance(counts, Mapping):
+                raise InvalidDataRequestError(
+                    "universe_filtered_reason_counts must be a mapping"
+                )
+            normalized_counts: dict[str, int] = {}
+            for code, value in counts.items():
+                if (
+                    type(code) is not str
+                    or not code.strip()
+                    or isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                ):
+                    raise InvalidDataRequestError(
+                        "universe_filtered_reason_counts must map codes to non-negative integers"
+                    )
+                normalized_counts[code.strip()] = value
+            object.__setattr__(
+                self,
+                "universe_filtered_reason_counts",
+                MappingProxyType(dict(sorted(normalized_counts.items()))),
+            )
+        rechecks = tuple(self.universe_final_rechecks)
+        normalized_rechecks: list[Mapping[str, object]] = []
+        for item in rechecks:
+            if not isinstance(item, Mapping):
+                raise InvalidDataRequestError(
+                    "universe_final_rechecks entries must be mappings"
+                )
+            frozen = _freeze_domain_json(dict(item), "universe_final_rechecks")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "universe_final_rechecks entries must be JSON mappings"
+                )
+            normalized_rechecks.append(frozen)
+        object.__setattr__(self, "universe_final_rechecks", tuple(normalized_rechecks))
+        resolution = self.universe_scope_resolution
+        if resolution is not None:
+            if isinstance(resolution, Mapping):
+                normalized_resolution = _freeze_domain_json(
+                    dict(resolution), "universe_scope_resolution"
+                )
+                if not isinstance(normalized_resolution, MappingProxyType):
+                    raise InvalidDataRequestError(
+                        "universe_scope_resolution must be a JSON mapping"
+                    )
+                object.__setattr__(self, "universe_scope_resolution", normalized_resolution)
+                resolution = normalized_resolution
+            elif not callable(getattr(resolution, "canonical_content", None)):
+                raise InvalidDataRequestError(
+                    "universe_scope_resolution must expose canonical_content()"
+                )
+            if scope_hash is None:
+                resolved_hash = (
+                    resolution.get("snapshot_hash")
+                    if isinstance(resolution, Mapping)
+                    else getattr(resolution, "snapshot_hash", None)
+                )
+                if isinstance(resolved_hash, str) and resolved_hash:
+                    object.__setattr__(
+                        self, "universe_scope_snapshot_hash", _require_hash_digest(
+                            resolved_hash, "universe_scope_snapshot_hash"
+                        )
+                    )
+            else:
+                resolved_hash = (
+                    resolution.get("snapshot_hash")
+                    if isinstance(resolution, Mapping)
+                    else getattr(resolution, "snapshot_hash", None)
+                )
+                if isinstance(resolved_hash, str) and resolved_hash and resolved_hash != scope_hash:
+                    raise UniversePreflightHashMismatchError(
+                        "universe_scope_resolution hash does not match report hash"
+                    )
+        if self.scope_mode in (InstrumentScopeMode.DYNAMIC, InstrumentScopeMode.HYBRID):
+            # A ready dynamic/hybrid report is consumable only when it carries
+            # the concrete task-15 scope resolution.  A naked digest or
+            # provider signature is not enough to prove the frozen calendar
+            # axis and capability gate.
+            try:
+                from app.backtesting.data.universe import (
+                    UniverseScopeResolution,
+                    UniverseScopeStatus,
+                )
+            except ImportError:  # pragma: no cover - import-cycle guard
+                UniverseScopeResolution = ()  # type: ignore[assignment]
+                UniverseScopeStatus = ()  # type: ignore[assignment]
+            if self.status is PreflightStatus.READY:
+                if not isinstance(resolution, UniverseScopeResolution):
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report requires universe scope resolution"
+                    )
+                if resolution.status is not UniverseScopeStatus.READY:
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report cannot carry a blocked scope resolution"
+                    )
+                from app.backtesting.calendar_axis import (
+                    CalendarAxisResolution,
+                    CalendarSnapshot,
+                )
+                axis = resolution.calendar_axis_resolution
+                if isinstance(axis, CalendarSnapshot):
+                    axis = axis.resolution
+                if not isinstance(axis, CalendarAxisResolution) or (
+                    axis.policy_key != "strict_compatible"
+                    or str(axis.policy_version) != "1"
+                    or axis.status is not CalendarAxisStatus.COMPATIBLE
+                    or tuple(axis.calendar_ids) != tuple(
+                        resolution.resolved_calendar_ids
+                    )
+                    or not axis.session_signature
+                    or tuple(axis.differences)
+                    or resolution.calendar_session_signature
+                    != axis.session_signature
+                ):
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report requires a compatible strict calendar-axis result"
+                    )
+                if any(
+                    getattr(getattr(issue, "severity", "error"), "value", getattr(issue, "severity", "error"))
+                    == "error"
+                    for issue in resolution.issues
+                ):
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report cannot carry blocking scope issues"
+                    )
+                # Keep the report constructor fail-closed even when a caller
+                # bypasses ``resolve_dynamic_universe_scope`` and constructs
+                # a resolution directly.  Presence of a calendar and hash
+                # alone does not prove the required qualification contracts.
+                capability_aliases = {
+                    "universe": {"universe", "pit_universe", "candidate_universe"},
+                    "identity": {"identity", "pit_identity", "instrument_identity"},
+                    "mapping": {"mapping", "mappings", "pit_mapping", "display_mapping"},
+                    "rules": {"rule", "rules", "rule_package", "rule_qualification", "qualification"},
+                    "market_data": {"bar", "bars", "market_data", "raw_bars", "coverage", "coverage_qualification", "history"},
+                }
+                declared = {
+                    str(key).strip().lower().replace("-", "_").replace(".", "_")
+                    for key in resolution.capability_summary
+                }
+                missing_capabilities = sorted(
+                    bucket
+                    for bucket, aliases in capability_aliases.items()
+                    if not declared.intersection(aliases)
+                )
+                if missing_capabilities:
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report requires complete capability evidence",
+                        details={"missing_capabilities": missing_capabilities},
+                    )
+                unavailable_capabilities: list[str] = []
+                for bucket, aliases in capability_aliases.items():
+                    matching_keys = declared.intersection(aliases)
+                    for key in matching_keys:
+                        value = resolution.capability_summary.get(key)
+                        if isinstance(value, Mapping):
+                            value = value.get(
+                                "status",
+                                value.get(
+                                    "availability",
+                                    value.get("supported", value.get("complete")),
+                                ),
+                            )
+                        value = getattr(value, "value", value)
+                        if isinstance(value, str):
+                            value = value.strip().lower()
+                        if value is False or value in {
+                            None,
+                            "missing",
+                            "unavailable",
+                            "unsupported",
+                            "blocked",
+                            "unknown",
+                            "incomplete",
+                            "invalid",
+                        }:
+                            unavailable_capabilities.append(bucket)
+                if unavailable_capabilities:
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report cannot carry unavailable capability evidence",
+                        details={
+                            "unavailable_capabilities": sorted(
+                                set(unavailable_capabilities)
+                            )
+                        },
+                    )
+                profile = resolution.source_evidence.get(
+                    "preflight_profile", "formal@1"
+                )
+                if str(profile) != "internal_link_acceptance@1":
+                    formal_gate_aliases = {
+                        "formal_preflight": {
+                            "formal_preflight",
+                            "preflight_16b",
+                            "formal_admission",
+                            "formal_qualification",
+                        },
+                        "formal_runtime": {
+                            "formal_runtime",
+                            "runtime_boundary",
+                            "runner",
+                            "strategy_runtime",
+                        },
+                        "formal_corporate_actions": {
+                            "formal_corporate_actions",
+                            "corporate_action_qualification",
+                            "actions_18",
+                            "task18",
+                        },
+                        "formal_trading_status": {
+                            "formal_trading_status",
+                            "trading_status_qualification",
+                            "status_19",
+                            "task19",
+                        },
+                    }
+                    missing_formal_gates = sorted(
+                        gate
+                        for gate, aliases in formal_gate_aliases.items()
+                        if not declared.intersection(aliases)
+                    )
+                    if missing_formal_gates:
+                        raise InvalidDataRequestError(
+                            "a ready formal dynamic report requires all formal dependency gates",
+                            details={"missing_formal_gates": missing_formal_gates},
+                        )
+                if not self.universe_scope_snapshot_hash:
+                    raise InvalidDataRequestError(
+                        "a ready dynamic report requires universe scope snapshot hash"
+                    )
+                if (
+                    resolution.current_snapshot_hash is not None
+                    and resolution.current_snapshot_hash
+                    != resolution.snapshot_hash
+                ):
+                    raise UniversePreflightHashMismatchError(
+                        "a ready dynamic report cannot carry a changed session scope hash",
+                        details={
+                            "expected": resolution.snapshot_hash,
+                            "actual": resolution.current_snapshot_hash,
+                        },
+                    )
         object.__setattr__(
             self,
             "resolved_calendar_ids",
@@ -1180,6 +1661,91 @@ class DataPreflightReport:
         object.__setattr__(
             self, "coverage_reports", tuple(sorted(coverages))
         )
+        coverage_by_capability = {
+            item.capability: item.machine_content() for item in coverages
+        }
+        coverage_fields = {
+            "instrument_mapping_coverage": DataCapability.MAPPINGS,
+            "instrument_rule_fact_summary": DataCapability.RULES,
+            "lookback_session_bar_coverage": DataCapability.BARS,
+            "bar_validity_summary": DataCapability.BARS,
+        }
+        for field_name, capability in coverage_fields.items():
+            value = getattr(self, field_name)
+            if value is None:
+                value = coverage_by_capability.get(capability)
+            if value is not None:
+                if not isinstance(value, Mapping):
+                    raise InvalidDataRequestError(
+                        f"{field_name} must be a mapping"
+                    )
+                frozen = _freeze_domain_json(dict(value), field_name)
+                if not isinstance(frozen, MappingProxyType):
+                    raise InvalidDataRequestError(
+                        f"{field_name} must be a JSON mapping"
+                    )
+                object.__setattr__(self, field_name, frozen)
+        bars = self.lookback_session_bar_coverage
+        rules = self.instrument_rule_fact_summary
+        missing_bars = tuple(self.missing_bars)
+        if not missing_bars and isinstance(bars, Mapping):
+            raw_missing = bars.get("missing_ranges", ())
+            if isinstance(raw_missing, Sequence) and not isinstance(
+                raw_missing, (str, bytes)
+            ):
+                missing_bars = tuple(raw_missing)
+        normalized_missing_bars: list[Mapping[str, object]] = []
+        for item in missing_bars:
+            if not isinstance(item, Mapping):
+                raise InvalidDataRequestError(
+                    "missing_bars entries must be mappings"
+                )
+            frozen = _freeze_domain_json(dict(item), "missing_bars")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "missing_bars entries must be JSON mappings"
+                )
+            normalized_missing_bars.append(frozen)
+        object.__setattr__(
+            self,
+            "missing_bars",
+            tuple(sorted(normalized_missing_bars, key=canonical_json)),
+        )
+        object.__setattr__(
+            self,
+            "missing_fields",
+            _sorted_unique_text(
+                self.missing_fields, "missing_fields", allow_empty=True
+            ),
+        )
+        for field_name, summary, count_name in (
+            ("invalid_bars", bars, "invalid"),
+            ("incomplete_rules", rules, "unavailable"),
+        ):
+            value = getattr(self, field_name)
+            counts = summary.get("counts") if isinstance(summary, Mapping) else None
+            if value is None and isinstance(counts, Mapping):
+                value = counts.get(count_name)
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or value < 0
+            ):
+                raise InvalidDataRequestError(
+                    f"{field_name} must be a non-negative integer"
+                )
+            object.__setattr__(self, field_name, value)
+        non_pit_sources = self.non_pit_sources or self.non_strict_pit_capabilities
+        object.__setattr__(
+            self,
+            "non_pit_sources",
+            _sorted_unique_enum(
+                non_pit_sources,
+                DataCapability,
+                "non_pit_sources",
+                allow_empty=True,
+            ),
+        )
         revisions = self.source_revisions or {}
         if not isinstance(revisions, Mapping):
             raise InvalidDataRequestError("source_revisions must be a mapping")
@@ -1198,6 +1764,12 @@ class DataPreflightReport:
             self, "source_revisions", MappingProxyType(normalized_revisions)
         )
         issues = _sorted_issues(self.issues)
+        if not self.missing_fields:
+            object.__setattr__(
+                self,
+                "missing_fields",
+                tuple(sorted({issue.field for issue in issues if issue.field})),
+            )
         errors = [
             issue for issue in issues
             if issue.severity is IssueSeverity.ERROR
@@ -1388,6 +1960,19 @@ class DataPreflightReport:
         return self.status is PreflightStatus.BLOCKED
 
     @property
+    def fixed_instrument_ids(self) -> tuple[UUID, ...]:
+        """Canonical fixed union including every non-zero opening holding."""
+
+        return tuple(
+            sorted(
+                set(self.static_instrument_ids)
+                | set(self.mandatory_instrument_ids)
+                | set(self.non_zero_initial_position_instrument_ids),
+                key=str,
+            )
+        )
+
+    @property
     def primary_issue_code(self) -> str | None:
         """Stable first issue code after canonical issue ordering."""
 
@@ -1402,6 +1987,34 @@ class DataPreflightReport:
         details: dict[str, object] = {
             "schema_version": 2 if self.hash_schema_version == 2 else 1,
             "primary_issue_code": self.primary_issue_code,
+            "run_kind": self.run_kind,
+            "preflight_profile_key": self.preflight_profile_key,
+            "preflight_profile_version": self.preflight_profile_version,
+            "preflight_profile": (
+                f"{self.preflight_profile_key}@{self.preflight_profile_version}"
+                if self.preflight_profile_key is not None
+                else None
+            ),
+            "capability_manifest_version": self.capability_manifest_version,
+            "status": self.status,
+            "scope_mode": self.scope_mode,
+            "resolved_instruments": [
+                str(item) for item in self.resolved_instruments
+            ],
+            "coverage_reports": [
+                report.machine_content() for report in self.coverage_reports
+            ],
+            "instrument_mapping_coverage": self.instrument_mapping_coverage,
+            "instrument_rule_fact_summary": self.instrument_rule_fact_summary,
+            "lookback_session_bar_coverage": self.lookback_session_bar_coverage,
+            "bar_validity_summary": self.bar_validity_summary,
+            "missing_bars": self.missing_bars,
+            "missing_fields": self.missing_fields,
+            "invalid_bars": self.invalid_bars,
+            "incomplete_rules": self.incomplete_rules,
+            "non_pit_sources": self.non_pit_sources,
+            "source_revisions": self.source_revisions,
+            "fixture_sources": self.fixture_sources,
             "issues": [issue.as_dict() for issue in self.issues],
             "requested_window": {
                 "start_date": self.requested_window.start_date,
@@ -1440,8 +2053,41 @@ class DataPreflightReport:
             "adjustment_factor_coverage": self.adjustment_factor_coverage,
             "calendar_ids": self.resolved_calendar_ids,
             "coverage": self.calendar_summary.get("coverage") if self.calendar_summary else None,
-            "report_hash": self.report_hash if self.hash_schema_version == 2 else None,
-            "hash_schema_version": self.hash_schema_version if self.hash_schema_version == 2 else None,
+            "universe_eligibility_policy_version": (
+                {
+                    "key": self.universe_eligibility_policy_version.key,
+                    "version": self.universe_eligibility_policy_version.version,
+                }
+                if isinstance(self.universe_eligibility_policy_version, ContractRef)
+                else self.universe_eligibility_policy_version
+            ),
+            "qualification_policy_version": (
+                {
+                    "key": self.qualification_policy_version.key,
+                    "version": self.qualification_policy_version.version,
+                }
+                if isinstance(self.qualification_policy_version, ContractRef)
+                else self.qualification_policy_version
+            ),
+            "qualification_policy": (
+                {
+                    "key": self.qualification_policy.key,
+                    "version": self.qualification_policy.version,
+                }
+                if isinstance(self.qualification_policy, ContractRef)
+                else self.qualification_policy
+            ),
+            "universe_eligibility_summary": self.universe_eligibility_summary,
+            "non_zero_initial_position_instrument_ids": [
+                str(item) for item in self.non_zero_initial_position_instrument_ids
+            ],
+            "universe_scope_snapshot_hash": self.universe_scope_snapshot_hash,
+            "universe_candidate_count": self.universe_candidate_count,
+            "universe_filtered_reason_counts": self.universe_filtered_reason_counts,
+            "universe_target_ids": [str(item) for item in self.universe_target_ids],
+            "universe_final_rechecks": self.universe_final_rechecks,
+            "report_hash": self.report_hash,
+            "hash_schema_version": self.hash_schema_version,
             "issues_complete": True,
             "cursor": None,
             "next_cursor": None,
@@ -1460,8 +2106,28 @@ class DataPreflightReport:
                 "calendar_session_signature": self.calendar_session_signature,
                 "warmup_session_signature": self.warmup_session_signature,
             })
+        if self.universe_scope_resolution is not None:
+            resolver = self.universe_scope_resolution
+            as_dict = getattr(resolver, "as_dict", None)
+            canonical_content = getattr(resolver, "canonical_content", None)
+            details["universe_scope_resolution"] = (
+                as_dict() if callable(as_dict) else resolver
+            )
+            if not callable(as_dict) and callable(canonical_content):
+                details["universe_scope_resolution"] = dict(canonical_content())
+            elif not callable(as_dict) and not callable(canonical_content):
+                # Never put arbitrary provider objects in an API/report
+                # payload.  The machine scope hash already captures the
+                # admissible semantics.
+                details["universe_scope_resolution"] = None
         return {
             "status": self.status.value,
+            "run_kind": self.run_kind,
+            "preflight_profile": (
+                f"{self.preflight_profile_key}@{self.preflight_profile_version}"
+                if self.preflight_profile_key is not None
+                else None
+            ),
             "run_id": None,
             "persisted": False,
             "reason_code": "data_preflight_blocked" if self.blocked else None,
@@ -1492,7 +2158,7 @@ class DataPreflightReport:
                 for point in points
             ]
 
-        return {
+        payload = {
             "status": self.status,
             "provider_key": self.provider_key,
             "capability_manifest_version": self.capability_manifest_version,
@@ -1632,7 +2298,63 @@ class DataPreflightReport:
             ],
             "source_revisions": self.source_revisions,
             "issues": [issue.machine_fields() for issue in self.issues],
+            # Candidate membership is deliberately absent.  These fields
+            # capture only frozen policies and aggregate evidence; daily
+            # dynamic candidate ordering is a runtime observation, not an
+            # admission input.
+            "non_zero_initial_position_instrument_ids": [
+                str(item) for item in self.non_zero_initial_position_instrument_ids
+            ],
+            "universe_eligibility_policy_version": (
+                {
+                    "key": self.universe_eligibility_policy_version.key,
+                    "version": self.universe_eligibility_policy_version.version,
+                }
+                if isinstance(self.universe_eligibility_policy_version, ContractRef)
+                else self.universe_eligibility_policy_version
+            ),
+            "qualification_policy_version": (
+                {
+                    "key": self.qualification_policy_version.key,
+                    "version": self.qualification_policy_version.version,
+                }
+                if isinstance(self.qualification_policy_version, ContractRef)
+                else self.qualification_policy_version
+            ),
+            "qualification_policy": (
+                {
+                    "key": self.qualification_policy.key,
+                    "version": self.qualification_policy.version,
+                }
+                if isinstance(self.qualification_policy, ContractRef)
+                else self.qualification_policy
+            ),
+            "universe_scope_snapshot_hash": self.universe_scope_snapshot_hash,
+            # Selected target ids and final-recheck details are decision audit
+            # data.  Keep them out of the request-level report hash so a
+            # changing daily candidate list never changes admission identity.
         }
+        if self.run_kind is not None:
+            payload.update(
+                {
+                    "run_kind": self.run_kind,
+                    "preflight_profile_key": self.preflight_profile_key,
+                    "preflight_profile_version": self.preflight_profile_version,
+                    "resolved_instruments": [
+                        str(item) for item in self.resolved_instruments
+                    ],
+                    "instrument_mapping_coverage": self.instrument_mapping_coverage,
+                    "instrument_rule_fact_summary": self.instrument_rule_fact_summary,
+                    "lookback_session_bar_coverage": self.lookback_session_bar_coverage,
+                    "bar_validity_summary": self.bar_validity_summary,
+                    "missing_bars": self.missing_bars,
+                    "missing_fields": self.missing_fields,
+                    "invalid_bars": self.invalid_bars,
+                    "incomplete_rules": self.incomplete_rules,
+                    "non_pit_sources": self.non_pit_sources,
+                    "fixture_sources": self.fixture_sources,
+                }
+            )
         # Legacy @1 reports retain their historical payload exactly.  Calendar
         # PIT evidence is opt-in @2 and is never silently folded into an old
         # report merely because the Python object has compatibility defaults.

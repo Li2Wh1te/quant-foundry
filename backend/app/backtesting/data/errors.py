@@ -46,6 +46,23 @@ __all__ = [
     "InvalidDataRequestError",
     "LookbackSessionsLimitExceededError",
     "ProviderContractViolationError",
+    "CoverageFactInvalidError",
+    "CoverageFactConflictError",
+    "CoverageIncompleteError",
+    "CoverageRequiredFieldMissingError",
+    "CoverageProviderContractViolationError",
+    "InternalPreflightProfileMismatchError",
+    "InternalPreflightFixtureMissingError",
+    "InternalPreflightFixtureOutOfScopeError",
+    "InternalPreflightDegradedForbiddenError",
+    "DataPreflightReportHashMismatchError",
+    "UniverseScopeUnresolvedError",
+    "UniverseCapabilityMissingError",
+    "UniversePitBoundaryViolationError",
+    "UniverseTargetOutsideScopeError",
+    "UniverseSelectedIneligibleError",
+    "UniversePreflightHashMismatchError",
+    "UniverseProviderContractViolationError",
     "UniverseCalendarNotPreflightedError",
     "UnsupportedCapabilityError",
     "CalendarContractError",
@@ -268,6 +285,66 @@ class ProviderContractViolationError(DataContractError):
     code = "provider_contract_violation"
 
 
+class CoverageFactInvalidError(ProviderContractViolationError):
+    """A coverage fact violates the immutable fact-envelope contract."""
+
+    code = "coverage_fact_invalid"
+
+
+class CoverageFactConflictError(ProviderContractViolationError):
+    """Two different materializations claim one coverage fact key."""
+
+    code = "coverage_fact_conflict"
+
+
+class CoverageIncompleteError(DataContractError):
+    """Required coverage is partial or cannot be proven complete."""
+
+    code = "coverage_incomplete"
+
+
+class CoverageRequiredFieldMissingError(DataContractError):
+    """A required field has no covering coverage fact."""
+
+    code = "coverage_required_field_missing"
+
+
+class CoverageProviderContractViolationError(ProviderContractViolationError):
+    """Coverage input contains a fact outside the requested contract."""
+
+    code = "coverage_provider_contract_violation"
+
+
+class InternalPreflightProfileMismatchError(DataContractError):
+    """The requested internal preflight profile is not an exact match."""
+
+    code = "internal_preflight_profile_mismatch"
+
+
+class InternalPreflightFixtureMissingError(DataContractError):
+    """A required named internal fixture was not supplied."""
+
+    code = "internal_preflight_fixture_missing"
+
+
+class InternalPreflightFixtureOutOfScopeError(DataContractError):
+    """An internal fixture does not cover the requested instrument/date scope."""
+
+    code = "internal_preflight_fixture_out_of_scope"
+
+
+class InternalPreflightDegradedForbiddenError(DataContractError):
+    """The internal-link profile cannot return a degraded result."""
+
+    code = "internal_preflight_degraded_forbidden"
+
+
+class DataPreflightReportHashMismatchError(DataContractError):
+    """A preflight report hash does not match its canonical machine content."""
+
+    code = "data_preflight_report_hash_mismatch"
+
+
 class UniverseCalendarNotPreflightedError(DataContractError):
     """A dynamic candidate set carries a calendar never preflighted this run.
 
@@ -275,6 +352,48 @@ class UniverseCalendarNotPreflightedError(DataContractError):
     """
 
     code = "universe_calendar_not_preflighted"
+
+
+class UniverseScopeUnresolvedError(DataContractError):
+    """The dynamic scope could not be reduced to a finite named calendar set."""
+
+    code = "universe_scope_unresolved"
+
+
+class UniverseCapabilityMissingError(DataContractError):
+    """The provider cannot prove the capabilities required by a dynamic scope."""
+
+    code = "universe_capability_missing"
+
+
+class UniversePitBoundaryViolationError(DataContractError):
+    """A candidate or query would read outside its frozen PIT boundaries."""
+
+    code = "universe_pit_boundary_violation"
+
+
+class UniverseTargetOutsideScopeError(DataContractError):
+    """A strategy target is not in the fixed or current dynamic permission set."""
+
+    code = "universe_target_outside_scope"
+
+
+class UniverseSelectedIneligibleError(DataContractError):
+    """A selected candidate failed final qualification before order creation."""
+
+    code = "universe_selected_ineligible"
+
+
+class UniversePreflightHashMismatchError(DataContractError):
+    """A session or run observed a different frozen universe-scope hash."""
+
+    code = "universe_preflight_hash_mismatch"
+
+
+class UniverseProviderContractViolationError(DataContractError):
+    """A universe provider returned malformed or non-PIT candidate data."""
+
+    code = "universe_provider_contract_violation"
 
 
 class DataSessionClosedError(DataContractError):
@@ -472,6 +591,23 @@ ERROR_CODES: frozenset[str] = frozenset(
         ConsistencyTokenExpiredError,
         ConsistencyCoverageIncompleteError,
         ProviderContractViolationError,
+        CoverageFactInvalidError,
+        CoverageFactConflictError,
+        CoverageIncompleteError,
+        CoverageRequiredFieldMissingError,
+        CoverageProviderContractViolationError,
+        InternalPreflightProfileMismatchError,
+        InternalPreflightFixtureMissingError,
+        InternalPreflightFixtureOutOfScopeError,
+        InternalPreflightDegradedForbiddenError,
+        DataPreflightReportHashMismatchError,
+        UniverseScopeUnresolvedError,
+        UniverseCapabilityMissingError,
+        UniversePitBoundaryViolationError,
+        UniverseTargetOutsideScopeError,
+        UniverseSelectedIneligibleError,
+        UniversePreflightHashMismatchError,
+        UniverseProviderContractViolationError,
         DataSessionClosedError,
         UniverseCalendarNotPreflightedError,
         CalendarIdSetEmptyError,

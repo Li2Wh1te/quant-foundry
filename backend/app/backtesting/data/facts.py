@@ -19,15 +19,23 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
+import re
 from types import MappingProxyType
-from typing import Mapping
+from typing import Mapping, Sequence
 from uuid import UUID
 
 from app.backtesting.data.errors import (
+    CoverageFactInvalidError,
     ProviderContractViolationError,
     freeze_json,
 )
-from app.backtesting.data.requests import ContractRef, PriceBasis, QualityStatus
+from app.backtesting.data.requests import (
+    ContractRef,
+    DataCapability,
+    PriceBasis,
+    QualityStatus,
+)
 from app.backtesting.domain import _aware_datetime
 from app.instruments.domain import (
     InstrumentCodeMapping,
@@ -38,6 +46,9 @@ from app.instruments.domain import (
 
 __all__ = [
     "AdjustedSeriesPoint",
+    "CoverageApplicability",
+    "DataCoverageApplicability",
+    "DataCoverageFact",
     "Bar",
     "BarFact",
     "ClosePriceFact",
@@ -163,6 +174,517 @@ def _validated_schema(value: ContractRef | None, field_name: str) -> ContractRef
     if not isinstance(value, ContractRef):
         raise ProviderContractViolationError(f"{field_name} must be a ContractRef")
     return value
+
+
+_MACHINE_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_.:/-]*$")
+_MACHINE_CODE_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]*$")
+_SENSITIVE_DETAIL_KEY_PARTS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "apikey",
+        "api_token",
+        "authorization",
+        "credential",
+        "credentials",
+        "password",
+        "private_key",
+        "refresh_token",
+        "secret",
+        "token",
+    }
+)
+
+
+class CoverageApplicability(StrEnum):
+    """Whether one coverage dimension is required by the frozen rule."""
+
+    REQUIRED = "required"
+    NOT_APPLICABLE = "not_applicable"
+
+
+# This longer spelling is useful to callers that want to distinguish the
+# coverage declaration from similarly named calendar declarations.  It is an
+# alias, not a second enum or a second source of contract semantics.
+DataCoverageApplicability = CoverageApplicability
+
+
+def _safe_contract_value(value: object) -> object:
+    """Convert validation context to JSON-safe, non-sensitive primitives."""
+
+    if value is None or type(value) in (str, bool, int, float):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, ContractRef):
+        return {"key": value.key, "version": value.version}
+    if isinstance(value, Mapping):
+        return {
+            str(key): _safe_contract_value(item)
+            for key, item in value.items()
+            if isinstance(key, (str, int, float, bool))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_safe_contract_value(item) for item in value]
+    return type(value).__name__
+
+
+def _coverage_invalid(message: str, **details: object) -> CoverageFactInvalidError:
+    """Build one JSON-safe immutable-fact error with machine context."""
+
+    return CoverageFactInvalidError(
+        message,
+        details={key: _safe_contract_value(value) for key, value in details.items()},
+    )
+
+
+def _coverage_rule_ref(
+    value: ContractRef | tuple[str, int] | str | None,
+    field_name: str,
+) -> ContractRef | None:
+    """Normalize an optional exact ``key@version`` validation reference.
+
+    The public contract uses :class:`ContractRef`; accepting the compact
+    ``key@version`` form keeps JSON adapters ergonomic while still rejecting
+    an unpinned ``latest`` reference.  No mutable mapping or arbitrary object
+    can enter a fact through this compatibility path.
+    """
+
+    if value is None:
+        return None
+    if isinstance(value, ContractRef):
+        reference = value
+    elif isinstance(value, str):
+        text = value.strip()
+        if "@" not in text:
+            raise _coverage_invalid(
+                f"{field_name} must include an exact key@version reference",
+                field=field_name,
+                actual=value,
+                expected="key@version",
+            )
+        key, separator, version_text = text.rpartition("@")
+        if not separator or not key.strip() or not version_text.isdigit():
+            raise _coverage_invalid(
+                f"{field_name} must include an exact key@version reference",
+                field=field_name,
+                actual=value,
+                expected="key@version",
+            )
+        try:
+            reference = ContractRef(key=key.strip(), version=int(version_text))
+        except (TypeError, ValueError) as exc:
+            raise _coverage_invalid(
+                f"{field_name} is not a valid versioned reference",
+                field=field_name,
+                actual=value,
+                expected="key@version",
+            ) from exc
+    elif isinstance(value, Mapping) and set(value) == {"key", "version"}:
+        key = value["key"]
+        version = value["version"]
+        try:
+            reference = ContractRef(key=key, version=version)
+        except (TypeError, ValueError) as exc:
+            raise _coverage_invalid(
+                f"{field_name} is not a valid versioned reference",
+                field=field_name,
+                actual={"key": key, "version": version},
+                expected="key@version",
+            ) from exc
+    elif isinstance(value, (tuple, list)) and len(value) == 2:
+        key, version = value
+        try:
+            reference = ContractRef(key=key, version=version)
+        except (TypeError, ValueError) as exc:
+            raise _coverage_invalid(
+                f"{field_name} is not a valid versioned reference",
+                field=field_name,
+                actual=list(value),
+                expected="key@version",
+            ) from exc
+    else:
+        raise _coverage_invalid(
+            f"{field_name} must be a ContractRef or exact key@version value",
+            field=field_name,
+            actual=type(value).__name__,
+            expected="ContractRef",
+        )
+    if reference.key.strip().lower() == "latest":
+        raise _coverage_invalid(
+            f"{field_name} must not use the unpinned latest reference",
+            field=field_name,
+            actual=reference.key,
+            expected="an exact versioned key",
+        )
+    return reference
+
+
+def _coverage_field(value: object) -> str:
+    """Require an ASCII machine field name, never a display label."""
+
+    if type(value) is not str or not value.strip() or not _MACHINE_FIELD_RE.fullmatch(value.strip()):
+        raise _coverage_invalid(
+            "field must be a non-blank ASCII machine field name",
+            field=value if type(value) is str else None,
+            actual=value if type(value) in (str, int, float, bool) else type(value).__name__,
+            expected="[A-Za-z_][A-Za-z0-9_.:/-]*",
+        )
+    return value.strip()
+
+
+def _coverage_applicability(value: CoverageApplicability | str) -> CoverageApplicability:
+    """Normalize only the two explicitly declared applicability values."""
+
+    if isinstance(value, CoverageApplicability):
+        return value
+    if isinstance(value, str):
+        try:
+            return CoverageApplicability(value.strip())
+        except ValueError:
+            pass
+    raise _coverage_invalid(
+        "applicability must be required or not_applicable",
+        field="applicability",
+        actual=value if type(value) is str else type(value).__name__,
+        expected=[CoverageApplicability.REQUIRED.value, CoverageApplicability.NOT_APPLICABLE.value],
+    )
+
+
+def _contains_sensitive_detail_key(value: object) -> str | None:
+    """Find credential-shaped keys before JSON freezing detail payloads."""
+
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            if isinstance(key, str):
+                normalized = key.strip().lower().replace("-", "_")
+                pieces = set(normalized.split("."))
+                if (
+                    normalized in _SENSITIVE_DETAIL_KEY_PARTS
+                    or pieces & _SENSITIVE_DETAIL_KEY_PARTS
+                    or any(
+                        part in normalized
+                        for part in (
+                            "token",
+                            "secret",
+                            "password",
+                            "credential",
+                            "authorization",
+                            "api_key",
+                            "private_key",
+                        )
+                    )
+                ):
+                    return key
+            nested = _contains_sensitive_detail_key(item)
+            if nested is not None:
+                return nested
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            nested = _contains_sensitive_detail_key(item)
+            if nested is not None:
+                return nested
+    return None
+
+
+def _coverage_details(value: Mapping[str, object] | None) -> Mapping[str, object]:
+    """Deep-freeze auditable JSON details and reject credential material."""
+
+    details = {} if value is None else value
+    if not isinstance(details, Mapping):
+        raise _coverage_invalid(
+            "details must be a JSON mapping",
+            field="details",
+            actual=type(details).__name__,
+            expected="JSON object",
+        )
+    sensitive_key = _contains_sensitive_detail_key(details)
+    if sensitive_key is not None:
+        raise _coverage_invalid(
+            "details must not contain credentials or access tokens",
+            field="details",
+            actual=sensitive_key,
+            expected="non-sensitive audit context",
+        )
+    try:
+        frozen = freeze_json(dict(details), "details")
+    except ValueError as exc:
+        raise _coverage_invalid(
+            "details must contain JSON-safe values",
+            field="details",
+            actual=type(details).__name__,
+            expected="JSON object",
+        ) from exc
+    assert isinstance(frozen, MappingProxyType)
+    return frozen
+
+
+def _coverage_issue_codes(value: Sequence[str] | None) -> tuple[str, ...]:
+    """Validate and deterministically normalize machine issue identifiers."""
+
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)):
+        raise _coverage_invalid(
+            "issue_codes must be an iterable of machine codes",
+            field="issue_codes",
+            actual=type(value).__name__,
+            expected="sequence[str]",
+        )
+    try:
+        raw_codes = tuple(value)
+    except TypeError as exc:
+        raise _coverage_invalid(
+            "issue_codes must be an iterable of machine codes",
+            field="issue_codes",
+            actual=type(value).__name__,
+            expected="sequence[str]",
+        ) from exc
+    normalized: set[str] = set()
+    for code in raw_codes:
+        if type(code) is not str or not _MACHINE_CODE_RE.fullmatch(code.strip()):
+            raise _coverage_invalid(
+                "issue_codes entries must be non-blank machine codes",
+                field="issue_codes",
+                actual=code if type(code) is str else type(code).__name__,
+                expected="[A-Za-z][A-Za-z0-9_.:-]*",
+            )
+        normalized.add(code.strip())
+    return tuple(sorted(normalized))
+
+
+def _thaw_json(value: object) -> object:
+    """Return a JSON-safe mutable projection for wire-style dictionaries."""
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, StrEnum):
+        return value.value
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, Mapping):
+        return {str(key): _thaw_json(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw_json(item) for item in value]
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class DataCoverageFact:
+    """One immutable, auditable coverage assertion.
+
+    The fact is intentionally an envelope rather than a source-specific
+    table.  Its logical identity contains only the stable instrument/date,
+    capability, field, and exact validation-rule reference.  ``details`` is
+    limited to JSON values and is recursively frozen so a provider cannot
+    mutate the evidence after aggregation.  A missing fact is represented by
+    the aggregator as ``unavailable``; callers must not manufacture an empty
+    fact or infer ``not_applicable`` from absence.
+    """
+
+    instrument_id: UUID
+    session_date: date
+    capability: DataCapability
+    field: str
+    validation_rule: ContractRef | tuple[str, int] | str | None = None
+    applicability: CoverageApplicability | str = CoverageApplicability.REQUIRED
+    quality_status: QualityStatus = QualityStatus.UNAVAILABLE
+    evidence: FactEvidence | None = None
+    details: Mapping[str, object] = MappingProxyType({})
+    issue_codes: Sequence[str] = ()
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.instrument_id, UUID):
+            raise _coverage_invalid(
+                "instrument_id must be a UUID",
+                field="instrument_id",
+                actual=type(self.instrument_id).__name__,
+                expected="UUID",
+            )
+        if not isinstance(self.session_date, date) or isinstance(self.session_date, datetime):
+            raise _coverage_invalid(
+                "session_date must be a calendar date",
+                field="session_date",
+                actual=type(self.session_date).__name__,
+                expected="date",
+            )
+        if not isinstance(self.capability, DataCapability):
+            raise _coverage_invalid(
+                "capability must be a DataCapability",
+                field="capability",
+                actual=type(self.capability).__name__,
+                expected="DataCapability",
+            )
+        object.__setattr__(self, "field", _coverage_field(self.field))
+        object.__setattr__(
+            self,
+            "validation_rule",
+            _coverage_rule_ref(self.validation_rule, "validation_rule"),
+        )
+        applicability = _coverage_applicability(self.applicability)
+        object.__setattr__(self, "applicability", applicability)
+        if not isinstance(self.quality_status, QualityStatus):
+            raise _coverage_invalid(
+                "quality_status must be a QualityStatus",
+                field="quality_status",
+                actual=type(self.quality_status).__name__,
+                expected="QualityStatus",
+            )
+        if self.evidence is not None and not isinstance(self.evidence, FactEvidence):
+            raise _coverage_invalid(
+                "evidence must be FactEvidence or None",
+                field="evidence",
+                actual=type(self.evidence).__name__,
+                expected="FactEvidence",
+            )
+        # A complete assertion is meaningful only with complete source
+        # evidence.  This prevents a provider from using a positive status as
+        # a shortcut around the source's own quality result.
+        if self.quality_status is QualityStatus.COMPLETE and (
+            self.evidence is None
+            or self.evidence.quality_status is not QualityStatus.COMPLETE
+        ):
+            raise _coverage_invalid(
+                "complete coverage requires complete audit evidence",
+                field="evidence",
+                actual=(
+                    None
+                    if self.evidence is None
+                    else self.evidence.quality_status.value
+                ),
+                expected=QualityStatus.COMPLETE.value,
+            )
+        # ``not_applicable`` is a positive rule declaration, not a fallback
+        # for a missing source row.  It therefore needs the rule reference
+        # that made the declaration and has no partial/invalid quality.
+        if applicability is CoverageApplicability.NOT_APPLICABLE:
+            if self.validation_rule is None:
+                raise _coverage_invalid(
+                    "not_applicable coverage requires an explicit validation rule",
+                    field="validation_rule",
+                    actual=None,
+                    expected="exact key@version",
+                )
+            if self.quality_status is not QualityStatus.COMPLETE:
+                raise _coverage_invalid(
+                    "not_applicable coverage must have complete quality",
+                    field="quality_status",
+                    actual=self.quality_status.value,
+                    expected=QualityStatus.COMPLETE.value,
+                )
+        # An unavailable assertion explicitly says that coverage cannot be
+        # proven.  A source evidence object, when present, must not contradict
+        # that meaning by claiming complete/partial/invalid quality.
+        if (
+            self.quality_status is QualityStatus.UNAVAILABLE
+            and self.evidence is not None
+            and self.evidence.quality_status is not QualityStatus.UNAVAILABLE
+        ):
+            raise _coverage_invalid(
+                "unavailable coverage cannot carry non-unavailable evidence",
+                field="evidence.quality_status",
+                actual=self.evidence.quality_status.value,
+                expected=QualityStatus.UNAVAILABLE.value,
+            )
+        frozen_details = _coverage_details(self.details)
+        if self.quality_status is QualityStatus.INVALID and not frozen_details:
+            raise _coverage_invalid(
+                "invalid coverage requires auditable failure details",
+                field="details",
+                actual="empty",
+                expected="raw value and/or failed-rule context",
+            )
+        object.__setattr__(self, "details", frozen_details)
+        object.__setattr__(self, "issue_codes", _coverage_issue_codes(self.issue_codes))
+
+    @property
+    def logical_key(
+        self,
+    ) -> tuple[UUID, date, DataCapability, str, tuple[str, int] | None]:
+        """Return the stable logical identity used for de-duplication."""
+
+        rule = self.validation_rule
+        rule_key = None if rule is None else (rule.key, rule.version)
+        return (
+            self.instrument_id,
+            self.session_date,
+            self.capability,
+            self.field,
+            rule_key,
+        )
+
+    @property
+    def fact_key(
+        self,
+    ) -> tuple[UUID, date, DataCapability, str, tuple[str, int] | None]:
+        """Compatibility alias for callers that name the identity fact key."""
+
+        return self.logical_key
+
+    @property
+    def normalized_logical_key(self) -> tuple[str, str, str, str, tuple[str, int] | None]:
+        """Return the JSON-safe key projection used by report aggregation."""
+
+        instrument_id, session_date, capability, field, rule = self.logical_key
+        return (
+            str(instrument_id),
+            session_date.isoformat(),
+            capability.value,
+            field,
+            rule,
+        )
+
+    def __hash__(self) -> int:
+        """Hash only the stable logical key, never mutable-source metadata."""
+
+        return hash(self.logical_key)
+
+    def machine_content(self) -> dict[str, object]:
+        """Return hash/comparison content without object identity metadata."""
+
+        rule = self.validation_rule
+        evidence = self.evidence
+        return {
+            "instrument_id": str(self.instrument_id),
+            "session_date": self.session_date,
+            "capability": self.capability,
+            "field": self.field,
+            "validation_rule": (
+                None
+                if rule is None
+                else {"key": rule.key, "version": rule.version}
+            ),
+            "applicability": self.applicability,
+            "quality_status": self.quality_status,
+            "evidence": (
+                None
+                if evidence is None
+                else {
+                    "source": evidence.source,
+                    "observed_at": evidence.observed_at,
+                    "known_at": evidence.known_at,
+                    "quality_status": evidence.quality_status,
+                    "source_revision": evidence.source_revision,
+                }
+            ),
+            "details": self.details,
+            "issue_codes": list(self.issue_codes),
+        }
+
+    def as_dict(self) -> dict[str, object]:
+        """Return a JSON-safe wire projection of this coverage fact."""
+
+        payload = self.machine_content()
+        return _thaw_json(payload)  # type: ignore[return-value]
+
+    def to_dict(self) -> dict[str, object]:
+        """Compatibility alias for serializers using the common ``to_dict`` name."""
+
+        return self.as_dict()
 
 
 @dataclass(frozen=True, slots=True)

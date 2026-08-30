@@ -11,10 +11,10 @@ from __future__ import annotations
 
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Generic, Optional, TypeVar
+from typing import Generic, Mapping, Optional, TypeVar
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic import PlainSerializer
 from typing_extensions import Annotated
 
@@ -77,7 +77,9 @@ class BacktestDecisionItem(_ResultItem):
     mode: str
     targets: dict | list | None = None
     validation_status: str
-    validation_issues: list | None = None
+    # The existing JSON projection carries both legacy text issues and
+    # structured PIT candidate qualification evidence.
+    validation_issues: list[str | dict] | None = None
     duration_ms: SerializedDecimal = None
     error: str | None = None
 
@@ -222,6 +224,18 @@ class AnalysisAdmissionFailureItem(BaseModel):
 
 
 class BacktestDataPreflightItem(_ResultItem):
+    """Operator-safe projection of an admission/session preflight row.
+
+    The database table keeps Phase 2a metadata inside the reserved
+    ``capabilities.__preflight__`` object for migration compatibility.  This
+    validator promotes those fields to stable top-level response fields so a
+    UI never needs to understand the storage detail.
+    """
+
+    run_kind: str = "backtest_run"
+    preflight_profile_key: str = "formal"
+    preflight_profile_version: int = 1
+    preflight_profile: str = "formal@1"
     phase: str
     status: str
     report_hash: str
@@ -243,6 +257,117 @@ class BacktestDataPreflightItem(_ResultItem):
     snapshot_fingerprint: str | None = None
     coverage: dict | None = None
     source_revisions: dict | None = None
+    admission_report_hash: str | None = None
+    session_report_hash: str | None = None
+    hash_match: bool | None = None
+    report_diff: list[dict] | None = None
+    failure_phase: str | None = None
+    fixture_sources: dict | None = None
+    scope_summary: dict | None = None
+    title: str = "正式回测预检"
+    message: str = "正式回测预检结果。"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _promote_preflight_metadata(cls, value):
+        """Promote reserved persistence metadata from mappings or ORM rows."""
+
+        if isinstance(value, Mapping):
+            payload = dict(value)
+        else:
+            names = (
+                "run_id",
+                "phase",
+                "status",
+                "report_hash",
+                "hash_schema_version",
+                "capabilities",
+                "calendar_summary",
+                "session_summary",
+                "pit_status",
+                "data_cutoff",
+                "cutoff_local_date",
+                "include_cutoff_day",
+                "knowledge_as_of",
+                "pit_profile",
+                "profile_version",
+                "non_strict_pit",
+                "non_strict_pit_capabilities",
+                "calendar_revision_digest",
+                "snapshot_fingerprint",
+                "coverage",
+                "source_revisions",
+                "run_kind",
+                "preflight_profile_key",
+                "preflight_profile_version",
+                "preflight_profile",
+                "admission_report_hash",
+                "session_report_hash",
+                "hash_match",
+                "report_diff",
+                "failure_phase",
+                "fixture_sources",
+                "scope_summary",
+                "title",
+                "message",
+            )
+            payload = {name: getattr(value, name) for name in names if hasattr(value, name)}
+        capabilities = payload.get("capabilities")
+        metadata = (
+            capabilities.get("__preflight__")
+            if isinstance(capabilities, Mapping)
+            else None
+        )
+        if isinstance(metadata, Mapping):
+            for name in (
+                "run_kind",
+                "preflight_profile_key",
+                "preflight_profile_version",
+                "qualification_hash",
+                "admission_report_hash",
+                "session_report_hash",
+                "hash_match",
+                "report_diff",
+                "failure_phase",
+                "fixture_sources",
+                "scope_summary",
+            ):
+                if name in metadata:
+                    payload[name] = metadata[name]
+            if "qualification_hash" in metadata:
+                payload["report_hash"] = metadata["qualification_hash"]
+            key = payload.get("preflight_profile_key", "formal")
+            version = payload.get("preflight_profile_version", 1)
+            payload["preflight_profile"] = f"{key}@{version}"
+            internal = payload.get("run_kind") == "internal_link_acceptance"
+            payload.setdefault("title", "内部链路验收" if internal else "正式回测预检")
+            payload.setdefault(
+                "message",
+                "内部链路验收预检结果。" if internal else "正式回测预检结果。",
+            )
+        else:
+            # DTOs produced by an internal adapter may already expose the
+            # promoted fields directly.  Keep the operator-facing title and
+            # Chinese summary correct without requiring the storage wrapper.
+            internal = payload.get("run_kind") == "internal_link_acceptance"
+            if internal:
+                payload.setdefault("preflight_profile", "internal_link_acceptance@1")
+                payload.setdefault("title", "内部链路验收")
+                payload.setdefault("message", "内部链路验收预检结果。")
+        run_kind = payload.get("run_kind", "backtest_run")
+        profile_key = payload.get("preflight_profile_key", "formal")
+        profile_version = payload.get("preflight_profile_version", 1)
+        if run_kind == "internal_link_acceptance" and (
+            profile_key != "internal_link_acceptance" or profile_version != 1
+        ):
+            raise ValueError(
+                "internal_link_acceptance results require profile internal_link_acceptance@1"
+            )
+        if run_kind == "backtest_run" and (
+            profile_key != "formal" or profile_version != 1
+        ):
+            raise ValueError("formal results require profile formal@1")
+        return payload
 
 
 class BacktestDataChunkItem(_ResultItem):
