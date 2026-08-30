@@ -2,8 +2,10 @@
 
 from datetime import date, datetime
 from decimal import Decimal
+from uuid import UUID, uuid4
 
-from sqlalchemy import CheckConstraint, Date, DateTime, Index, Numeric, String, func
+from sqlalchemy import CheckConstraint, Date, DateTime, Index, Numeric, String, Uuid, JSON, UniqueConstraint, func
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -46,4 +48,30 @@ class EtfDailyBar(Base):
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+    source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+
+class EtfDailyBarRevisionAudit(Base):
+    """Append-only evidence of corrections or legacy revision backfills."""
+
+    __tablename__ = "etf_daily_bar_revision_audits"
+    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True, default=uuid4)
+    source: Mapped[str] = mapped_column(String(32), nullable=False)
+    ts_code: Mapped[str] = mapped_column(String(16), nullable=False)
+    trade_date: Mapped[date] = mapped_column(Date, nullable=False)
+    previous_source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    source_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    batch_revision: Mapped[str] = mapped_column(String(128), nullable=False)
+    accepted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    change_kind: Mapped[str] = mapped_column(String(24), nullable=False)
+    changed_fields: Mapped[list] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False
+    )
+    __table_args__ = (
+        CheckConstraint("change_kind IN ('correction', 'metadata_backfill')", name="ck_etf_revision_audit_change_kind"),
+        UniqueConstraint("source", "ts_code", "trade_date", "source_revision", name="uq_etf_revision_audit_identity"),
+        Index("ix_etf_revision_audit_source_date", "source", "trade_date"),
+        Index("ix_etf_revision_audit_source_code_date_accepted", "source", "ts_code", "trade_date", "accepted_at"),
+        Index("ix_etf_revision_audit_batch_revision", "batch_revision"),
     )

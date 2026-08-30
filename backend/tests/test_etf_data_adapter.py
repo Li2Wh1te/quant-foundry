@@ -470,6 +470,60 @@ class AdjustmentPolicyTestCase(unittest.TestCase):
 
 
 class SummaryAndHashTestCase(unittest.TestCase):
+    def test_bar_evidence_projects_source_revision_and_known_at_none(self) -> None:
+        row = make_bar_row(SESSIONS[0], source_revision="rev-1")
+        adapter = make_adapter(FakeStores())
+        bar = adapter.project_bar(row, INSTRUMENT_ID)
+        self.assertEqual(bar.evidence.source_revision, "rev-1")
+        self.assertIsNone(bar.evidence.known_at)
+        self.assertEqual(bar.evidence.observed_at, row.updated_at)
+
+    def test_data_revision_summary_tracks_legacy_and_accepted_time(self) -> None:
+        rows = [
+            make_bar_row(SESSIONS[0], source_revision="rev-1"),
+            make_bar_row(SESSIONS[1], source_revision=None),
+        ]
+        adapter = make_adapter(FakeStores())
+        summary = adapter.preflight_summary(
+            instrument_ids=[INSTRUMENT_ID],
+            expected_sessions=SESSIONS[:2],
+            bars_by_instrument={INSTRUMENT_ID: SESSIONS[:2]},
+            daily_rows=rows,
+        )
+        revision = summary["source_revisions"]["__data_revision_summary__"]
+        self.assertEqual(revision["contract"], "data_revision_summary@1")
+        self.assertEqual(revision["status"], "partial")
+        self.assertEqual(revision["capabilities"]["bars"]["missing_revision_count"], 1)
+
+    def test_data_revision_summary_counts_only_explicit_correction_audit(self) -> None:
+        rows = [
+            make_bar_row(SESSIONS[0], source_revision="rev-1", change_kind="metadata_backfill"),
+            make_bar_row(SESSIONS[1], source_revision="rev-2", change_kind="correction"),
+        ]
+        adapter = make_adapter(FakeStores())
+        summary = adapter.preflight_summary(
+            instrument_ids=[INSTRUMENT_ID], expected_sessions=SESSIONS[:2],
+            bars_by_instrument={INSTRUMENT_ID: SESSIONS[:2]}, daily_rows=rows,
+        )
+        bars = summary["source_revisions"]["__data_revision_summary__"]["capabilities"]["bars"]
+        self.assertEqual(bars["correction_count"], 1)
+        self.assertEqual(bars["affected_range"], {
+            "start": SESSIONS[1].isoformat(), "end": SESSIONS[1].isoformat(),
+            "correction_count": 1,
+        })
+
+    def test_data_revision_summary_does_not_infer_correction_from_source_revision(self) -> None:
+        rows = [make_bar_row(day, source_revision=f"rev-{index}") for index, day in enumerate(SESSIONS[:2])]
+        adapter = make_adapter(FakeStores())
+        summary = adapter.preflight_summary(
+            instrument_ids=[INSTRUMENT_ID], expected_sessions=SESSIONS[:2],
+            bars_by_instrument={INSTRUMENT_ID: SESSIONS[:2]}, daily_rows=rows,
+        )
+        bars = summary["source_revisions"]["__data_revision_summary__"]["capabilities"]["bars"]
+        self.assertEqual(bars["correction_count"], 0)
+        self.assertEqual(bars["affected_range"], {
+            "start": None, "end": None, "correction_count": 0,
+        })
     """Matrix items 9-10: revision sensitivity and hash stability."""
 
     def build_summary(
@@ -525,6 +579,13 @@ class SummaryAndHashTestCase(unittest.TestCase):
         self.assertEqual(
             second["source_revisions"]["daily_bars"]["latest_observed_at"],
             stamp_b.isoformat(),
+        )
+        # The T20 revision summary is additive: legacy observation markers
+        # remain available alongside the derived revision-vector fields.
+        self.assertIn("revision_vector_hash", first["source_revisions"]["daily_bars"])
+        self.assertEqual(
+            first["source_revisions"]["__data_revision_summary__"]["contract"],
+            "data_revision_summary@1",
         )
 
     def test_trading_status_summary_is_explicit_without_status_facts(self) -> None:

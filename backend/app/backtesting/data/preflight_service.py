@@ -967,6 +967,112 @@ def _post_report_gate_issues(
     return tuple(issues)
 
 
+def _source_revision_audit_issues(
+    report: DataPreflightReport,
+    request: DataPreflightRequest,
+    profile: PreflightProfile,
+    fixtures: Sequence[InternalFixture],
+) -> tuple[PreflightIssue, ...]:
+    """Enforce source-revision audit qualification for consumed Bar facts."""
+    consumed = [c for c in report.coverage_reports if c.capability is DataCapability.BARS]
+    if not consumed:
+        return ()
+    summary = report.data_revision_summary
+    daily = summary.get("daily_bars") if isinstance(summary, Mapping) else None
+    production_ok = isinstance(daily, Mapping) and isinstance(daily.get("audit"), Mapping) and daily["audit"].get("evidence_class") == "production_audit" and daily["audit"].get("status") == "complete"
+    revision_ok = isinstance(daily, Mapping) and int(daily.get("missing_revision_count", 1) or 1) == 0
+    fixture_ok = False
+    fixture_failures: list[Mapping[str, object]] = []
+    # The source-revision fixture is deliberately validated here as an
+    # evidence object, rather than merely by name.  This gate runs after the
+    # provider report is frozen and therefore has the complete request scope
+    # available for comparison.
+    forbidden = ("token", "secret", "password", "credential")
+
+    def _contains_sensitive(value: object) -> bool:
+        if isinstance(value, Mapping):
+            return any(
+                any(word in str(key).lower() for word in forbidden)
+                or _contains_sensitive(item)
+                for key, item in value.items()
+            )
+        if isinstance(value, (tuple, list, set, frozenset)):
+            return any(_contains_sensitive(item) for item in value)
+        return any(word in str(value).lower() for word in forbidden)
+
+    def _scope_dates(fixture: InternalFixture) -> tuple[date, date]:
+        starts = [fixture.start_date]
+        ends = [fixture.end_date]
+        scope = fixture.scope if isinstance(fixture.scope, Mapping) else {}
+        for key in ("formal_envelope", "warmup_envelope", "history_envelope"):
+            envelope = scope.get(key)
+            if isinstance(envelope, Mapping):
+                try:
+                    starts.append(date.fromisoformat(str(envelope["start_date"])))
+                    ends.append(date.fromisoformat(str(envelope["end_date"])))
+                except (KeyError, TypeError, ValueError):
+                    fixture_failures.append({"reason": "invalid_date_range", "field": key})
+        return min(starts), max(ends)
+
+    for fixture in fixtures:
+        ref = f"{fixture.fixture_key}@{fixture.fixture_version}"
+        if ref != "source_revision_audit@1":
+            continue
+        if str(getattr(fixture, "capability", "")) not in {FIXTURE_SOURCE_REVISIONS, "source_revision_audit"}:
+            fixture_failures.append({"reason": "capability_mismatch"})
+            continue
+        proof = getattr(fixture, "proof_summary", None)
+        content_hash = str(getattr(fixture, "content_hash", ""))
+        valid_hash = len(content_hash) == 64 and all(c in "0123456789abcdefABCDEF" for c in content_hash)
+        start, end = _scope_dates(fixture)
+        required_ids = set(getattr(request, "static_instrument_ids", ())) | set(
+            getattr(request, "mandatory_instrument_ids", ())
+        )
+        ids_ok = not required_ids or required_ids.issubset(set(getattr(fixture, "instrument_ids", ())))
+        required_ranges = [request.requested_window]
+        for attr in ("formal_envelope", "warmup_envelope", "history_envelope"):
+            envelope = getattr(request, attr, None)
+            if envelope is not None and hasattr(envelope, "start_date") and hasattr(envelope, "end_date"):
+                required_ranges.append(envelope)
+        dates_ok = start <= min(item.start_date for item in required_ranges) and end >= max(
+            item.end_date for item in required_ranges
+        )
+        proof_ok = (isinstance(proof, Mapping) and bool(proof)) or (isinstance(proof, str) and bool(proof.strip()))
+        sensitive_ok = not _contains_sensitive(fixture.machine_content())
+        # A fixture must never masquerade as a production audit record.
+        production_claim = (
+            isinstance(proof, Mapping)
+            and str(proof.get("evidence_class", "")).lower() == "production_audit"
+        ) or str(getattr(fixture, "source", "")).lower() in {"production", "production_audit"}
+        substituted = proof.get("substituted_capability") if isinstance(proof, Mapping) else None
+        capability_claim_ok = substituted is None or str(substituted).lower() in {
+            FIXTURE_SOURCE_REVISIONS,
+            "source_revision_audit",
+            "source_revisions",
+        }
+        fixture_ok = bool(
+            getattr(fixture, "fixture_only", False) is True
+            and getattr(fixture, "source", None) == "internal_fixture"
+            and proof_ok and valid_hash and ids_ok and dates_ok and sensitive_ok
+            and not production_claim and capability_claim_ok
+        )
+        if not fixture_ok:
+            fixture_failures.append({"reason": "invalid_fixture_scope_or_proof", "fixture_key": fixture.fixture_key})
+    if production_ok and revision_ok:
+        return ()
+    if profile.reference == FORMAL_PROFILE:
+        if not summary:
+            code = "source_revision_audit_missing"
+        elif not revision_ok or not isinstance(daily, Mapping) or not daily.get("audit"):
+            code = "source_revision_audit_incomplete"
+        else:
+            code = "source_revision_audit_not_production"
+        return (_issue(code, "来源修订审计证据不满足 formal 生产要求，已阻断回测。", field="source_revisions"),)
+    if fixture_ok or production_ok:
+        return ()
+    return (_issue("source_revision_audit_missing", "来源修订审计证据缺失，且未提供合格 source_revision_audit@1 fixture，已阻断回测。", field="source_revisions", details={"fixture_failures": fixture_failures}),)
+
+
 def _fixture_session_scope_issues(
     report: DataPreflightReport,
     fixtures: Sequence[InternalFixture],
@@ -1925,6 +2031,7 @@ class DataPreflightService:
             resolution=dynamic_resolution,
         )
         report_gate_issues = _post_report_gate_issues(report, request, fixtures)
+        report_gate_issues += _source_revision_audit_issues(report, request, profile, fixtures)
         if report_gate_issues:
             report = _with_report_issues(report, report_gate_issues)
         fixture_session_issues = _fixture_session_scope_issues(

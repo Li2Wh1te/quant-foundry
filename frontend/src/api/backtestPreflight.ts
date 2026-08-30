@@ -38,6 +38,59 @@ export interface BacktestPreflightItem {
   snapshot_fingerprint?: string | null;
   coverage?: Record<string, unknown> | null;
   source_revisions?: Record<string, unknown> | null;
+  data_revision_summary?: Record<string, unknown> | null;
+}
+
+/**
+ * The deliberately small set of revision evidence that may be compared
+ * between runs.  Keep this projection explicit: report hashes, raw source
+ * revision maps, and unrelated capability details are not functional
+ * revision fields and must never leak into the comparison result.
+ */
+export interface DataRevisionComparisonFields {
+  revision_vector_hash: unknown;
+  source: unknown;
+  accepted_at_range: unknown;
+  affected_range: unknown;
+  non_strict_pit_capabilities: unknown;
+  non_strict_pit: unknown;
+}
+
+function revisionCapability(item: BacktestPreflightItem): Record<string, unknown> | null {
+  const summary = item.data_revision_summary;
+  if (!summary || typeof summary !== "object") return null;
+  const capabilities = summary.capabilities;
+  if (!capabilities || typeof capabilities !== "object") return null;
+  const bars = (capabilities as Record<string, unknown>).bars;
+  return bars && typeof bars === "object" ? bars as Record<string, unknown> : null;
+}
+
+export function compareDataRevisionFields(left: BacktestPreflightItem, right: BacktestPreflightItem) {
+  const leftBars = revisionCapability(left);
+  const rightBars = revisionCapability(right);
+  const leftFields: DataRevisionComparisonFields = {
+    revision_vector_hash: left.data_revision_summary?.revision_vector_hash ?? leftBars?.revision_vector_hash ?? null,
+    source: leftBars?.source ?? null,
+    accepted_at_range: leftBars?.accepted_at_range ?? null,
+    affected_range: leftBars?.affected_range ?? null,
+    non_strict_pit_capabilities: left.non_strict_pit_capabilities ?? null,
+    non_strict_pit: left.non_strict_pit ?? null,
+  };
+  const rightFields: DataRevisionComparisonFields = {
+    revision_vector_hash: right.data_revision_summary?.revision_vector_hash ?? rightBars?.revision_vector_hash ?? null,
+    source: rightBars?.source ?? null,
+    accepted_at_range: rightBars?.accepted_at_range ?? null,
+    affected_range: rightBars?.affected_range ?? null,
+    non_strict_pit_capabilities: right.non_strict_pit_capabilities ?? null,
+    non_strict_pit: right.non_strict_pit ?? null,
+  };
+  const fields = Object.keys(leftFields) as (keyof DataRevisionComparisonFields)[];
+  return fields.reduce<Record<string, { left: unknown; right: unknown }>>((diff, field) => {
+    const a = leftFields[field];
+    const b = rightFields[field];
+    if (JSON.stringify(a) !== JSON.stringify(b)) diff[field] = { left: a, right: b };
+    return diff;
+  }, {});
 }
 
 export interface BacktestPreflightPage {

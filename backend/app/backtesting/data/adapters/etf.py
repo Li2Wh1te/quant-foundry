@@ -291,6 +291,7 @@ class DailyBarRow(Protocol):
     vol: Decimal | None
     amount: Decimal | None
     updated_at: datetime
+    source_revision: str | None
 
 
 class AdjustmentFactorRow(Protocol):
@@ -872,6 +873,11 @@ class EtfFactsAdapter:
                 observed_at=row.updated_at,
                 quality_status=quality,
                 known_at=None,
+                source_revision=(
+                    str(row.source_revision)
+                    if getattr(row, "source_revision", None) is not None
+                    else None
+                ),
             ),
             validation_rule_version=ETF_VALIDATION_RULE_VERSION,
             attributes={
@@ -1927,6 +1933,101 @@ class EtfFactsAdapter:
         stamps = [row.updated_at for row in rows if row.updated_at is not None]
         return max(stamps).isoformat() if stamps else None
 
+    @staticmethod
+    def _data_revision_summary(rows: Sequence[DailyBarRow]) -> dict[str, object]:
+        """Build the bounded ``data_revision_summary@1`` contract for bars.
+
+        The vector is derived solely from consumed rows (revision, session and
+        accepted time), making it deterministic and sensitive to corrections
+        without retaining raw payloads or presentation metadata.
+        """
+        ordered = sorted(
+            rows,
+            key=lambda row: (
+                getattr(row, "trade_date", date.min),
+                str(getattr(row, "ts_code", "")),
+            ),
+        )
+        revisions = [getattr(row, "source_revision", None) for row in ordered]
+        missing = sum(1 for revision in revisions if not revision)
+        dates = [row.trade_date for row in ordered if isinstance(getattr(row, "trade_date", None), date)]
+        accepted = [row.updated_at for row in ordered if isinstance(getattr(row, "updated_at", None), datetime)]
+        vector = [
+            {
+                "trade_date": row.trade_date.isoformat(),
+                "source_code": str(getattr(row, "ts_code", "")),
+                "source_revision": getattr(row, "source_revision", None),
+                "accepted_at": row.updated_at.isoformat() if getattr(row, "updated_at", None) else None,
+            }
+            for row in ordered
+        ]
+        vector_hash = canonical_hash(vector)
+        valid_range = {"start": min(dates).isoformat(), "end": max(dates).isoformat()} if dates else {"start": None, "end": None}
+        accepted_range = {"min": min(accepted).isoformat(), "max": max(accepted).isoformat()} if accepted else {"min": None, "max": None}
+        # A source revision identifies the content version, not whether the
+        # current row was a historical correction.  Treating every non-null
+        # revision as a correction over-reports the affected range for normal
+        # first ingestion and metadata backfills.  Only explicit audit fields
+        # emitted by the ingestion audit boundary are accepted here.
+        def _is_correction(row: object) -> bool:
+            for field in ("change_kind", "audit_change_kind", "revision_change_kind"):
+                value = row.get(field) if isinstance(row, Mapping) else getattr(row, field, None)
+                if value is not None:
+                    return str(getattr(value, "value", value)).lower() == "correction"
+            audit = row.get("audit") if isinstance(row, Mapping) else getattr(row, "audit", None)
+            if isinstance(audit, Mapping):
+                value = audit.get("change_kind")
+                if value is not None:
+                    return str(getattr(value, "value", value)).lower() == "correction"
+            return False
+
+        revised_dates = [row.trade_date for row in ordered if _is_correction(row)]
+        affected = {
+            "start": min(revised_dates).isoformat() if revised_dates else None,
+            "end": max(revised_dates).isoformat() if revised_dates else None,
+            "correction_count": len(revised_dates),
+        }
+        status = "complete" if ordered and missing == 0 else ("partial" if ordered else "unavailable")
+        capability = {
+            "source": ETF_PROVIDER_KEY,
+            "fact_count": len(ordered),
+            "missing_revision_count": missing,
+            "correction_count": len(revised_dates),
+            "valid_time_range": valid_range,
+            "accepted_at_range": accepted_range,
+            "affected_range": affected,
+        }
+        return {
+            "daily_bars": {
+                "source": ETF_PROVIDER_KEY,
+                "revision_kind": "derived_content_hash",
+                "revision_vector_hash": vector_hash,
+                "fact_count": len(ordered),
+                "missing_revision_count": missing,
+                "valid_time_range": valid_range,
+                "accepted_at_range": accepted_range,
+                "affected_range": affected,
+                "audit": {
+                    "evidence_class": "production_audit",
+                    "evidence_ref": "etf_daily_bar_revision_audits@1",
+                    "status": status,
+                },
+            },
+            "__data_revision_summary__": {
+                "contract": "data_revision_summary@1",
+                "status": status,
+                "revision_vector_hash": vector_hash,
+                "qualification": {
+                    "profile": "formal@1",
+                    "eligible": status == "complete",
+                    "evidence_class": "production_audit",
+                    "evidence_ref": "etf_daily_bar_revision_audits@1",
+                    "reason_codes": [] if status == "complete" else ["missing_source_revision"],
+                },
+                "capabilities": {"bars": capability},
+            },
+        }
+
     def preflight_summary(
         self,
         *,
@@ -2287,6 +2388,29 @@ class EtfFactsAdapter:
                 "verification",
             )
         }
+        # Merge the derived revision contract into the legacy daily-bars
+        # revision record instead of replacing it wholesale.  Existing
+        # consumers rely on ``latest_observed_at`` (the observation marker),
+        # while the T20 summary contributes bounded revision-vector fields.
+        revision_summary = self._data_revision_summary(daily_rows)
+        derived_daily_revision = revision_summary.get("daily_bars", {})
+        if not isinstance(derived_daily_revision, Mapping):  # pragma: no cover - defensive
+            derived_daily_revision = {}
+        daily_revision = {
+            **derived_daily_revision,
+            "source": self.source,
+            "latest_observed_at": self.revision_stamp(daily_rows),
+        }
+        source_revisions = {
+            "daily_bars": daily_revision,
+            "adjustment_factors": {
+                "source": self.source,
+                "latest_observed_at": self.revision_stamp(factor_rows),
+            },
+            "__data_revision_summary__": revision_summary.get(
+                "__data_revision_summary__", {}
+            ),
+        }
         summary: dict[str, object] = {
             "provider_key": ETF_PROVIDER_KEY,
             "adapter_key": ETF_ADAPTER_KEY,
@@ -2379,16 +2503,7 @@ class EtfFactsAdapter:
                 ),
             },
             "mapping_segments": mapping_summary,
-            "source_revisions": {
-                "daily_bars": {
-                    "source": self.source,
-                    "latest_observed_at": self.revision_stamp(daily_rows),
-                },
-                "adjustment_factors": {
-                    "source": self.source,
-                    "latest_observed_at": self.revision_stamp(factor_rows),
-                },
-            },
+            "source_revisions": source_revisions,
             "invalid_bars": invalid_bars,
             "bar_validity_summary": {
                 "adapter_key": ETF_ADAPTER_KEY,

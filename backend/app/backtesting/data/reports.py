@@ -668,7 +668,7 @@ class DataCoverageReport:
     unavailable_count: int
     quality_status: QualityStatus
     missing_ranges: tuple[DateRange, ...] = ()
-    source_revisions: Mapping[str, str] | None = None
+    source_revisions: Mapping[str, object] | None = None
     issues: tuple[PreflightIssue, ...] = ()
 
     def __post_init__(self) -> None:
@@ -731,17 +731,23 @@ class DataCoverageReport:
             raise InvalidDataRequestError(
                 "source_revisions must be a mapping"
             )
-        normalized_revisions: dict[str, str] = {}
+        normalized_revisions: dict[str, object] = {}
         for source, revision in revisions.items():
             if type(source) is not str or not source.strip():
                 raise InvalidDataRequestError(
                     "source_revisions keys must be non-blank strings"
                 )
-            if type(revision) is not str or not revision.strip():
-                raise InvalidDataRequestError(
-                    "source_revisions values must be non-blank strings"
-                )
-            normalized_revisions[source] = revision
+            if isinstance(revision, str):
+                if not revision.strip():
+                    raise InvalidDataRequestError("source_revisions values must be non-blank strings")
+                normalized_revisions[source] = revision
+            elif isinstance(revision, Mapping):
+                try:
+                    normalized_revisions[source] = freeze_json(revision, f"source_revisions[{source!r}]")
+                except (TypeError, ValueError) as exc:
+                    raise InvalidDataRequestError(str(exc)) from exc
+            else:
+                raise InvalidDataRequestError("source_revisions values must be strings or JSON mappings")
         object.__setattr__(
             self, "source_revisions", MappingProxyType(normalized_revisions)
         )
@@ -879,7 +885,7 @@ class DataPreflightReport:
     adjustment_factor_coverage: Mapping[str, object] | None = None
     quality_mode: QualityMode = QualityMode.STRICT
     coverage_reports: tuple[DataCoverageReport, ...] = ()
-    source_revisions: Mapping[str, str] | None = None
+    source_revisions: Mapping[str, object] | None = None
     issues: tuple[PreflightIssue, ...] = ()
     # Task-16A report-contract fields.  They live on the authoritative report
     # itself so persistence, hashing, and API projections consume one frozen
@@ -945,6 +951,12 @@ class DataPreflightReport:
     trading_status: Mapping[str, object] | None = None
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     report_hash: str = ""
+
+    @property
+    def data_revision_summary(self) -> Mapping[str, object] | None:
+        """Return the reserved, structured ``data_revision_summary@1`` payload."""
+        value = self.source_revisions.get("__data_revision_summary__") if self.source_revisions else None
+        return value if isinstance(value, Mapping) else None
 
     def __post_init__(self) -> None:
         if not isinstance(self.status, PreflightStatus):
@@ -1919,17 +1931,23 @@ class DataPreflightReport:
         revisions = self.source_revisions or {}
         if not isinstance(revisions, Mapping):
             raise InvalidDataRequestError("source_revisions must be a mapping")
-        normalized_revisions: dict[str, str] = {}
+        normalized_revisions: dict[str, object] = {}
         for source, revision in revisions.items():
             if type(source) is not str or not source.strip():
                 raise InvalidDataRequestError(
                     "source_revisions keys must be non-blank strings"
                 )
-            if type(revision) is not str or not revision.strip():
-                raise InvalidDataRequestError(
-                    "source_revisions values must be non-blank strings"
-                )
-            normalized_revisions[source] = revision
+            if isinstance(revision, str):
+                if not revision.strip():
+                    raise InvalidDataRequestError("source_revisions values must be non-blank strings")
+                normalized_revisions[source] = revision
+            elif isinstance(revision, Mapping):
+                try:
+                    normalized_revisions[source] = freeze_json(revision, f"source_revisions[{source!r}]")
+                except (TypeError, ValueError) as exc:
+                    raise InvalidDataRequestError(str(exc)) from exc
+            else:
+                raise InvalidDataRequestError("source_revisions values must be strings or JSON mappings")
         object.__setattr__(
             self, "source_revisions", MappingProxyType(normalized_revisions)
         )

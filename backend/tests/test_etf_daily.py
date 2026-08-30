@@ -412,9 +412,9 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         self.assertIs(result, write_result)
         self.assertIs(actual_checkpoint, checkpoint)
-        bar_repository_class.return_value.upsert_bars.assert_called_once_with(
-            [make_bar()], source="tushare"
-        )
+        call_kwargs = bar_repository_class.return_value.upsert_bars.call_args.kwargs
+        self.assertEqual(call_kwargs["source"], "tushare")
+        self.assertIsNotNone(call_kwargs["accepted_at"])
         checkpoint_repository_class.return_value.advance.assert_called_once_with(
             sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,

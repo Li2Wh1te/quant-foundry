@@ -1,16 +1,18 @@
 """PostgreSQL persistence for current authoritative ETF daily bars."""
 
 from collections.abc import Iterable
-from datetime import date
+from datetime import UTC, date, datetime
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.data_ingestion.models.etf_daily import EtfDailyBar
+from app.data_ingestion.models.etf_daily import EtfDailyBar, EtfDailyBarRevisionAudit
 from app.data_ingestion.schemas.etf_daily import (
     EtfDailyBarInput,
     EtfDailyBarUpsertResult,
+    batch_revision,
+    canonical_row_revision,
 )
 
 
@@ -25,6 +27,7 @@ class EtfDailyBarRepository:
         records: Iterable[EtfDailyBarInput],
         *,
         source: str,
+        accepted_at: datetime | None = None,
     ) -> EtfDailyBarUpsertResult:
         """Insert a complete session or overwrite only corrected source values."""
         bars = list(records)
@@ -33,41 +36,86 @@ class EtfDailyBarRepository:
             return EtfDailyBarUpsertResult(received=0, changed=0, unchanged=0)
 
         table = EtfDailyBar.__table__
-        statement = insert(table).values(
-            [
-                {
-                    "source": source,
-                    "ts_code": bar.ts_code,
-                    "trade_date": bar.trade_date,
-                    "open": bar.open,
-                    "high": bar.high,
-                    "low": bar.low,
-                    "close": bar.close,
-                    "vol": bar.vol,
-                    "amount": bar.amount,
-                }
-                for bar in bars
-            ]
+        return self._upsert_revisioned(
+            bars, source=source,
+            accepted_at=(accepted_at or datetime.now(UTC)),
         )
-        excluded = statement.excluded
-        source_columns = ("open", "high", "low", "close", "vol", "amount")
-        changed_fields = or_(
-            *(
-                getattr(table.c, column).is_distinct_from(getattr(excluded, column))
-                for column in source_columns
+
+    def _upsert_revisioned(
+        self, bars: list[EtfDailyBarInput], *, source: str, accepted_at: datetime
+    ) -> EtfDailyBarUpsertResult:
+        """Classify rows and append correction metadata without committing."""
+        table = EtfDailyBar.__table__
+        revisions = [canonical_row_revision(bar, source=source) for bar in bars]
+        batch = batch_revision(revisions)
+        counts = {"inserted": 0, "corrected": 0, "metadata_backfilled": 0, "unchanged": 0}
+        audit_table = EtfDailyBarRevisionAudit.__table__
+        for bar, revision in zip(bars, revisions):
+            key = {"source": source, "ts_code": bar.ts_code, "trade_date": bar.trade_date}
+            current = self.session.get(EtfDailyBar, (source, bar.ts_code, bar.trade_date))
+            values = {
+                **key,
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "vol": bar.vol,
+                "amount": bar.amount,
+                "source_revision": revision,
+            }
+            if current is None:
+                self.session.execute(insert(table).values(values))
+                counts["inserted"] += 1
+                continue
+            source_fields = ("open", "high", "low", "close", "vol", "amount")
+            changed_fields = sorted(
+                field for field in source_fields
+                if getattr(current, field) != values[field]
             )
-        )
-        statement = statement.on_conflict_do_update(
-            index_elements=[table.c.source, table.c.ts_code, table.c.trade_date],
-            set_={
-                **{column: getattr(excluded, column) for column in source_columns},
-                "updated_at": func.now(),
-            },
-            where=changed_fields,
-        ).returning(table.c.ts_code)
-        changed = len(self.session.execute(statement).all())
+            old_revision = getattr(current, "source_revision", None)
+            if old_revision == revision:
+                counts["unchanged"] += 1
+                continue
+            if changed_fields:
+                kind = "correction"
+                counts["corrected"] += 1
+            elif old_revision is None:
+                kind = "metadata_backfill"
+                counts["metadata_backfilled"] += 1
+            else:
+                counts["unchanged"] += 1
+                continue
+            # Update current state while preserving created_at and avoiding wall-clock revisions.
+            self.session.execute(
+                table.update()
+                .where(
+                    table.c.source == source,
+                    table.c.ts_code == bar.ts_code,
+                    table.c.trade_date == bar.trade_date,
+                )
+                .values(**values, updated_at=func.now())
+            )
+            if audit_table is not None:
+                self.session.execute(
+                    insert(audit_table).values(
+                        source=source,
+                        ts_code=bar.ts_code,
+                        trade_date=bar.trade_date,
+                        previous_source_revision=old_revision,
+                        source_revision=revision,
+                        batch_revision=batch,
+                        accepted_at=accepted_at,
+                        change_kind=kind,
+                        changed_fields=changed_fields,
+                    )
+                )
+        changed = counts["inserted"] + counts["corrected"] + counts["metadata_backfilled"]
         return EtfDailyBarUpsertResult(
-            received=len(bars), changed=changed, unchanged=len(bars) - changed
+            received=len(bars), changed=changed, unchanged=counts["unchanged"],
+            inserted=counts["inserted"], corrected=counts["corrected"],
+            metadata_backfilled=counts["metadata_backfilled"], batch_revision=batch,
+            affected_start_date=min(bar.trade_date for bar in bars),
+            affected_end_date=max(bar.trade_date for bar in bars),
         )
 
     def list_bars(

@@ -257,6 +257,7 @@ class BacktestDataPreflightItem(_ResultItem):
     snapshot_fingerprint: str | None = None
     coverage: dict | None = None
     source_revisions: dict | None = None
+    data_revision_summary: dict | None = None
     admission_report_hash: str | None = None
     session_report_hash: str | None = None
     hash_match: bool | None = None
@@ -297,6 +298,7 @@ class BacktestDataPreflightItem(_ResultItem):
                 "snapshot_fingerprint",
                 "coverage",
                 "source_revisions",
+                "data_revision_summary",
                 "run_kind",
                 "preflight_profile_key",
                 "preflight_profile_version",
@@ -354,6 +356,14 @@ class BacktestDataPreflightItem(_ResultItem):
                 payload.setdefault("preflight_profile", "internal_link_acceptance@1")
                 payload.setdefault("title", "内部链路验收")
                 payload.setdefault("message", "内部链路验收预检结果。")
+        # Promote the bounded source revision summary while retaining the
+        # original source_revisions mapping unchanged for audit detail.
+        if payload.get("data_revision_summary") is None:
+            revisions = payload.get("source_revisions")
+            if isinstance(revisions, Mapping):
+                summary = revisions.get("__data_revision_summary__")
+                if isinstance(summary, Mapping):
+                    payload["data_revision_summary"] = dict(summary)
         run_kind = payload.get("run_kind", "backtest_run")
         profile_key = payload.get("preflight_profile_key", "formal")
         profile_version = payload.get("preflight_profile_version", 1)

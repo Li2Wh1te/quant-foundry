@@ -4,7 +4,8 @@ import {
   BacktestPreflightError,
   BacktestPreflightItem,
   fetchBacktestPreflight,
-  PreflightSection
+  PreflightSection,
+  compareDataRevisionFields
 } from "../api/backtestPreflight";
 import { useAuth } from "../auth/AuthContext";
 import "../backtestPreflight.css";
@@ -15,6 +16,10 @@ function jsonText(value: unknown): string {
 
 function reportTitle(item: BacktestPreflightItem): string {
   return item.status === "ready" ? "数据预检已通过" : "数据预检未通过";
+}
+
+function revisionSummary(item: BacktestPreflightItem): Record<string, any> | null {
+  return item.data_revision_summary && typeof item.data_revision_summary === "object" ? item.data_revision_summary : null;
 }
 
 /**
@@ -31,6 +36,8 @@ export function BacktestPreflightPage() {
   const [page, setPage] = useState<{ items: BacktestPreflightItem[]; next_cursor: string | null; has_more: boolean; truncated: boolean } | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [compareRunId, setCompareRunId] = useState("");
+  const [comparePage, setComparePage] = useState<typeof page>(null);
 
   const load = useCallback(async (nextRunId: string, nextSection?: PreflightSection, cursor?: string) => {
     if (!nextRunId.trim()) return;
@@ -51,6 +58,16 @@ export function BacktestPreflightPage() {
       setLoading(false);
     }
   }, [logout]);
+
+  const compare = async () => {
+    if (!compareRunId.trim()) return;
+    try {
+      const result = await fetchBacktestPreflight(compareRunId.trim(), { limit: 100 });
+      setComparePage(result);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "对比运行加载失败。");
+    }
+  };
 
   useEffect(() => () => undefined, []);
 
@@ -82,6 +99,10 @@ export function BacktestPreflightPage() {
             {loading ? "加载中…" : "查询预检"}
           </button>
         </form>
+        <div className="compare-row">
+          <label>第二运行 ID<input value={compareRunId} onChange={(event) => setCompareRunId(event.target.value)} placeholder="可选：输入 UUID 进行摘要对比" /></label>
+          <button className="button button--secondary" type="button" onClick={() => void compare()} disabled={!compareRunId.trim() || loading}>对比修订摘要</button>
+        </div>
       </section>
 
       {error && <div className="alert alert--error" role="alert">{error}</div>}
@@ -109,11 +130,23 @@ export function BacktestPreflightPage() {
                 <div><dt>data_cutoff</dt><dd><code>{item.data_cutoff ?? "未提供"}</code></dd></div>
                 <div><dt>日历修订摘要</dt><dd><code>{item.calendar_revision_digest ?? "未提供"}</code></dd></div>
                 <div><dt>snapshot fingerprint</dt><dd><code>{item.snapshot_fingerprint ?? "未提供"}</code></dd></div>
+                <div><dt>non-strict PIT</dt><dd>{item.non_strict_pit == null ? "未提供" : item.non_strict_pit ? "是" : "否"}</dd></div>
+                <div><dt>non-strict 能力</dt><dd>{item.non_strict_pit_capabilities?.join("、") ?? "未提供"}</dd></div>
               </dl>
               {item.calendar_summary && <details open={section === "calendar"}><summary>日历与覆盖证据</summary><pre>{jsonText(item.calendar_summary)}</pre></details>}
               {item.session_summary && <details open={section === "sessions"}><summary>formal / warmup 会话证据</summary><pre>{jsonText(item.session_summary)}</pre></details>}
               {item.coverage && <details><summary>数据覆盖</summary><pre>{jsonText(item.coverage)}</pre></details>}
               {item.source_revisions && <details><summary>来源修订</summary><pre>{jsonText(item.source_revisions)}</pre></details>}
+              <details><summary>源数据修订摘要</summary>{revisionSummary(item) ? <>
+                <dl className="preflight-meta revision-meta">
+                  <div><dt>审计资格</dt><dd>{revisionSummary(item)?.qualification?.eligible ? "可用" : "不可用"}</dd></div>
+                  <div><dt>证据类别</dt><dd>{revisionSummary(item)?.qualification?.evidence_class ?? "未提供"}</dd></div>
+                  <div><dt>来源版本</dt><dd><code>{revisionSummary(item)?.contract ?? "未提供"}</code></dd></div>
+                  <div><dt>修订 hash</dt><dd><code>{revisionSummary(item)?.revision_vector_hash ?? "未提供"}</code></dd></div>
+                  <div><dt>有效时间范围</dt><dd>{jsonText(revisionSummary(item)?.capabilities?.bars?.valid_time_range ?? "未提供")}</dd></div>
+                  <div><dt>影响范围 / correction 计数</dt><dd>{jsonText(revisionSummary(item)?.capabilities?.bars?.affected_range ?? "未提供")}</dd></div>
+                </dl><pre>{jsonText(item.data_revision_summary)}</pre>
+              </> : <p className="muted">未提供</p>}</details>
             </article>
           ))}
           {page.has_more && page.next_cursor && (
@@ -122,6 +155,7 @@ export function BacktestPreflightPage() {
             </button>
           )}
           {page.truncated && <p className="muted">当前结果仍有分页内容，请继续加载。</p>}
+          {comparePage?.items[0] && page.items[0] && <details className="compare-panel" open><summary>双运行功能字段对比</summary><pre>{jsonText(compareDataRevisionFields(page.items[0], comparePage.items[0]))}</pre></details>}
         </section>
       )}
     </main>

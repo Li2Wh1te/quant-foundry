@@ -356,7 +356,9 @@ def sync_etf_daily_by_calendar(
         ) from exc
     if not canonical_ids:
         raise InstrumentCalendarUnresolvedError("ETF calendar set is empty")
-    totals = {"days": 0, "received": 0, "changed": 0, "unchanged": 0}
+    totals = {"days": 0, "received": 0, "changed": 0, "unchanged": 0,
+              "inserted": 0, "corrected": 0, "metadata_backfilled": 0}
+    batch_revisions: list[str] = []
     first_date: date | None = None
     last_date: date | None = None
     bars_by_date: dict[date, list[EtfDailyBarInput]] = {}
@@ -517,13 +519,22 @@ def sync_etf_daily_by_calendar(
             totals["received"] += write_result.received
             totals["changed"] += write_result.changed
             totals["unchanged"] += write_result.unchanged
+            totals["inserted"] += write_result.inserted
+            totals["corrected"] += write_result.corrected
+            totals["metadata_backfilled"] += write_result.metadata_backfilled
+            if write_result.batch_revision:
+                batch_revisions.append(write_result.batch_revision)
             first_date = trading_date if first_date is None else min(first_date, trading_date)
             last_date = trading_date
             logger.info(
                 "etf_daily_calendar_succeeded",
                 message=(
                     f"完成 {calendar_id} ETF 日线采集：{date_text} 至 {date_text}，拉取 {write_result.received} 条，"
-                    f"变更 {write_result.changed} 条，未变更 {write_result.unchanged} 条，失败 0 条，checkpoint 已推进至 {date_text}。"
+                    f"变更 {write_result.changed} 条，未变更 {write_result.unchanged} 条，失败 0 条，"
+                    f"revision {write_result.batch_revision or '无'}，影响范围 "
+                    f"{(write_result.affected_start_date or trading_date).isoformat()} 至 "
+                    f"{(write_result.affected_end_date or trading_date).isoformat()}，"
+                    f"checkpoint 已推进至 {date_text}。"
                 ),
                 title="ETF 日线采集完成",
                 data_type="etf_daily",
@@ -532,6 +543,9 @@ def sync_etf_daily_by_calendar(
                 end_date=date_text,
                 fetched_count=write_result.received,
                 changed_count=write_result.changed,
+                inserted_count=write_result.inserted,
+                corrected_count=write_result.corrected,
+                metadata_backfilled_count=write_result.metadata_backfilled,
                 unchanged_count=write_result.unchanged,
                 failed_count=0,
                 checkpoint_scope=checkpoint_scope,
@@ -539,8 +553,12 @@ def sync_etf_daily_by_calendar(
                 checkpoint_after=_checkpoint_synced_through_date(checkpoint).isoformat(),
                 checkpoint_advanced=True,
                 source=TUSHARE_SOURCE,
-                source_revision=None,
-                reconciliation_range=None,
+                source_revision=write_result.batch_revision,
+                batch_revision=write_result.batch_revision,
+                reconciliation_range={
+                    "start_date": (write_result.affected_start_date or trading_date).isoformat(),
+                    "end_date": (write_result.affected_end_date or trading_date).isoformat(),
+                },
             )
             checkpoint_before = _checkpoint_synced_through_date(checkpoint).isoformat()
     return EtfDailySyncResult(
@@ -552,6 +570,12 @@ def sync_etf_daily_by_calendar(
         start_date=first_date,
         end_date=last_date,
         calendar_ids=canonical_ids,
+        inserted=totals["inserted"],
+        corrected=totals["corrected"],
+        metadata_backfilled=totals["metadata_backfilled"],
+        batch_revision=batch_revisions[-1] if batch_revisions else None,
+        affected_start_date=first_date,
+        affected_end_date=last_date,
     )
 
 
@@ -646,8 +670,9 @@ def _commit_etf_daily_date(
     """Commit one complete ETF session and its checkpoint atomically."""
     with Session(get_engine()) as session:
         try:
+            accepted_at = datetime.now(UTC)
             write_result = EtfDailyBarRepository(session).upsert_bars(
-                bars, source=TUSHARE_SOURCE
+                bars, source=TUSHARE_SOURCE, accepted_at=accepted_at
             )
             checkpoint = DataSyncCheckpointRepository(session).advance(
                 sync_key=sync_key,
