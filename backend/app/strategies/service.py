@@ -4,9 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from hashlib import sha256
 import json
 from typing import Any
+from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
@@ -78,6 +80,41 @@ class StrategyDraftValidationError(StrategyStorageError):
     def __init__(self, issues: tuple[StrategyValidationIssue, ...]) -> None:
         super().__init__("strategy draft did not pass validation")
         self.issues = issues
+
+
+class StrategyRevisionBindingError(StrategyStorageError, ValueError):
+    """Raised when a run cannot bind an exact published revision."""
+
+
+@dataclass(frozen=True, slots=True)
+class PublishedStrategyBinding:
+    """Immutable execution snapshot detached from ORM and mutable drafts."""
+
+    strategy_id: UUID
+    revision_id: UUID
+    revision_number: int
+    source_code: str
+    source_hash: str
+    parameter_schema: Mapping[str, Any]
+    parameters: Mapping[str, Any]
+    runtime_manifest: Mapping[str, Any]
+    strategy_contract_version: int
+    # Optional run-scope facts are kept as serializable frozen values.  They
+    # are populated by the run coordinator when available and deliberately do
+    # not carry ORM/provider objects across the worker boundary.
+    static_instrument_ids: tuple[UUID, ...] = ()
+    initial_positions: tuple[Mapping[str, Any], ...] = ()
+    adjustment_policy_reference: Mapping[str, Any] | None = None
+
+    @property
+    def strategy_revision_id(self) -> UUID:
+        """Canonical name used by run-start callers."""
+        return self.revision_id
+
+    @property
+    def frozen_parameters(self) -> Mapping[str, Any]:
+        """Canonical immutable parameter snapshot name."""
+        return self.parameters
 
 
 class StrategyStorageService:
@@ -315,6 +352,55 @@ class StrategyStorageService:
         self.session.flush()
         return revision
 
+    def bind_published_revision(
+        self,
+        strategy_id: UUID,
+        revision_id: UUID,
+        *,
+        parameters: Mapping[str, Any] | None = None,
+        expected_source_hash: str | None = None,
+    ) -> PublishedStrategyBinding:
+        """Bind an exact published revision to a detached, read-only run input."""
+        strategy = self.repository.get_strategy(strategy_id)
+        revision = self.repository.get_revision(revision_id)
+        if strategy is None:
+            raise StrategyNotFoundError(str(strategy_id))
+        if revision is None:
+            raise StrategyRevisionBindingError("published revision not found")
+        if revision.strategy_id != strategy_id:
+            raise StrategyRevisionBindingError("revision does not belong to strategy")
+        if strategy.current_revision_id is None:
+            raise StrategyRevisionBindingError("strategy has no published revision")
+        # Historical published revisions are valid run inputs when explicitly
+        # selected; drafts/current pointers are never substituted implicitly.
+        if revision.source_hash != source_hash(revision.source_code):
+            raise StrategyRevisionBindingError("published revision source hash mismatch")
+        if expected_source_hash is not None and revision.source_hash != expected_source_hash:
+            raise StrategyRevisionBindingError("published revision hash mismatch")
+        manifest = dict(revision.runtime_manifest or {})
+        if manifest.get("strategy_contract_version") != STRATEGY_CONTRACT_VERSION:
+            raise StrategyRevisionBindingError("unsupported strategy contract version")
+        supplied = revision.default_parameters if parameters is None else parameters
+        normalized = _normalize_json_object(supplied, field_name="parameters")
+        issues = _validate_runtime_parameters(revision.parameter_schema or {}, normalized)
+        if issues:
+            raise StrategyRevisionBindingError("parameters do not satisfy revision schema: " + "; ".join(issues))
+        return PublishedStrategyBinding(
+            strategy_id=strategy_id,
+            revision_id=revision.id,
+            revision_number=revision.revision_number,
+            source_code=revision.source_code,
+            source_hash=revision.source_hash,
+            parameter_schema=_deep_freeze(revision.parameter_schema or {}),
+            parameters=_deep_freeze(normalized),
+            runtime_manifest=_deep_freeze(manifest),
+            strategy_contract_version=STRATEGY_CONTRACT_VERSION,
+        )
+
+    # Explicit alias used by run-start callers; both names intentionally share
+    # the same strict binding semantics and return the same detached snapshot.
+    resolve_published_binding = bind_published_revision
+
     def _require_editable_strategy(self, strategy_id: UUID) -> Strategy:
         """Lock and validate the strategy before changing its draft lifecycle."""
         strategy = self.repository.get_strategy(strategy_id, for_update=True)
@@ -434,3 +520,44 @@ def _assert_expected_strategy_version(current: int, expected: int) -> None:
         raise StrategyMetadataConflictError(
             f"strategy version does not match: expected {expected}, current {current}"
         )
+
+
+def _deep_freeze(value: Any) -> Any:
+    """Recursively freeze JSON values crossing into a worker."""
+    if isinstance(value, Mapping):
+        return MappingProxyType({str(k): _deep_freeze(v) for k, v in value.items()})
+    if isinstance(value, list):
+        return tuple(_deep_freeze(v) for v in value)
+    if isinstance(value, tuple):
+        return tuple(_deep_freeze(v) for v in value)
+    return value
+
+
+def _validate_runtime_parameters(schema: Mapping[str, Any], parameters: Mapping[str, Any]) -> list[str]:
+    """Validate the small JSON-Schema profile supported by strategy v1."""
+    issues: list[str] = []
+    if schema.get("type") not in (None, "object"):
+        issues.append("schema type must be object")
+    required = schema.get("required", [])
+    if isinstance(required, list):
+        issues.extend(f"missing required parameter: {name}" for name in required if name not in parameters)
+    properties = schema.get("properties", {})
+    if isinstance(properties, Mapping):
+        if schema.get("additionalProperties") is False:
+            issues.extend(
+                f"unknown parameter: {name}"
+                for name in parameters
+                if name not in properties
+            )
+        for name, rule in properties.items():
+            if name not in parameters or not isinstance(rule, Mapping):
+                continue
+            expected = rule.get("type")
+            value = parameters[name]
+            valid = {"object": isinstance(value, Mapping), "array": isinstance(value, list),
+                     "string": isinstance(value, str), "boolean": isinstance(value, bool),
+                     "integer": isinstance(value, int) and not isinstance(value, bool),
+                     "number": isinstance(value, (int, float)) and not isinstance(value, bool)}.get(expected, True)
+            if not valid:
+                issues.append(f"parameter {name} has invalid type")
+    return issues

@@ -88,6 +88,8 @@ from app.strategy_protocol.context import (
     PortfolioDTO,
     PositionDTO,
     PreviousStepDTO,
+    StartContext,
+    FinishContext,
 )
 from app.strategy_protocol.data_view import (
     AdjustmentPolicyGate,
@@ -1208,6 +1210,12 @@ class StrategyProgram(Protocol):
         """Return the validated :class:`StrategyDecision` for this step."""
         ...
 
+    # Lifecycle hooks are optional for backwards-compatible strategy adapters.
+    def on_start(self, context: Any) -> Any: ...
+    def on_order_update(self, order: Any) -> Any: ...
+    def on_fill(self, fill: Any) -> Any: ...
+    def on_finish(self, result: Any) -> Any: ...
+
 
 class CorporateActionSource(Protocol):
     def cash_dividend_events(self) -> tuple[CashDividendEvent, ...]:
@@ -2147,6 +2155,7 @@ class DeterministicBacktestRunner:
         self._last_analysis_completed_session: date | None = None
         self._finished = False
         self._failed = False
+        self._strategy_started = False
 
         self._portfolio = initial_portfolio
         register_initial = getattr(
@@ -4785,6 +4794,17 @@ class DeterministicBacktestRunner:
                 f"got {next_after_last.sequence if next_after_last is not None else None}"
             )
         try:
+            if not self._strategy_started:
+                hook = getattr(self._strategy, "on_start", None)
+                if callable(hook):
+                    first = ordered[0]
+                    hook(StartContext(
+                        step_sequence=first.sequence,
+                        session_date=first.start_time.date(),
+                        decision_time=first.start_time,
+                        timezone=first.timezone,
+                    ))
+                self._strategy_started = True
             self._execute_slice(ordered, next_after_last=next_after_last)
         except Exception:
             # Events already emitted stay on the stream for audit, but the
@@ -4794,6 +4814,19 @@ class DeterministicBacktestRunner:
             raise
         self._next_expected_step = ordered[-1].sequence + 1
         if self._next_expected_step >= len(self._axis):
+            hook = getattr(self._strategy, "on_finish", None)
+            try:
+                if callable(hook):
+                    last = ordered[-1]
+                    hook(FinishContext(
+                        step_sequence=last.sequence,
+                        session_date=last.end_time.date(),
+                        decision_time=last.end_time,
+                        timezone=last.timezone,
+                    ))
+            except Exception:
+                self._failed = True
+                raise
             self._finished = True
         current_chunk_sequence = self._analysis_chunk_sequence
         self._analysis_chunk_sequence += 1
@@ -5971,6 +6004,11 @@ class DeterministicBacktestRunner:
                     price=fill.price,
                 )
             )
+            hook = getattr(self._strategy, "on_fill", None)
+            if callable(hook):
+                # Only the immutable summary is exposed; the mutable engine
+                # Fill object remains private to accounting/runtime.
+                hook(self._step_fill_summaries[-1])
             emitted.append(
                 self._emit_pair(
                     BacktestEventType.FILL_APPLIED,
@@ -6146,6 +6184,10 @@ class DeterministicBacktestRunner:
                     },
                 )
             )
+            hook = getattr(self._strategy, "on_order_update", None)
+            if callable(hook):
+                # Pass a frozen summary rather than the mutable Order object.
+                hook(staged_order_records[-1])
         return emitted
 
     def _freeze_dividend_entitlement(

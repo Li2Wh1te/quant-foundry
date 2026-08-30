@@ -16,7 +16,7 @@ from .contract import (
     MAX_LOOKBACK_SESSIONS,
     STRATEGY_CONTRACT_VERSION,
 )
-from .context import DecisionContext
+from .context import DecisionContext, FinishContext, OrderUpdate, Fill, StartContext
 from .data_view import StrategyDataDTO, UniverseQueryDTO
 from .decisions import DecisionModeRegistry, StrategyDecision, build_default_registry
 
@@ -25,6 +25,10 @@ __all__ = [
     "MAX_LOOKBACK_SESSIONS",
     "STRATEGY_CONTRACT_VERSION",
     "DecisionContext",
+    "StartContext",
+    "FinishContext",
+    "OrderUpdate",
+    "Fill",
     "DecisionModeRegistry",
     "StrategyDataDTO",
     "StrategyDecision",

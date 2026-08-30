@@ -72,6 +72,21 @@ class ContractCheckResult:
     message: str | None = None
     line: int | None = None
     technical: str | None = None
+    # Canonical run-level failure evidence names. ``line``/``technical`` are
+    # retained as compatibility aliases for existing callers.
+    failure_step: int | None = None
+    source_line: int | None = None
+    technical_detail: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.source_line is None:
+            object.__setattr__(self, "source_line", self.line)
+        elif self.line is None:
+            object.__setattr__(self, "line", self.source_line)
+        if self.technical_detail is None:
+            object.__setattr__(self, "technical_detail", self.technical)
+        elif self.technical is None:
+            object.__setattr__(self, "technical", self.technical_detail)
 
 
 SYNTHETIC_FALLBACK_TIMEZONE = timezone(timedelta(hours=8))
@@ -437,6 +452,11 @@ def _validate_result_document(
             message=failure.get("message"),
             line=failure.get("line"),
             technical=failure.get("traceback") or stderr_tail,
+            failure_step=failure.get("failure_step"),
+            source_line=failure.get("source_line", failure.get("line")),
+            technical_detail=failure.get("technical_detail")
+            or failure.get("traceback")
+            or stderr_tail,
         )
 
     evidence = decoded.get("evidence")

@@ -581,6 +581,11 @@ export function StrategiesPage() {
                     <button className="task-create-button" type="button" disabled={publishing || saving || validating || isArchived} onClick={() => void handlePublish()}><Rocket aria-hidden="true" />{publishing ? "发布中" : "发布版本"}</button>
                   </div>
                 </div>
+                <div className="strategy-editor__run-gate" role="status">
+                  {detail.current_revision
+                    ? <span>回测将绑定已发布版本 v{detail.current_revision.revision_number}（不可变）。{isDirty ? "当前草稿有未发布修改，回测不会使用这些修改。" : ""}</span>
+                    : <span>请先发布策略，未发布草稿不能进入回测。</span>}
+                </div>
 
                 <form className="strategy-editor__form" onSubmit={(event) => void handleSave(event)}>
                   <div className="strategy-metadata-grid">
