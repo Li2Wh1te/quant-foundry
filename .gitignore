@@ -13,3 +13,8 @@ __pycache__/
 
 # Ignore documentation directories at any level while preserving local files.
 **/docs/
+
+# Review artifacts are local-only and must not be committed.
+*REVIEW_CHECKLIST.md
+*TRACEABILITY.md
+*REVIEW_STATUS.md
