@@ -135,6 +135,15 @@ class StrategyDetailResponse(StrategySummaryResponse):
     current_revision: StrategyRevisionSummaryResponse | None
 
 
+class StrategyBacktestWorkspaceResponse(BaseModel):
+    """Strategy-scoped projection consumed by the backtest workbench."""
+
+    strategy: dict[str, Any]
+    published_revisions: list[dict[str, Any]]
+    formal_gate: dict[str, Any]
+    runs: dict[str, Any]
+
+
 class StrategyValidationIssueResponse(BaseModel):
     """A display-safe static validation issue that does not echo private source."""
 

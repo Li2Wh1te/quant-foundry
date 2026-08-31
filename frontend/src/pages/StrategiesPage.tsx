@@ -583,7 +583,7 @@ export function StrategiesPage() {
                 </div>
                 <div className="strategy-editor__run-gate" role="status">
                   {detail.current_revision
-                    ? <span>回测将绑定已发布版本 v{detail.current_revision.revision_number}（不可变）。{isDirty ? "当前草稿有未发布修改，回测不会使用这些修改。" : ""}</span>
+                    ? <span>回测将绑定已发布版本 v{detail.current_revision.revision_number}（不可变）。{isDirty ? "当前草稿有未发布修改，回测不会使用这些修改。" : ""} <Link className="strategy-open-backtest" to={`/admin/strategies/${detail.id}/backtests`}>进入回测工作台</Link></span>
                     : <span>请先发布策略，未发布草稿不能进入回测。</span>}
                 </div>
 

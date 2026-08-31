@@ -151,6 +151,7 @@ class StrategyApiSchemaTestCase(unittest.TestCase):
                 "/api/admin/strategies/{strategy_id}/draft",
                 "/api/admin/strategies/{strategy_id}/validate",
                 "/api/admin/strategies/{strategy_id}/publish",
+                "/api/admin/strategies/{strategy_id}/backtests",
                 "/api/admin/strategies/{strategy_id}/revisions",
                 "/api/admin/strategies/{strategy_id}/revisions/{revision_number}",
             },

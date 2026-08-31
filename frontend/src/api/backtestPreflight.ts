@@ -121,6 +121,16 @@ export class BacktestPreflightError extends Error {
   }
 }
 
+/** Execute side-effect-free admission preflight before creating a formal run. */
+export async function preflightBacktest(payload: unknown, signal?: AbortSignal): Promise<BacktestPreflightItem> {
+  const response = await fetch("/api/admin/backtest-runs/preflight", {
+    method: "POST", headers: { ...headers(), "Content-Type": "application/json" },
+    body: JSON.stringify(payload), signal,
+  });
+  await checkResponse(response);
+  return response.json() as Promise<BacktestPreflightItem>;
+}
+
 function headers(): HeadersInit {
   const token = readApiToken();
   return token ? { Authorization: `Bearer ${token}` } : {};

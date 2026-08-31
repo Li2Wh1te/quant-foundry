@@ -14,6 +14,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
 import { StrategyDataApiPage } from "./pages/StrategyDataApiPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
+import { StrategyBacktestsPage } from "./pages/StrategyBacktestsPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -97,6 +98,7 @@ export function App() {
         path="/admin/strategies/:strategyId"
         element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
       />
+      <Route path="/admin/strategies/:strategyId/backtests" element={<RequireAuth><AdminPage><StrategyBacktestsPage /></AdminPage></RequireAuth>} />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>
   );

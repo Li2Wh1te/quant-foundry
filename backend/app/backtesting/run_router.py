@@ -37,6 +37,7 @@ from .run_repository import (
     TERMINAL_STATUSES,
 )
 from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse
+from app.strategies.repository import StrategyRepository
 from .spec import BacktestSpec, InitialPositionInput
 
 
@@ -717,6 +718,7 @@ def _list(
     limit: int,
     offset: int,
     strategy_revision_id: str | None = None,
+    strategy_id: str | None = None,
 ) -> dict[str, list[RunResponse]]:
     # FastAPI resolves Query defaults before dispatch; direct function callers
     # receive Query marker objects instead, so normalize them here as well.
@@ -730,6 +732,7 @@ def _list(
             limit=limit,
             offset=offset,
             strategy_revision_id=strategy_revision_id,
+            strategy_id=strategy_id,
         )
         return {"items": [_response(row) for row in rows]}
     rows = [
@@ -775,7 +778,7 @@ def list_strategy_runs(
         session=session,
         limit=limit,
         offset=offset,
-        strategy_revision_id=strategy_id,
+        strategy_id=strategy_id,
     )
 
 

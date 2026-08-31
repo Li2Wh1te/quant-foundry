@@ -12,14 +12,25 @@ from datetime import date, datetime, timezone
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logging import backtest_event_message
+from .pagination import (
+    CursorPage,
+    build_cursor,
+    compute_query_digest,
+    encode_sort_element,
+    hmac_compare,
+    normalize_limit,
+    parse_cursor,
+    CursorQueryMismatchError,
+)
 from .supervisor_lock import assert_supervisor_lock_held
 
 from .models import BacktestQueueGuardRecord, BacktestRunRecord
+from app.strategies.models import StrategyRevision
 from .run_binding import BacktestRun, IdempotencyKeyReusedError, QueueFullError
 from .run_execution import InvalidRunTransition, RunStateMachine
 
@@ -500,6 +511,7 @@ class DatabaseRunRepository:
         queue_kind: str = FORMAL_KIND,
         tenant_id: str | None = None,
         strategy_revision_id: str | None = None,
+        strategy_id: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[BacktestRunRecord]:
@@ -517,12 +529,150 @@ class DatabaseRunRepository:
             statement = statement.where(
                 BacktestRunRecord.strategy_revision_id == strategy_revision_id
             )
+        if strategy_id is not None:
+            statement = statement.join(
+                StrategyRevision,
+                StrategyRevision.id == BacktestRunRecord.strategy_revision_id,
+            ).where(StrategyRevision.strategy_id == strategy_id)
         statement = (
             statement.order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
             .limit(limit)
             .offset(offset)
         )
         return list(self.session.scalars(statement))
+
+    def list_page(
+        self,
+        *,
+        signing_key: str,
+        queue_kind: str = FORMAL_KIND,
+        tenant_id: str | None = None,
+        strategy_revision_id: str | None = None,
+        strategy_id: str | None = None,
+        limit: int = 100,
+        cursor: str | None = None,
+    ) -> CursorPage:
+        """List durable run roots with the shared signed opaque-cursor contract.
+
+        The legacy collection endpoints still expose offset pagination for
+        compatibility.  Canonical scoped consumers use this method so the
+        cursor is bound to the owner/filter/page-size query and to the maximum
+        row visible when the walk starts.
+        """
+
+        self._validate_kind(queue_kind)
+        checked_limit = normalize_limit(limit)
+        statement = select(BacktestRunRecord).where(
+            BacktestRunRecord.run_kind == queue_kind
+        )
+        if tenant_id is not None:
+            statement = statement.where(
+                BacktestRunRecord.idempotency_scope == tenant_id
+            )
+        if strategy_revision_id is not None:
+            statement = statement.where(
+                BacktestRunRecord.strategy_revision_id == strategy_revision_id
+            )
+        if strategy_id is not None:
+            statement = statement.join(
+                StrategyRevision,
+                StrategyRevision.id == BacktestRunRecord.strategy_revision_id,
+            ).where(StrategyRevision.strategy_id == strategy_id)
+
+        query_payload = {
+            "resource": "backtest_runs",
+            "run_kind": queue_kind,
+            "tenant_id": tenant_id,
+            "strategy_revision_id": strategy_revision_id,
+            "strategy_id": strategy_id,
+            "limit": checked_limit,
+            "sort": ["created_at", "id"],
+            "direction": "asc",
+        }
+        key_kinds = ("ts", "uuid")
+        upper_bound_columns = {"created_at": "ts", "id": "uuid"}
+
+        if cursor is None:
+            upper_row = self.session.execute(
+                statement.with_only_columns(
+                    BacktestRunRecord.created_at, BacktestRunRecord.id
+                )
+                .order_by(
+                    BacktestRunRecord.created_at.desc(), BacktestRunRecord.id.desc()
+                )
+                .limit(1)
+            ).first()
+            if upper_row is None:
+                return CursorPage(items=(), next_cursor=None, has_more=False)
+            upper_bound = {
+                "created_at": upper_row[0],
+                "id": upper_row[1],
+            }
+            expected_digest = compute_query_digest(
+                {
+                    **query_payload,
+                    "query_upper_bound": {
+                        name: encode_sort_element(kind, upper_bound[name])
+                        for name, kind in upper_bound_columns.items()
+                    },
+                }
+            )
+        else:
+            parsed = parse_cursor(
+                cursor,
+                signing_key=signing_key,
+                key_kinds=key_kinds,
+                upper_bound_columns=upper_bound_columns,
+            )
+            upper_bound = dict(parsed.query_upper_bound)
+            expected_digest = compute_query_digest(
+                {
+                    **query_payload,
+                    "query_upper_bound": {
+                        name: encode_sort_element(kind, upper_bound[name])
+                        for name, kind in upper_bound_columns.items()
+                    },
+                }
+            )
+            if not hmac_compare(parsed.query_digest, expected_digest):
+                raise CursorQueryMismatchError(
+                    "cursor belongs to a different query; restart from the first page"
+                )
+            last_created_at, last_id = parsed.last_sort_key
+            statement = statement.where(
+                or_(
+                    BacktestRunRecord.created_at > last_created_at,
+                    and_(
+                        BacktestRunRecord.created_at == last_created_at,
+                        BacktestRunRecord.id > last_id,
+                    ),
+                )
+            )
+
+        statement = statement.where(
+            or_(
+                BacktestRunRecord.created_at < upper_bound["created_at"],
+                and_(
+                    BacktestRunRecord.created_at == upper_bound["created_at"],
+                    BacktestRunRecord.id <= upper_bound["id"],
+                ),
+            )
+        ).order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
+        rows = list(self.session.scalars(statement.limit(checked_limit + 1)))
+        has_more = len(rows) > checked_limit
+        items = tuple(rows[:checked_limit])
+        next_cursor = None
+        if has_more:
+            last = items[-1]
+            next_cursor = build_cursor(
+                signing_key=signing_key,
+                query_digest=expected_digest,
+                key_kinds=key_kinds,
+                last_sort_key=(last.created_at, last.id),
+                upper_bound_columns=upper_bound_columns,
+                query_upper_bound=upper_bound,
+            )
+        return CursorPage(items=items, next_cursor=next_cursor, has_more=has_more)
 
     def transition(
         self,

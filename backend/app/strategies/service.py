@@ -12,6 +12,7 @@ from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from sqlalchemy.orm import Session
+from sqlalchemy import select
 
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.strategies.repository import StrategyRepository
@@ -295,6 +296,9 @@ class StrategyStorageService:
         the unique database constraint protects the invariant against every
         writer, including future maintenance tooling.
         """
+        # This flag is consumed by the HTTP adapter to expose 200 for an
+        # idempotent replay and 201 for a newly-created immutable revision.
+        self.last_publish_reused = False
         strategy = self._require_editable_strategy(strategy_id)
         draft = self.repository.get_draft(strategy.id, for_update=True)
         if draft is None:
@@ -332,6 +336,27 @@ class StrategyStorageService:
                 "runtime_manifest strategy_contract_version must equal "
                 f"{STRATEGY_CONTRACT_VERSION}"
             )
+
+        # Publication is content-idempotent while the strategy row is locked:
+        # retries with identical source, parameter contract/defaults, runtime
+        # manifest and contract version return the latest immutable revision.
+        latest = self.session.scalar(
+            select(StrategyRevision)
+            .where(StrategyRevision.strategy_id == strategy.id)
+            .order_by(StrategyRevision.revision_number.desc())
+            .limit(1)
+        )
+        if latest is not None and (
+            latest.source_hash == computed_hash
+            and latest.source_code == draft.source_code
+            and (latest.parameter_schema or {}) == (draft.parameter_schema or {})
+            and (latest.default_parameters or {}) == (draft.default_parameters or {})
+            and (latest.runtime_manifest or {}) == manifest
+            and (latest.runtime_manifest or {}).get("strategy_contract_version")
+            == STRATEGY_CONTRACT_VERSION
+        ):
+            self.last_publish_reused = True
+            return latest
 
         revision = StrategyRevision(
             id=uuid4(),
