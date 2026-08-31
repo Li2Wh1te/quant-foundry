@@ -17,6 +17,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.logging import backtest_event_message
+from .supervisor_lock import assert_supervisor_lock_held
 
 from .models import BacktestQueueGuardRecord, BacktestRunRecord
 from .run_binding import BacktestRun, IdempotencyKeyReusedError, QueueFullError
@@ -109,6 +110,8 @@ class RunRepository:
     def transition(self, run_id: UUID | str, target: str) -> BacktestRun:
         key = UUID(str(run_id))
         row = self._rows[key]
+        if target in TERMINAL_STATUSES or target == "terminal":
+            raise PermissionError("terminal status is owned by the locked Supervisor")
         self._states.transition(row.status, target)
         row = replace(row, status=target)
         self._rows[key] = row
@@ -160,20 +163,15 @@ class RunRepository:
         exit_code: int | None,
         expected_count: int | None = None,
     ) -> str:
-        from .run_execution import decide_terminal
+        """Reject the historical repository's terminal-write bypass.
 
-        key = UUID(str(run_id))
-        row = self._rows[key]
-        status = decide_terminal(
-            marker=marker,
-            exit_code=exit_code,
-            expected_count=expected_count,
-            run_id=str(key),
-            config_hash=row.binding.config_hash,
-        )
-        self._rows[key] = replace(row, status=status, terminal_status=status)
-        self.last_message = backtest_event_message("回测终态裁决", str(key), status)
-        return status
+        This adapter predates the dedicated ``RunnerSupervisor`` and is kept
+        only for non-persistent state-machine tests.  It may expose lifecycle
+        reads and non-terminal transitions, but it must never turn a pure
+        evidence decision into a terminal root mutation.
+        """
+
+        raise PermissionError("terminal status is owned by the locked Supervisor")
 
     def recover(self) -> tuple[BacktestRun, ...]:
         """Return non-terminal roots for supervisor scan; never auto-requeues."""
@@ -542,14 +540,12 @@ class DatabaseRunRepository:
         current = row.status
         if expected_status is not None and current != expected_status:
             return None
-        if target in TERMINAL_STATUSES:
-            if current not in {"starting", "running", "cancel_requested"}:
-                raise InvalidRunTransition(f"{current} -> {target} is not allowed")
-            if target == "indeterminate" and not row.terminal_decision_reason:
-                raise ValueError("indeterminate requires terminal_decision_reason")
-            row.status = target
-            row.terminal_status = target
-            row.finished_at = now or _utcnow()
+        if target in TERMINAL_STATUSES or target == "terminal":
+            # The generic repository transition API is intentionally limited
+            # to live-state changes.  A terminal transition must carry the
+            # complete evidence bundle and the Supervisor lock through the
+            # dedicated conditional-CAS writer below.
+            raise PermissionError("terminal status is owned by the locked Supervisor")
         else:
             RunStateMachine().transition(current, target)
             row.status = target
@@ -579,6 +575,12 @@ class DatabaseRunRepository:
             .where(
                 BacktestRunRecord.id == row.id,
                 BacktestRunRecord.status == "queued",
+                # A cancellation request is an explicit queue-side decision.
+                # Keep it out of the claim CAS as well as the SELECT so a
+                # request that wins the row-lock race cannot receive a
+                # launch identity and later be mislabeled as
+                # ``cancelled_before_start`` after claiming.
+                BacktestRunRecord.cancel_requested.is_(False),
             )
             .values(
                 status="starting",
@@ -599,6 +601,11 @@ class DatabaseRunRepository:
             .where(
                 BacktestRunRecord.run_kind == kind,
                 BacktestRunRecord.status == "queued",
+                # ``cancel_requested`` is intentionally separate from the
+                # lifecycle status for queued rows.  The Supervisor closes
+                # such rows through its queued-cancellation path; a normal
+                # worker claim must never assign them a launch identity.
+                BacktestRunRecord.cancel_requested.is_(False),
             )
             .order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
             .limit(1)
@@ -645,10 +652,10 @@ class DatabaseRunRepository:
         timestamp = row.cancel_requested_at or now or _utcnow()
         row.cancel_requested_at = timestamp
         row.cancel_requested = True
-        # A queued cancellation remains claimable so the Supervisor can take
-        # the row under the same queue lock and close it as
-        # ``cancelled_before_start`` without launching a worker.  Active runs
-        # enter the explicit cancel_requested state.
+        # A queued cancellation retains ``status=queued`` plus the explicit
+        # request flag.  The Supervisor scans and closes that row before a
+        # normal claim; the claim CAS also excludes the flag as a race guard.
+        # Active runs enter the explicit cancel_requested state.
         if row.status in {"starting", "running"}:
             row.status = "cancel_requested"
         self.session.flush()
@@ -658,36 +665,21 @@ class DatabaseRunRepository:
         self,
         run_id: UUID | str,
         *,
+        supervisor_lock: Any = None,
         reason: str = "cancelled_before_start",
         now: datetime | None = None,
     ) -> BacktestRunRecord | None:
         """Supervisor-only closure for a queued cancellation request."""
 
-        row = self.get(run_id, for_update=True)
-        if row is None:
-            return None
-        if row.status in TERMINAL_STATUSES:
-            return row
-        if row.status not in {"queued", "cancel_requested"}:
-            raise InvalidRunTransition(
-                f"queued cancellation requires queued/cancel_requested, got {row.status}"
-            )
-        if any(
-            value is not None
-            for value in (
-                row.launch_id,
-                row.child_pid,
-                row.child_start_identity,
-                row.child_process_group_id,
-                row.worker_handshake_at,
-            )
-        ):
-            raise InvalidRunTransition("run has already acquired worker identity")
-        row.status = "cancelled"
-        row.terminal_status = "cancelled"
-        row.terminal_decision_reason = reason
-        row.finished_at = now or _utcnow()
-        self.session.flush()
+        assert_supervisor_lock_held(supervisor_lock)
+        changed, row = self._set_terminal_cas(
+            run_id,
+            terminal_status="cancelled",
+            terminal_decision_reason=reason,
+            now=now,
+            supervisor_lock=supervisor_lock,
+            allow_queued_cancel=True,
+        )
         return row
 
     def record_progress(
@@ -695,6 +687,7 @@ class DatabaseRunRepository:
         run_id: UUID | str,
         progress: float,
         *,
+        launch_id: UUID | str | None = None,
         current_trading_date: date | None = None,
         current_step: str | None = None,
         checkpoint: Mapping[str, Any] | None = None,
@@ -705,25 +698,64 @@ class DatabaseRunRepository:
 
         if not 0 <= float(progress) <= 1:
             raise ValueError("progress must be in [0, 1]")
+        if launch_id is None:
+            # A run identity without its launch identity is not sufficient to
+            # distinguish a late worker from the currently active worker.
+            # Durable progress and heartbeat writes therefore fail closed.
+            raise ValueError("launch_id is required for progress persistence")
         row = self.get(run_id, for_update=True)
         if row is None:
             return None
-        if row.status not in NON_TERMINAL_STATUSES:
+        if row.launch_id is None or str(row.launch_id) != str(launch_id):
+            # A previous worker must never update the run after a new launch
+            # has acquired the same run root.  Returning ``False`` lets the
+            # progress reporter distinguish an identity miss from a commit.
+            return False
+        if row.status not in {"starting", "running", "cancel_requested"}:
             raise InvalidRunTransition("terminal run cannot receive progress")
         if float(progress) < float(row.progress or 0):
             raise ValueError("progress cannot move backwards")
-        row.progress = progress
-        if current_trading_date is not None:
-            row.current_trading_date = current_trading_date
-            row.current_date = current_trading_date.isoformat()
-        if current_step is not None:
-            row.current_step = str(current_step)
-        if checkpoint is not None:
-            row.checkpoint = _json_value(checkpoint)
         timestamp = heartbeat_at or _utcnow()
-        row.last_heartbeat_at = timestamp
-        row.last_progress_persisted_at = persisted_at or timestamp
+        # Keep the launch/status/monotonic predicates in the database write.
+        # The row lock above serializes normal callers, while this CAS also
+        # protects adapters that refresh a stale ORM object between the read
+        # and the flush.
+        values: dict[str, Any] = {
+            "progress": progress,
+            "last_heartbeat_at": timestamp,
+            "last_progress_persisted_at": persisted_at or timestamp,
+        }
+        if current_trading_date is not None:
+            values["current_trading_date"] = current_trading_date
+            values["current_date"] = current_trading_date.isoformat()
+        if current_step is not None:
+            values["current_step"] = str(current_step)
+        if checkpoint is not None:
+            values["checkpoint"] = _json_value(checkpoint)
+        changed = self.session.execute(
+            update(BacktestRunRecord)
+            .where(
+                BacktestRunRecord.id == UUID(str(run_id)),
+                BacktestRunRecord.launch_id == UUID(str(launch_id)),
+                BacktestRunRecord.status.in_(
+                    ("starting", "running", "cancel_requested")
+                ),
+                BacktestRunRecord.progress <= progress,
+            )
+            .values(**values)
+        ).rowcount
+        if changed != 1:
+            return False
         self.session.flush()
+        refresh = getattr(self.session, "refresh", None)
+        if callable(refresh):
+            refresh(row)
+        else:
+            # Minimal repository doubles may not expose SQLAlchemy's refresh
+            # method.  Keep their returned row coherent without weakening the
+            # production CAS above.
+            for name, value in values.items():
+                setattr(row, name, value)
         return row
 
     def set_terminal(
@@ -731,14 +763,78 @@ class DatabaseRunRepository:
         run_id: UUID | str,
         terminal_status: str,
         *,
+        supervisor_lock: Any = None,
         terminal_decision_reason: str | None = None,
         evidence: Mapping[str, Any] | None = None,
         result_integrity_status: str | None = None,
         result_counts: Mapping[str, Any] | None = None,
         now: datetime | None = None,
+        terminal_evidence: Mapping[str, Any] | None = None,
     ) -> BacktestRunRecord | None:
-        """Write a terminal state conditionally and preserve first-writer wins."""
+        """Write a terminal state through the locked conditional-CAS path.
 
+        ``set_terminal`` is deliberately unusable by API/Worker callers: the
+        live Supervisor advisory-lock capability is mandatory.  The evidence
+        and status fields are included in one SQL ``UPDATE`` so a competing
+        reconciliation either wins the row predicate or observes the already
+        committed first decision without overwriting it.
+        """
+
+        _changed, row = self._set_terminal_cas(
+            run_id,
+            terminal_status=terminal_status,
+            supervisor_lock=supervisor_lock,
+            terminal_decision_reason=terminal_decision_reason,
+            evidence=evidence,
+            result_integrity_status=result_integrity_status,
+            result_counts=result_counts,
+            now=now,
+            terminal_evidence=terminal_evidence,
+        )
+        return row
+
+    def write_terminal(
+        self,
+        run_id: UUID | str,
+        *,
+        status: str,
+        supervisor_lock: Any = None,
+        **evidence: Any,
+    ) -> bool:
+        """Supervisor callback returning whether this CAS won the row."""
+
+        finished_at = evidence.get("finished_at")
+        changed, _row = self._set_terminal_cas(
+            run_id,
+            terminal_status=status,
+            supervisor_lock=supervisor_lock,
+            terminal_decision_reason=evidence.get("terminal_decision_reason"),
+            terminal_evidence=evidence,
+            now=finished_at if isinstance(finished_at, datetime) else None,
+            allow_queued_cancel=(
+                status == "cancelled"
+                and evidence.get("terminal_decision_reason") == "cancelled_before_start"
+            ),
+        )
+        return changed
+
+    def _set_terminal_cas(
+        self,
+        run_id: UUID | str,
+        *,
+        terminal_status: str,
+        supervisor_lock: Any = None,
+        terminal_decision_reason: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+        result_integrity_status: str | None = None,
+        result_counts: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+        terminal_evidence: Mapping[str, Any] | None = None,
+        allow_queued_cancel: bool = False,
+    ) -> tuple[bool, BacktestRunRecord | None]:
+        """Apply the shared locked CAS and return ``(changed, current_row)``."""
+
+        assert_supervisor_lock_held(supervisor_lock)
         if terminal_status not in TERMINAL_STATUSES:
             raise ValueError(f"unsupported terminal status: {terminal_status}")
         reason = terminal_decision_reason or (
@@ -747,16 +843,37 @@ class DatabaseRunRepository:
         if terminal_status == "indeterminate" and not reason:
             raise ValueError("indeterminate requires terminal_decision_reason")
         # Read/lock first so a caller cannot finalize a still-queued run
-        # directly.  A queued cancellation has its dedicated
-        # ``cancel_queued_before_start`` closure above.
+        # directly.  The only queued exception is a Supervisor-owned
+        # cancellation before a worker acquired any identity.
         current = self.get(run_id, for_update=True)
         if current is None:
-            return None
+            return False, None
         if current.status in TERMINAL_STATUSES:
-            return current
-        if current.status not in {"starting", "running", "cancel_requested"}:
+            return False, current
+        allowed_active = current.status in {"starting", "running", "cancel_requested"}
+        allowed_queued_cancel = (
+            allow_queued_cancel
+            and terminal_status == "cancelled"
+            and reason == "cancelled_before_start"
+            and current.status in {"queued", "cancel_requested"}
+            and all(
+                value is None
+                for value in (
+                    current.launch_id,
+                    current.child_pid,
+                    current.child_start_identity,
+                    current.child_process_group_id,
+                    current.worker_handshake_at,
+                )
+            )
+        )
+        if not allowed_active and not allowed_queued_cancel:
             raise InvalidRunTransition(
                 f"{current.status} -> {terminal_status} is not allowed"
+            )
+        if terminal_status == "cancelled" and current.status in {"queued", "cancel_requested"} and not allowed_queued_cancel:
+            raise InvalidRunTransition(
+                "queued cancellation requires the Supervisor cancellation path"
             )
         values: dict[str, Any] = {
             "status": terminal_status,
@@ -770,12 +887,35 @@ class DatabaseRunRepository:
             values["result_integrity_status"] = result_integrity_status
         if result_counts is not None:
             values["result_counts"] = _json_value(result_counts)
+        if terminal_evidence is not None:
+            columns = set(BacktestRunRecord.__table__.columns.keys())
+            for key, value in terminal_evidence.items():
+                if key in {"status", "terminal_status", "finished_at"}:
+                    continue
+                if key in columns:
+                    values[key] = _json_value(value)
         statement = (
             update(BacktestRunRecord)
             .where(
                 BacktestRunRecord.id == UUID(str(run_id)),
                 BacktestRunRecord.status == current.status,
                 BacktestRunRecord.status.not_in(TERMINAL_STATUSES),
+            )
+            .where(
+                # Keep queued cancellation's identity guard in the SQL CAS,
+                # not merely in the stale ORM snapshot above.
+                *(
+                    (
+                        BacktestRunRecord.status.in_(("queued", "cancel_requested")),
+                        BacktestRunRecord.launch_id.is_(None),
+                        BacktestRunRecord.child_pid.is_(None),
+                        BacktestRunRecord.child_start_identity.is_(None),
+                        BacktestRunRecord.child_process_group_id.is_(None),
+                        BacktestRunRecord.worker_handshake_at.is_(None),
+                    )
+                    if allowed_queued_cancel
+                    else ()
+                )
             )
             .values(**values)
         )
@@ -784,9 +924,7 @@ class DatabaseRunRepository:
         row = self.get(run_id)
         # A zero-row update intentionally returns the already committed state;
         # callers must never overwrite a concurrent terminal decision.
-        if result.rowcount == 0:
-            return row
-        return row
+        return result.rowcount == 1, row
 
 
 class DatabaseRunCreationRepository(DatabaseRunRepository):

@@ -33,6 +33,7 @@ from .runner_protocol import (
     ExitCategory,
     RESULT_COUNT_KEYS,
     build_completion_marker,
+    map_runner_exit_code,
 )
 
 
@@ -169,7 +170,70 @@ def write_completion_marker(
         raise RuntimeError("completion marker requires a committed result transaction")
     if writer is None:
         raise WorkerDependencyUnavailable("worker completion marker writer is not configured")
-    writer(dict(marker))
+    written = writer(dict(marker))
+    if written is False:
+        # A callback may use ``False`` to report a conditional-write miss
+        # (stale launch, terminal row, or a failed transaction).  Treat that
+        # as a worker failure so the Supervisor cannot mistake missing marker
+        # evidence for a successful completion.
+        raise WorkerDependencyUnavailable(
+            "worker completion marker was not persisted"
+        )
+
+
+def _start_progress_reporter(reporter: Any) -> None:
+    """Start the reporter's heartbeat fallback when the adapter supports it."""
+
+    start = getattr(reporter, "start", None)
+    if callable(start):
+        start()
+
+
+def _validate_progress_reporter_identity(
+    reporter: Any,
+    *,
+    run_id: UUID,
+    launch_id: UUID,
+) -> None:
+    """Reject a reporter bound to another run or launch attempt."""
+
+    if reporter is None:
+        return
+    for name, expected in (("run_id", run_id), ("launch_id", launch_id)):
+        observed = getattr(reporter, name, None)
+        if observed is not None and str(observed) != str(expected):
+            raise WorkerDependencyUnavailable(
+                f"progress reporter {name} does not match worker launch"
+            )
+
+
+def _stop_progress_reporter(reporter: Any) -> None:
+    """Stop and flush worker progress before completion evidence is written."""
+
+    if reporter is None:
+        return
+    stop = getattr(reporter, "stop", None)
+    if callable(stop):
+        try:
+            parameters = inspect.signature(stop).parameters
+        except (TypeError, ValueError):
+            parameters = None
+        accepts_flush = parameters is None or "flush" in parameters or any(
+            parameter.kind is inspect.Parameter.VAR_KEYWORD
+            for parameter in (parameters or {}).values()
+        )
+        if accepts_flush:
+            stop(flush=True)
+        else:
+            # Small legacy test adapters expose ``stop()`` without the
+            # protocol keyword.  Signature inspection avoids catching a
+            # TypeError raised from inside a real persistence callback and
+            # accidentally issuing a duplicate stop/flush.
+            stop()
+        return
+    flush = getattr(reporter, "flush", None)
+    if callable(flush):
+        flush()
 
 
 def run_worker(
@@ -264,7 +328,16 @@ def run_worker(
         resource_evidence,
     )
 
+    reporter_started = False
     try:
+        if progress_reporter is not None:
+            _validate_progress_reporter_identity(
+                progress_reporter,
+                run_id=parsed_run_id,
+                launch_id=parsed_launch_id,
+            )
+            _start_progress_reporter(progress_reporter)
+            reporter_started = True
         # The existing runtime is passed in by the application boundary; this
         # worker does not import strategy source or reconstruct mutable config.
         raw_result = _invoke_runtime(
@@ -294,7 +367,26 @@ def run_worker(
         persisted = persist_results(raw_result)
         if persisted is False:
             raise WorkerDependencyUnavailable("result transaction was not committed")
+        # Stop the reporter only after the result transaction has completed.
+        # Its final flush therefore precedes marker computation and prevents
+        # a late heartbeat from changing the run root after marker commit.
+        _stop_progress_reporter(progress_reporter)
+        reporter_started = False
         digest, counts = _integrity_values(result.integrity)
+        exit_code = (
+            result.exit_code
+            if result.exit_code is not None
+            else CATEGORY_TO_EXIT_CODE[result.category]
+        )
+        classification = map_runner_exit_code(exit_code)
+        if not classification.mapped or classification.category != result.category:
+            # A worker cannot declare one business category while returning a
+            # different protocol code; the Supervisor must otherwise classify
+            # the launch as indeterminate.  Reject the pair before marker
+            # persistence so no inconsistent evidence is published.
+            raise WorkerDependencyUnavailable(
+                "worker result category conflicts with runner_exit_code@1"
+            )
         marker = build_completion_marker(
             run_id=parsed_run_id,
             declared_category=result.category,
@@ -311,7 +403,6 @@ def run_worker(
             marker,
             result_transaction_committed=True,
         )
-        exit_code = result.exit_code if result.exit_code is not None else CATEGORY_TO_EXIT_CODE[result.category]
         logger.info(
             "回测 worker 已完成结果写入和完成标记，等待 Supervisor 复核终态。",
             extra={
@@ -325,6 +416,19 @@ def run_worker(
         )
         return exit_code
     except Exception as exc:
+        if reporter_started:
+            try:
+                _stop_progress_reporter(progress_reporter)
+            except Exception:
+                logger.warning(
+                    "回测 worker 关闭进度报告器失败，继续保留未知终态证据。",
+                    exc_info=True,
+                    extra={
+                        "event": "backtest_worker_progress_shutdown_failed",
+                        "run_id": str(parsed_run_id),
+                        "launch_id": str(parsed_launch_id),
+                    },
+                )
         logger.exception(
             "回测 worker 执行失败，未直接写入 Supervisor 终态。",
             extra={

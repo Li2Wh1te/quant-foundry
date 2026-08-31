@@ -2,17 +2,22 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 import logging
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from .models import BacktestRunRecord
 from .result_repository import BacktestResultRepository, ResultRecordConflictError
 
 logger = logging.getLogger("backtesting.result_writer")
+
+_TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "indeterminate", "terminal"}
+)
+_ACTIVE_STATUSES = frozenset({"starting", "running", "cancel_requested"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +29,7 @@ class BacktestResultContext:
     config_hash: str
     owner_scope: str = "default"
     schema_version: str = "result-v1"
+    launch_id: UUID | None = None
 
     def __post_init__(self) -> None:
         expected_map = {
@@ -70,8 +76,17 @@ class BacktestResultPersistenceService:
             raise ValueError("result root is missing or has incompatible kind/profile")
         if root.config_hash != self.context.config_hash or root.tenant_id != self.context.owner_scope:
             raise ValueError("result context does not match run root")
-        if root.status == "terminal":
+        if self.context.launch_id is None:
+            # Run identity alone is not enough for a Worker-facing writer:
+            # an old launch could otherwise append facts after a new launch
+            # has claimed the same run root.
+            raise ValueError("result context launch_id is required")
+        if root.launch_id is None or str(root.launch_id) != str(self.context.launch_id):
+            raise ValueError("result context launch_id does not match run root")
+        if root.status in _TERMINAL_STATUSES or root.terminal_status is not None:
             raise ValueError("terminal run cannot accept result chunks")
+        if root.status not in _ACTIVE_STATUSES:
+            raise ValueError("result root is not in an active launch state")
         return root
 
     def persist_result_batch(self, batch: ResultBatch) -> int:
@@ -186,11 +201,28 @@ class BacktestResultPersistenceService:
         return self.persist_result_batch(ResultBatch(steps=tuple(steps), decisions=tuple(decisions), orders=tuple(orders), fills=tuple(fills), positions=tuple(positions), equity_curve=tuple(equities), metrics=metrics))
 
     def record_progress(self, progress: float, *, current_step: int | None = None, current_date: str | None = None, checkpoint: Mapping[str, Any] | None = None) -> None:
-        root = self._root()
-        if not 0 <= progress <= 1 or progress < float(root.progress or 0):
+        if not 0 <= progress <= 1:
             raise ValueError("progress must be monotonic in [0,1]")
-        root.progress = progress; root.current_step = current_step; root.current_date = current_date
-        if checkpoint is not None: root.checkpoint = dict(checkpoint)
+        # Reuse the canonical repository write so result chunks and the
+        # standalone heartbeat adapter share launch/status/CAS semantics.
+        root = self._root()
+        if progress < float(root.progress or 0):
+            raise ValueError("progress must be monotonic in [0,1]")
+        current_trading_date = (
+            date.fromisoformat(current_date) if current_date is not None else None
+        )
+        from .run_repository import DatabaseRunRepository
+
+        changed = DatabaseRunRepository(self.session).record_progress(
+            self.context.run_id,
+            progress,
+            launch_id=self.context.launch_id,
+            current_trading_date=current_trading_date,
+            current_step=(str(current_step) if current_step is not None else None),
+            checkpoint=checkpoint,
+        )
+        if changed is None or changed is False:
+            raise ValueError("progress write lost run or launch condition")
 
     def record_completion_marker(self, marker: Mapping[str, Any], *, exit_code: int | None = None) -> None:
         """Persist worker completion evidence after result rows are committed."""
@@ -201,7 +233,6 @@ class BacktestResultPersistenceService:
             require_valid_completion_marker,
         )
 
-        root = self._root()
         validated = require_valid_completion_marker(
             marker,
             run_id=self.context.run_id,
@@ -211,16 +242,39 @@ class BacktestResultPersistenceService:
             category = map_exit_code(exit_code)
             if category != validated.get("declared_category"):
                 raise ValueError("completion marker category conflicts with worker exit code")
-        root.completion_marker = dict(validated)
-        root.runner_exit_code = exit_code
-        if hasattr(root, "runner_exit_code_protocol"):
-            root.runner_exit_code_protocol = EXIT_CODE_PROTOCOL
-        if hasattr(root, "runner_exit_category"):
-            root.runner_exit_category = map_exit_code(exit_code)
-        if hasattr(root, "completion_marker_protocol"):
-            root.completion_marker_protocol = validated.get("protocol_version")
-        if hasattr(root, "completion_marker_validation"):
-            root.completion_marker_validation = {"valid": True, "errors": []}
+        root = self._root()
+        # Completion evidence is append-only.  The run/launch/status/empty
+        # marker predicates are all part of one conditional update, so a stale
+        # Worker cannot publish evidence for a newer launch and a concurrent
+        # Worker cannot replace the first marker.  Replaying the exact marker
+        # remains idempotent after the CAS loses a race.
+        values = {
+            "completion_marker": dict(validated),
+            "runner_exit_code": exit_code,
+            "runner_exit_code_protocol": EXIT_CODE_PROTOCOL,
+            "runner_exit_category": map_exit_code(exit_code),
+            "completion_marker_protocol": validated.get("protocol_version"),
+            "completion_marker_validation": {"valid": True, "errors": []},
+        }
+        statement = update(BacktestRunRecord).where(
+            BacktestRunRecord.id == self.context.run_id,
+            BacktestRunRecord.launch_id == self.context.launch_id,
+            BacktestRunRecord.status.in_(tuple(_ACTIVE_STATUSES)),
+            BacktestRunRecord.completion_marker.is_(None),
+        )
+        changed = self.session.execute(statement.values(**values)).rowcount
+        self.session.flush()
+        if changed == 1:
+            return
+        current = self.session.get(BacktestRunRecord, self.context.run_id)
+        if current is not None and (
+            current.completion_marker == dict(validated)
+            and current.runner_exit_code == exit_code
+        ):
+            return
+        if current is not None and current.completion_marker is not None:
+            raise ValueError("completion marker already exists")
+        raise ValueError("completion marker write lost run or launch condition")
 
     def record_terminal_summary(self, *, terminal_status: str, integrity_status: str | None = None, result_counts: Mapping[str, Any] | None = None) -> None:
         """Reject terminal writes from the worker-facing persistence service.
@@ -232,20 +286,38 @@ class BacktestResultPersistenceService:
         logger.warning(f"回测终态写入已拒绝，运行 {self.context.run_id}，终态由 Supervisor 裁决。", extra={"event": "backtest_terminal_write_rejected", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind})
         raise PermissionError("terminal status is Supervisor-owned")
 
-    def apply_supervisor_terminal_summary(self, *, terminal_status: str, integrity_status: str | None = None, result_counts: Mapping[str, Any] | None = None, supervisor_token: object) -> None:
-        """Apply a terminal decision only with the private Supervisor token."""
-        if supervisor_token is not _SUPERVISOR_TOKEN:
-            raise PermissionError("invalid Supervisor authorization")
-        root = self.session.get(BacktestRunRecord, self.context.run_id)
-        if root is None:
-            raise ValueError("run root not found")
-        if root.status == "terminal" and root.terminal_status != terminal_status:
-            raise ValueError("terminal state is immutable")
-        root.status = "terminal"
-        root.terminal_status = terminal_status
-        root.result_integrity_status = integrity_status
-        if result_counts is not None:
-            root.result_counts = dict(result_counts)
+    def apply_supervisor_terminal_summary(
+        self,
+        *,
+        terminal_status: str,
+        supervisor_lock: Any = None,
+        terminal_decision_reason: str | None = None,
+        integrity_evidence: Mapping[str, Any] | None = None,
+        integrity_status: str | None = None,
+        result_counts: Mapping[str, Any] | None = None,
+    ) -> bool:
+        """Delegate the summary to the canonical locked Supervisor CAS.
 
+        The result writer is a Worker-facing component and therefore cannot
+        retain a private token that permits direct root mutation.  The
+        Supervisor must provide its live advisory-lock capability; the shared
+        repository then writes the status and evidence atomically and keeps
+        first-writer-wins semantics for repeated reconciliation.
+        """
 
-_SUPERVISOR_TOKEN = object()
+        from .run_repository import DatabaseRunRepository
+
+        reason = terminal_decision_reason
+        if terminal_status == "indeterminate" and not reason:
+            reason = "terminal_summary"
+        repository = DatabaseRunRepository(self.session)
+        changed = repository.set_terminal(
+            self.context.run_id,
+            terminal_status,
+            supervisor_lock=supervisor_lock,
+            terminal_decision_reason=reason,
+            evidence=integrity_evidence,
+            result_integrity_status=integrity_status,
+            result_counts=result_counts,
+        )
+        return changed is not None and getattr(changed, "status", None) == terminal_status

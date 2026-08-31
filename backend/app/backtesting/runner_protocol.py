@@ -94,6 +94,20 @@ _MARKER_FIELDS = frozenset(
         "config_hash",
     }
 )
+_REQUIRED_MARKER_FIELDS = frozenset(
+    {
+        "protocol_version",
+        "run_id",
+        "declared_category",
+        "result_integrity",
+        "result_counts",
+        "failure_phase",
+        "failure_type",
+    }
+)
+_INTEGRITY_FIELDS = frozenset(
+    {"algorithm", "canonicalization", "scope", "covered_tables", "digest"}
+)
 
 
 class CompletionMarkerValidationError(ValueError):
@@ -129,27 +143,39 @@ class MarkerValidation:
     # bounded error list so the result remains immutable and serializable.
     @property
     def protocol_version_valid(self) -> bool:
-        return not any("protocol_version" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "protocol_version" in error for error in self.errors
+        )
 
     @property
     def run_id_valid(self) -> bool:
-        return not any("run_id" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "run_id" in error for error in self.errors
+        )
 
     @property
     def category_valid(self) -> bool:
-        return not any("declared_category" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "declared_category" in error for error in self.errors
+        )
 
     @property
     def integrity_shape_valid(self) -> bool:
-        return not any("result_integrity" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "result_integrity" in error for error in self.errors
+        )
 
     @property
     def counts_valid(self) -> bool:
-        return not any("result_counts" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "result_counts" in error for error in self.errors
+        )
 
     @property
     def failure_fields_valid(self) -> bool:
-        return not any("failure" in error for error in self.errors)
+        return self.marker is not None and not any(
+            "failure" in error for error in self.errors
+        )
 
     @property
     def normalized(self) -> dict[str, Any] | None:
@@ -176,6 +202,77 @@ class MarkerValidation:
 
 
 @dataclass(frozen=True, slots=True)
+class CompletionMarker:
+    """Typed representation of one canonical completion marker.
+
+    The dataclass is intentionally a value object.  It does not know how to
+    write a database row; callers must first commit result rows and then use a
+    launch-aware writer.  ``from_mapping`` always runs the same strict
+    validator used by the Supervisor, preventing a second marker schema from
+    emerging in an adapter.
+    """
+
+    protocol_version: str
+    run_id: UUID
+    declared_category: str
+    result_integrity: Mapping[str, Any]
+    result_counts: Mapping[str, int]
+    failure_phase: str | None
+    failure_type: str | None
+    config_hash: str | None = None
+
+    def __post_init__(self) -> None:
+        """Reject invalid values even when callers bypass ``from_mapping``."""
+
+        validation = validate_completion_marker(
+            self.as_dict(), run_id=self.run_id, config_hash=self.config_hash
+        )
+        if not validation.valid:
+            raise CompletionMarkerValidationError(validation.errors)
+
+    @classmethod
+    def from_mapping(
+        cls,
+        marker: Mapping[str, Any],
+        *,
+        run_id: UUID | str | None = None,
+        config_hash: str | None = None,
+    ) -> "CompletionMarker":
+        """Parse a marker only after all protocol constraints are checked."""
+
+        validation = validate_completion_marker(
+            marker, run_id=run_id, config_hash=config_hash
+        )
+        normalized = validation.raise_for_error()
+        return cls(
+            protocol_version=normalized["protocol_version"],
+            run_id=UUID(str(normalized["run_id"])),
+            declared_category=normalized["declared_category"],
+            result_integrity=dict(normalized["result_integrity"]),
+            result_counts=dict(normalized["result_counts"]),
+            failure_phase=normalized["failure_phase"],
+            failure_type=normalized["failure_type"],
+            config_hash=normalized.get("config_hash"),
+        )
+
+    def as_dict(self) -> dict[str, Any]:
+        """Return a detached JSON-compatible marker mapping."""
+
+        payload: dict[str, Any] = {
+            "protocol_version": self.protocol_version,
+            "run_id": str(self.run_id),
+            "declared_category": self.declared_category,
+            "result_integrity": dict(self.result_integrity),
+            "result_counts": dict(self.result_counts),
+            "failure_phase": self.failure_phase,
+            "failure_type": self.failure_type,
+        }
+        if self.config_hash is not None:
+            payload["config_hash"] = self.config_hash
+        return payload
+
+
+@dataclass(frozen=True, slots=True)
 class TerminalEvaluation:
     """All evidence used for one immutable terminal decision."""
 
@@ -189,6 +286,12 @@ class TerminalEvaluation:
     @property
     def determinate(self) -> bool:
         return self.status != "indeterminate"
+
+    @property
+    def terminal_status(self) -> str:
+        """Canonical field name used by the Supervisor adapter."""
+
+        return self.status
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,6 +350,11 @@ def map_runner_exit_code(
         if isinstance(signal_number, int)
         else None
     )
+    # ``subprocess`` commonly reports a POSIX signal as a negative return
+    # code.  Preserve that raw evidence while exposing the positive signal
+    # number so callers do not accidentally map ``-9`` to a business failure.
+    if valid_signal is None and isinstance(raw_exit_code, int) and not isinstance(raw_exit_code, bool) and raw_exit_code < 0:
+        valid_signal = -raw_exit_code
     if valid_signal is not None:
         return RunnerExitClassification(
             EXIT_CODE_PROTOCOL,
@@ -320,6 +428,13 @@ def validate_completion_marker(
     ``config_hash`` extension it is still validated and compared.
     """
 
+    # Accept the typed value object without creating a second validation path.
+    # The conversion is detached, so callers cannot mutate evidence while it
+    # is being checked.
+    if not isinstance(marker, Mapping):
+        as_dict = getattr(marker, "as_dict", None)
+        if callable(as_dict):
+            marker = as_dict()
     errors: list[str] = []
     if not isinstance(marker, Mapping):
         errors.append("marker must be an object")
@@ -333,6 +448,12 @@ def validate_completion_marker(
         errors.append(
             "marker contains unsupported fields: "
             + ", ".join(sorted(str(field) for field in unknown_fields))
+        )
+    missing_fields = _REQUIRED_MARKER_FIELDS.difference(marker)
+    if missing_fields:
+        errors.append(
+            "marker is missing required fields: "
+            + ", ".join(sorted(missing_fields))
         )
 
     expected_run_id = _as_run_id(run_id)
@@ -355,6 +476,12 @@ def validate_completion_marker(
     if not isinstance(integrity, Mapping):
         errors.append("result_integrity must be an object")
     else:
+        unknown_integrity_fields = set(integrity).difference(_INTEGRITY_FIELDS)
+        if unknown_integrity_fields:
+            errors.append(
+                "result_integrity contains unsupported fields: "
+                + ", ".join(sorted(str(field) for field in unknown_integrity_fields))
+            )
         if integrity.get("algorithm") != RESULT_INTEGRITY_ALGORITHM:
             errors.append("result_integrity.algorithm must be sha256")
         if integrity.get("canonicalization") != RESULT_INTEGRITY_CANONICALIZATION:
@@ -497,6 +624,7 @@ def _integrity_values(integrity: Any) -> tuple[bool, str | None, Mapping[str, An
         return False, None, None, ("result integrity is unavailable",)
     if isinstance(integrity, Mapping):
         valid = integrity.get("valid", integrity.get("passed", integrity.get("status") == "passed"))
+        status = integrity.get("status")
         digest = integrity.get("digest")
         counts = integrity.get("counts", integrity.get("result_counts"))
         errors = integrity.get("errors", ())
@@ -514,8 +642,11 @@ def _integrity_values(integrity: Any) -> tuple[bool, str | None, Mapping[str, An
             for key in RESULT_COUNT_KEYS
         ):
             errors = tuple(errors) + ("result integrity counts contain invalid values",)
+        if status not in (None, "passed"):
+            errors = tuple(errors) + (f"result integrity status is {status!r}",)
         return bool(valid) and not errors, digest, normalized_counts, tuple(errors)
     valid = bool(getattr(integrity, "valid", getattr(integrity, "passed", False)))
+    status = getattr(integrity, "status", None)
     digest = getattr(integrity, "digest", None)
     counts = getattr(integrity, "counts", getattr(integrity, "result_counts", None))
     errors = getattr(integrity, "errors", ())
@@ -533,6 +664,8 @@ def _integrity_values(integrity: Any) -> tuple[bool, str | None, Mapping[str, An
         for key in RESULT_COUNT_KEYS
     ):
         errors = tuple(errors) + ("result integrity counts contain invalid values",)
+    if status not in (None, "passed"):
+        errors = tuple(errors) + (f"result integrity status is {status!r}",)
     return valid and not errors, digest, normalized_counts, tuple(errors)
 
 
@@ -570,7 +703,7 @@ def evaluate_terminal(
     """
 
     validation = validate_completion_marker(marker, run_id=run_id, config_hash=config_hash)
-    exit_category = map_exit_code(exit_code)
+    exit_category = map_runner_exit_code(exit_code).category
     evidence = integrity if integrity_evidence is None else integrity_evidence
     integrity_valid, integrity_digest, integrity_counts, integrity_errors = _integrity_values(evidence)
     errors = list(validation.errors)
@@ -585,8 +718,13 @@ def evaluate_terminal(
     if not integrity_valid:
         errors.append("result integrity is not proven")
 
-    if validation.valid and isinstance(marker, Mapping):
-        marker_integrity = marker.get("result_integrity")
+    # ``validate_completion_marker`` also accepts the typed CompletionMarker
+    # value object.  Always continue with its detached normalized mapping so
+    # the reconciliation checks below cannot be skipped merely because the
+    # caller chose the typed API instead of a raw JSON mapping.
+    normalized_marker = validation.marker
+    if validation.valid and isinstance(normalized_marker, Mapping):
+        marker_integrity = normalized_marker.get("result_integrity")
         marker_digest = marker_integrity.get("digest") if isinstance(marker_integrity, Mapping) else None
         if isinstance(marker_integrity, Mapping):
             metadata = _integrity_metadata(evidence)
@@ -612,10 +750,10 @@ def evaluate_terminal(
                     errors.append(f"result integrity {key} differs from protocol")
         if integrity_digest is not None and marker_digest != integrity_digest:
             errors.append("result integrity digest differs from completion marker")
-        marker_counts = marker.get("result_counts")
+        marker_counts = normalized_marker.get("result_counts")
         if integrity_counts is not None and dict(marker_counts or {}) != dict(integrity_counts):
             errors.append("result counts differ from completion marker")
-        if marker.get("declared_category") != exit_category:
+        if normalized_marker.get("declared_category") != exit_category:
             errors.append("completion marker category conflicts with exit code")
 
     if errors:
@@ -650,6 +788,29 @@ def decide_terminal(**kwargs: Any) -> str:
     return evaluate_terminal(**kwargs).status
 
 
+def reconcile_terminal_evidence(*args: Any, **kwargs: Any) -> Any:
+    """Delegate to the canonical pure supervision adapter.
+
+    The lazy import keeps this low-level protocol module independent from the
+    integrity adapter while preserving one discoverable reconciliation entry
+    point for callers that historically imported protocol helpers here.
+    """
+
+    from .run_supervision_adapter import reconcile_terminal_evidence as reconcile
+
+    return reconcile(*args, **kwargs)
+
+
+def __getattr__(name: str) -> Any:
+    """Expose the adapter decision type without introducing an import cycle."""
+
+    if name == "TerminalDecision":
+        from .run_supervision_adapter import TerminalDecision
+
+        return TerminalDecision
+    raise AttributeError(name)
+
+
 __all__ = [
     "CATEGORY_TO_EXIT_CODE",
     "COMPLETION_MARKER_PROTOCOL",
@@ -661,6 +822,7 @@ __all__ = [
     "MarkerValidation",
     "TerminalEvaluation",
     "CompletionMarkerValidationError",
+    "CompletionMarker",
     "RESULT_COUNT_KEYS",
     "RESULT_INTEGRITY_ALGORITHM",
     "RESULT_INTEGRITY_CANONICALIZATION",
@@ -675,5 +837,6 @@ __all__ = [
     "map_exit_code",
     "map_runner_exit_code",
     "require_valid_completion_marker",
+    "reconcile_terminal_evidence",
     "validate_completion_marker",
 ]

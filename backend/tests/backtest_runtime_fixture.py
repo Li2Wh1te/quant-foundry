@@ -328,6 +328,7 @@ def build_runner(
     universe_query_override=None,
     candidate_eligibility_evaluator=None,
     universe_scope_resolution=None,
+    progress_sink=None,
 ):
     """Assemble a fully wired runner with zero slippage and zero fees.
 
@@ -459,6 +460,7 @@ def build_runner(
         rule_snapshot_bundle=rule_snapshot_bundle,
         candidate_eligibility_evaluator=candidate_eligibility_evaluator,
         universe_scope_resolution=universe_scope_resolution,
+        progress_sink=progress_sink,
     )
 
 

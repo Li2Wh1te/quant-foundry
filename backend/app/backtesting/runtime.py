@@ -33,6 +33,7 @@ from datetime import date, datetime
 from decimal import Decimal, ROUND_FLOOR
 from enum import StrEnum
 from inspect import Parameter, signature
+import logging
 from types import MappingProxyType
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
@@ -104,6 +105,9 @@ from app.backtesting.result_models import (
 )
 from app.backtesting.data.requests import ConsistencyValidation, DataChunkQuery, DataCapability
 
+
+logger = logging.getLogger("backtesting.runtime")
+
 __all__ = [
     "BacktestEventType",
     "BacktestRunResult",
@@ -119,6 +123,7 @@ __all__ = [
     "OrderOutcomeRecord",
     "PhaseContext",
     "PhaseExecutionError",
+    "ProgressSink",
     "SessionQuote",
     "SettlementCalendarGateway",
     "SettlementScheduleError",
@@ -238,6 +243,28 @@ class PhaseExecutionError(DomainValidationError):
         """Expose the wrapped stable code using the data-error convention."""
 
         return self.error_code
+
+
+class ProgressSink(Protocol):
+    """Optional, storage-agnostic progress boundary for one runner."""
+
+    def phase_started(
+        self,
+        trading_date: date | datetime | str | None,
+        current_step: str | int | None,
+        completed_steps: int,
+        total_steps: int,
+    ) -> Any:
+        """Observe the start of a phase without receiving DB dependencies."""
+
+    def step_completed(
+        self,
+        trading_date: date | datetime | str | None,
+        current_step: str | int | None,
+        completed_steps: int,
+        total_steps: int,
+    ) -> Any:
+        """Observe a successfully completed formal timeline step."""
 
 
 class SettlementScheduleError(DomainValidationError):
@@ -1736,6 +1763,7 @@ class DeterministicBacktestRunner:
         universe_scope: Any | None = None,
         fixed_authorized_instrument_ids: Sequence[UUID] | None = None,
         result_sink: Any | None = None,
+        progress_sink: ProgressSink | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -1788,6 +1816,10 @@ class DeterministicBacktestRunner:
         # remains storage-agnostic; the sink receives each completed chunk's
         # immutable BacktestRunResult projection.
         self._result_sink = result_sink
+        # The sink receives only immutable coordinates and counts.  It may
+        # persist them in a worker-owned adapter, but the deterministic
+        # runner never receives a Session, Repository, or thread object.
+        self._progress_sink = progress_sink
         self._axis = axis
         self._timing_policy = timing_policy
         self._view_factory = view_factory
@@ -5400,6 +5432,53 @@ class DeterministicBacktestRunner:
     # Phase dispatch
     # ------------------------------------------------------------------
 
+    def _notify_progress(
+        self,
+        event_name: str,
+        step: TimeStep,
+        *,
+        completed_steps: int,
+    ) -> None:
+        """Emit one progress event without coupling the runner to storage.
+
+        Progress is observability, not business state.  A broken sink must
+        therefore be logged and ignored so a database outage cannot alter
+        deterministic strategy, matching, or accounting semantics.
+        """
+
+        sink = self._progress_sink
+        if sink is None:
+            return
+        method = getattr(sink, event_name, None)
+        if not callable(method):
+            # ``on_phase_started``/``on_step_completed`` are accepted as a
+            # narrow compatibility spelling for existing callback adapters.
+            method = getattr(sink, f"on_{event_name}", None)
+        if not callable(method):
+            return
+        trading_date = step.metadata.get("session_date")
+        if not isinstance(trading_date, str):
+            trading_date = step.start_time.date()
+        try:
+            method(
+                trading_date,
+                step.sequence,
+                completed_steps,
+                len(self._axis),
+            )
+        except Exception:
+            logger.warning(
+                "回测进度事件写入失败，继续执行核心回测逻辑。",
+                exc_info=True,
+                extra={
+                    "event": "backtest_runner_progress_sink_failed",
+                    "run_id": self._run_id,
+                    "progress_event": event_name,
+                    "current_step": step.sequence,
+                    "current_trading_date": str(trading_date),
+                },
+            )
+
     def _execute_slice(
         self,
         ordered: tuple[TimeStep, ...],
@@ -5425,6 +5504,11 @@ class DeterministicBacktestRunner:
                 for phase_sequence, instruction in enumerate(
                     instructions, start=1
                 ):
+                    self._notify_progress(
+                        "phase_started",
+                        step,
+                        completed_steps=step.sequence,
+                    )
                     events = self._advance_phase(
                         step=step,
                         next_step=next_step,
@@ -5449,6 +5533,11 @@ class DeterministicBacktestRunner:
                     details=getattr(exc, "details", None),
                 ) from exc
             self._complete_step(step)
+            self._notify_progress(
+                "step_completed",
+                step,
+                completed_steps=step.sequence + 1,
+            )
 
     def _advance_phase(
         self,

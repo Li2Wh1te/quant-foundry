@@ -24,11 +24,15 @@ from .runner_progress import is_lost_heartbeat
 from .runner_protocol import (
     COMPLETION_MARKER_PROTOCOL,
     EXIT_CODE_PROTOCOL,
-    evaluate_terminal,
     map_runner_exit_code,
     validate_completion_marker,
 )
-from .supervisor_lock import PostgresAdvisoryLock, SupervisorLockNotHeld
+from .run_supervision_adapter import reconcile_terminal_evidence
+from .supervisor_lock import (
+    PostgresAdvisoryLock,
+    SupervisorLockNotHeld,
+    assert_supervisor_lock_held,
+)
 
 
 logger = logging.getLogger("backtesting.runner.supervisor")
@@ -37,6 +41,13 @@ TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "indeterminate", "terminal"}
 )
 ACTIVE_STATUSES = frozenset({"starting", "running", "cancel_requested"})
+TERMINAL_STATUS_ZH = {
+    "succeeded": "成功",
+    "failed": "失败",
+    "cancelled": "已取消",
+    "timed_out": "已超时",
+    "indeterminate": "不确定",
+}
 
 
 def _utc_now() -> datetime:
@@ -168,6 +179,10 @@ class ChildHandle:
     termination_reason: str | None = None
     failure_phase: str | None = None
     forced: bool = False
+    # Once liveness loss is observed the action is irreversible for this
+    # launch.  Repeated supervisor ticks may still escalate TERM to KILL, but
+    # they must not emit duplicate loss events or restart the worker.
+    lost_heartbeat_detected: bool = False
     # Wall-clock launch time is used only as a fallback when no durable
     # heartbeat has ever been written.  The timeout itself remains monotonic.
     started_at: datetime | None = None
@@ -204,6 +219,12 @@ class InMemoryRunRepository:
 
     def claim_next(self, *, formal_first: bool = True) -> Any | None:
         rows = [row for row in self.rows.values() if _row_value(row, "status") == "queued"]
+        rows = [
+            row
+            for row in rows
+            if not bool(_row_value(row, "cancel_requested", False))
+            and _row_value(row, "cancel_requested_at") is None
+        ]
         if not rows:
             return None
         rows.sort(
@@ -219,10 +240,49 @@ class InMemoryRunRepository:
         self.events.append({"event": "claimed", "run_id": str(_row_id(row))})
         return row
 
-    def write_terminal(self, run_id: UUID | str, *, status: str, **evidence: Any) -> bool:
+    def write_terminal(
+        self,
+        run_id: UUID | str,
+        *,
+        status: str,
+        supervisor_lock: Any = None,
+        **evidence: Any,
+    ) -> bool:
+        """Apply the test adapter's status CAS only for a locked Supervisor.
+
+        This in-memory repository is a compatibility fixture, not an
+        authority that API or Worker code may use to finalize a run.  Keeping
+        the same capability argument as the database repository makes tests
+        exercise the production ownership boundary instead of reintroducing a
+        permissive fallback.
+        """
+
+        assert_supervisor_lock_held(supervisor_lock)
+        if status not in {"succeeded", "failed", "cancelled", "timed_out", "indeterminate"}:
+            raise ValueError(f"unsupported terminal status: {status}")
         row = self.get(run_id)
         if row is None or _row_value(row, "status") in TERMINAL_STATUSES:
             return False
+        current = _row_value(row, "status")
+        queued_cancel = (
+            status == "cancelled"
+            and evidence.get("terminal_decision_reason") == "cancelled_before_start"
+            and current in {"queued", "cancel_requested"}
+            and all(
+                _row_value(row, name) is None
+                for name in (
+                    "launch_id",
+                    "child_pid",
+                    "child_start_identity",
+                    "child_process_group_id",
+                    "worker_handshake_at",
+                )
+            )
+        )
+        if current not in ACTIVE_STATUSES and not queued_cancel:
+            return False
+        if status == "indeterminate" and not evidence.get("terminal_decision_reason"):
+            raise ValueError("indeterminate requires terminal_decision_reason")
         _set_row_value(row, "status", status)
         _set_row_value(row, "terminal_status", status)
         for key, value in evidence.items():
@@ -324,7 +384,7 @@ class SqlAlchemyRunnerRepository:
         order = case((model.run_kind == "backtest_run", 0), else_=1)
         row = self.session.scalars(
             select(model)
-            .where(model.status == "queued")
+            .where(model.status == "queued", model.cancel_requested.is_(False))
             .order_by(order, model.created_at, model.id)
             .with_for_update(skip_locked=True)
             .limit(1)
@@ -338,7 +398,11 @@ class SqlAlchemyRunnerRepository:
 
         changed = self.session.execute(
             update(model)
-            .where(model.id == row.id, model.status == "queued")
+            .where(
+                model.id == row.id,
+                model.status == "queued",
+                model.cancel_requested.is_(False),
+            )
             .values(status="starting", claimed_at=_utc_now())
         ).rowcount
         if changed != 1:
@@ -413,28 +477,32 @@ class SqlAlchemyRunnerRepository:
         self.session.commit()
         return changed == 1
 
-    def write_terminal(self, run_id: UUID | str, *, status: str, **evidence: Any) -> bool:
-        from sqlalchemy import update
+    def write_terminal(
+        self,
+        run_id: UUID | str,
+        *,
+        status: str,
+        supervisor_lock: Any = None,
+        **evidence: Any,
+    ) -> bool:
+        """Delegate terminal persistence to the canonical locked repository.
 
-        model = self._model()
-        allowed = {
-            "terminal_status": status,
-            "finished_at": evidence.pop("finished_at", _utc_now()),
-        }
-        # Only mapped runner evidence is forwarded; arbitrary user data must
-        # not become a SQL column assignment.
-        columns = set(model.__table__.columns.keys())
-        allowed.update({key: value for key, value in evidence.items() if key in columns})
-        changed = self.session.execute(
-            update(model)
-            .where(
-                model.id == UUID(str(run_id)),
-                ~model.status.in_(tuple(TERMINAL_STATUSES)),
-            )
-            .values(status=status, **allowed)
-        ).rowcount
+        This legacy adapter remains available for old Supervisor wiring, but
+        it no longer owns a second SQL ``UPDATE`` implementation.  Sharing the
+        canonical repository also keeps evidence and status in one CAS and
+        requires the same live advisory-lock capability.
+        """
+
+        from .run_repository import DatabaseRunRepository
+
+        changed = DatabaseRunRepository(self.session).write_terminal(
+            run_id,
+            status=status,
+            supervisor_lock=supervisor_lock,
+            **evidence,
+        )
         self.session.commit()
-        return changed == 1
+        return changed
 
     def commit(self) -> None:
         self.session.commit()
@@ -620,6 +688,10 @@ class RunnerSupervisor:
         """Claim and launch at most one row, preserving formal priority."""
 
         self._require_lock()
+        # Keep the public one-shot launch API subject to the same queued
+        # cancellation gate as ``run_once``.  This closes a cancelled row
+        # before any claim can assign it a launch identity.
+        self.process_queued_cancellations()
         if len(self.children) >= self.settings.max_workers:
             return None
         row = self._claim_next()
@@ -915,6 +987,8 @@ class RunnerSupervisor:
             row = self._get(handle.run_id)
             if row is None:
                 continue
+            if _row_value(row, "status") in TERMINAL_STATUSES:
+                continue
             last_heartbeat = _row_value(row, "last_heartbeat_at")
             # A worker that never writes its first heartbeat is also lost.
             # Use the durable started_at when available and otherwise the
@@ -929,7 +1003,10 @@ class RunnerSupervisor:
                 lost_heartbeat_seconds=self.settings.lost_heartbeat_seconds,
             ):
                 continue
-            lost.append(str(handle.run_id))
+            first_detection = not handle.lost_heartbeat_detected
+            handle.lost_heartbeat_detected = True
+            if first_detection:
+                lost.append(str(handle.run_id))
             handle.failure_phase = "runner_lost_heartbeat"
             if handle.term_sent_at is None:
                 handle.termination_reason = "runner_lost_heartbeat"
@@ -938,14 +1015,28 @@ class RunnerSupervisor:
                 self._terminate(handle, reason="runner_lost_heartbeat_grace_expired", force=True)
             _set_row_value(row, "failure_phase", "runner_lost_heartbeat")
             _set_row_value(row, "recovery_action", "terminate_no_restart")
-            self._log(
-                logging.WARNING,
-                "backtest_runner_lost_heartbeat",
-                "回测运行连续 60 秒无有效心跳，已进入终止复核流程且不会自动重启。",
-                run_id=str(handle.run_id),
-                failure_phase="runner_lost_heartbeat",
-                recovery_action="terminate_no_restart",
-            )
+            if first_detection:
+                self._log(
+                    logging.WARNING,
+                    "backtest_runner_lost_heartbeat",
+                    "回测运行连续 60 秒无有效心跳，已进入终止复核流程且不会自动重启。",
+                    run_id=str(handle.run_id),
+                    failure_phase="runner_lost_heartbeat",
+                    recovery_action="terminate_no_restart",
+                )
+                # Keep the canonical task-23 event name in addition to the
+                # task-22 compatibility event.  The detailed fields remain
+                # structured so the frontend can render a short Chinese
+                # summary without exposing an internal event key.
+                self._log(
+                    logging.WARNING,
+                    "backtest_heartbeat_lost",
+                    "回测运行连续 60 秒没有有效心跳，已终止子进程并保留失联证据。",
+                    run_id=str(handle.run_id),
+                    failure_phase="runner_lost_heartbeat",
+                    recovery_action="terminate_no_restart",
+                    lost_heartbeat_seconds=self.settings.lost_heartbeat_seconds,
+                )
         return tuple(lost)
 
     def _integrity_for(self, row: Any, marker: Mapping[str, Any] | None) -> Any:
@@ -976,17 +1067,103 @@ class RunnerSupervisor:
             return None
         row = self._get(handle.run_id)
         marker = _row_value(row, "completion_marker") if row is not None else None
-        integrity = self._integrity_for(row, marker) if row is not None else None
-        evaluation = evaluate_terminal(
-            marker=marker,
-            exit_code=exit_code,
-            integrity=integrity,
+        marker_validation = validate_completion_marker(
+            marker,
             run_id=handle.run_id,
-            config_hash=_row_value(row, "config_hash") if row is not None else None,
-            forced=handle.forced,
+            config_hash=_row_value(row, "config_hash") if row else None,
+        )
+        self._log(
+            logging.INFO,
+            "backtest_completion_marker_received",
+            (
+                "回测完成标记已收到，正在校验运行身份和协议字段。"
+                if marker is not None
+                else "回测完成标记未收到，已保留缺失证据并进入终态复核。"
+            ),
+            run_id=str(handle.run_id),
+            launch_id=str(handle.launch_id),
+            worker_id=_row_value(row, "worker_id") if row is not None else None,
+            marker_present=marker is not None,
+            completion_marker_protocol=(
+                marker.get("protocol_version")
+                if isinstance(marker, Mapping)
+                else None
+            ),
+        )
+        self._log(
+            logging.INFO if marker_validation.valid else logging.WARNING,
+            "backtest_completion_marker_validated",
+            (
+                "回测完成标记校验完成，协议字段和运行身份有效。"
+                if marker_validation.valid
+                else "回测完成标记校验未通过，已保留结构化错误证据。"
+            ),
+            run_id=str(handle.run_id),
+            launch_id=str(handle.launch_id),
+            completion_marker_validation=marker_validation.as_dict(),
+        )
+        integrity = self._integrity_for(row, marker) if row is not None else None
+        integrity_dict = (
+            integrity.as_dict()
+            if hasattr(integrity, "as_dict")
+            else dict(integrity)
+            if isinstance(integrity, Mapping)
+            else None
+        )
+        self._log(
+            logging.INFO if integrity_dict and integrity_dict.get("valid", integrity_dict.get("status") == "passed") else logging.WARNING,
+            "backtest_result_integrity_checked",
+            (
+                "回测结果完整性校验完成，摘要和结果计数已保留。"
+                if integrity_dict and integrity_dict.get("valid", integrity_dict.get("status") == "passed")
+                else "回测结果完整性校验未通过，无法证明摘要和结果计数。"
+            ),
+            run_id=str(handle.run_id),
+            launch_id=str(handle.launch_id),
+            integrity_status=integrity_dict.get("status") if integrity_dict else "unavailable",
+            integrity_digest=integrity_dict.get("digest") if integrity_dict else None,
+            result_counts=(
+                integrity_dict.get("counts", integrity_dict.get("actual_counts"))
+                if integrity_dict
+                else None
+            ),
+        )
+        evaluation = reconcile_terminal_evidence(
+            run_id=handle.run_id,
+            raw_exit_code=exit_code,
+            completion_marker=marker,
+            recomputed_integrity=integrity,
+            expected_config_hash=(
+                _row_value(row, "config_hash") if row is not None else None
+            ),
+            termination_evidence={
+                "forced": handle.forced,
+                "failure_phase": handle.failure_phase,
+            },
+        )
+        self._log(
+            logging.INFO if evaluation.status != "indeterminate" else logging.WARNING,
+            "backtest_terminal_evidence_reconciled",
+            (
+                "回测终态证据已核对，退出码、完成标记和完整性证据"
+                f"决定为{TERMINAL_STATUS_ZH.get(evaluation.status, '不确定')}。"
+            ),
+            run_id=str(handle.run_id),
+            launch_id=str(handle.launch_id),
+            raw_exit_code=exit_code,
+            exit_category=evaluation.exit_category,
+            terminal_status=evaluation.status,
+            terminal_decision_reason=evaluation.reason,
+            completion_marker_validation=marker_validation.as_dict(),
+            integrity_status=integrity_dict.get("status") if integrity_dict else "unavailable",
+            result_counts=(
+                integrity_dict.get("counts", integrity_dict.get("actual_counts"))
+                if integrity_dict
+                else None
+            ),
         )
         reason = handle.termination_reason or evaluation.reason
-        self._write_terminal(
+        changed = self._write_terminal(
             handle.run_id,
             status=evaluation.status,
             marker=marker,
@@ -999,28 +1176,34 @@ class RunnerSupervisor:
             recovery_action="terminate_no_restart" if handle.failure_phase else None,
             stdout_evidence=handle.capture.evidence(),
             completion_marker_validation=(
-                validate_completion_marker(
-                    marker,
-                    run_id=handle.run_id,
-                    config_hash=_row_value(row, "config_hash") if row else None,
-                ).as_dict()
+                marker_validation.as_dict()
                 if marker is not None
                 else None
             ),
         )
+        persisted = self._get(handle.run_id)
+        effective_status = (
+            str(_row_value(persisted, "status"))
+            if not changed and persisted is not None and _row_value(persisted, "status") in TERMINAL_STATUSES
+            else evaluation.status
+        )
         self.children.pop(str(handle.run_id), None)
         self._log(
-            logging.INFO if evaluation.status != "indeterminate" else logging.WARNING,
+            logging.INFO if effective_status != "indeterminate" else logging.WARNING,
             "backtest_run_terminal",
-            f"回测运行已进入{evaluation.status}终态，Supervisor 已完成证据复核。",
+            f"回测运行已进入{TERMINAL_STATUS_ZH.get(effective_status, '不确定')}终态，Supervisor 已完成证据复核。",
             run_id=str(handle.run_id),
             launch_id=str(handle.launch_id),
             exit_code=exit_code,
             exit_category=evaluation.exit_category,
-            terminal_decision_reason=reason,
+            terminal_decision_reason=(
+                _row_value(persisted, "terminal_decision_reason", reason)
+                if not changed and persisted is not None
+                else reason
+            ),
             integrity_status=getattr(integrity, "status", None) if integrity is not None else None,
         )
-        return evaluation.status
+        return effective_status
 
     def reap_children(self) -> tuple[str, ...]:
         self._require_lock()
@@ -1128,25 +1311,51 @@ class RunnerSupervisor:
         callback = getattr(self.repository, "write_terminal", None)
         if callable(callback):
             try:
-                changed = bool(callback(run_id, status=status, **evidence))
+                changed = bool(
+                    callback(
+                        run_id,
+                        status=status,
+                        supervisor_lock=self.lock,
+                        **evidence,
+                    )
+                )
             except TypeError:
-                changed = bool(callback(run_id, status, evidence))
+                # Do not fall back to an unguarded legacy callback shape.  A
+                # terminal write without the advisory-lock capability would
+                # reintroduce the very bypass this boundary is meant to close.
+                raise PermissionError(
+                    "terminal repository callback must require supervisor_lock"
+                )
         else:
-            changed = False
-            if row is not None:
-                _set_row_value(row, "status", status)
-                for name, value in evidence.items():
-                    _set_row_value(row, name, value)
-                changed = True
-                self._commit()
+            # A read-only or incomplete repository adapter cannot be used as a
+            # terminal-state fallback.  Only the canonical repository CAS may
+            # mutate a run root, and it must receive this Supervisor's live
+            # advisory-lock capability.
+            raise PermissionError(
+                "terminal state requires a Supervisor repository CAS writer"
+            )
+        if changed:
+            # ``DatabaseRunRepository`` keeps evidence and status in one
+            # transaction but intentionally leaves commit ownership to the
+            # Supervisor boundary.  In-memory adapters make this a no-op.
+            self._commit()
         if changed:
             self._log(
                 logging.INFO,
                 "backtest_terminal_written",
-                f"回测运行已写入{status}终态，原因已保留为结构化证据。",
+                f"回测运行已写入{TERMINAL_STATUS_ZH.get(status, '不确定')}终态，原因已保留为结构化证据。",
                 run_id=str(run_id),
                 terminal_decision_reason=reason,
                 exit_code=exit_code,
+            )
+            self._log(
+                logging.INFO,
+                "backtest_terminal_state_written",
+                f"回测运行终态已写入，状态为{TERMINAL_STATUS_ZH.get(status, '不确定')}，决议原因已保留。",
+                run_id=str(run_id),
+                terminal_status=status,
+                terminal_decision_reason=reason,
+                raw_exit_code=exit_code,
             )
         return changed
 
@@ -1167,15 +1376,20 @@ class RunnerSupervisor:
 
         self._require_lock()
         row = self._get(run_id)
-        evaluation = evaluate_terminal(
-            marker=marker,
-            exit_code=exit_code,
-            integrity=integrity,
+        evaluation = reconcile_terminal_evidence(
             run_id=run_id,
-            config_hash=_row_value(row, "config_hash") if row is not None else None,
-            forced=forced,
+            raw_exit_code=exit_code,
+            completion_marker=marker,
+            recomputed_integrity=integrity,
+            expected_config_hash=(
+                _row_value(row, "config_hash") if row is not None else None
+            ),
+            termination_evidence={
+                "forced": forced,
+                "failure_phase": failure_phase,
+            },
         )
-        self._write_terminal(
+        changed = self._write_terminal(
             run_id,
             status=evaluation.status,
             marker=marker,
@@ -1188,7 +1402,14 @@ class RunnerSupervisor:
             recovery_observed_at=recovery_observed_at,
             recovery_process_state=recovery_process_state,
         )
-        return evaluation.status
+        # A retry must report the durable first decision, not a newly derived
+        # status from conflicting late evidence.  This makes reconciliation
+        # idempotent for both the in-memory and SQL-backed repositories.
+        persisted = self._get(run_id)
+        persisted_status = _row_value(persisted, "status") if persisted is not None else None
+        if not changed and persisted_status in TERMINAL_STATUSES:
+            return str(persisted_status)
+        return str(persisted_status or evaluation.status)
 
     def startup_recovery(self) -> tuple[str, ...]:
         """Scan active roots after acquiring the lock without adopting children."""
@@ -1290,6 +1511,13 @@ class RunnerSupervisor:
             "runner_supervisor_recovery",
             f"回测 Supervisor 启动恢复扫描完成，处理 {len(outcomes)} 个非终态运行，未自动重启。",
             recovery_count=len(outcomes),
+        )
+        self._log(
+            logging.INFO,
+            "backtest_recovery_evidence_reconciled",
+            f"回测恢复证据核对完成，处理 {len(outcomes)} 个遗留运行，未自动重启原运行。",
+            recovery_count=len(outcomes),
+            recovery_action="terminate_no_restart",
         )
         return tuple(outcomes)
 

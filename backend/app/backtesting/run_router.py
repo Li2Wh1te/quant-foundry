@@ -270,7 +270,7 @@ def _response(run: BacktestRun | object) -> RunResponse:
             "behavior_versions": _wire_value(binding.metadata.get("behavior_versions", {}))
             if isinstance(binding.metadata, Mapping)
             else {},
-            "progress": 0,
+            "progress_ratio": 0,
         }
         return RunResponse(**values)
 
@@ -282,7 +282,15 @@ def _response(run: BacktestRun | object) -> RunResponse:
     profile = getattr(run, "profile", None) or getattr(binding, "profile", "formal@1")
     status = getattr(run, "status", "queued")
     current_date = getattr(run, "current_trading_date", None)
-    legacy_date = getattr(run, "current_date", None)
+    if current_date is None:
+        # Legacy task-08 rows may carry only the textual date alias.  Convert
+        # it into the canonical date field without returning the alias.
+        legacy_date = getattr(run, "current_date", None)
+        if isinstance(legacy_date, str) and legacy_date.strip():
+            try:
+                current_date = date.fromisoformat(legacy_date[:10])
+            except ValueError:
+                current_date = None
     parameters = getattr(run, "parameters", None)
     if parameters is None and binding is not None:
         parameters = {}
@@ -313,20 +321,21 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "backtest_config": _wire_value(config or {}),
         "data_request": _wire_value(data_request),
         "behavior_versions": _wire_value(behavior_versions),
-        "progress": float(getattr(run, "progress", 0) or 0),
-        "current_trading_date": current_date,
-        "current_date": (
-            current_date.isoformat()
-            if hasattr(current_date, "isoformat")
-            else legacy_date
+        # The database column is retained for compatibility with the existing
+        # run root, while the API exposes the canonical protocol name only.
+        "progress_ratio": float(
+            getattr(run, "progress_ratio", None)
+            if getattr(run, "progress_ratio", None) is not None
+            else getattr(run, "progress", 0)
+            or 0
         ),
+        "current_trading_date": current_date,
         "current_step": str(raw_current_step) if raw_current_step is not None else None,
         "created_at": getattr(run, "created_at", None),
         "started_at": getattr(run, "started_at", None),
         "finished_at": getattr(run, "finished_at", None),
         "claimed_at": getattr(run, "claimed_at", None),
         "child_pid": getattr(run, "child_pid", None),
-        "child_start_identity": getattr(run, "child_start_identity", None),
         "child_process_group_id": getattr(run, "child_process_group_id", None),
         "worker_id": getattr(run, "worker_id", None),
         "worker_handshake_at": getattr(run, "worker_handshake_at", None),
@@ -339,8 +348,17 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "recovery_observed_at": getattr(run, "recovery_observed_at", None),
         "recovery_action": getattr(run, "recovery_action", None),
         "recovery_process_state": getattr(run, "recovery_process_state", None),
-        "runner_exit_code": getattr(run, "runner_exit_code", None),
-        "runner_exit_code_protocol": getattr(run, "runner_exit_code_protocol", None),
+        # Persisted task-22 names are projected to the task-23 wire contract.
+        "child_exit_code": (
+            getattr(run, "child_exit_code", None)
+            if getattr(run, "child_exit_code", None) is not None
+            else getattr(run, "runner_exit_code", None)
+        ),
+        "child_exit_code_protocol": (
+            getattr(run, "child_exit_code_protocol", None)
+            if getattr(run, "child_exit_code_protocol", None) is not None
+            else getattr(run, "runner_exit_code_protocol", None)
+        ),
         "runner_exit_category": getattr(run, "runner_exit_category", None),
         "completion_marker_protocol": getattr(run, "completion_marker_protocol", None),
         "completion_marker_validation": getattr(

@@ -26,6 +26,24 @@ class SupervisorLockNotHeld(RuntimeError):
     """Raised when a Supervisor attempts a protected operation without its lock."""
 
 
+def assert_supervisor_lock_held(lock: Any) -> None:
+    """Require the live advisory-lock capability for a protected write.
+
+    Terminal state writers receive the exact lock object owned by the
+    ``RunnerSupervisor``.  Checking both the cheap ``held`` flag and the
+    optional connection probe keeps test doubles useful while ensuring a
+    dropped PostgreSQL session fails closed before the CAS is attempted.
+    """
+
+    if lock is None or not bool(getattr(lock, "held", False)):
+        raise SupervisorLockNotHeld(
+            "terminal state writes require the Supervisor advisory lock"
+        )
+    assert_held = getattr(lock, "assert_held", None)
+    if callable(assert_held):
+        assert_held()
+
+
 def advisory_lock_key(lock_name: str = ADVISORY_LOCK_NAME) -> int:
     """Derive a stable signed PostgreSQL bigint from the documented lock name."""
 
@@ -230,5 +248,6 @@ __all__ = [
     "SupervisorLock",
     "SupervisorLockNotHeld",
     "LockNotHeld",
+    "assert_supervisor_lock_held",
     "advisory_lock_key",
 ]

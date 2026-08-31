@@ -1434,6 +1434,81 @@ class BacktestResultRepository:
             return
         self.assert_result_visible(run_id, expected_kind="backtest_run")
 
+    # -- integrity projection --------------------------------------------
+
+    def read_integrity_rows(
+        self,
+        run_id: UUID | str,
+        *,
+        include_internal: bool = False,
+    ) -> dict[str, list[Any]]:
+        """Read the fixed eight result tables for one run in one transaction.
+
+        The repository remains the owner of result-table schema and query
+        visibility.  The protocol layer receives ORM rows through this narrow
+        adapter and applies its own explicit stable-column projection; it does
+        not issue ``SELECT *`` or discover tables dynamically.
+        """
+
+        run_uuid = _require_uuid("run_id", run_id)
+        self.assert_result_visible(
+            run_uuid,
+            expected_kind=(
+                "internal_link_acceptance" if include_internal else "backtest_run"
+            ),
+            allow_indeterminate=True,
+        )
+        table_records: tuple[tuple[str, type], ...] = (
+            ("backtest_steps", BacktestStepRecord),
+            ("backtest_decisions", BacktestDecisionRecord),
+            ("backtest_orders", BacktestOrderResultRecord),
+            ("backtest_order_updates", BacktestOrderUpdateRecord),
+            ("backtest_fills", BacktestFillResultRecord),
+            ("backtest_positions", BacktestPositionResultRecord),
+            ("backtest_equity_curve", BacktestEquityCurveRecord),
+            ("backtest_metrics", BacktestMetricRecord),
+        )
+        rows_by_table: dict[str, list[Any]] = {}
+        for table_name, record_cls in table_records:
+            rows_by_table[table_name] = list(
+                self.session.scalars(
+                    select(record_cls).where(record_cls.run_id == run_uuid)
+                )
+            )
+        return rows_by_table
+
+    def compute_result_counts(
+        self,
+        run_id: UUID | str,
+        *,
+        include_internal: bool = False,
+    ) -> dict[str, int]:
+        """Compute all eight protocol counters from committed result rows."""
+
+        from .runner_integrity import result_counts
+
+        return result_counts(
+            self.read_integrity_rows(run_id, include_internal=include_internal)
+        )
+
+    def verify_result_integrity(
+        self,
+        run_id: UUID | str,
+        marker: Mapping[str, Any],
+        *,
+        config_hash: str,
+        include_internal: bool = False,
+    ) -> Any:
+        """Recompute and compare a worker marker using repository-owned rows."""
+
+        from .runner_integrity import verify_result_integrity
+
+        return verify_result_integrity(
+            marker,
+            self.read_integrity_rows(run_id, include_internal=include_internal),
+            config_hash=config_hash,
+        )
+
     # -- writes ------------------------------------------------------------
 
     def append(self, kind: str, *dtos: Any) -> int:

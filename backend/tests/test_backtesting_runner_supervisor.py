@@ -151,10 +151,52 @@ class RunnerSupervisorTestCase(unittest.TestCase):
         self.assertEqual(row.status, "succeeded")
         self.assertEqual(supervisor.reconcile_run(row.id, marker=row.completion_marker, exit_code=0, integrity=integrity), "succeeded")
         self.assertEqual(row.status, "succeeded")
+        self.assertEqual(
+            supervisor.reconcile_run(
+                row.id,
+                marker=None,
+                exit_code=10,
+                integrity=None,
+                reason="late_conflicting_evidence",
+            ),
+            "succeeded",
+        )
+        self.assertEqual(row.terminal_decision_reason, "completion_evidence_consistent")
+
+    def test_supervisor_fallback_cannot_write_terminal_state_without_repository_cas(self) -> None:
+        row = Row("backtest_run")
+
+        class ReadOnlyRepository:
+            def get(self, run_id):
+                return row if str(run_id) == str(row.id) else None
+
+            def commit(self):
+                raise AssertionError("a read-only repository must not be committed")
+
+        supervisor = RunnerSupervisor(
+            repository=ReadOnlyRepository(),
+            lock=FakeLock(),
+        )
+        supervisor.acquire_lock()
+        with self.assertRaises(PermissionError):
+            supervisor._write_terminal(
+                row.id,
+                status="indeterminate",
+                marker=None,
+                exit_code=None,
+                integrity=None,
+                reason="missing_evidence",
+                failure_phase="runner_supervisor_recovery",
+                forced=False,
+                recovery_action="identity_unverified",
+            )
+        self.assertEqual(row.status, "queued")
 
     def test_queued_cancellation_is_closed_without_starting_a_child(self) -> None:
         row = Row("backtest_run")
-        row.status = "cancel_requested"
+        # The persisted queue keeps ``status=queued`` and records the request
+        # in its dedicated cancellation flag until Supervisor closes it.
+        row.status = "queued"
         row.cancel_requested = True
         row.cancel_requested_at = datetime.now(UTC)
         repository = InMemoryRunRepository([row])
@@ -166,6 +208,19 @@ class RunnerSupervisorTestCase(unittest.TestCase):
         self.assertEqual(row.status, "cancelled")
         self.assertEqual(row.terminal_decision_reason, "cancelled_before_start")
         self.assertIsNone(row.completion_marker)
+        self.assertEqual(supervisor.children, {})
+
+    def test_direct_launch_api_closes_queued_cancellation_before_claim(self) -> None:
+        row = Row("backtest_run")
+        row.cancel_requested = True
+        repository = InMemoryRunRepository([row])
+        supervisor = RunnerSupervisor(repository=repository, lock=FakeLock())
+        supervisor.acquire_lock()
+
+        self.assertIsNone(repository.claim_next())
+        self.assertIsNone(supervisor.launch_next())
+        self.assertEqual(row.status, "cancelled")
+        self.assertEqual(row.terminal_decision_reason, "cancelled_before_start")
         self.assertEqual(supervisor.children, {})
 
     def test_first_missing_heartbeat_is_detected_and_audited(self) -> None:
@@ -190,6 +245,26 @@ class RunnerSupervisorTestCase(unittest.TestCase):
         self.assertIsNotNone(row.termination_requested_at)
         self.assertEqual(row.termination_reason, "runner_lost_heartbeat")
         self.assertIs(handle, supervisor.children[str(row.id)])
+
+    def test_lost_heartbeat_detection_is_emitted_once_per_launch(self) -> None:
+        base = datetime(2026, 1, 1, tzinfo=UTC)
+        row = Row("backtest_run")
+        repository = InMemoryRunRepository([row])
+        process = FakeProcess(1007)
+        supervisor = RunnerSupervisor(
+            repository=repository,
+            lock=FakeLock(),
+            launcher=FakeLauncher(process),
+            clock=lambda: base,
+        )
+        supervisor.acquire_lock()
+        supervisor.run_once()
+
+        first = supervisor.process_heartbeat_timeouts(now=base + timedelta(seconds=60))
+        second = supervisor.process_heartbeat_timeouts(now=base + timedelta(seconds=61))
+
+        self.assertEqual(first, (str(row.id),))
+        self.assertEqual(second, ())
 
     def test_lock_loss_stops_known_worker_without_durable_claims(self) -> None:
         row = Row("backtest_run")

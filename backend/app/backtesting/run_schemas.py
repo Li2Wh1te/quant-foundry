@@ -26,23 +26,23 @@ class RunResponse(BaseModel):
     config_hash: str
     rerun_of_run_id: UUID | None = None
     strategy_revision_id: UUID | None = None
-    parameters: dict[str, Any] = {}
-    backtest_config: dict[str, Any] = {}
-    data_request: dict[str, Any] = {}
-    behavior_versions: dict[str, Any] = {}
-    progress: float = 0
+    parameters: dict[str, Any] = Field(default_factory=dict)
+    backtest_config: dict[str, Any] = Field(default_factory=dict)
+    data_request: dict[str, Any] = Field(default_factory=dict)
+    behavior_versions: dict[str, Any] = Field(default_factory=dict)
+    # ``progress_ratio`` is the public protocol field.  The persistence layer
+    # still stores the task-08/22 ``progress`` column, so the router performs
+    # the one-way projection at this boundary instead of exposing both names.
+    progress_ratio: float = 0
     current_trading_date: date | None = None
     current_step: str | None = None
-    # ``current_date`` is retained as a wire-compatible alias for clients
-    # released with task-08.  New responses populate both fields from the
-    # canonical ``current_trading_date`` column.
-    current_date: str | None = None
     created_at: datetime | None = None
     started_at: datetime | None = None
     finished_at: datetime | None = None
     claimed_at: datetime | None = None
     child_pid: int | None = None
-    child_start_identity: str | None = None
+    # Start tokens are process-control evidence and must never be returned by
+    # the operator API.  The Supervisor keeps them in the run root internally.
     child_process_group_id: int | None = None
     worker_id: str | None = None
     worker_handshake_at: datetime | None = None
@@ -55,8 +55,8 @@ class RunResponse(BaseModel):
     recovery_observed_at: datetime | None = None
     recovery_action: str | None = None
     recovery_process_state: dict[str, Any] | None = None
-    runner_exit_code: int | None = None
-    runner_exit_code_protocol: str | None = None
+    child_exit_code: int | None = None
+    child_exit_code_protocol: str | None = None
     runner_exit_category: str | None = None
     completion_marker_protocol: str | None = None
     completion_marker_validation: dict[str, Any] | None = None
@@ -73,7 +73,7 @@ class RunResponse(BaseModel):
     completion_marker: dict[str, Any] | None = None
     runner_exit_report: dict[str, Any] | None = None
     result_integrity_evidence: dict[str, Any] | None = None
-    result_counts: dict[str, Any] = {}
+    result_counts: dict[str, Any] = Field(default_factory=dict)
 
 class RunError(BaseModel):
     code: str
