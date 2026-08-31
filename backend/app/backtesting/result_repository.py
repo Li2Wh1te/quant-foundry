@@ -626,6 +626,7 @@ def _fill_record(dto: BacktestFillDto) -> dict[str, Any]:
     return {
         "run_id": dto.run_id,
         "fill_id": dto.fill_id,
+        "fill_sequence": dto.fill_sequence,
         "order_id": dto.order_id,
         "instrument_id": dto.instrument_id,
         "event_trading_code": dto.display.event_trading_code,
@@ -1075,8 +1076,8 @@ _RESULT_KINDS: dict[str, ResultKindSpec] = {
             dto_cls=BacktestFillDto,
             record_cls=BacktestFillResultRecord,
             to_record=_fill_record,
-            sort_columns=("timestamp", "fill_id"),
-            key_kinds=("ts", "uuid"),
+            sort_columns=("timestamp", "fill_sequence", "fill_id"),
+            key_kinds=("ts", "int", "uuid"),
             identity_fields=("fill_id",),
             time_column="timestamp",
             allowed_filters=frozenset(
@@ -1301,6 +1302,8 @@ class BacktestResultRepository:
                     f"{kind} expects {spec.dto_cls.__name__}, got "
                     f"{type(dto).__name__}"
                 )
+            if kind == "fills" and getattr(dto, "fill_sequence", None) is None:
+                raise ResultRepositoryError("fills require a stable fill_sequence")
             identity = (
                 dto.run_id,
                 *(getattr(dto, name) for name in spec.identity_fields),
@@ -1342,6 +1345,98 @@ class BacktestResultRepository:
                 f"{kind} row violates the run-scoped uniqueness contract"
             ) from exc
         return len(payloads)
+
+    def append_idempotent(self, kind: str, *dtos: Any) -> int:
+        """Append facts with replay-safe no-op semantics.
+
+        Existing ``append`` retains its strict duplicate behavior for legacy
+        callers; this explicit API is used by chunk writers.
+        """
+        if not dtos:
+            return 0
+        spec = get_result_kind_spec(kind)
+        # Root-aware guard: result facts may never be written for an unknown
+        # run, and a single batch cannot accidentally mix run namespaces.
+        run_ids = {getattr(dto, "run_id", None) for dto in dtos}
+        if len(run_ids) != 1 or None in run_ids:
+            raise ResultRepositoryError("all result rows in a batch must share one run_id")
+        root = self.session.get(BacktestRunRecord, next(iter(run_ids)))
+        if root is None:
+            raise ResultRepositoryError("backtest run root not found")
+        if root.status == "terminal":
+            raise ResultRepositoryError("terminal run cannot accept result facts")
+        # Child facts must reference an order from the same run.  Checking
+        # before INSERT keeps cross-run links from being accepted when the
+        # database schema only carries a run_id foreign key.
+        if kind in {"order_updates", "fills"}:
+            order_ids = {getattr(dto, "order_id", None) for dto in dtos}
+            if None in order_ids:
+                raise ResultRepositoryError(f"{kind} requires order_id")
+            rows = self.session.scalars(
+                select(BacktestOrderResultRecord).where(
+                    BacktestOrderResultRecord.run_id == next(iter(run_ids)),
+                    BacktestOrderResultRecord.order_id.in_(order_ids),
+                )
+            ).all()
+            known = {row.order_id for row in rows}
+            missing = order_ids - known
+            if missing:
+                raise ResultRecordConflictError(
+                    f"{kind} references order(s) outside the run: {sorted(map(str, missing))}"
+                )
+        if kind == "order_updates":
+            # Update sequence is contiguous per order (0,1,2...).  A replay
+            # of an existing sequence remains idempotent below.
+            for dto in dtos:
+                previous = self.session.scalar(
+                    select(func.max(BacktestOrderUpdateRecord.update_sequence)).where(
+                        BacktestOrderUpdateRecord.run_id == dto.run_id,
+                        BacktestOrderUpdateRecord.order_id == dto.order_id,
+                    )
+                )
+                if previous is not None and dto.update_sequence > previous + 1:
+                    raise ResultRecordConflictError("order update sequence must advance contiguously")
+        pending = []
+        for dto in dtos:
+            if not isinstance(dto, spec.dto_cls):
+                raise ResultRepositoryError(f"{kind} expects {spec.dto_cls.__name__}")
+            if kind == "fills" and getattr(dto, "fill_sequence", None) is None:
+                raise ResultRepositoryError("fills require a stable fill_sequence")
+            identity = [getattr(spec.record_cls, name) == getattr(dto, name) for name in spec.identity_fields]
+            identity.append(spec.record_cls.run_id == dto.run_id)
+            existing = self.session.scalars(select(spec.record_cls).where(and_(*identity))).first()
+            payload = spec.to_record(dto)
+            if existing is not None:
+                if all(getattr(existing, key) == value for key, value in payload.items() if key != "run_id"):
+                    continue
+                raise ResultRecordConflictError(f"{kind} identity conflict")
+            pending.append(payload)
+        if pending:
+            try:
+                self.session.add_all([spec.record_cls(**p) for p in pending]); self.session.flush()
+            except IntegrityError as exc:
+                raise ResultRecordConflictError(f"{kind} uniqueness conflict") from exc
+        return len(pending)
+
+    def append_order_update_transaction(self, dto: BacktestOrderUpdateDto) -> int:
+        """Append an order transition and update its projection atomically."""
+        if not isinstance(dto, BacktestOrderUpdateDto):
+            raise ResultRepositoryError("order update DTO is required")
+        order = self.session.scalars(select(BacktestOrderResultRecord).where(
+            BacktestOrderResultRecord.run_id == dto.run_id,
+            BacktestOrderResultRecord.order_id == dto.order_id,
+        )).first()
+        if order is None:
+            raise ResultRecordConflictError("order update references an unknown order")
+        expected = order.status
+        if dto.old_status is not None and dto.old_status.value != expected:
+            raise ResultRecordConflictError("order projection status does not match transition old_status")
+        added = self.append_idempotent("order_updates", dto)
+        if added:
+            order.status = dto.new_status.value
+            order.status_reason = dto.reason
+            self.session.flush()
+        return added
 
     def append_metrics(self, *dtos: Any) -> int:
         """Persist analyzer-produced metrics under v1 producer rules.

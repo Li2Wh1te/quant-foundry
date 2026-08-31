@@ -8,7 +8,8 @@ from uuid import UUID, uuid4
 
 from sqlalchemy import CheckConstraint, DateTime, Index, String, Uuid, func, text, Integer, Boolean, Numeric, ForeignKey
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, object_session
+from sqlalchemy import event
 
 from app.db.base import Base
 
@@ -140,6 +141,8 @@ class BacktestRunRecord(Base):
         CheckConstraint("length(config_hash) = 64", name="backtest_config_hash_sha256"),
         CheckConstraint("max_lookback_sessions = 512", name="backtest_lookback_fixed"),
         CheckConstraint("data_chunk_policy_key = 'fixed_trading_sessions' AND data_chunk_policy_version = 1 AND data_chunk_size_sessions = 20", name="backtest_chunk_policy_fixed"),
+        CheckConstraint("(status = 'terminal') = (terminal_status IS NOT NULL)", name="backtest_terminal_status_consistent"),
+        CheckConstraint("updated_at >= created_at", name="backtest_updated_after_created"),
         Index("ix_backtest_runs_queue", "run_kind", "status", "created_at"),
         Index("uq_backtest_runs_idempotency", "tenant_id", "idempotency_key", unique=True),
     )
@@ -159,6 +162,13 @@ class BacktestRunRecord(Base):
     initial_cash: Mapped[str | None] = mapped_column(String(64), nullable=True)
     initial_positions: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     data_request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    # Immutable point-in-time evidence captured at admission (provider,
+    # calendar/PIT snapshot and report hashes).  It is intentionally separate
+    # from the request so query projections can expose evidence without
+    # re-resolving a mutable provider.
+    data_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    pit_snapshot_hash: Mapped[str | None] = mapped_column(String(71), nullable=True)
+    pit_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     data_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
     max_lookback_sessions: Mapped[int] = mapped_column(Integer, nullable=False, server_default="512")
     data_chunk_policy_key: Mapped[str] = mapped_column(String(64), nullable=False, server_default="fixed_trading_sessions")
@@ -185,6 +195,43 @@ class BacktestRunRecord(Base):
     cancel_requested: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # Result persistence projection fields. These are maintained by the
+    # writer/supervisor boundary and never recomputed by query handlers.
+    result_summary: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    result_counts: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    result_integrity_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    first_result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_result_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    @property
+    def owner_scope(self) -> str:
+        """Stable deployment owner scope (tenant_id remains the DB column)."""
+        return self.tenant_id
 
 
 __all__.append("BacktestRunRecord")
+
+
+_IMMUTABLE_RUN_FIELDS = (
+    "tenant_id", "run_kind", "profile", "idempotency_key", "config_hash",
+    "backtest_config", "strategy_revision_id", "strategy_source_hash",
+    "parameters", "data_request", "account_profile_id", "account_profile_version",
+    "fee_schedule_key", "fee_schedule_version", "fee_schedule_snapshot",
+    "behavior_versions", "data_evidence", "pit_snapshot_hash", "pit_cutoff_at",
+)
+
+
+@event.listens_for(BacktestRunRecord, "before_update", propagate=True)
+def _reject_immutable_run_input_updates(mapper, connection, target) -> None:
+    """Fail closed when a service attempts to mutate frozen run inputs."""
+    state = object_session(target)
+    if state is None:
+        return
+    from sqlalchemy import inspect
+    history = inspect(target)
+    changed = [name for name in _IMMUTABLE_RUN_FIELDS if history.attrs[name].history.has_changes()]
+    if changed:
+        raise ValueError(f"immutable backtest run fields cannot be updated: {', '.join(changed)}")

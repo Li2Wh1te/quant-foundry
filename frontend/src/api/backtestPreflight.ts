@@ -161,3 +161,15 @@ export async function fetchBacktestPreflight(
   await checkResponse(response);
   return response.json() as Promise<BacktestPreflightPage>;
 }
+
+/** Fetch persisted formal-run comparison from the canonical compare route. */
+export async function compareBacktestRuns(runIds: string[], signal?: AbortSignal): Promise<unknown> {
+  const response = await fetch("/api/admin/backtests/compare", {
+    method: "POST",
+    headers: { ...headers(), "Content-Type": "application/json" },
+    body: JSON.stringify({ run_ids: runIds }),
+    signal,
+  });
+  await checkResponse(response);
+  return response.json();
+}

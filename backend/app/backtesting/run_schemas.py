@@ -21,6 +21,15 @@ class RunResponse(BaseModel):
     profile: str
     status: str
     config_hash: str
+    rerun_of_run_id: UUID | None = None
+    strategy_revision_id: UUID | None = None
+    parameters: dict[str, Any] = {}
+    backtest_config: dict[str, Any] = {}
+    data_request: dict[str, Any] = {}
+    behavior_versions: dict[str, Any] = {}
+    progress: float = 0
+    current_date: str | None = None
+    current_step: int | None = None
 
 class RunError(BaseModel):
     code: str

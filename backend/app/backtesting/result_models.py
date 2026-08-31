@@ -718,6 +718,7 @@ class BacktestFillRecord:
     # Stable identity of the pending-settlement lot this buy fill produced;
     # sells carry no lot and stay ``None``.
     settlement_lot_id: UUID | None = None
+    fill_sequence: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -808,10 +809,12 @@ class BacktestFillRecord:
             raise DomainValidationError(
                 "settlement_lot_id must be a UUID when provided"
             )
+        if self.fill_sequence is not None:
+            object.__setattr__(self, "fill_sequence", _sequence(self.fill_sequence, "fill_sequence"))
 
     @property
-    def cursor_sort_key(self) -> tuple[datetime, UUID]:
-        return (self.timestamp, self.fill_id)
+    def cursor_sort_key(self) -> tuple[datetime, int | None, UUID]:
+        return (self.timestamp, self.fill_sequence, self.fill_id)
 
 
 @dataclass(frozen=True, slots=True)

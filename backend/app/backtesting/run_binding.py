@@ -248,6 +248,7 @@ class BacktestRun:
     status: str = "queued"
     idempotency_key: str | None = None
     terminal_status: str | None = None
+    rerun_of_run_id: UUID | None = None
 
 
 class RunCreationService:

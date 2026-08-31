@@ -383,8 +383,10 @@ class BacktestFillResultRecord(_RunBoundRecord):
             "ix_backtest_fills_run_sort_key",
             "run_id",
             "timestamp",
+            "fill_sequence",
             "fill_id",
         ),
+        Index("uq_backtest_fills_run_sequence", "run_id", "fill_sequence", unique=True),
         Index(
             "ix_backtest_fills_run_instrument",
             "run_id",
@@ -396,6 +398,11 @@ class BacktestFillResultRecord(_RunBoundRecord):
         Uuid,
         nullable=False,
         comment="Business identity of the fill within the run.",
+    )
+    fill_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Stable deterministic in-run sequence; never derived from UUID or insertion time.",
     )
     order_id: Mapped[UUID] = mapped_column(
         Uuid,

@@ -12,9 +12,12 @@ from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Body
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy import select
+from app.backtesting.models import BacktestRunRecord
+from app.backtesting.result_records import BacktestEquityCurveRecord, BacktestMetricRecord
 
 from app.backtesting.pagination import (
     DEFAULT_PAGE_SIZE,
@@ -26,6 +29,7 @@ from app.backtesting.pagination import (
 )
 from app.backtesting.result_repository import (
     BacktestResultRepository,
+    InternalResultNotVisibleError,
     ResultFilterError,
     UnknownResultKindError,
 )
@@ -50,6 +54,78 @@ router = APIRouter(
     prefix="/api/admin/backtest-runs/{run_id}/results",
     tags=["backtest-results"],
 )
+# Comparison is a collection-level formal backtest endpoint.  Keep it on the
+# documented ``/api/admin/backtests`` resource rather than the internal run
+# root namespace used by persistence handlers.
+compare_router = APIRouter(prefix="/api/admin/backtests", tags=["backtest-compare"])
+formal_result_alias_router = APIRouter(prefix="/api/admin/backtests/{run_id}", tags=["backtest-results"])
+
+
+@compare_router.post("/compare")
+def compare_runs(
+    payload: dict = Body(...),
+    session: Session = Depends(get_db_session),
+) -> dict[str, object]:
+    """Compare persisted formal runs without invoking runtime or analyzers."""
+    run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
+    if not isinstance(run_ids, list) or len(run_ids) < 2 or len(run_ids) != len(set(run_ids)):
+        raise HTTPException(status_code=422, detail="run_ids 必须为至少两个不重复的运行 ID")
+    try:
+        ids = [UUID(str(value)) for value in run_ids]
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail="run_ids 包含无效 UUID") from exc
+    roots = list(session.scalars(select(BacktestRunRecord).where(BacktestRunRecord.id.in_(ids))))
+    by_id = {row.id: row for row in roots}
+    # Apply the same root/visibility guard as every result handler. Unknown
+    # roots and internal runs intentionally share one non-disclosing 404.
+    if len(by_id) != len(ids) or any(
+        row.run_kind != "backtest_run" or row.profile != "formal@1" for row in roots
+    ):
+        raise HTTPException(status_code=404, detail="正式回测结果不存在")
+    # Fetch all rows in two set-based queries to avoid one query per run.
+    equity_rows = list(session.scalars(
+        select(BacktestEquityCurveRecord)
+        .where(BacktestEquityCurveRecord.run_id.in_(ids))
+        .order_by(BacktestEquityCurveRecord.run_id, BacktestEquityCurveRecord.as_of, BacktestEquityCurveRecord.sequence)
+    ))
+    metric_rows = list(session.scalars(
+        select(BacktestMetricRecord)
+        .where(BacktestMetricRecord.run_id.in_(ids))
+        .order_by(BacktestMetricRecord.run_id, BacktestMetricRecord.metric_key, BacktestMetricRecord.formula_version)
+    ))
+    equity_by_run: dict[UUID, list[BacktestEquityCurveRecord]] = {rid: [] for rid in ids}
+    metrics_by_run: dict[UUID, list[BacktestMetricRecord]] = {rid: [] for rid in ids}
+    for row in equity_rows:
+        equity_by_run.setdefault(row.run_id, []).append(row)
+    for row in metric_rows:
+        metrics_by_run.setdefault(row.run_id, []).append(row)
+    summaries = []
+    curves = []
+    drawdowns = []
+    metrics = []
+    for rid in ids:
+        root = by_id[rid]
+        points = [{"as_of": row.as_of, "equity": (str(row.equity) if row.equity is not None else None), "drawdown": (str(row.drawdown) if row.drawdown is not None else None), "valuation_status": row.valuation_status} for row in equity_by_run[rid]]
+        curves.append({"run_id": str(rid), "points": points})
+        drawdowns.append({"run_id": str(rid), "points": [{"as_of": p["as_of"], "drawdown": p["drawdown"], "valuation_status": p["valuation_status"]} for p in points]})
+        metrics.append({"run_id": str(rid), "items": [{"metric_key": row.metric_key, "formula_version": row.formula_version, "value": (str(row.value) if row.value is not None else None), "unit": row.unit, "sample_count": row.sample_count, "unavailable_reason": row.unavailable_reason} for row in metrics_by_run[rid]]})
+        summaries.append({"run_id": str(rid), "status": root.status, "terminal_status": root.terminal_status, "config_hash": root.config_hash, "parameters": root.parameters, "backtest_config": root.backtest_config, "data_request": root.data_request, "behavior_versions": root.behavior_versions})
+    # Include a compact, deterministic configuration diff for each run pair;
+    # curves/metrics are fetched in batches above, never by invoking runtime.
+    baseline = summaries[0].get("backtest_config") or summaries[0].get("parameters") or {}
+    for summary in summaries:
+        current = summary.get("backtest_config") or summary.get("parameters") or {}
+        summary["config_diff"] = {
+            key: {"baseline": baseline.get(key), "current": current.get(key)}
+            for key in sorted(set(baseline) | set(current))
+            if baseline.get(key) != current.get(key)
+        }
+    metric_matrix = []
+    for rid in ids:
+        for row in metrics_by_run[rid]:
+            metric_matrix.append({"metric_key": row.metric_key, "formula_version": row.formula_version, "run_id": str(rid), "value": str(row.value) if row.value is not None else None, "unit": row.unit, "sample_count": row.sample_count, "unavailable_reason": row.unavailable_reason})
+    configuration_diff = [summary["config_diff"] for summary in summaries]
+    return {"summaries": summaries, "equity_curves": curves, "equity_curve_series": curves, "drawdown_curve_series": drawdowns, "metrics": metrics, "metric_matrix": metric_matrix, "configuration_diff": configuration_diff}
 
 legacy_router = APIRouter(
     prefix="/api/admin/backtests/{run_id}",
@@ -128,8 +204,10 @@ def _read_page(
             status_code=400,
             detail=f"无效或不适配的游标：{exc}",
         ) from exc
-    except UnknownResultKindError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (UnknownResultKindError, InternalResultNotVisibleError) as exc:
+        # Do not reveal whether a UUID is unknown or belongs to an internal
+        # run; both are outside the formal result visibility boundary.
+        raise HTTPException(status_code=404, detail="正式回测结果不存在") from exc
     except ValueError as exc:
         # Covers the page-size policy and non-timezone-aware boundaries.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -660,15 +738,26 @@ def list_data_preflight(
 def legacy_data_preflight_method_not_allowed() -> None:
     """Reject non-GET legacy calls without touching preflight data."""
 
-    raise HTTPException(status_code=405, detail="旧预检路径仅支持 GET 重定向。")
+    raise HTTPException(
+        status_code=405,
+        detail={
+            "reason_code": "calendar_preflight_legacy_method_not_allowed",
+            "message": "旧预检路径仅支持 GET 重定向。",
+        },
+    )
 
 
 @legacy_router.get("/data-preflight", include_in_schema=False)
 def legacy_data_preflight_redirect(
     run_id: Annotated[UUID, Path()],
     request: Request,
+    session: Session = Depends(get_db_session),
 ) -> RedirectResponse:
     """Redirect the documented legacy alias without reading or writing data."""
+
+    root = session.get(BacktestRunRecord, run_id)
+    if root is None or root.run_kind != "backtest_run" or root.profile != "formal@1":
+        raise HTTPException(status_code=404, detail="正式回测结果不存在")
 
     if DATA_PREFLIGHT_API_VERSION >= DATA_PREFLIGHT_REDIRECT_SUNSET_VERSION:
         raise HTTPException(
@@ -704,3 +793,16 @@ def list_data_chunks(
         signing_key=signing_key,
         phase=phase,
     )
+
+
+# Public contract aliases use ``/api/admin/backtests/{run_id}/...`` while the
+# canonical preflight resource remains under ``backtest-runs/.../results``.
+# These aliases delegate to the same guarded handlers and do not create a
+# second persistence/query implementation.
+formal_result_alias_router.add_api_route("/steps", list_steps, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/decisions", list_decisions, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/orders", list_orders, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/fills", list_fills, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/positions", list_positions, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/equity", list_equity_curve, methods=["GET"], include_in_schema=True)
+formal_result_alias_router.add_api_route("/metrics", list_metrics, methods=["GET"], include_in_schema=True)

@@ -4,8 +4,8 @@ import {
   BacktestPreflightError,
   BacktestPreflightItem,
   fetchBacktestPreflight,
-  PreflightSection,
-  compareDataRevisionFields
+  compareBacktestRuns,
+  PreflightSection
 } from "../api/backtestPreflight";
 import { useAuth } from "../auth/AuthContext";
 import "../backtestPreflight.css";
@@ -37,7 +37,7 @@ export function BacktestPreflightPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [compareRunId, setCompareRunId] = useState("");
-  const [comparePage, setComparePage] = useState<typeof page>(null);
+  const [compareResult, setCompareResult] = useState<unknown>(null);
 
   const load = useCallback(async (nextRunId: string, nextSection?: PreflightSection, cursor?: string) => {
     if (!nextRunId.trim()) return;
@@ -62,8 +62,12 @@ export function BacktestPreflightPage() {
   const compare = async () => {
     if (!compareRunId.trim()) return;
     try {
-      const result = await fetchBacktestPreflight(compareRunId.trim(), { limit: 100 });
-      setComparePage(result);
+      if (!runId.trim()) {
+        setError("请先输入第一运行 ID，再进行对比。");
+        return;
+      }
+      const result = await compareBacktestRuns([runId.trim(), compareRunId.trim()]);
+      setCompareResult(result);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "对比运行加载失败。");
     }
@@ -158,7 +162,7 @@ export function BacktestPreflightPage() {
             </button>
           )}
           {page.truncated && <p className="muted">当前结果仍有分页内容，请继续加载。</p>}
-          {comparePage?.items[0] && page.items[0] && <details className="compare-panel" open><summary>双运行功能字段对比</summary><pre>{jsonText(compareDataRevisionFields(page.items[0], comparePage.items[0]))}</pre></details>}
+          {compareResult !== null && <details className="compare-panel" open><summary>双运行结果对比（含回撤与配置差异）</summary><pre>{jsonText(compareResult)}</pre></details>}
         </section>
       )}
     </main>

@@ -1735,6 +1735,7 @@ class DeterministicBacktestRunner:
         universe_scope_resolution: Any | None = None,
         universe_scope: Any | None = None,
         fixed_authorized_instrument_ids: Sequence[UUID] | None = None,
+        result_sink: Any | None = None,
     ) -> None:
         if not isinstance(run_id, str) or not run_id.strip():
             raise DomainValidationError("run_id must be non-blank text")
@@ -1783,6 +1784,10 @@ class DeterministicBacktestRunner:
             # consumed by the execution loop.
             selected_rule_snapshot.verify_hash()
         self._run_id = run_id
+        # Optional persistence boundary supplied by task 09.  The runner
+        # remains storage-agnostic; the sink receives each completed chunk's
+        # immutable BacktestRunResult projection.
+        self._result_sink = result_sink
         self._axis = axis
         self._timing_policy = timing_policy
         self._view_factory = view_factory
@@ -4879,7 +4884,7 @@ class DeterministicBacktestRunner:
                 if isinstance(session_text, str)
                 else None
             )
-        return BacktestRunResult(
+        result = BacktestRunResult(
             run_id=self._run_id,
             events=tuple(self._events),
             equity_curve=tuple(self._equity_curve),
@@ -4917,6 +4922,12 @@ class DeterministicBacktestRunner:
                 self._final_qualification_results
             ),
         )
+        if self._result_sink is not None:
+            persist = getattr(self._result_sink, "persist_runtime_result", None)
+            if not callable(persist):
+                raise DomainValidationError("result_sink must expose persist_runtime_result(result)")
+            persist(result)
+        return result
 
     def build_analysis_failure_snapshot(self, exc: Exception) -> Any:
         """Freeze the analyzer-relevant facts after a mid-run failure.
