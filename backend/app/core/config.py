@@ -40,6 +40,9 @@ class Settings(BaseSettings):
     scheduler_dispatch_interval_ms: int = Field(default=500, ge=100, le=10_000)
     scheduler_max_queued_runs: int = Field(default=1_000, ge=1, le=100_000)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
+    backtest_max_workers: int = Field(default=1, ge=1, le=64)
+    backtest_formal_queue_limit: int = Field(default=32, ge=1, le=32)
+    backtest_internal_queue_limit: int | None = Field(default=None, ge=1, lt=32)
     tushare_token: SecretStr | None = None
     tushare_api_url: str = Field(default="http://api.tushare.pro", min_length=1)
     ingestion_request_interval_ms: int = Field(default=1_000, ge=0, le=60_000)

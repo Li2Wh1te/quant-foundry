@@ -27,6 +27,7 @@ from sqlalchemy import (
     Numeric,
     String,
     Uuid,
+    ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -80,6 +81,7 @@ class _RunBoundRecord(Base):
     )
     run_id: Mapped[UUID] = mapped_column(
         Uuid,
+        ForeignKey("backtest_runs.id", ondelete="RESTRICT"),
         nullable=False,
         comment="Owning backtest run; every result row is bound to exactly one run. "
         "A foreign key to backtest_runs is added by the run-creation task.",

@@ -66,6 +66,7 @@ from app.backtesting.result_records import (
     BacktestPositionResultRecord,
     BacktestStepRecord,
 )
+from app.backtesting.models import BacktestRunRecord
 
 
 class ResultRepositoryError(ValueError):
@@ -84,6 +85,13 @@ class InternalResultNotVisibleError(ResultFilterError):
     """A Phase 2a internal run was addressed through a formal read path."""
 
     code = "internal_result_not_visible"
+
+def enforce_root_kind(run_kind: str | None, expected: str = "backtest_run") -> None:
+    """Require an existing root and exact visibility kind before result reads."""
+    if run_kind is None:
+        raise UnknownResultKindError("backtest run root not found")
+    if run_kind != expected:
+        raise InternalResultNotVisibleError("该运行不属于正式结果范围")
 
 
 class ResultRecordConflictError(Exception):
@@ -1233,25 +1241,13 @@ class BacktestResultRepository:
         self._signing_key = cursor_signing_key
 
     def get_run_visibility(self, run_id: UUID | str) -> str:
-        """Return ``formal`` or ``internal`` from the authoritative report rows.
-
-        There is no separate run table in this phase.  The preflight report is
-        the existing run-bound authority, and its reserved metadata is the
-        only source used here.  Legacy rows without metadata retain the
-        historical formal-compatible behavior.
-        """
+        """Return visibility from the authoritative backtest_runs root row."""
 
         run_uuid = _require_uuid("run_id", run_id)
-        rows = self.session.scalars(
-            select(BacktestDataPreflightResultRecord).where(
-                BacktestDataPreflightResultRecord.run_id == run_uuid
-            )
-        )
-        for row in rows:
-            capabilities = row.capabilities
-            metadata = capabilities.get("__preflight__") if isinstance(capabilities, Mapping) else None
-            if isinstance(metadata, Mapping) and metadata.get("run_kind") == "internal_link_acceptance":
-                return "internal"
+        root = self.session.get(BacktestRunRecord, run_uuid)
+        if root is None:
+            raise UnknownResultKindError("backtest run root not found")
+        enforce_root_kind(root.run_kind, "backtest_run")
         return "formal"
 
     def _assert_visible_run(
@@ -1262,7 +1258,9 @@ class BacktestResultRepository:
     ) -> None:
         """Enforce formal-default visibility for every result kind."""
 
-        if self.get_run_visibility(run_id) == "internal" and not include_internal:
+        if include_internal:
+            raise InternalResultNotVisibleError("公开结果接口不支持 include_internal")
+        if self.get_run_visibility(run_id) == "internal":
             raise InternalResultNotVisibleError(
                 "internal link-acceptance results are not visible through formal result queries"
             )
@@ -1611,7 +1609,9 @@ class BacktestResultRepository:
         # Formal analysis/result reads must not expose Phase 2a internal
         # artifacts.  Internal operators use the explicit preflight/result
         # path with ``include_internal`` at the owning API boundary.
-        if self.get_run_visibility(run_uuid) == "internal" and not include_internal:
+        if include_internal:
+            raise InternalResultNotVisibleError("公开结果接口不支持 include_internal")
+        if self.get_run_visibility(run_uuid) == "internal":
             return None
         record = self.session.scalars(
             select(BacktestAnalysisSummaryRecord).where(

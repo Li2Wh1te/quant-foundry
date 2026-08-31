@@ -1,0 +1,8 @@
+import { useEffect, useState } from "react";
+import { cancelBacktestRun, createBacktestRun, listBacktestRuns, type BacktestRun } from "../api/backtestRuns";
+export function BacktestRunsPage(){
+ const [runs,setRuns]=useState<BacktestRun[]>([]); const [strategy,setStrategy]=useState(""); const [message,setMessage]=useState("");
+ const refresh=()=>listBacktestRuns().then((d)=>setRuns((d.items||[]).filter((r:BacktestRun)=>r.run_kind!=="internal_link_acceptance")));
+ useEffect(()=>{ refresh(); const t=window.setInterval(()=>{ if(runs.some(r=>["queued","starting","running","cancel_requested"].includes(r.status))) refresh(); },5000); return()=>window.clearInterval(t)},[runs]);
+ const create=()=>{ if(!strategy.trim()){setMessage("请填写策略版本");return} setMessage("正在预检…"); createBacktestRun({strategy_revision_id:strategy.trim(),idempotency_key:crypto.randomUUID(),spec:{start_date:new Date().toISOString().slice(0,10),end_date:new Date().toISOString().slice(0,10),initial_cash:"0",initial_positions:[]}}).then(()=>{setMessage("已创建");refresh()}).catch((e)=>setMessage(e.message)); };
+ return <section><h1>回测运行</h1><label>策略版本 <input value={strategy} onChange={e=>setStrategy(e.target.value)} placeholder="strategy-revision" /></label><button onClick={create}>预检并创建回测</button>{message&&<p role="status">{message}</p>}{runs.map(r=><article key={r.id}><div>{r.id}</div><div>{r.status} {Math.round((r.progress||0)*100)}%</div><div>{r.current_date||""}</div>{["queued","starting","running"].includes(r.status)&&<button onClick={()=>cancelBacktestRun(r.id).then(refresh).catch(e=>setMessage(e.message))}>取消</button>}</article>)}</section> }

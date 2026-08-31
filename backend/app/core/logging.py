@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+def backtest_event_message(action: str, scope: str, outcome: str) -> str:
+    """Build concise operator-facing Chinese summary while retaining structured fields."""
+    return f"{action}（范围：{scope}）{outcome}。"
+
 import atexit
 import copy
 import logging

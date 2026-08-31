@@ -6,6 +6,7 @@ import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
 import { AccountProfilesPage } from "./pages/AccountProfilesPage";
 import { BacktestPreflightPage } from "./pages/BacktestPreflightPage";
+import { BacktestRunsPage } from "./pages/BacktestRunsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
@@ -91,6 +92,7 @@ export function App() {
         path="/admin/backtest-preflight"
         element={<RequireAuth><AdminPage><BacktestPreflightPage /></AdminPage></RequireAuth>}
       />
+      <Route path="/admin/backtest-runs" element={<RequireAuth><AdminPage><BacktestRunsPage /></AdminPage></RequireAuth>} />
       <Route
         path="/admin/strategies/:strategyId"
         element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}

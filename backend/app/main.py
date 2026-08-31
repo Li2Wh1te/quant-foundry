@@ -12,6 +12,7 @@ from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
 from app.backtesting.router import router as backtesting_router
+from app.backtesting.run_router import router as backtest_run_router, internal_router as internal_backtest_run_router
 from app.backtesting.result_router import (
     router as backtest_result_router,
     legacy_router as backtest_result_legacy_router,
@@ -65,6 +66,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(data_ingestion_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)
+    protected_router.include_router(backtest_run_router)
+    protected_router.include_router(internal_backtest_run_router)
     protected_router.include_router(backtest_result_router)
     protected_router.include_router(backtest_result_legacy_router)
 
