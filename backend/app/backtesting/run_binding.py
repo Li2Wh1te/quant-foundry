@@ -237,8 +237,29 @@ class GateOrchestrator:
         return GateDecision(not failed, dict(checks), disabled, ",".join(failed) if failed else None)
 
 
-class IdempotencyKeyReusedError(ValueError): pass
-class QueueFullError(RuntimeError): pass
+class IdempotencyKeyReusedError(ValueError):
+    """An idempotency key was reused for a different frozen request."""
+
+
+class QueueFullError(RuntimeError):
+    """A logical backtest queue cannot accept another queued root."""
+
+    code = "backtest_queue_full"
+
+    def __init__(
+        self,
+        message: str = "backtest queue is full",
+        *,
+        queue_kind: str | None = None,
+        queued_count: int | None = None,
+        queue_limit: int | None = None,
+        disabled: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.queue_kind = queue_kind
+        self.queued_count = queued_count
+        self.queue_limit = queue_limit
+        self.disabled = disabled
 
 
 @dataclass(frozen=True, slots=True)
@@ -253,6 +274,21 @@ class BacktestRun:
 
 class RunCreationService:
     def __init__(self, *, formal_capacity: int = 32, internal_capacity: int | None = None) -> None:
+        if (
+            not isinstance(formal_capacity, int)
+            or isinstance(formal_capacity, bool)
+            or formal_capacity < 1
+            or formal_capacity > 32
+        ):
+            raise ValueError("formal capacity must be between 1 and 32")
+        if internal_capacity is not None and (
+            not isinstance(internal_capacity, int)
+            or isinstance(internal_capacity, bool)
+            or internal_capacity < 1
+            or internal_capacity >= formal_capacity
+            or internal_capacity >= 32
+        ):
+            raise ValueError("internal capacity must be smaller than formal capacity")
         self.formal_capacity, self.internal_capacity = formal_capacity, internal_capacity
         self._runs: dict[tuple[str, str], BacktestRun] = {}
         self._queued = {"backtest_run": 0, "internal_link_acceptance": 0}
@@ -267,7 +303,13 @@ class RunCreationService:
         cap = self.internal_capacity if binding.run_kind == "internal_link_acceptance" else self.formal_capacity
         current = self._queued[binding.run_kind] if queued is None else queued
         if cap is None or current >= cap:
-            raise QueueFullError("backtest queue is full")
+            raise QueueFullError(
+                "backtest queue is full",
+                queue_kind=binding.run_kind,
+                queued_count=current,
+                queue_limit=cap,
+                disabled=cap is None,
+            )
         run = BacktestRun(uuid4(), binding, idempotency_key=idempotency_key)
         if idempotency_key:
             self._runs[key] = run

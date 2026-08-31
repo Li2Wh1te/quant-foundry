@@ -110,7 +110,7 @@ class BacktestResultPersistenceService:
         if batch.progress is not None:
             self.record_progress(batch.progress, current_step=batch.current_step, current_date=batch.current_date, checkpoint=batch.checkpoint)
         self.session.flush()
-        logger.info("backtest_result_chunk_committed", extra={"event": "backtest_result_chunk_committed", "message": f"回测结果块已提交，运行 {self.context.run_id}，写入 {total} 条事实，checkpoint 已处理。", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind, "result_count": total})
+        logger.info(f"回测结果块已提交，运行 {self.context.run_id}，写入 {total} 条事实，checkpoint 已处理。", extra={"event": "backtest_result_chunk_committed", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind, "result_count": total})
         return total
 
     def persist_runtime_result(self, result: Any) -> int:
@@ -193,7 +193,34 @@ class BacktestResultPersistenceService:
         if checkpoint is not None: root.checkpoint = dict(checkpoint)
 
     def record_completion_marker(self, marker: Mapping[str, Any], *, exit_code: int | None = None) -> None:
-        root = self._root(); root.completion_marker = dict(marker); root.runner_exit_code = exit_code
+        """Persist worker completion evidence after result rows are committed."""
+
+        from .runner_protocol import (
+            EXIT_CODE_PROTOCOL,
+            map_exit_code,
+            require_valid_completion_marker,
+        )
+
+        root = self._root()
+        validated = require_valid_completion_marker(
+            marker,
+            run_id=self.context.run_id,
+            config_hash=self.context.config_hash,
+        )
+        if exit_code is not None:
+            category = map_exit_code(exit_code)
+            if category != validated.get("declared_category"):
+                raise ValueError("completion marker category conflicts with worker exit code")
+        root.completion_marker = dict(validated)
+        root.runner_exit_code = exit_code
+        if hasattr(root, "runner_exit_code_protocol"):
+            root.runner_exit_code_protocol = EXIT_CODE_PROTOCOL
+        if hasattr(root, "runner_exit_category"):
+            root.runner_exit_category = map_exit_code(exit_code)
+        if hasattr(root, "completion_marker_protocol"):
+            root.completion_marker_protocol = validated.get("protocol_version")
+        if hasattr(root, "completion_marker_validation"):
+            root.completion_marker_validation = {"valid": True, "errors": []}
 
     def record_terminal_summary(self, *, terminal_status: str, integrity_status: str | None = None, result_counts: Mapping[str, Any] | None = None) -> None:
         """Reject terminal writes from the worker-facing persistence service.
@@ -202,7 +229,7 @@ class BacktestResultPersistenceService:
         integrity evidence).  Keeping this method fail-closed prevents a
         child process from fabricating ``succeeded`` or other terminal states.
         """
-        logger.warning("backtest_terminal_write_rejected", extra={"event": "backtest_terminal_write_rejected", "message": f"回测终态写入已拒绝，运行 {self.context.run_id}，终态由 Supervisor 裁决。", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind})
+        logger.warning(f"回测终态写入已拒绝，运行 {self.context.run_id}，终态由 Supervisor 裁决。", extra={"event": "backtest_terminal_write_rejected", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind})
         raise PermissionError("terminal status is Supervisor-owned")
 
     def apply_supervisor_terminal_summary(self, *, terminal_status: str, integrity_status: str | None = None, result_counts: Mapping[str, Any] | None = None, supervisor_token: object) -> None:

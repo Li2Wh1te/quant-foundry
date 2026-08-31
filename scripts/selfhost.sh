@@ -13,12 +13,12 @@ usage() {
 Usage: scripts/selfhost.sh <command>
 
 Commands:
-  up                Build and start PostgreSQL, Backend, and Frontend (default)
+  up                Build and start PostgreSQL, Backend, Runner, and Frontend (default)
   deploy-frontend   Build and recreate only the Frontend container
-  deploy-backend    Build, migrate, and recreate only the Backend container
+  deploy-backend    Build, migrate, and recreate Backend and Runner containers
   restart-postgres  Restart PostgreSQL and wait until it is healthy
   down              Stop all containers while preserving data
-  logs              Follow PostgreSQL, Backend, and Frontend logs
+  logs              Follow PostgreSQL, Backend, Runner, and Frontend logs
   migrate           Apply pending Alembic migrations
   psql              Open a psql shell in the PostgreSQL container
   reset             Delete local data and deploy a clean stack
@@ -64,15 +64,17 @@ deploy() {
     echo "Building the Backend and Frontend images..."
     compose build backend frontend
 
-    compose stop frontend backend >/dev/null 2>&1 || true
+    # Stop application processes before applying migrations.  In particular,
+    # the runner must not observe a partially upgraded schema.
+    compose stop frontend backend runner >/dev/null 2>&1 || true
 
     echo "Starting PostgreSQL..."
     compose up -d --wait --wait-timeout 60 postgres
 
     run_migrations
 
-    echo "Starting Backend and Frontend..."
-    compose up -d --no-build --wait --wait-timeout 120 backend frontend
+    echo "Starting Backend, Runner, and Frontend..."
+    compose up -d --no-build --wait --wait-timeout 120 backend runner frontend
 
     echo "Quant Foundry is ready at http://$(compose port frontend 80)"
 }
@@ -98,13 +100,13 @@ deploy_backend() {
     echo "Ensuring PostgreSQL is healthy..."
     compose up -d --wait --wait-timeout 60 postgres
 
-    echo "Stopping the current Backend..."
-    compose stop backend >/dev/null 2>&1 || true
+    echo "Stopping the current Backend and Runner..."
+    compose stop backend runner >/dev/null 2>&1 || true
 
     run_migrations
 
-    echo "Starting Backend and applying its Frontend proxy configuration..."
-    compose up -d --no-build --wait --wait-timeout 120 backend frontend
+    echo "Starting Backend, Runner, and applying its Frontend proxy configuration..."
+    compose up -d --no-build --wait --wait-timeout 120 backend runner frontend
 }
 
 restart_postgres() {
@@ -165,13 +167,17 @@ main() {
             compose down --remove-orphans
             ;;
         logs)
-            compose logs --follow postgres backend frontend
+            compose logs --follow postgres backend runner frontend
             ;;
         migrate)
             # Upgrades must also refresh an existing .env so newly required
             # keys (for example QF_CURSOR_SIGNING_KEY) exist before Alembic
             # loads the application settings.
             ensure_environment
+            # Do not leave a long-lived runner using the pre-migration schema.
+            # This command intentionally does not start it again; `up` and
+            # `deploy-backend` start the runner only after migration succeeds.
+            compose stop runner >/dev/null 2>&1 || true
             run_migrations
             ;;
         psql)
@@ -181,7 +187,7 @@ main() {
             reset_stack
             ;;
         status)
-            compose ps
+            compose ps postgres backend runner frontend
             ;;
     esac
 }

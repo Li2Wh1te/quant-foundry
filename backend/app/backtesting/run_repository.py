@@ -1,84 +1,809 @@
-"""Run root state and supervisor-facing evidence adapter."""
+"""Persistence and queue coordination for backtest run roots.
+
+The database repository is intentionally small and explicit.  A queue guard
+row is locked before counting ``queued`` roots, so separate API processes share
+the same serialization point without depending on an in-process mutex.
+"""
+
 from __future__ import annotations
+
 from dataclasses import replace
-from typing import Mapping, Any
-from .run_binding import BacktestRun
-from .run_execution import RunStateMachine, decide_terminal
+from datetime import date, datetime, timezone
+from typing import Any, Mapping
+from uuid import UUID, uuid4
+
+from sqlalchemy import func, select, update
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
 from app.core.logging import backtest_event_message
-from sqlalchemy import func, select, text
-from .models import BacktestRunRecord
-from .run_binding import IdempotencyKeyReusedError, QueueFullError
+
+from .models import BacktestQueueGuardRecord, BacktestRunRecord
+from .run_binding import BacktestRun, IdempotencyKeyReusedError, QueueFullError
+from .run_execution import InvalidRunTransition, RunStateMachine
+
+
+FORMAL_KIND = "backtest_run"
+INTERNAL_KIND = "internal_link_acceptance"
+RUN_KINDS = frozenset({FORMAL_KIND, INTERNAL_KIND})
+TERMINAL_STATUSES = frozenset(
+    {"succeeded", "failed", "cancelled", "timed_out", "indeterminate"}
+)
+NON_TERMINAL_STATUSES = frozenset(
+    {"queued", "starting", "running", "cancel_requested"}
+)
+
+
+class QueueSchemaError(RuntimeError):
+    """The migration did not install a required queue guard row/table."""
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _json_value(value: Any) -> Any:
+    """Convert frozen mapping/date/UUID values into JSONB-safe primitives."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    if isinstance(value, (UUID, date, datetime)):
+        return value.isoformat()
+    if hasattr(value, "value") and not isinstance(value, (str, int, float, bool)):
+        return _json_value(value.value)
+    return value
+
+
+def _raise_queue_full(
+    *,
+    queue_kind: str,
+    queued_count: int,
+    queue_limit: int | None,
+    disabled: bool = False,
+) -> QueueFullError:
+    """Build a structured queue error while retaining the legacy exception type."""
+
+    message = (
+        "内部验收等待队列未启用"
+        if disabled
+        else (
+            "内部链路验收等待队列已满，请稍后重试"
+            if queue_kind == INTERNAL_KIND
+            else "回测等待队列已满，请稍后重试"
+        )
+    )
+    error = QueueFullError(message)
+    # These attributes are deliberately attached to the established exception
+    # class so older callers that only catch QueueFullError remain compatible.
+    error.queue_kind = queue_kind  # type: ignore[attr-defined]
+    error.queued_count = queued_count  # type: ignore[attr-defined]
+    error.queue_limit = queue_limit  # type: ignore[attr-defined]
+    error.code = "backtest_queue_full"  # type: ignore[attr-defined]
+    error.disabled = disabled  # type: ignore[attr-defined]
+    return error
+
 
 class RunRepository:
+    """Small in-memory adapter retained for pure state-machine tests.
+
+    Production API code uses :class:`DatabaseRunRepository`; this adapter has
+    no capacity authority and must not be used for persisted requests.
+    """
+
     def __init__(self):
-        self._rows = {}; self._states = RunStateMachine(); self._queue_state = {}; self._cancel_evidence = {}
-    def add(self, run: BacktestRun): self._rows[run.run_id] = run; return run
-    def get(self, run_id): return self._rows.get(run_id)
-    def transition(self, run_id, target: str):
-        row = self._rows[run_id]; self._states.transition(row.status, target)
-        row = replace(row, status=target); self._rows[run_id] = row
-        self.last_message = backtest_event_message("回测状态变更", str(run_id), f"状态为 {target}")
+        self._rows: dict[UUID, BacktestRun] = {}
+        self._states = RunStateMachine()
+        self._queue_state: dict[UUID, dict[str, str]] = {}
+        self._cancel_evidence: dict[UUID, dict[str, Any]] = {}
+        self.last_message = ""
+
+    def add(self, run: BacktestRun) -> BacktestRun:
+        self._rows[run.run_id] = run
+        return run
+
+    def get(self, run_id: UUID | str) -> BacktestRun | None:
+        return self._rows.get(UUID(str(run_id)))
+
+    def transition(self, run_id: UUID | str, target: str) -> BacktestRun:
+        key = UUID(str(run_id))
+        row = self._rows[key]
+        self._states.transition(row.status, target)
+        row = replace(row, status=target)
+        self._rows[key] = row
+        self.last_message = backtest_event_message(
+            "回测状态变更", str(key), f"状态为 {target}"
+        )
         return row
-    def request_cancel(self, run_id): return self.transition(run_id, "cancel_requested")
-    def mark_queued(self, run_id, kind):
-        self._queue_state[run_id] = {"kind": kind, "state": "queued"}
-    def mark_claimed(self, run_id):
-        if run_id in self._queue_state:
-            self._queue_state[run_id]["state"] = "claimed"
-    def record_cancel_evidence(self, run_id, *, grace_seconds: int, forced: bool = False, terminated_at=None):
+
+    def request_cancel(self, run_id: UUID | str) -> BacktestRun:
+        key = UUID(str(run_id))
+        row = self._rows[key]
+        if row.status in TERMINAL_STATUSES or row.status == "terminal":
+            return row
+        return self.transition(key, "cancel_requested")
+
+    def mark_queued(self, run_id: UUID | str, kind: str) -> None:
+        self._queue_state[UUID(str(run_id))] = {"kind": kind, "state": "queued"}
+
+    def mark_claimed(self, run_id: UUID | str) -> None:
+        key = UUID(str(run_id))
+        if key in self._queue_state:
+            self._queue_state[key]["state"] = "claimed"
+
+    def record_cancel_evidence(
+        self,
+        run_id: UUID | str,
+        *,
+        grace_seconds: int,
+        forced: bool = False,
+        terminated_at: datetime | None = None,
+    ) -> dict[str, Any]:
         if grace_seconds < 0:
             raise ValueError("grace_seconds must be non-negative")
-        self._cancel_evidence[run_id] = {"grace_seconds": grace_seconds, "forced": bool(forced), "terminated_at": terminated_at}
-        return self._cancel_evidence[run_id]
-    def cancel_evidence(self, run_id):
-        return self._cancel_evidence.get(run_id)
-    def adjudicate(self, run_id, *, marker: Mapping[str, Any] | None, exit_code: int | None, expected_count: int | None = None):
-        row = self._rows[run_id]
-        status = decide_terminal(marker=marker, exit_code=exit_code, expected_count=expected_count, run_id=str(run_id), config_hash=row.binding.config_hash)
-        self._rows[run_id] = replace(row, status="terminal", terminal_status=status)
-        self.last_message = backtest_event_message("回测终态裁决", str(run_id), status)
-        return status
-    def recover(self):
-        """Return non-terminal roots for supervisor scan; never auto-requeues."""
-        return tuple(r for r in self._rows.values() if r.status != "terminal")
+        self._cancel_evidence[UUID(str(run_id))] = {
+            "grace_seconds": grace_seconds,
+            "forced": bool(forced),
+            "terminated_at": terminated_at,
+        }
+        return self._cancel_evidence[UUID(str(run_id))]
 
-    def recoverable(self):
-        """Supervisor scan returns roots with evidence, without changing state."""
-        rows = tuple({"run_id": r.run_id, "status": r.status, "cancel_evidence": self.cancel_evidence(r.run_id)} for r in self.recover())
-        self.last_message = backtest_event_message("回测恢复扫描", f"非终态运行 {len(rows)} 个", "扫描完成，未自动重排队")
+    def cancel_evidence(self, run_id: UUID | str) -> dict[str, Any] | None:
+        return self._cancel_evidence.get(UUID(str(run_id)))
+
+    def adjudicate(
+        self,
+        run_id: UUID | str,
+        *,
+        marker: Mapping[str, Any] | None,
+        exit_code: int | None,
+        expected_count: int | None = None,
+    ) -> str:
+        from .run_execution import decide_terminal
+
+        key = UUID(str(run_id))
+        row = self._rows[key]
+        status = decide_terminal(
+            marker=marker,
+            exit_code=exit_code,
+            expected_count=expected_count,
+            run_id=str(key),
+            config_hash=row.binding.config_hash,
+        )
+        self._rows[key] = replace(row, status=status, terminal_status=status)
+        self.last_message = backtest_event_message("回测终态裁决", str(key), status)
+        return status
+
+    def recover(self) -> tuple[BacktestRun, ...]:
+        """Return non-terminal roots for supervisor scan; never auto-requeues."""
+
+        return tuple(
+            row
+            for row in self._rows.values()
+            if row.status not in TERMINAL_STATUSES and row.status != "terminal"
+        )
+
+    def recoverable(self) -> tuple[dict[str, Any], ...]:
+        """Return roots with evidence without changing their lifecycle state."""
+
+        rows = tuple(
+            {
+                "run_id": row.run_id,
+                "status": row.status,
+                "cancel_evidence": self.cancel_evidence(row.run_id),
+            }
+            for row in self.recover()
+        )
+        self.last_message = backtest_event_message(
+            "回测恢复扫描",
+            f"非终态运行 {len(rows)} 个",
+            "扫描完成，未自动重排队",
+        )
         return rows
 
-class DatabaseRunCreationRepository:
-    """PostgreSQL transaction boundary for idempotency and logical queues."""
-    def __init__(self, session, *, formal_limit: int = 32, internal_limit: int | None = None):
-        self.session = session
-        self.limits = {"backtest_run": formal_limit, "internal_link_acceptance": internal_limit}
 
-    def create(self, binding, *, tenant_id: str, idempotency_key: str):
-        # Serialize capacity checks per logical queue inside the caller's DB transaction.
-        self.session.execute(text("SELECT pg_advisory_xact_lock(hashtext(:queue_kind))"), {"queue_kind": binding.run_kind})
-        existing = self.session.scalar(select(BacktestRunRecord).where(BacktestRunRecord.tenant_id == tenant_id, BacktestRunRecord.idempotency_key == idempotency_key))
+class DatabaseRunRepository:
+    """Repository for durable roots, queue guards, and guarded transitions."""
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        formal_limit: int = 32,
+        internal_limit: int | None = None,
+    ) -> None:
+        if not isinstance(formal_limit, int) or isinstance(formal_limit, bool):
+            raise ValueError("formal queue limit must be an integer")
+        if formal_limit < 1 or formal_limit > 32:
+            raise ValueError("formal queue limit must be between 1 and 32")
+        if internal_limit is not None and (
+            not isinstance(internal_limit, int)
+            or isinstance(internal_limit, bool)
+            or internal_limit < 1
+            or internal_limit >= formal_limit
+            or internal_limit >= 32
+        ):
+            raise ValueError("internal queue limit must be smaller than formal limit")
+        self.session = session
+        self.limits = {
+            FORMAL_KIND: formal_limit,
+            INTERNAL_KIND: internal_limit,
+        }
+
+    def _validate_kind(self, kind: str) -> None:
+        if kind not in RUN_KINDS:
+            raise ValueError(f"unsupported backtest run kind: {kind}")
+
+    def get(
+        self,
+        run_id: UUID | str,
+        *,
+        expected_kind: str | None = None,
+        for_update: bool = False,
+    ) -> BacktestRunRecord | None:
+        """Load one root with an optional authoritative kind guard."""
+
+        key = UUID(str(run_id))
+        statement = select(BacktestRunRecord).where(BacktestRunRecord.id == key)
+        if expected_kind is not None:
+            self._validate_kind(expected_kind)
+            statement = statement.where(BacktestRunRecord.run_kind == expected_kind)
+        if for_update:
+            statement = statement.with_for_update()
+        return self.session.scalar(statement)
+
+    def get_by_idempotency(
+        self,
+        scope: str,
+        key: str,
+        *,
+        for_update: bool = False,
+    ) -> BacktestRunRecord | None:
+        """Find by scope/key before any queue-capacity lock is taken."""
+
+        if not scope or not key:
+            raise ValueError("idempotency scope and key are required")
+        statement = select(BacktestRunRecord).where(
+            BacktestRunRecord.idempotency_scope == scope,
+            BacktestRunRecord.idempotency_key == key,
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        return self.session.scalar(statement)
+
+    # Explicit aliases keep the repository vocabulary discoverable to callers
+    # that use the task-package terms rather than the older creation-only name.
+    find_by_idempotency = get_by_idempotency
+
+    def queued_count(self, queue_kind: str) -> int:
+        """Count only queued roots for one logical queue."""
+
+        self._validate_kind(queue_kind)
+        return int(
+            self.session.scalar(
+                select(func.count(BacktestRunRecord.id)).where(
+                    BacktestRunRecord.run_kind == queue_kind,
+                    BacktestRunRecord.status == "queued",
+                )
+            )
+            or 0
+        )
+
+    count_queued = queued_count
+
+    def _ensure_guard_row(self, queue_kind: str) -> BacktestQueueGuardRecord:
+        """Ensure test-created metadata has the same permanent guard rows as a migration."""
+
+        guard = self.session.scalar(
+            select(BacktestQueueGuardRecord).where(
+                BacktestQueueGuardRecord.queue_kind == queue_kind
+            )
+        )
+        if guard is not None:
+            return guard
+        guard = BacktestQueueGuardRecord(queue_kind=queue_kind)
+        try:
+            # Keep a competing seed insert inside a savepoint.  Rolling back
+            # the caller's transaction here could discard an otherwise valid
+            # admission decision before the queue lock is acquired.
+            with self.session.begin_nested():
+                self.session.add(guard)
+                self.session.flush()
+        except IntegrityError:
+            # Another transaction may have seeded the permanent row first.
+            guard = self.session.scalar(
+                select(BacktestQueueGuardRecord).where(
+                    BacktestQueueGuardRecord.queue_kind == queue_kind
+                )
+            )
+            if guard is None:
+                raise QueueSchemaError(
+                    f"queue guard row missing for {queue_kind}"
+                )
+        return guard
+
+    def lock_queue_guard(self, queue_kind: str) -> BacktestQueueGuardRecord:
+        """Lock the permanent guard row used by a capacity transaction."""
+
+        self._validate_kind(queue_kind)
+        self._ensure_guard_row(queue_kind)
+        guard = self.session.scalar(
+            select(BacktestQueueGuardRecord)
+            .where(BacktestQueueGuardRecord.queue_kind == queue_kind)
+            .with_for_update()
+        )
+        if guard is None:
+            raise QueueSchemaError(f"queue guard row missing for {queue_kind}")
+        return guard
+
+    def _capacity_error(self, queue_kind: str, queued: int) -> QueueFullError:
+        limit = self.limits[queue_kind]
+        return _raise_queue_full(
+            queue_kind=queue_kind,
+            queued_count=queued,
+            queue_limit=limit,
+            disabled=limit is None,
+        )
+
+    def create(
+        self,
+        binding,
+        *,
+        tenant_id: str = "default",
+        idempotency_key: str,
+        idempotency_scope: str | None = None,
+    ) -> BacktestRunRecord:
+        """Create one queued root with idempotency-before-capacity ordering.
+
+        The first lookup is intentionally outside the guard lock: a retry for
+        an existing key must return the original root even when the queue is
+        full.  A second lookup after locking closes the concurrent-create race.
+        """
+
+        if not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("idempotency_key is required")
+        scope = idempotency_scope or tenant_id
+        kind = str(binding.run_kind)
+        self._validate_kind(kind)
+
+        existing = self.get_by_idempotency(scope, idempotency_key)
         if existing is not None:
             if existing.config_hash != binding.config_hash:
-                raise IdempotencyKeyReusedError("idempotency key already used with different request")
+                raise IdempotencyKeyReusedError(
+                    "idempotency key already used with different request"
+                )
             return existing
-        limit = self.limits[binding.run_kind]
+
+        limit = self.limits[kind]
         if limit is None:
-            raise QueueFullError("internal backtest queue is disabled")
-        queued = self.session.scalar(select(func.count()).select_from(BacktestRunRecord).where(BacktestRunRecord.run_kind == binding.run_kind, BacktestRunRecord.status == "queued")) or 0
+            raise self._capacity_error(kind, 0)
+
+        # The guard row is the only serialization point for this logical
+        # queue.  API processes do not share Python state or an app mutex.
+        self.lock_queue_guard(kind)
+        existing = self.get_by_idempotency(scope, idempotency_key)
+        if existing is not None:
+            if existing.config_hash != binding.config_hash:
+                raise IdempotencyKeyReusedError(
+                    "idempotency key already used with different request"
+                )
+            return existing
+
+        queued = self.queued_count(kind)
         if queued >= limit:
-            raise QueueFullError("backtest queue is full")
-        row = BacktestRunRecord(
-            tenant_id=tenant_id, idempotency_key=idempotency_key,
-            run_kind=binding.run_kind, profile=binding.profile, status="queued",
-            config_hash=binding.config_hash, backtest_config=dict(binding.config),
-            parameters=dict(binding.strategy.get("parameters", {})),
-            initial_cash=str(binding.spec.initial_cash),
-            initial_positions=list(binding.config["spec"]["initial_positions"]),
-            data_request=dict(binding.data_request),
-            fee_schedule_snapshot=dict(binding.account.get("fee_schedule", {})),
-            analyzer_specs=list(binding.components.get("analyzers", ())),
+            raise self._capacity_error(kind, queued)
+
+        spec = binding.spec
+        account = binding.account if isinstance(binding.account, Mapping) else {}
+        fee_schedule = account.get("fee_schedule", {})
+        if not isinstance(fee_schedule, Mapping):
+            fee_schedule = {}
+        strategy = binding.strategy if isinstance(binding.strategy, Mapping) else {}
+        metadata = binding.metadata if isinstance(binding.metadata, Mapping) else {}
+        data_request = (
+            binding.data_request if isinstance(binding.data_request, Mapping) else {}
         )
-        self.session.add(row)
+        positions = [
+            {
+                "instrument_id": str(item.instrument_id),
+                "side": item.side.value,
+                "quantity": str(item.quantity),
+                "available_quantity": str(item.available_quantity),
+                "average_price": (
+                    None if item.average_price is None else str(item.average_price)
+                ),
+            }
+            for item in spec.initial_positions
+        ]
+        row = BacktestRunRecord(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            idempotency_scope=scope,
+            idempotency_key=idempotency_key,
+            run_kind=kind,
+            profile=binding.profile,
+            status="queued",
+            config_hash=binding.config_hash,
+            backtest_config=_json_value(binding.config),
+            strategy_revision_id=(
+                str(strategy["revision_id"]) if strategy.get("revision_id") else None
+            ),
+            strategy_source_hash=(
+                str(strategy["source_hash"]) if strategy.get("source_hash") else None
+            ),
+            strategy_contract_version=(
+                str(strategy["contract_version"])
+                if strategy.get("contract_version")
+                else None
+            ),
+            parameters=_json_value(strategy.get("parameters", {})),
+            initial_cash=str(spec.initial_cash),
+            initial_positions=positions,
+            data_request=_json_value(data_request),
+            data_evidence=_json_value(metadata.get("data_evidence", {})),
+            pit_snapshot_hash=metadata.get("pit_snapshot_hash"),
+            data_provider_key=data_request.get("provider_key"),
+            max_lookback_sessions=int(data_request.get("max_lookback_sessions", 512)),
+            data_chunk_policy_key="fixed_trading_sessions",
+            data_chunk_policy_version=1,
+            data_chunk_size_sessions=20,
+            data_admission_preflight_hash=metadata.get("admission_report_hash"),
+            data_preflight_hash=metadata.get("preflight_hash"),
+            account_profile_id=(
+                str(account.get("profile_id", account.get("account_profile_id")))
+                if account.get("profile_id", account.get("account_profile_id"))
+                else None
+            ),
+            account_profile_version=(
+                str(account.get("version", account.get("profile_version")))
+                if account.get("version", account.get("profile_version"))
+                else None
+            ),
+            fee_schedule_key=(
+                str(account.get("fee_schedule_key", fee_schedule.get("key")))
+                if account.get("fee_schedule_key", fee_schedule.get("key"))
+                else None
+            ),
+            fee_schedule_version=(
+                str(account.get("fee_schedule_version", fee_schedule.get("version")))
+                if account.get("fee_schedule_version", fee_schedule.get("version"))
+                else None
+            ),
+            fee_schedule_snapshot=_json_value(fee_schedule),
+            analyzer_specs=(
+                _json_value(binding.components.get("analyzers", ()))
+                if isinstance(binding.components, Mapping)
+                else []
+            ),
+            behavior_versions=_json_value(metadata.get("behavior_versions", {})),
+        )
+        # Use a savepoint so a concurrent unique-key loser can recover and
+        # return the already committed row without poisoning the caller's
+        # transaction.  The guard lock remains held by the outer transaction.
+        try:
+            with self.session.begin_nested():
+                self.session.add(row)
+                self.session.flush()
+        except IntegrityError:
+            existing = self.get_by_idempotency(scope, idempotency_key)
+            if existing is not None:
+                if existing.config_hash != binding.config_hash:
+                    raise IdempotencyKeyReusedError(
+                        "idempotency key already used with different request"
+                    )
+                return existing
+            raise
+        return row
+
+    def list(
+        self,
+        *,
+        queue_kind: str = FORMAL_KIND,
+        tenant_id: str | None = None,
+        strategy_revision_id: str | None = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> list[BacktestRunRecord]:
+        """List one logical queue; formal callers never see internal roots."""
+
+        self._validate_kind(queue_kind)
+        if limit < 1 or limit > 500 or offset < 0:
+            raise ValueError("limit must be between 1 and 500 and offset non-negative")
+        statement = select(BacktestRunRecord).where(
+            BacktestRunRecord.run_kind == queue_kind
+        )
+        if tenant_id is not None:
+            statement = statement.where(BacktestRunRecord.idempotency_scope == tenant_id)
+        if strategy_revision_id is not None:
+            statement = statement.where(
+                BacktestRunRecord.strategy_revision_id == strategy_revision_id
+            )
+        statement = (
+            statement.order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(self.session.scalars(statement))
+
+    def transition(
+        self,
+        run_id: UUID | str,
+        target: str,
+        *,
+        expected_status: str | None = None,
+        now: datetime | None = None,
+    ) -> BacktestRunRecord | None:
+        """Apply a restricted lifecycle transition under a row lock."""
+
+        row = self.get(run_id, for_update=True)
+        if row is None:
+            return None
+        current = row.status
+        if expected_status is not None and current != expected_status:
+            return None
+        if target in TERMINAL_STATUSES:
+            if current not in {"starting", "running", "cancel_requested"}:
+                raise InvalidRunTransition(f"{current} -> {target} is not allowed")
+            if target == "indeterminate" and not row.terminal_decision_reason:
+                raise ValueError("indeterminate requires terminal_decision_reason")
+            row.status = target
+            row.terminal_status = target
+            row.finished_at = now or _utcnow()
+        else:
+            RunStateMachine().transition(current, target)
+            row.status = target
         self.session.flush()
         return row
+
+    def claim_next(
+        self,
+        *,
+        worker_id: str | None = None,
+        launch_id: UUID | None = None,
+    ) -> BacktestRunRecord | None:
+        """Claim one formal-first row using ``FOR UPDATE SKIP LOCKED``."""
+
+        row = self._claim_kind(FORMAL_KIND)
+        if row is None:
+            row = self._claim_kind(INTERNAL_KIND)
+        if row is None:
+            return None
+        claim_time = _utcnow()
+        effective_launch_id = launch_id or uuid4()
+        # Keep the lifecycle predicate on the UPDATE as well as the SELECT;
+        # this remains safe if a caller changes the transaction strategy or a
+        # future implementation has more than one claimant.
+        claimed = self.session.execute(
+            update(BacktestRunRecord)
+            .where(
+                BacktestRunRecord.id == row.id,
+                BacktestRunRecord.status == "queued",
+            )
+            .values(
+                status="starting",
+                claimed_at=claim_time,
+                launch_id=effective_launch_id,
+                worker_id=worker_id,
+            )
+        )
+        if claimed.rowcount != 1:
+            return None
+        self.session.flush()
+        self.session.refresh(row)
+        return row
+
+    def _claim_kind(self, kind: str) -> BacktestRunRecord | None:
+        statement = (
+            select(BacktestRunRecord)
+            .where(
+                BacktestRunRecord.run_kind == kind,
+                BacktestRunRecord.status == "queued",
+            )
+            .order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
+            .limit(1)
+            .with_for_update(skip_locked=True)
+        )
+        return self.session.scalar(statement)
+
+    def claim_queued_runs(
+        self,
+        slots: int,
+        *,
+        worker_id_prefix: str = "backtest-worker",
+    ) -> list[BacktestRunRecord]:
+        """Claim at most ``slots`` rows while retaining formal priority."""
+
+        if slots < 0:
+            raise ValueError("slots must be non-negative")
+        rows: list[BacktestRunRecord] = []
+        for index in range(slots):
+            row = self.claim_next(worker_id=f"{worker_id_prefix}:{index}")
+            if row is None:
+                break
+            rows.append(row)
+        return rows
+
+    claim = claim_next
+
+    def request_cancel(
+        self,
+        run_id: UUID | str,
+        *,
+        expected_kind: str | None = None,
+        now: datetime | None = None,
+    ) -> BacktestRunRecord | None:
+        """Record a cancellation request, never a terminal decision."""
+
+        row = self.get(run_id, expected_kind=expected_kind, for_update=True)
+        if row is None:
+            return None
+        if row.status in TERMINAL_STATUSES:
+            return row
+        if row.status not in NON_TERMINAL_STATUSES:
+            raise InvalidRunTransition(f"cannot cancel run in state {row.status}")
+        timestamp = row.cancel_requested_at or now or _utcnow()
+        row.cancel_requested_at = timestamp
+        row.cancel_requested = True
+        # A queued cancellation remains claimable so the Supervisor can take
+        # the row under the same queue lock and close it as
+        # ``cancelled_before_start`` without launching a worker.  Active runs
+        # enter the explicit cancel_requested state.
+        if row.status in {"starting", "running"}:
+            row.status = "cancel_requested"
+        self.session.flush()
+        return row
+
+    def cancel_queued_before_start(
+        self,
+        run_id: UUID | str,
+        *,
+        reason: str = "cancelled_before_start",
+        now: datetime | None = None,
+    ) -> BacktestRunRecord | None:
+        """Supervisor-only closure for a queued cancellation request."""
+
+        row = self.get(run_id, for_update=True)
+        if row is None:
+            return None
+        if row.status in TERMINAL_STATUSES:
+            return row
+        if row.status not in {"queued", "cancel_requested"}:
+            raise InvalidRunTransition(
+                f"queued cancellation requires queued/cancel_requested, got {row.status}"
+            )
+        if any(
+            value is not None
+            for value in (
+                row.launch_id,
+                row.child_pid,
+                row.child_start_identity,
+                row.child_process_group_id,
+                row.worker_handshake_at,
+            )
+        ):
+            raise InvalidRunTransition("run has already acquired worker identity")
+        row.status = "cancelled"
+        row.terminal_status = "cancelled"
+        row.terminal_decision_reason = reason
+        row.finished_at = now or _utcnow()
+        self.session.flush()
+        return row
+
+    def record_progress(
+        self,
+        run_id: UUID | str,
+        progress: float,
+        *,
+        current_trading_date: date | None = None,
+        current_step: str | None = None,
+        checkpoint: Mapping[str, Any] | None = None,
+        heartbeat_at: datetime | None = None,
+        persisted_at: datetime | None = None,
+    ) -> BacktestRunRecord | None:
+        """Persist monotonic progress/heartbeat evidence for a live run."""
+
+        if not 0 <= float(progress) <= 1:
+            raise ValueError("progress must be in [0, 1]")
+        row = self.get(run_id, for_update=True)
+        if row is None:
+            return None
+        if row.status not in NON_TERMINAL_STATUSES:
+            raise InvalidRunTransition("terminal run cannot receive progress")
+        if float(progress) < float(row.progress or 0):
+            raise ValueError("progress cannot move backwards")
+        row.progress = progress
+        if current_trading_date is not None:
+            row.current_trading_date = current_trading_date
+            row.current_date = current_trading_date.isoformat()
+        if current_step is not None:
+            row.current_step = str(current_step)
+        if checkpoint is not None:
+            row.checkpoint = _json_value(checkpoint)
+        timestamp = heartbeat_at or _utcnow()
+        row.last_heartbeat_at = timestamp
+        row.last_progress_persisted_at = persisted_at or timestamp
+        self.session.flush()
+        return row
+
+    def set_terminal(
+        self,
+        run_id: UUID | str,
+        terminal_status: str,
+        *,
+        terminal_decision_reason: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+        result_integrity_status: str | None = None,
+        result_counts: Mapping[str, Any] | None = None,
+        now: datetime | None = None,
+    ) -> BacktestRunRecord | None:
+        """Write a terminal state conditionally and preserve first-writer wins."""
+
+        if terminal_status not in TERMINAL_STATUSES:
+            raise ValueError(f"unsupported terminal status: {terminal_status}")
+        reason = terminal_decision_reason or (
+            "terminal_decision" if terminal_status != "indeterminate" else None
+        )
+        if terminal_status == "indeterminate" and not reason:
+            raise ValueError("indeterminate requires terminal_decision_reason")
+        # Read/lock first so a caller cannot finalize a still-queued run
+        # directly.  A queued cancellation has its dedicated
+        # ``cancel_queued_before_start`` closure above.
+        current = self.get(run_id, for_update=True)
+        if current is None:
+            return None
+        if current.status in TERMINAL_STATUSES:
+            return current
+        if current.status not in {"starting", "running", "cancel_requested"}:
+            raise InvalidRunTransition(
+                f"{current.status} -> {terminal_status} is not allowed"
+            )
+        values: dict[str, Any] = {
+            "status": terminal_status,
+            "terminal_status": terminal_status,
+            "finished_at": now or _utcnow(),
+            "terminal_decision_reason": reason,
+        }
+        if evidence is not None:
+            values["result_integrity_evidence"] = _json_value(evidence)
+        if result_integrity_status is not None:
+            values["result_integrity_status"] = result_integrity_status
+        if result_counts is not None:
+            values["result_counts"] = _json_value(result_counts)
+        statement = (
+            update(BacktestRunRecord)
+            .where(
+                BacktestRunRecord.id == UUID(str(run_id)),
+                BacktestRunRecord.status == current.status,
+                BacktestRunRecord.status.not_in(TERMINAL_STATUSES),
+            )
+            .values(**values)
+        )
+        result = self.session.execute(statement)
+        self.session.flush()
+        row = self.get(run_id)
+        # A zero-row update intentionally returns the already committed state;
+        # callers must never overwrite a concurrent terminal decision.
+        if result.rowcount == 0:
+            return row
+        return row
+
+
+class DatabaseRunCreationRepository(DatabaseRunRepository):
+    """Compatibility name retained for callers that only create roots."""
+
+
+BacktestRunRepository = DatabaseRunRepository
+
+
+__all__ = [
+    "BacktestRunRepository",
+    "DatabaseRunCreationRepository",
+    "DatabaseRunRepository",
+    "FORMAL_KIND",
+    "INTERNAL_KIND",
+    "NON_TERMINAL_STATUSES",
+    "QueueSchemaError",
+    "RunRepository",
+    "TERMINAL_STATUSES",
+]

@@ -1,30 +1,66 @@
-"""Minimal formal/internal run API; terminal state is worker-owned."""
-from fastapi import APIRouter, HTTPException, Header, Depends
-from .run_schemas import RunCreateRequest, InternalRunCreateRequest, RunResponse
-from .run_admission import RunAdmissionService
-from .run_binding import RunBindingBuilder, RunCreationService
-from .spec import BacktestSpec, InitialPositionInput
-from .domain import PositionSide
-from datetime import date
-from uuid import UUID
-import logging
+"""Formal and internal backtest run lifecycle APIs.
+
+The API only validates/freeze-binds a request, persists a queued root, and
+records cancellation intent.  A worker or supervisor owns every terminal
+decision; no endpoint executes strategy code or writes a final status.
+"""
+
+from __future__ import annotations
+
 from dataclasses import replace
+from datetime import date
+import logging
+from typing import Any, Mapping
+from uuid import UUID
+
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from sqlalchemy.orm import Session
+
+from app.core.config import get_settings
 from app.core.logging import backtest_event_message
+from app.db.session import get_db_session
+
+from .domain import PositionSide
+from .run_admission import RunAdmissionService
+from .run_binding import (
+    BacktestRun,
+    IdempotencyKeyReusedError,
+    RunBinding,
+    RunBindingBuilder,
+    RunCreationService,
+    QueueFullError,
+)
+from .run_repository import (
+    DatabaseRunRepository,
+    FORMAL_KIND,
+    INTERNAL_KIND,
+    TERMINAL_STATUSES,
+)
+from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse
+from .spec import BacktestSpec, InitialPositionInput
+
 
 router = APIRouter(prefix="/api/admin/backtest-runs", tags=["backtests"])
-# Documented public contract uses ``/api/admin/backtests``.  Keep the older
+# The documented collection is ``/api/admin/backtests``.  Keep the
 # ``backtest-runs`` collection as a compatibility alias while both delegate to
-# the same service and visibility guards.
+# the same repository and formal-only visibility guard.
 formal_alias_router = APIRouter(prefix="/api/admin/backtests", tags=["backtests"])
-internal_router = APIRouter(prefix="/api/internal/backtests", tags=["internal-backtests"])
+internal_router = APIRouter(
+    prefix="/api/internal/backtests", tags=["internal-backtests"]
+)
+
 _service = RunAdmissionService()
 _creation = RunCreationService()
-_runs = {}
+# Direct function callers in older unit tests do not supply a database
+# dependency; the fallback remains deliberately private and is never used by
+# an ASGI request, where a SQLAlchemy Session is always injected.
+_runs: dict[str, BacktestRun] = {}
 logger = logging.getLogger("backtesting.run")
+
 ERROR_MESSAGES = {
     "invalid_request": "请求参数无效",
-    "idempotency_conflict": "幂等键已用于不同请求",
-    "queue_full": "运行队列已满",
+    "idempotency_key_reused": "幂等键已用于不同请求",
+    "queue_full": "回测等待队列已满，请稍后重试",
     "run_not_found": "运行不存在",
     "internal_disabled": "内部验收运行入口未启用",
     "account_not_selected": "请选择回测账户。",
@@ -38,158 +74,842 @@ ERROR_MESSAGES = {
     "backtest_cancel_not_allowed": "当前运行状态不允许取消。",
 }
 
-def require_internal_capability(x_backtest_capability: str | None = Header(default=None)) -> str:
+
+def require_internal_capability(
+    x_backtest_capability: str | None = Header(default=None),
+) -> str:
     """Allow internal diagnostics only to explicitly identified operators/services."""
+
     if x_backtest_capability not in {"operator", "service"}:
-        raise HTTPException(status_code=403, detail={"code": "internal_capability_required", "message": "需要运维或服务能力才可访问内部验收入口"})
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "code": "internal_capability_required",
+                "message": "需要运维或服务能力才可访问内部验收入口",
+            },
+        )
     return x_backtest_capability
 
-def _response(run):
-    binding = run.binding
-    return RunResponse(run_id=run.run_id, run_kind=binding.run_kind, profile=binding.profile,
-                       status=run.status, config_hash=binding.config_hash,
-                       rerun_of_run_id=run.rerun_of_run_id,
-                       strategy_revision_id=UUID(str(binding.strategy.get("revision_id"))) if binding.strategy.get("revision_id") else None,
-                       parameters=dict(binding.spec.__dict__) if hasattr(binding.spec, "__dict__") else {},
-                       backtest_config=dict(binding.config), data_request=dict(binding.data_request),
-                       behavior_versions=dict(binding.metadata.get("behavior_versions", {})) if isinstance(binding.metadata, dict) else {})
 
-def _validate_spec(raw: dict, expected_kind: str) -> None:
-    """Reject client-controlled routing/profile and credential-bearing fixture fields."""
-    allowed = {"start_date", "end_date", "initial_cash", "initial_positions", "dynamic_universe", "run_kind", "profile"}
+def _is_session(value: object) -> bool:
+    """Recognize a direct SQLAlchemy session without importing test sentinels."""
+
+    return isinstance(value, Session) or (
+        value is not None
+        and not hasattr(value, "dependency")
+        and callable(getattr(value, "execute", None))
+        and callable(getattr(value, "flush", None))
+    )
+
+
+def _settings(request: Request | None) -> object:
+    if request is not None:
+        attached = getattr(getattr(request, "app", None), "state", None)
+        configured = getattr(attached, "settings", None)
+        if configured is not None:
+            return configured
+    try:
+        return get_settings()
+    except Exception:
+        # Direct route-function tests may not provide environment secrets.
+        return None
+
+
+def _limit(settings: object, *names: str, default: int | None) -> int | None:
+    for name in names:
+        value = getattr(settings, name, None) if settings is not None else None
+        if value is not None:
+            return value
+    return default
+
+
+def _db_repository(session: object, request: Request | None) -> DatabaseRunRepository:
+    settings = _settings(request)
+    formal_limit = _limit(
+        settings,
+        "backtest_max_queued_runs",
+        "backtest_formal_queue_limit",
+        "backtest_queue_limit",
+        default=32,
+    )
+    internal_limit = _limit(
+        settings,
+        "backtest_internal_max_queued_runs",
+        "backtest_internal_queue_limit",
+        default=None,
+    )
+    return DatabaseRunRepository(
+        session, formal_limit=formal_limit or 32, internal_limit=internal_limit
+    )
+
+
+def _validate_spec(raw: Mapping[str, Any], expected_kind: str) -> None:
+    """Reject client-controlled routing/profile and credential-bearing fields."""
+
+    # Kind/profile are trusted-entry concerns, not request data.  Even a value
+    # equal to the expected kind is rejected so clients cannot accidentally
+    # make these fields part of a future canonical identity.
+    allowed = {
+        "start_date",
+        "end_date",
+        "initial_cash",
+        "initial_positions",
+        "dynamic_universe",
+    }
     unknown = set(raw) - allowed
     if unknown:
         raise ValueError(f"unsupported spec fields: {', '.join(sorted(unknown))}")
-    if raw.get("run_kind", expected_kind) != expected_kind or raw.get("profile") not in (None, ("formal@1" if expected_kind == "backtest_run" else "internal_link_acceptance@1")):
-        raise ValueError("run kind/profile are server controlled")
-    forbidden = {"fixture", "raw_fixture", "secret", "password", "credential", "access_token", "token"}
-    if any(any(part in str(k).lower() for part in forbidden) for k in raw):
-        raise ValueError("credential or raw fixture fields are forbidden")
+    forbidden = {
+        "fixture",
+        "raw_fixture",
+        "secret",
+        "password",
+        "credential",
+        "access_token",
+        "token",
+        "source",
+        "code",
+    }
+    if any(any(part in str(key).lower() for part in forbidden) for key in raw):
+        raise ValueError("credential, source, or raw fixture fields are forbidden")
+    if expected_kind not in {FORMAL_KIND, INTERNAL_KIND}:
+        raise ValueError("unsupported trusted run kind")
 
-@router.post("", response_model=RunResponse, status_code=201)
-def create_formal(payload: RunCreateRequest):
+
+def _build_spec(raw: Mapping[str, Any], *, internal: bool = False) -> BacktestSpec:
+    positions: list[InitialPositionInput] = []
+    if not internal:
+        positions = [
+            InitialPositionInput(
+                instrument_id=UUID(str(item["instrument_id"])),
+                side=PositionSide(item["side"]),
+                quantity=item["quantity"],
+                available_quantity=item.get("available_quantity", item["quantity"]),
+                average_price=item.get("average_price"),
+            )
+            for item in raw.get("initial_positions", [])
+        ]
+    return BacktestSpec(
+        start_date=date.fromisoformat(str(raw["start_date"])),
+        end_date=date.fromisoformat(str(raw["end_date"])),
+        initial_cash=raw.get("initial_cash", 0),
+        initial_positions=positions,
+        dynamic_universe=bool(raw.get("dynamic_universe", False)),
+    )
+
+
+def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
+    raw = payload.spec
+    _validate_spec(raw, kind)
+    spec = _build_spec(raw, internal=kind == INTERNAL_KIND)
+    # Strategy/account/data resolution belongs to task 08.  This API receives
+    # only the already trusted revision identity and never evaluates source.
+    return RunBindingBuilder().build(
+        spec,
+        run_kind=kind,
+        strategy={"revision_id": str(payload.strategy_revision_id), "published": True},
+        data_request={},
+    )
+
+
+def _uuid_or_none(value: object) -> UUID | None:
+    if value in (None, ""):
+        return None
     try:
-        raw = payload.spec
-        _validate_spec(raw, "backtest_run")
-        positions = [InitialPositionInput(instrument_id=UUID(str(p["instrument_id"])), side=PositionSide(p["side"]), quantity=p["quantity"], available_quantity=p.get("available_quantity", p["quantity"]), average_price=p.get("average_price")) for p in raw.get("initial_positions", [])]
-        spec = BacktestSpec(start_date=date.fromisoformat(raw["start_date"]), end_date=date.fromisoformat(raw["end_date"]), initial_cash=raw.get("initial_cash", 0), initial_positions=positions, dynamic_universe=bool(raw.get("dynamic_universe", False)))
-        binding = RunBindingBuilder().build(spec, strategy={"revision_id": str(payload.strategy_revision_id), "published": True}, data_request={})
-        # Formal creation must fail closed until the canonical gate/preflight
-        # dependencies provide an explicit admission decision; this endpoint
-        # never fabricates a ready result from placeholder booleans.
-        admission = _service.admission(binding, {}, degraded=payload.degraded, confirmed_report_hash=payload.confirmed_admission_report_hash)
+        return UUID(str(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _wire_value(value: Any) -> Any:
+    """Materialize immutable binding containers for JSON response encoding."""
+
+    if isinstance(value, Mapping):
+        return {str(key): _wire_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_wire_value(item) for item in value]
+    if isinstance(value, (date, UUID)):
+        return value.isoformat()
+    return value
+
+
+def _response(run: BacktestRun | object) -> RunResponse:
+    """Project domain or ORM rows without exposing stdout/secrets/source."""
+
+    if isinstance(run, BacktestRun):
+        binding = run.binding
+        spec = binding.spec
+        values: dict[str, Any] = {
+            "run_id": run.run_id,
+            "run_kind": binding.run_kind,
+            "profile": binding.profile,
+            "status": run.status,
+            "config_hash": binding.config_hash,
+            "rerun_of_run_id": run.rerun_of_run_id,
+            "strategy_revision_id": _uuid_or_none(
+                binding.strategy.get("revision_id")
+                if isinstance(binding.strategy, Mapping)
+                else None
+            ),
+            "parameters": {
+                "start_date": spec.start_date,
+                "end_date": spec.end_date,
+                "initial_cash": str(spec.initial_cash),
+                "initial_positions": [
+                    {
+                        "instrument_id": str(position.instrument_id),
+                        "side": position.side.value,
+                        "quantity": str(position.quantity),
+                    }
+                    for position in spec.initial_positions
+                ],
+                "dynamic_universe": spec.dynamic_universe,
+            },
+            "backtest_config": _wire_value(binding.config),
+            "data_request": _wire_value(binding.data_request),
+            "behavior_versions": _wire_value(binding.metadata.get("behavior_versions", {}))
+            if isinstance(binding.metadata, Mapping)
+            else {},
+            "progress": 0,
+        }
+        return RunResponse(**values)
+
+    binding = getattr(run, "binding", None)
+    run_id = getattr(run, "id", getattr(run, "run_id", None))
+    run_kind = getattr(run, "run_kind", None) or (
+        getattr(binding, "run_kind", FORMAL_KIND)
+    )
+    profile = getattr(run, "profile", None) or getattr(binding, "profile", "formal@1")
+    status = getattr(run, "status", "queued")
+    current_date = getattr(run, "current_trading_date", None)
+    legacy_date = getattr(run, "current_date", None)
+    parameters = getattr(run, "parameters", None)
+    if parameters is None and binding is not None:
+        parameters = {}
+    config = getattr(run, "backtest_config", None)
+    if config is None and binding is not None:
+        config = dict(binding.config)
+    data_request = getattr(run, "data_request", None) or {}
+    behavior_versions = getattr(run, "behavior_versions", None) or {}
+    raw_current_step = getattr(run, "current_step", None)
+    values = {
+        "run_id": _uuid_or_none(run_id),
+        "run_kind": run_kind,
+        "profile": profile,
+        "status": status,
+        "terminal_status": getattr(run, "terminal_status", None),
+        "config_hash": getattr(run, "config_hash", ""),
+        "rerun_of_run_id": _uuid_or_none(getattr(run, "rerun_of_run_id", None)),
+        "strategy_revision_id": _uuid_or_none(
+            getattr(run, "strategy_revision_id", None)
+            or (
+                binding.strategy.get("revision_id")
+                if isinstance(binding, RunBinding)
+                and isinstance(binding.strategy, Mapping)
+                else None
+            )
+        ),
+        "parameters": _wire_value(parameters or {}),
+        "backtest_config": _wire_value(config or {}),
+        "data_request": _wire_value(data_request),
+        "behavior_versions": _wire_value(behavior_versions),
+        "progress": float(getattr(run, "progress", 0) or 0),
+        "current_trading_date": current_date,
+        "current_date": (
+            current_date.isoformat()
+            if hasattr(current_date, "isoformat")
+            else legacy_date
+        ),
+        "current_step": str(raw_current_step) if raw_current_step is not None else None,
+        "created_at": getattr(run, "created_at", None),
+        "started_at": getattr(run, "started_at", None),
+        "finished_at": getattr(run, "finished_at", None),
+        "claimed_at": getattr(run, "claimed_at", None),
+        "child_pid": getattr(run, "child_pid", None),
+        "child_start_identity": getattr(run, "child_start_identity", None),
+        "child_process_group_id": getattr(run, "child_process_group_id", None),
+        "worker_id": getattr(run, "worker_id", None),
+        "worker_handshake_at": getattr(run, "worker_handshake_at", None),
+        "last_heartbeat_at": getattr(run, "last_heartbeat_at", None),
+        "last_progress_persisted_at": getattr(run, "last_progress_persisted_at", None),
+        "cancel_requested_at": getattr(run, "cancel_requested_at", None),
+        "cancel_requested": bool(getattr(run, "cancel_requested", False)),
+        "termination_requested_at": getattr(run, "termination_requested_at", None),
+        "termination_reason": getattr(run, "termination_reason", None),
+        "recovery_observed_at": getattr(run, "recovery_observed_at", None),
+        "recovery_action": getattr(run, "recovery_action", None),
+        "recovery_process_state": getattr(run, "recovery_process_state", None),
+        "runner_exit_code": getattr(run, "runner_exit_code", None),
+        "runner_exit_code_protocol": getattr(run, "runner_exit_code_protocol", None),
+        "runner_exit_category": getattr(run, "runner_exit_category", None),
+        "completion_marker_protocol": getattr(run, "completion_marker_protocol", None),
+        "completion_marker_validation": getattr(
+            run, "completion_marker_validation", None
+        ),
+        "result_integrity_status": getattr(run, "result_integrity_status", None),
+        "terminal_decision_reason": getattr(run, "terminal_decision_reason", None),
+        "failure_phase": getattr(run, "failure_phase", None),
+        "failure_type": getattr(run, "failure_type", None),
+        "error_message": getattr(run, "error_message", None),
+        "stdout_bytes": getattr(run, "stdout_bytes", None),
+        "stdout_digest": getattr(run, "stdout_digest", None),
+        "stdout_truncated": getattr(run, "stdout_truncated", None),
+        "resource_limit_evidence": getattr(run, "resource_limit_evidence", None),
+        "runner_config_evidence": getattr(run, "runner_config_evidence", None),
+        "completion_marker": getattr(run, "completion_marker", None),
+        "runner_exit_report": getattr(run, "runner_exit_report", None),
+        "result_integrity_evidence": getattr(run, "result_integrity_evidence", None),
+        "result_counts": getattr(run, "result_counts", None) or {},
+    }
+    # A malformed persisted row must not become a 500 serialization leak.  The
+    # repository's root guard still controls visibility; this fallback only
+    # preserves a stable response for UUIDs from legacy test doubles.
+    if values["run_id"] is None:
+        raise ValueError("run id is invalid")
+    return RunResponse(**values)
+
+
+def _queue_error(exc: QueueFullError) -> HTTPException:
+    queue_kind = getattr(exc, "queue_kind", None)
+    queued_count = getattr(exc, "queued_count", None)
+    queue_limit = getattr(exc, "queue_limit", None)
+    disabled = bool(getattr(exc, "disabled", False))
+    if disabled:
+        return HTTPException(
+            status_code=503,
+            detail={
+                "code": "internal_disabled",
+                "message": ERROR_MESSAGES["internal_disabled"],
+                "queue_kind": queue_kind,
+            },
+        )
+    return HTTPException(
+        status_code=429,
+        detail={
+            "code": "backtest_queue_full",
+            "message": (
+                "内部链路验收等待队列已满，请稍后重试"
+                if queue_kind == INTERNAL_KIND
+                else ERROR_MESSAGES["queue_full"]
+            ),
+            "queue_kind": queue_kind,
+            "queued_count": queued_count,
+            "queue_limit": queue_limit,
+        },
+    )
+
+
+def _rollback(session: object) -> None:
+    if _is_session(session):
+        session.rollback()
+
+
+def _existing_or_conflict(
+    repository: DatabaseRunRepository,
+    *,
+    scope: str,
+    key: str,
+    binding: RunBinding,
+) -> object | None:
+    existing = repository.get_by_idempotency(scope, key)
+    if existing is None:
+        return None
+    if existing.config_hash != binding.config_hash:
+        raise IdempotencyKeyReusedError(
+            "idempotency key already used with different request"
+        )
+    return existing
+
+
+def _create(
+    payload: RunCreateRequest,
+    *,
+    kind: str,
+    session: object,
+    request: Request | None,
+) -> RunResponse:
+    binding = _binding(payload, kind=kind)
+    scope = "default"
+    if _is_session(session):
+        repository = _db_repository(session, request)
+        # Idempotency lookup is before admission/capacity.  A retry therefore
+        # succeeds even when the queue filled after the original request.
+        existing = _existing_or_conflict(
+            repository,
+            scope=scope,
+            key=payload.idempotency_key,
+            binding=binding,
+        )
+        if existing is not None:
+            return _response(existing)
+        if kind == FORMAL_KIND:
+            admission = _service.admission(
+                binding,
+                {},
+                degraded=payload.degraded,
+                confirmed_report_hash=payload.confirmed_admission_report_hash,
+            )
+            if not admission.allowed:
+                raise ValueError(admission.message)
+        row = repository.create(
+            binding,
+            tenant_id=scope,
+            idempotency_scope=scope,
+            idempotency_key=payload.idempotency_key,
+        )
+        session.commit()
+        session.refresh(row)
+        logger.info(
+            "backtest_created",
+            extra={
+                "event": "backtest_created",
+                "message": backtest_event_message(
+                    "回测运行创建",
+                    f"{binding.spec.start_date} 至 {binding.spec.end_date}",
+                    "已进入正式等待队列"
+                    if kind == FORMAL_KIND
+                    else "已进入内部等待队列",
+                ),
+                "run_id": str(row.id),
+                "run_kind": row.run_kind,
+                "config_hash": row.config_hash,
+                "status": row.status,
+            },
+        )
+        return _response(row)
+
+    existing = next(
+        (
+            item
+            for item in _runs.values()
+            if item.idempotency_key == payload.idempotency_key
+            and item.binding.run_kind == kind
+        ),
+        None,
+    )
+    if existing is not None:
+        if existing.binding.config_hash != binding.config_hash:
+            raise IdempotencyKeyReusedError(
+                "idempotency key already used with different request"
+            )
+        return _response(existing)
+    # Compatibility for direct calls that bypass FastAPI dependency injection.
+    # Keep the same idempotency-before-admission order as the DB path.
+    if kind == FORMAL_KIND:
+        admission = _service.admission(
+            binding,
+            {},
+            degraded=payload.degraded,
+            confirmed_report_hash=payload.confirmed_admission_report_hash,
+        )
         if not admission.allowed:
             raise ValueError(admission.message)
-        run = _creation.create(binding, idempotency_key=payload.idempotency_key)
-        _runs[str(run.run_id)] = run
-        logger.info("backtest_created", extra={"event": "backtest_created", "message": backtest_event_message("回测运行创建", f"{spec.start_date} 至 {spec.end_date}", "已进入正式等待队列"), "run_id": str(run.run_id), "run_kind": binding.run_kind, "config_hash": binding.config_hash, "status": run.status})
-        return _response(run)
-    except Exception as exc:
-        code = "idempotency_conflict" if exc.__class__.__name__ == "IdempotencyKeyReusedError" else ("queue_full" if exc.__class__.__name__ == "QueueFullError" else "invalid_request")
-        status = 409 if code == "idempotency_conflict" else (429 if code == "queue_full" else 422)
-        raise HTTPException(status, detail={"code": code, "message": ERROR_MESSAGES[code], "details": {"error_type": type(exc).__name__}}) from exc
-
-@router.post("/preflight")
-def preflight(payload: RunCreateRequest):
-    return {"status": "blocked", "code": "preflight_dependency_unavailable", "message": "准入依赖未就绪，已拒绝运行", "report_hash": None, "issues": []}
-
-@internal_router.post("/link-acceptance", response_model=RunResponse, status_code=201, dependencies=[Depends(require_internal_capability)])
-def create_internal(payload: InternalRunCreateRequest):
-    try:
-        raw = payload.spec
-        _validate_spec(raw, "internal_link_acceptance")
-        spec = BacktestSpec(start_date=date.fromisoformat(raw["start_date"]), end_date=date.fromisoformat(raw["end_date"]), initial_cash=raw.get("initial_cash", 0), initial_positions=[], dynamic_universe=bool(raw.get("dynamic_universe", False)))
-        binding = RunBindingBuilder().build(spec, run_kind="internal_link_acceptance", strategy={"revision_id": str(payload.strategy_revision_id), "published": True}, data_request={})
-        run = _creation.create(binding, idempotency_key=payload.idempotency_key)
-        _runs[str(run.run_id)] = run
-        logger.info("backtest_internal_created", extra={"event":"backtest_internal_created", "message": backtest_event_message("内部链路验收运行创建", f"{spec.start_date} 至 {spec.end_date}", "已进入内部等待队列"), "run_id": str(run.run_id), "run_kind": binding.run_kind, "status": run.status})
-        return _response(run)
-    except Exception as exc:
-        if exc.__class__.__name__ == "QueueFullError" and _creation.internal_capacity is None:
-            raise HTTPException(503, detail={"code": "internal_disabled", "message": ERROR_MESSAGES["internal_disabled"]}) from exc
-        raise HTTPException(422, detail={"code": "invalid_request", "message": ERROR_MESSAGES["invalid_request"], "details": {"error_type": type(exc).__name__}}) from exc
-
-@router.post("/{run_id}/cancel")
-def cancel(run_id: str):
-    run = _runs.get(run_id)
-    if run is None: raise HTTPException(404, detail={"code": "run_not_found", "message": "运行不存在"})
-    if run.status in {"terminal", "cancel_requested"}: return _response(run)
-    run = replace(run, status="cancel_requested"); _runs[run_id] = run
-    logger.info("backtest_cancel_requested", extra={"event": "backtest_cancel_requested", "message": backtest_event_message("回测取消请求", run_id, "已记录，等待 Supervisor 裁决"), "run_id": run_id, "run_kind": run.binding.run_kind, "status": run.status})
+    run = _creation.create(binding, idempotency_key=payload.idempotency_key)
+    _runs[str(run.run_id)] = run
     return _response(run)
 
 
-@router.post("/{run_id}/rerun", response_model=RunResponse, status_code=201)
-def rerun(run_id: str):
-    """Create a fresh queued run from the original frozen binding."""
-    original = _runs.get(run_id)
-    if original is None or original.binding.run_kind != "backtest_run":
-        raise HTTPException(404, detail={"code": "backtest_rerun_not_allowed", "message": "正式回测不存在或不可重新运行"})
-    import uuid as _uuid
+@router.post("", response_model=RunResponse, status_code=201)
+def create_formal(
+    payload: RunCreateRequest,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+) -> RunResponse:
     try:
-        fresh = _creation.create(original.binding, idempotency_key=str(_uuid.uuid4()))
+        return _create(
+            payload,
+            kind=FORMAL_KIND,
+            session=session,
+            request=request,
+        )
+    except QueueFullError as exc:
+        _rollback(session)
+        raise _queue_error(exc) from exc
+    except IdempotencyKeyReusedError as exc:
+        _rollback(session)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "idempotency_key_reused",
+                "message": ERROR_MESSAGES["idempotency_key_reused"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
     except Exception as exc:
-        raise HTTPException(429, detail={"code": "backtest_queue_full", "message": "回测等待队列已满，请稍后重试"}) from exc
-    fresh = replace(fresh, rerun_of_run_id=original.run_id)
-    _runs[str(fresh.run_id)] = fresh
-    return _response(fresh)
+        _rollback(session)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_request",
+                "message": ERROR_MESSAGES["invalid_request"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
+
+
+@router.post("/preflight")
+def preflight(payload: RunCreateRequest) -> dict[str, Any]:
+    """Keep preflight side-effect free until task-08 provides its canonical gate."""
+
+    return {
+        "status": "blocked",
+        "code": "preflight_dependency_unavailable",
+        "message": "准入依赖未就绪，已拒绝运行",
+        "report_hash": None,
+        "issues": [],
+    }
+
+
+@internal_router.post(
+    "/link-acceptance",
+    response_model=RunResponse,
+    status_code=201,
+    dependencies=[Depends(require_internal_capability)],
+)
+def create_internal(
+    payload: InternalRunCreateRequest,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+) -> RunResponse:
+    try:
+        return _create(
+            payload,
+            kind=INTERNAL_KIND,
+            session=session,
+            request=request,
+        )
+    except QueueFullError as exc:
+        _rollback(session)
+        raise _queue_error(exc) from exc
+    except IdempotencyKeyReusedError as exc:
+        _rollback(session)
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "idempotency_key_reused",
+                "message": ERROR_MESSAGES["idempotency_key_reused"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
+    except Exception as exc:
+        _rollback(session)
+        if isinstance(exc, QueueFullError) and getattr(exc, "disabled", False):
+            raise _queue_error(exc) from exc
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "invalid_request",
+                "message": ERROR_MESSAGES["invalid_request"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
+
+
+def _cancel(
+    run_id: str,
+    *,
+    expected_kind: str,
+    session: object,
+) -> RunResponse:
+    if _is_session(session):
+        row = DatabaseRunRepository(session).request_cancel(
+            run_id, expected_kind=expected_kind
+        )
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "run_not_found", "message": ERROR_MESSAGES["run_not_found"]},
+            )
+        session.commit()
+        session.refresh(row)
+        logger.info(
+            "backtest_cancel_requested",
+            extra={
+                "event": "backtest_cancel_requested",
+                "message": backtest_event_message(
+                    "回测取消请求", run_id, "已记录，等待 Supervisor 裁决"
+                ),
+                "run_id": run_id,
+                "run_kind": row.run_kind,
+                "status": row.status,
+            },
+        )
+        return _response(row)
+    run = _runs.get(run_id)
+    if run is None or run.binding.run_kind != expected_kind:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "run_not_found", "message": ERROR_MESSAGES["run_not_found"]},
+        )
+    if run.status in TERMINAL_STATUSES or run.status in {"terminal", "cancel_requested"}:
+        return _response(run)
+    updated = replace(run, status="cancel_requested")
+    _runs[run_id] = updated
+    return _response(updated)
+
+
+@router.post("/{run_id}/cancel")
+def cancel(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> RunResponse:
+    try:
+        return _cancel(run_id, expected_kind=FORMAL_KIND, session=session)
+    except HTTPException:
+        _rollback(session)
+        raise
+    except Exception as exc:
+        _rollback(session)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "backtest_cancel_not_allowed",
+                "message": ERROR_MESSAGES["backtest_cancel_not_allowed"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
+
+
+@internal_router.post("/{run_id}/cancel", dependencies=[Depends(require_internal_capability)])
+def cancel_internal(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> RunResponse:
+    try:
+        return _cancel(run_id, expected_kind=INTERNAL_KIND, session=session)
+    except HTTPException:
+        _rollback(session)
+        raise
+    except Exception as exc:
+        _rollback(session)
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "backtest_cancel_not_allowed",
+                "message": ERROR_MESSAGES["backtest_cancel_not_allowed"],
+                "details": {"error_type": type(exc).__name__},
+            },
+        ) from exc
+
+
+def _list(
+    *,
+    kind: str,
+    session: object,
+    limit: int,
+    offset: int,
+    strategy_revision_id: str | None = None,
+) -> dict[str, list[RunResponse]]:
+    # FastAPI resolves Query defaults before dispatch; direct function callers
+    # receive Query marker objects instead, so normalize them here as well.
+    if not isinstance(limit, int):
+        limit = 100
+    if not isinstance(offset, int):
+        offset = 0
+    if _is_session(session):
+        rows = DatabaseRunRepository(session).list(
+            queue_kind=kind,
+            limit=limit,
+            offset=offset,
+            strategy_revision_id=strategy_revision_id,
+        )
+        return {"items": [_response(row) for row in rows]}
+    rows = [
+        run
+        for run in _runs.values()
+        if run.binding.run_kind == kind
+        and (
+            strategy_revision_id is None
+            or str(run.binding.strategy.get("strategy_id", run.binding.strategy.get("revision_id", "")))
+            == strategy_revision_id
+        )
+    ]
+    return {"items": [_response(run) for run in rows[offset : offset + limit]]}
+
 
 @router.get("")
-def list_runs():
-    # Public listing is formal-only; internal acceptance runs require the
-    # dedicated operator endpoint and are never exposed by this collection.
-    return {"items": [_response(r) for r in _runs.values() if r.binding.run_kind == "backtest_run"]}
+def list_runs(
+    session: Session = Depends(get_db_session),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, list[RunResponse]]:
+    return _list(kind=FORMAL_KIND, session=session, limit=limit, offset=offset)
+
+
+@internal_router.get("", dependencies=[Depends(require_internal_capability)])
+def list_internal_runs(
+    session: Session = Depends(get_db_session),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, list[RunResponse]]:
+    return _list(kind=INTERNAL_KIND, session=session, limit=limit, offset=offset)
 
 
 @router.get("/strategies/{strategy_id}/backtests")
-def list_strategy_runs(strategy_id: str):
-    """Return formal runs for one strategy revision/identity only."""
-    items = []
-    for run in _runs.values():
-        if run.binding.run_kind != "backtest_run":
-            continue
-        strategy = run.binding.strategy
-        if str(strategy.get("strategy_id", strategy.get("revision_id", ""))) == strategy_id:
-            items.append(_response(run))
-    return {"items": items}
+def list_strategy_runs(
+    strategy_id: str,
+    session: Session = Depends(get_db_session),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, list[RunResponse]]:
+    return _list(
+        kind=FORMAL_KIND,
+        session=session,
+        limit=limit,
+        offset=offset,
+        strategy_revision_id=strategy_id,
+    )
+
 
 @router.get("/{run_id}")
-def get_run(run_id: str):
+def get_run(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> RunResponse:
+    if _is_session(session):
+        try:
+            row = DatabaseRunRepository(session).get(
+                run_id, expected_kind=FORMAL_KIND
+            )
+        except (TypeError, ValueError):
+            row = None
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={"code": "run_not_found", "message": ERROR_MESSAGES["run_not_found"]},
+            )
+        return _response(row)
     run = _runs.get(run_id)
-    if run is None or run.binding.run_kind != "backtest_run":
-        raise HTTPException(404, detail={"code": "run_not_found", "message": "运行不存在"})
+    if run is None or run.binding.run_kind != FORMAL_KIND:
+        raise HTTPException(
+            status_code=404,
+            detail={"code": "run_not_found", "message": ERROR_MESSAGES["run_not_found"]},
+        )
     return _response(run)
 
+
 @internal_router.get("/{run_id}", dependencies=[Depends(require_internal_capability)])
-def get_internal_run(run_id: str):
+def get_internal_run(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    if _is_session(session):
+        try:
+            row = DatabaseRunRepository(session).get(
+                run_id, expected_kind=INTERNAL_KIND
+            )
+        except (TypeError, ValueError):
+            row = None
+        if row is None:
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "backtest_run_not_found",
+                    "message": "内部验收运行不存在",
+                },
+            )
+        response = _response(row).model_dump(mode="json")
+        response.update(
+            {
+                "visibility": "internal",
+                "label": "内部链路验收",
+                "preflight_profile": row.profile,
+            }
+        )
+        return response
     run = _runs.get(run_id)
-    if run is None or run.binding.run_kind != "internal_link_acceptance":
-        raise HTTPException(404, detail={"code": "backtest_run_not_found", "message": "内部验收运行不存在"})
-    response = _response(run).model_dump()
-    response.update({"visibility": "internal", "label": "内部链路验收", "preflight_profile": run.binding.profile})
+    if run is None or run.binding.run_kind != INTERNAL_KIND:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "backtest_run_not_found",
+                "message": "内部验收运行不存在",
+            },
+        )
+    response = _response(run).model_dump(mode="json")
+    response.update(
+        {"visibility": "internal", "label": "内部链路验收", "preflight_profile": run.binding.profile}
+    )
     return response
 
 
 @formal_alias_router.post("", response_model=RunResponse, status_code=201)
-def create_formal_alias(payload: RunCreateRequest):
-    return create_formal(payload)
+def create_formal_alias(
+    payload: RunCreateRequest,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+) -> RunResponse:
+    return create_formal(payload, session=session, request=request)
 
 
 @formal_alias_router.get("")
-def list_runs_alias():
-    return list_runs()
+def list_runs_alias(
+    session: Session = Depends(get_db_session),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, list[RunResponse]]:
+    return list_runs(session=session, limit=limit, offset=offset)
 
 
 @formal_alias_router.get("/{run_id}")
-def get_run_alias(run_id: str):
-    return get_run(run_id)
+def get_run_alias(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> RunResponse:
+    return get_run(run_id, session=session)
 
 
 @formal_alias_router.post("/{run_id}/cancel")
-def cancel_alias(run_id: str):
-    return cancel(run_id)
+def cancel_alias(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+) -> RunResponse:
+    return cancel(run_id, session=session)
 
 
 @formal_alias_router.post("/{run_id}/rerun", response_model=RunResponse, status_code=201)
-def rerun_alias(run_id: str):
+def rerun_alias(run_id: str) -> RunResponse:
+    # Manual rerun is retained only for compatibility with the existing 09 API;
+    # supervisor recovery never invokes it automatically.
     return rerun(run_id)
+
+
+@router.post("/{run_id}/rerun", response_model=RunResponse, status_code=201)
+def rerun(run_id: str) -> RunResponse:
+    original = _runs.get(run_id)
+    if original is None or original.binding.run_kind != FORMAL_KIND:
+        raise HTTPException(
+            status_code=404,
+            detail={
+                "code": "backtest_rerun_not_allowed",
+                "message": "正式回测不存在或不可重新运行",
+            },
+        )
+    import uuid as _uuid
+
+    try:
+        fresh = _creation.create(
+            original.binding, idempotency_key=str(_uuid.uuid4())
+        )
+    except QueueFullError as exc:
+        raise _queue_error(exc) from exc
+    fresh = replace(fresh, rerun_of_run_id=original.run_id)
+    _runs[str(fresh.run_id)] = fresh
+    return _response(fresh)
+
+
+__all__ = [
+    "cancel",
+    "cancel_internal",
+    "create_formal",
+    "create_internal",
+    "formal_alias_router",
+    "get_internal_run",
+    "get_run",
+    "internal_router",
+    "list_runs",
+    "list_strategy_runs",
+    "preflight",
+    "require_internal_capability",
+    "router",
+]

@@ -29,7 +29,11 @@ from app.instruments.rule_snapshots_models import (
 )
 from app.scheduling.models import ScheduledTask, TaskRun
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
-from app.backtesting.models import BacktestAccountProfileRecord, BacktestRunRecord
+from app.backtesting.models import (
+    BacktestAccountProfileRecord,
+    BacktestQueueGuardRecord,
+    BacktestRunRecord,
+)
 from app.backtesting.calendar_models import (
     CalendarRegistryRecord,
     CalendarSourcePriorityRecord,
@@ -60,6 +64,7 @@ __all__ = [
     "DataSyncCheckpoint",
     "BacktestAccountProfileRecord",
     "BacktestRunRecord",
+    "BacktestQueueGuardRecord",
     "BacktestAnalysisSummaryRecord",
     "BacktestDataChunkRecord",
     "BacktestDataPreflightResultRecord",

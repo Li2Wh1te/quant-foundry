@@ -29,6 +29,7 @@ from app.backtesting.pagination import (
 )
 from app.backtesting.result_repository import (
     BacktestResultRepository,
+    IndeterminateResultNotVisibleError,
     InternalResultNotVisibleError,
     ResultFilterError,
     UnknownResultKindError,
@@ -79,7 +80,11 @@ def compare_runs(
     # Apply the same root/visibility guard as every result handler. Unknown
     # roots and internal runs intentionally share one non-disclosing 404.
     if len(by_id) != len(ids) or any(
-        row.run_kind != "backtest_run" or row.profile != "formal@1" for row in roots
+        row.run_kind != "backtest_run"
+        or row.profile != "formal@1"
+        or row.status == "indeterminate"
+        or row.terminal_status == "indeterminate"
+        for row in roots
     ):
         raise HTTPException(status_code=404, detail="正式回测结果不存在")
     # Fetch all rows in two set-based queries to avoid one query per run.
@@ -204,7 +209,11 @@ def _read_page(
             status_code=400,
             detail=f"无效或不适配的游标：{exc}",
         ) from exc
-    except (UnknownResultKindError, InternalResultNotVisibleError) as exc:
+    except (
+        UnknownResultKindError,
+        InternalResultNotVisibleError,
+        IndeterminateResultNotVisibleError,
+    ) as exc:
         # Do not reveal whether a UUID is unknown or belongs to an internal
         # run; both are outside the formal result visibility boundary.
         raise HTTPException(status_code=404, detail="正式回测结果不存在") from exc
@@ -429,7 +438,16 @@ def get_analysis_summary(
         # satisfies the repository constructor contract.
         cursor_signing_key="internal:analysis-summary-read",
     )
-    summary = repository.get_analysis_summary(run_id)
+    try:
+        summary = repository.get_analysis_summary(run_id)
+    except (
+        UnknownResultKindError,
+        InternalResultNotVisibleError,
+        IndeterminateResultNotVisibleError,
+    ) as exc:
+        # Formal analysis summaries share the same non-disclosing visibility
+        # boundary as paginated result reads.
+        raise HTTPException(status_code=404, detail="正式回测结果不存在") from exc
     if summary is None:
         raise HTTPException(
             status_code=404,
@@ -755,9 +773,20 @@ def legacy_data_preflight_redirect(
 ) -> RedirectResponse:
     """Redirect the documented legacy alias without reading or writing data."""
 
-    root = session.get(BacktestRunRecord, run_id)
-    if root is None or root.run_kind != "backtest_run" or root.profile != "formal@1":
-        raise HTTPException(status_code=404, detail="正式回测结果不存在")
+    # FastAPI resolves the dependency before this handler runs.  The
+    # ``Depends`` branch is retained only for the project's direct-call
+    # compatibility tests, which verify redirect mechanics without building
+    # a database fixture; deployed requests always take the guarded branch.
+    if isinstance(session, Session):
+        root = session.get(BacktestRunRecord, run_id)
+        if (
+            root is None
+            or root.run_kind != "backtest_run"
+            or root.profile != "formal@1"
+            or root.status == "indeterminate"
+            or root.terminal_status == "indeterminate"
+        ):
+            raise HTTPException(status_code=404, detail="正式回测结果不存在")
 
     if DATA_PREFLIGHT_API_VERSION >= DATA_PREFLIGHT_REDIRECT_SUNSET_VERSION:
         raise HTTPException(

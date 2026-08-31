@@ -96,11 +96,16 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         if key == LEGACY_URL_KEY:
             continue
         if key in desired:
-            value = (
-                desired[key]
-                if key in SECRET_KEYS or not values.get(key)
-                else values[key]
-            )
+            # A present non-secret key is operator-owned even when its value
+            # is intentionally empty.  Only a missing key receives the
+            # template default; generated secrets are the explicit exception
+            # because an empty/known-weak secret cannot start the deployment.
+            if key in SECRET_KEYS:
+                value = desired[key]
+            elif key in values:
+                value = values[key]
+            else:
+                value = desired[key]
             updated_lines.append(f"{key}={value}\n")
             written.add(key)
             continue

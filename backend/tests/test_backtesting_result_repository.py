@@ -36,6 +36,7 @@ from app.backtesting.result_models import (
 from app.backtesting.result_records import Base
 from app.backtesting.result_repository import (
     BacktestResultRepository,
+    InternalResultNotVisibleError,
     ResultFilterError,
     ResultRecordConflictError,
 )
@@ -140,6 +141,32 @@ class ResultRepositoryTestCase(unittest.TestCase):
             cursor = page.next_cursor
             self.assertIsNotNone(cursor)
         return collected, pages
+
+    def test_sqlite_fixture_preflight_kind_still_guards_formal_reads(self) -> None:
+        """A missing root table must not make an internal fixture public."""
+
+        self.repo.append(
+            "data_preflight",
+            BacktestDataPreflightRecord(
+                run_id=self.run_id,
+                phase=DataPhase.ADMISSION,
+                status="blocked",
+                report_hash="internal-report",
+                run_kind="internal_link_acceptance",
+                preflight_profile_key="internal_link_acceptance",
+                preflight_profile_version=1,
+            ),
+        )
+
+        with self.assertRaises(InternalResultNotVisibleError):
+            self.repo.read_page("data_preflight", run_id=self.run_id)
+
+        # ``include_internal`` is a repository-only diagnostic capability; the
+        # HTTP result router never forwards that caller-controlled flag.
+        page = self.repo.read_page(
+            "data_preflight", run_id=self.run_id, include_internal=True
+        )
+        self.assertEqual(len(page.items), 1)
 
 
 class WriteContractTestCase(ResultRepositoryTestCase):

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { cancelBacktestRun, createBacktestRun, getBacktestRun, listBacktestRuns, type BacktestRun } from "../api/backtestRuns";
 
-const TERMINAL = new Set(["succeeded", "failed", "cancelled", "terminal", "indeterminate"]);
-const statusLabel: Record<string,string> = { queued:"排队中", starting:"启动中", running:"运行中", cancel_requested:"取消处理中", succeeded:"已成功", failed:"失败", cancelled:"已取消", indeterminate:"结果待判定", terminal:"已结束" };
+const TERMINAL = new Set(["succeeded", "failed", "cancelled", "timed_out", "terminal", "indeterminate"]);
+const statusLabel: Record<string,string> = { queued:"排队中", starting:"启动中", running:"运行中", cancel_requested:"取消处理中", succeeded:"已成功", failed:"失败", cancelled:"已取消", timed_out:"已超时", indeterminate:"结果待判定", terminal:"已结束" };
 
 export function BacktestRunsPage() {
   const [runs, setRuns] = useState<BacktestRun[]>([]);
