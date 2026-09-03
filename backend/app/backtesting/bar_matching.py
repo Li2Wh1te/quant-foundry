@@ -173,6 +173,20 @@ class StatelessFeeQuoteProvider(FeeQuoteProvider):
         applicability = getattr(
             instrument_context, "fee_applicability_context", None
         ) or {}
+        # ``none`` is an explicit no-fee declaration used by zero-cost
+        # compatibility fixtures. It is not a missing-category fallback: the
+        # snapshot has deliberately selected no fee rules.
+        if frozenset(categories or ()) == frozenset({"none"}):
+            return FeeQuote(
+                total=ZERO,
+                currency=currency,
+                breakdown=FeeBreakdown(
+                    schedule_key=self._fee_schedule.key,
+                    schedule_version=getattr(self._fee_schedule, "version", None),
+                    currency=currency,
+                    components=(),
+                ),
+            )
         rules = resolve_instrument_fee_rules(
             self._fee_schedule,
             fee_categories=categories,
@@ -1126,7 +1140,13 @@ class BarOpenMatchingModel:
             fees=quote.total,
             fee_breakdown=quote.breakdown,
             slippage_bps=slippage.slippage_bps,
-            slippage_amount=abs(slippage.price_delta) * quantity,
+            # Slippage is measured in cash, using the same multiplier as
+            # gross notional rather than silently assuming one contract.
+            slippage_amount=(
+                abs(slippage.price_delta)
+                * quantity
+                * outcome.facts.contract_multiplier
+            ),
             slippage_model_key=slippage.model_key,
             slippage_model_version=slippage.model_version,
             slippage_model_parameters=slippage.parameters,

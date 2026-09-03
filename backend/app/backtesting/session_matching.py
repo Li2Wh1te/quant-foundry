@@ -733,7 +733,13 @@ class OpeningMatchService:
             contract_multiplier=multiplier,
             fee_breakdown=breakdown,
             slippage_bps=slippage_bps,
-            slippage_amount=abs(execution_price - reference_price) * quantity,
+            # Slippage amount is a cash value and therefore includes the
+            # instrument's frozen contract multiplier.
+            slippage_amount=(
+                abs(execution_price - reference_price)
+                * quantity
+                * multiplier
+            ),
             slippage_model_key=model_key,
             slippage_model_version=model_version,
             slippage_model_parameters=parameters,

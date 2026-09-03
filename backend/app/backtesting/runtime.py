@@ -67,6 +67,7 @@ from app.backtesting.dividends import (
 )
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.session_matching import (
+    MatchLedger,
     _clone_portfolio,
     _copy_shadow_into,
 )
@@ -78,6 +79,7 @@ from app.backtesting.execution import (
     OrderIntent,
     OrderStatus,
     PriceLimitStatus,
+    SubmissionSequenceAllocator,
 )
 from app.backtesting.time_axis import TimeAxis, TimeStep
 from app.backtesting.timing import DataViewKind, TimingInstruction, TimingPhase, TimingPolicy
@@ -488,6 +490,7 @@ class InstrumentFacts:
     buy_allowed: bool
     sell_allowed: bool
     board_lot: Decimal = Decimal("100")
+    contract_multiplier: Decimal = Decimal("1")
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -507,6 +510,8 @@ class InstrumentFacts:
                 )
         lot = _positive(self.board_lot, "board_lot")
         object.__setattr__(self, "board_lot", lot)
+        multiplier = _positive(self.contract_multiplier, "contract_multiplier")
+        object.__setattr__(self, "contract_multiplier", multiplier)
 
 
 class EngineMarketData(Protocol):
@@ -1397,8 +1402,11 @@ class TargetWeightsInterpreter:
                 continue
             lot = facts.get(instrument_id)
             board_lot = lot.board_lot if lot is not None else self._board_lot
+            contract_multiplier = (
+                lot.contract_multiplier if lot is not None else Decimal("1")
+            )
             desired_quantity = _floor_to_lot(
-                weight * equity / reference, board_lot
+                weight * equity / (reference * contract_multiplier), board_lot
             )
             position = portfolio.positions.get(instrument_id)
             current_quantity = (
@@ -1470,6 +1478,7 @@ class OrderOutcomeRecord:
     instrument_id: UUID
     side: str
     quantity: Decimal
+    filled_quantity: Decimal
     status: str
     status_reason: str | None
     submitted_at: datetime
@@ -2205,6 +2214,7 @@ class DeterministicBacktestRunner:
             # candidate permissions or the frozen calendar set.
             register_initial(tuple(self._portfolio.positions))
         self._orders: list[Order] = []
+        self._submission_sequences = SubmissionSequenceAllocator(run_id=run_id)
         self._pending_fills: tuple[Fill, ...] = ()
         # Accounting-applied fee accumulator: the analyzer's equity
         # observations and cumulative-fee metrics read this total instead
@@ -4928,6 +4938,7 @@ class DeterministicBacktestRunner:
                     instrument_id=order.instrument_id,
                     side=order.side.value,
                     quantity=Decimal(str(order.quantity)),
+                    filled_quantity=Decimal(str(order.filled_quantity)),
                     status=order.status.value,
                     status_reason=order.status_reason,
                     submitted_at=order.submitted_at,
@@ -5883,6 +5894,29 @@ class DeterministicBacktestRunner:
             timestamp=timestamp,
         )
 
+    @staticmethod
+    def _interpretation_facts_for_policy(policy: Any) -> Any:
+        """Project one frozen rule policy into the formal sizing contract."""
+
+        from app.strategy_protocol.interpretation import (
+            InstrumentExecutionFacts,
+            SellOddLotPolicy,
+        )
+
+        return InstrumentExecutionFacts(
+            instrument_id=policy.instrument_id,
+            holding_precision=policy.quantity_precision,
+            order_precision=policy.quantity_precision,
+            lot_size=policy.lot_size,
+            minimum_order_quantity=policy.minimum_order_quantity,
+            # The v1 ETF package has no independent odd-lot field. Strict
+            # lots are the only safe default until that rule is versioned.
+            sell_odd_lot_policy=SellOddLotPolicy.STRICT_LOT,
+            contract_multiplier=policy.contract_multiplier,
+            fee_categories=policy.fee_categories,
+            fee_applicability_context=policy.fee_applicability_context,
+        )
+
     def _phase_observe_open(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
@@ -5967,10 +6001,77 @@ class DeterministicBacktestRunner:
                 )
                 for order in active
             }
-        match_context = MatchContext.from_portfolio(
-            self._portfolio, currency=self._currency
-        )
-        result = self._execution_model.match(active, market_states, match_context)
+        if self._rule_snapshot_bundle is not None:
+            # Formal runs use the already-implemented rule-aware matcher. It
+            # consumes the frozen policy projection for multiplier, lot,
+            # availability, and fee-category semantics; the legacy matcher
+            # must never silently replace those rules.
+            from app.backtesting.bar_matching import (
+                BarOpenMatchingModel,
+                StatelessFeeQuoteProvider,
+            )
+            fee_calculator = getattr(self._execution_model, "fee_calculator", None)
+            fee_schedule = getattr(fee_calculator, "schedule", None)
+            if fee_schedule is None:
+                raise DomainValidationError(
+                    "formal execution requires a frozen fee schedule"
+                )
+            slippage_model = getattr(self._execution_model, "slippage_model", None)
+            if slippage_model is None:
+                raise DomainValidationError(
+                    "formal execution requires a versioned slippage model"
+                )
+            execution_facts = {
+                instrument_id: self._interpretation_facts_for_policy(policy)
+                for instrument_id, policy in policy_by_instrument.items()
+            }
+            formal_result = BarOpenMatchingModel(
+                slippage_model=slippage_model,
+                fee_quote_provider=StatelessFeeQuoteProvider(
+                    fee_schedule=fee_schedule
+                ),
+            ).match(
+                orders=active,
+                market_states=market_states,
+                ledger=MatchLedger.from_portfolio(
+                    self._portfolio, currency=self._currency
+                ),
+                facts=execution_facts,
+                match_at=context.decision_time,
+                position_quantities={
+                    instrument_id: position.quantity
+                    for instrument_id, position in self._portfolio.positions.items()
+                },
+            )
+            fills = formal_result.fills
+            skipped = tuple(
+                (
+                    item.order_id,
+                    getattr(item.reason_code, "code", str(item.reason_code)),
+                )
+                for item in formal_result.skipped_or_rejected_orders
+            )
+            unsubmitted_ids = set(formal_result.unsubmitted_order_ids)
+            # A zero-budget buy never became an executable order. Remove it
+            # immediately so the next session cannot match it again.
+            if unsubmitted_ids:
+                self._orders = [
+                    order for order in self._orders
+                    if order.order_id not in unsubmitted_ids
+                ]
+        else:
+            match_context = MatchContext.from_portfolio(
+                self._portfolio, currency=self._currency
+            )
+            legacy_result = self._execution_model.match(
+                active, market_states, match_context
+            )
+            fills = legacy_result.fills
+            skipped = tuple(
+                (item.order_id, item.reason)
+                for item in legacy_result.skipped_orders
+            )
+            unsubmitted_ids = set()
         emitted: list[tuple[str, Mapping[str, Any]]] = [
             self._emit_pair(
                 BacktestEventType.FILL_CREATED,
@@ -5984,7 +6085,10 @@ class DeterministicBacktestRunner:
                     "quantity": fill.quantity,
                     "contract_multiplier": fill.contract_multiplier,
                     "notional": fill.gross_notional,
+                    "gross_notional": fill.gross_notional,
                     "fees": fill.fees,
+                    "currency": fill.currency,
+                    "slippage_amount": fill.slippage_amount,
                     "fee_breakdown": (
                         {
                             "schedule_key": fill.fee_breakdown.schedule_key,
@@ -6023,14 +6127,14 @@ class DeterministicBacktestRunner:
                     ),
                 },
             )
-            for fill in result.fills
+            for fill in fills
         ]
         emitted.extend(
             self._emit_pair(
                 BacktestEventType.ORDER_EXPIRED,
-                {"order_id": str(skip.order_id), "reason": skip.reason},
+                {"order_id": str(order_id), "reason": reason},
             )
-            for skip in result.skipped_orders
+            for order_id, reason in skipped
         )
         emitted.extend(
             self._emit_pair(
@@ -6042,6 +6146,8 @@ class DeterministicBacktestRunner:
         # Daily orders never roll over: anything the model left unprocessed
         # expires immediately with an explicit reason.
         for order in active:
+            if order.order_id in unsubmitted_ids:
+                continue
             if order.status is OrderStatus.SUBMITTED:
                 order.expire("not_matched_at_open")
                 emitted.append(
@@ -6050,7 +6156,7 @@ class DeterministicBacktestRunner:
                         {"order_id": str(order.order_id), "reason": "not_matched_at_open"},
                     )
                 )
-        self._pending_fills = result.fills
+        self._pending_fills = fills
         return emitted
 
     def _phase_account(
@@ -6367,10 +6473,19 @@ class DeterministicBacktestRunner:
         # the rest feeds next-step order sizing.  Missing closes simply stay
         # absent; accounting blocks a valuation whose positions lack marks.
         marks = view.close_marks()
+        valuation_kwargs: dict[str, Any] = {}
+        if self._rule_snapshot_bundle is not None:
+            valuation_kwargs["contract_multipliers"] = {
+                instrument_id: self.execution_policy_for(
+                    instrument_id, context.session_date
+                ).contract_multiplier
+                for instrument_id in self._portfolio.positions
+            }
         valuation = self._accounting.value(
             self._portfolio,
             {i: m for i, m in marks.items() if i in self._portfolio.positions},
             as_of=context.decision_time,
+            **valuation_kwargs,
         )
         self._last_marks = dict(marks)
         snapshot = valuation.snapshot
@@ -6608,6 +6723,7 @@ class DeterministicBacktestRunner:
             for instrument_id in instrument_ids
             if instrument_id in self._instrument_facts
         }
+        policies: dict[UUID, Any] = {}
         if self._rule_snapshot_bundle is not None:
             from dataclasses import replace as dataclass_replace
 
@@ -6621,6 +6737,7 @@ class DeterministicBacktestRunner:
                 policy = self.execution_policy_for(
                     instrument_id, context.session_date
                 )
+                policies[instrument_id] = policy
                 fact = facts.get(instrument_id)
                 if fact is None:
                     raise DomainValidationError(
@@ -6633,15 +6750,53 @@ class DeterministicBacktestRunner:
                     policy=policy,
                 )
                 facts[instrument_id] = dataclass_replace(
-                    fact, board_lot=policy.lot_size
+                    fact,
+                    board_lot=policy.lot_size,
+                    contract_multiplier=policy.contract_multiplier,
                 )
-        intents = self._interpreter.interpret(
-            decision,
-            portfolio=self._portfolio,
-            equity=self._portfolio.account.equity,
-            reference_prices=self._last_marks,
-            facts=facts,
-        )
+        if getattr(self._interpreter, "interpreter_key", None) == (
+            "long_only_target_weights"
+        ):
+            from app.strategy_protocol.interpretation import (
+                CorporateActionCashStatus,
+                CorporateActionSnapshot,
+                PortfolioDecisionSnapshot,
+            )
+
+            decision_snapshot = PortfolioDecisionSnapshot(
+                decision_snapshot_at=context.decision_time,
+                cash=self._portfolio.account.cash_balances[self._currency],
+                equity=self._portfolio.account.equity,
+                valuation_status=self._portfolio.valuation_status.value,
+                corporate_action_snapshot=CorporateActionSnapshot(
+                    CorporateActionCashStatus.CREDITED
+                ),
+                positions={
+                    instrument_id: position.quantity
+                    for instrument_id, position in self._portfolio.positions.items()
+                },
+            )
+            interpretation = self._interpreter.interpret(
+                decision,
+                snapshot=decision_snapshot,
+                facts={
+                    instrument_id: self._interpretation_facts_for_policy(
+                        policies[instrument_id]
+                    )
+                    for instrument_id in instrument_ids
+                },
+                unadjusted_market_closes=self._last_marks,
+                allowed_instrument_ids=set(instrument_ids),
+            )
+            intents = interpretation.order_intents
+        else:
+            intents = self._interpreter.interpret(
+                decision,
+                portfolio=self._portfolio,
+                equity=self._portfolio.account.equity,
+                reference_prices=self._last_marks,
+                facts=facts,
+            )
         effective_from = context.effective_from
         if effective_from is None:
             raise DomainValidationError(
@@ -6650,14 +6805,19 @@ class DeterministicBacktestRunner:
         emitted: list[tuple[str, Mapping[str, Any]]] = []
         staged_orders: list[Order] = []
         staged_order_records: list[OrderSummaryDTO] = []
+        next_submission_sequence = self._submission_sequences.last_sequence
         for index, intent in enumerate(intents, start=0):
             intent = replace(
                 intent,
                 intent_id=self._derived_id(
                     f"intent:{context.step_sequence}:{index}"
                 ),
+                decision_id=decision.decision_id,
                 valid_from=effective_from,
-                valid_until=effective_from,
+                # A one-shot order is consumed by this match attempt.  Keep
+                # the upper bound open so the formal half-open validity rule
+                # does not expire an order exactly at the next open.
+                valid_until=None,
             )
             order = Order.from_intent(
                 intent,
@@ -6665,6 +6825,7 @@ class DeterministicBacktestRunner:
                     f"order:{context.step_sequence}:{index}"
                 ),
                 submitted_at=context.decision_time,
+                submission_sequence=next_submission_sequence + index + 1,
             )
             staged_orders.append(order)
             staged_order_records.append(
@@ -6686,13 +6847,19 @@ class DeterministicBacktestRunner:
                         "quantity": order.quantity,
                         "decision_id": str(decision.decision_id),
                         "valid_from": order.valid_from.isoformat(),
-                        "valid_until": order.valid_until.isoformat(),
+                        "valid_until": (
+                            order.valid_until.isoformat()
+                            if order.valid_until is not None
+                            else None
+                        ),
                     },
                 )
             )
         # Commit all order objects only after every intent has been converted
         # successfully.  Qualification and conversion failures therefore
         # cannot leave a prefix of this decision's orders in runtime state.
+        for _ in staged_orders:
+            self._submission_sequences.next_sequence()
         self._orders.extend(staged_orders)
         self._step_order_records.extend(staged_order_records)
         return emitted

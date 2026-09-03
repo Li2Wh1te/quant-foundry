@@ -47,6 +47,7 @@ from .production_runtime import (
     DEFAULT_RULE_PACKAGE,
     build_formal_binding,
 )
+from app.instruments.rule_snapshots_repository import RunRuleSnapshotRepository
 from .data.reports import canonical_hash
 
 
@@ -514,6 +515,7 @@ def _create(
                 )
             return _response(existing)
 
+    rule_snapshot_bundle = None
     if _is_session(session) and kind == FORMAL_KIND:
         revision = StrategyRepository(session).get_revision(payload.strategy_revision_id)
         if revision is None:
@@ -527,6 +529,7 @@ def _create(
             confirmed_report_hash=payload.confirmed_admission_report_hash,
         )
         binding = binding_result.binding
+        rule_snapshot_bundle = binding_result.rule_snapshot_bundle
     else:
         binding = _binding(payload, kind=kind)
     if _is_session(session):
@@ -556,6 +559,12 @@ def _create(
             idempotency_key=effective_key,
             idempotency_request_hash=request_fingerprint,
         )
+        if rule_snapshot_bundle is not None:
+            snapshot_repository = RunRuleSnapshotRepository(session)
+            if snapshot_repository.snapshot_hash_for(row.id) is None:
+                snapshot_repository.write_bundle(
+                    rule_snapshot_bundle.for_run(row.id)
+                )
         session.commit()
         session.refresh(row)
         logger.info(

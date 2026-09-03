@@ -37,7 +37,12 @@ PACKAGE = VersionedReference("china_listed_etf_rules", 1)
 RUN_ID = uuid4()
 
 
-def _values(*, lot_size: str = "200", price_tick: str = "0.05") -> dict:
+def _values(
+    *,
+    lot_size: str = "200",
+    price_tick: str = "0.05",
+    contract_multiplier: str = "1",
+) -> dict:
     """Return the complete execution projection used by runtime admission."""
 
     return {
@@ -45,7 +50,7 @@ def _values(*, lot_size: str = "200", price_tick: str = "0.05") -> dict:
         "quantity_precision": 0,
         "price_precision": 2,
         "price_tick": Decimal(price_tick),
-        "contract_multiplier": Decimal("1"),
+        "contract_multiplier": Decimal(contract_multiplier),
         "trading_session_template": VersionedReference("cn_etf_session", 1),
         "settlement_rule_class": "t_plus_1_before_open_match",
         "sellable_rule": VersionedReference("sell_rule", 1),
@@ -70,6 +75,7 @@ def _segment(
     effective_from: date = date(2026, 1, 1),
     effective_to: date | None = None,
     lot_size: str = "200",
+    contract_multiplier: str = "1",
 ) -> InstrumentRuleSnapshotSegment:
     observed_at = datetime(2026, 8, 1, 12, tzinfo=UTC)
     provenance = {
@@ -92,7 +98,10 @@ def _segment(
         effective_to=effective_to,
         normal_fact_reference=VersionedReference("etf_rule_fact", 3),
         exception_fact_reference=None,
-        normalized_values=_values(lot_size=lot_size),
+        normalized_values=_values(
+            lot_size=lot_size,
+            contract_multiplier=contract_multiplier,
+        ),
         capability_declarations={
             "suspension": "not_applicable",
             "opening_availability": "not_applicable",
@@ -266,6 +275,107 @@ class RuntimeSnapshotAcceptanceTests(unittest.TestCase):
         self.assertEqual(submitted[0].payload["quantity"], Decimal("400"))
         fills = [event for event in result.events if event.event_type == "fill_created"]
         self.assertEqual(fills[0].payload["execution_price"], Decimal("100.05"))
+
+    def test_formal_runtime_uses_multiplier_for_sizing_matching_and_valuation(self) -> None:
+        days = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        runner = build_runner(
+            run_id="runtime-multiplier",
+            axis=build_axis(days),
+            market_data=DictMarketData(
+                {day: {INSTRUMENT_ID: ("10.00", "10.00")} for day in days}
+            ),
+            strategy_view=CountingStrategyView({day: "10.00" for day in days}),
+            strategy=ScriptedStrategy({0: {str(INSTRUMENT_ID): "1"}}),
+            initial_cash="20000",
+            rule_snapshot_bundle=_bundle(
+                run_id=None,
+                segments=(_segment(contract_multiplier="10", lot_size="100"),)
+            ),
+        )
+
+        result = runner.run()
+        submitted = [
+            event for event in result.events
+            if event.event_type == "order_submitted"
+        ]
+        fills = [
+            event for event in result.events
+            if event.event_type == "fill_created"
+        ]
+
+        # 20,000 / (10 x 10) = 200 units; a legacy price-only sizing path
+        # would incorrectly submit 2,000 units.
+        self.assertEqual(submitted[0].payload["quantity"], Decimal("200"))
+        self.assertEqual(fills[0].payload["contract_multiplier"], Decimal("10"))
+        self.assertEqual(fills[0].payload["gross_notional"], Decimal("20000"))
+        self.assertEqual(result.equity_curve[1].equity, Decimal("20000"))
+
+    def test_formal_runtime_uses_rule_aware_partial_cash_matching(self) -> None:
+        days = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
+        runner = build_runner(
+            run_id="runtime-cash-allocation",
+            axis=build_axis(days),
+            market_data=DictMarketData(
+                {
+                    days[0]: {INSTRUMENT_ID: ("1.00", "1.00")},
+                    days[1]: {INSTRUMENT_ID: ("10.00", "10.00")},
+                    days[2]: {INSTRUMENT_ID: ("10.00", "10.00")},
+                }
+            ),
+            strategy_view=CountingStrategyView({day: "10.00" for day in days}),
+            strategy=ScriptedStrategy({0: {str(INSTRUMENT_ID): "1"}}),
+            initial_cash="1500",
+            rule_snapshot_bundle=_bundle(
+                run_id=None,
+                segments=(_segment(contract_multiplier="1", lot_size="100"),),
+            ),
+        )
+
+        result = runner.run()
+        order = result.order_outcomes[0]
+
+        # Sizing uses the D0 close (1.00), while matching uses the D1 open
+        # (10.00). The formal matcher keeps the affordable lot instead of
+        # expiring the full 1,500-share request.
+        self.assertEqual(order.status, "partially_filled")
+        self.assertEqual(order.filled_quantity, Decimal("100"))
+        # The partial buy spends 1,000 and the following scripted flatten
+        # sells it back for 1,000; no rule-induced cash drift remains.
+        self.assertEqual(runner._portfolio.account.available_cash, Decimal("1500"))
+
+    def test_formal_runtime_uses_multiplier_for_valuation(self) -> None:
+        from app.backtesting.domain import PositionSide, PositionState
+
+        days = [date(2026, 8, 3), date(2026, 8, 4)]
+        runner = build_runner(
+            run_id="runtime-valuation-multiplier",
+            axis=build_axis(days),
+            market_data=DictMarketData(
+                {day: {INSTRUMENT_ID: ("10.00", "10.00")} for day in days}
+            ),
+            strategy_view=CountingStrategyView({day: "10.00" for day in days}),
+            strategy=ScriptedStrategy({0: {str(INSTRUMENT_ID): "1"}}),
+            initial_cash="0",
+            rule_snapshot_bundle=_bundle(
+                run_id=None,
+                segments=(_segment(contract_multiplier="10", lot_size="1"),),
+            ),
+        )
+        runner._portfolio.positions[INSTRUMENT_ID] = PositionState(
+            instrument_id=INSTRUMENT_ID,
+            side=PositionSide.LONG,
+            quantity="100",
+            available_quantity="100",
+            average_price="9",
+        )
+
+        result = runner.run()
+
+        self.assertEqual(result.equity_curve[0].equity, Decimal("10000"))
+        self.assertEqual(
+            runner._portfolio.positions[INSTRUMENT_ID].unrealized_pnl,
+            Decimal("1000"),
+        )
 
     def test_runtime_fails_closed_when_snapshot_has_no_segment(self) -> None:
         bundle = _bundle(segments=(_segment(uuid4()),), run_id=None)

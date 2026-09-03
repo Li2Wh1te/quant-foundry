@@ -182,6 +182,7 @@ class Order:
         *,
         order_id: UUID,
         submitted_at: datetime,
+        submission_sequence: int | None = None,
     ) -> "Order":
         """Create a standard market order from an intent."""
 
@@ -194,6 +195,7 @@ class Order:
             submitted_at=submitted_at,
             valid_from=intent.valid_from,
             valid_until=intent.valid_until,
+            submission_sequence=submission_sequence,
         )
 
     @property

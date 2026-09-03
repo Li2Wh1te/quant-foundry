@@ -269,7 +269,7 @@ def _production_callbacks(run_id: UUID, launch_id: UUID, expected_config_hash: s
                 raise WorkerDependencyUnavailable("persisted run root does not exist")
             if expected_config_hash is not None and row.config_hash != expected_config_hash:
                 raise WorkerDependencyUnavailable("persisted run config hash does not match launch")
-            binding = binding_from_row(row)
+            binding = binding_from_row(row, session=session)
             revision = session.get(StrategyRevision, UUID(str(row.strategy_revision_id)))
             if revision is None:
                 raise WorkerDependencyUnavailable("published strategy revision does not exist")

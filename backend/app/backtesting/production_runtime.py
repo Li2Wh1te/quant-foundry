@@ -7,7 +7,7 @@ source and invokes this composition root; the API never executes strategy code.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
 from types import ModuleType, SimpleNamespace
@@ -49,6 +49,7 @@ from app.instruments.identity_repository import InstrumentIdentityRepository
 from app.instruments.repository import InstrumentCodeMappingRepository
 from app.instruments.rule_exceptions_repository import RuleExceptionSetsRepository
 from app.instruments.rule_facts_repository import RuleFactsRepository
+from app.instruments.rule_snapshots_repository import RunRuleSnapshotRepository
 from app.instruments.rules.etf_china import register_china_listed_etf_rules
 from app.instruments.rules.registry import RulePackageRegistry
 from app.instruments.spec_provider import InstrumentSpecProvider
@@ -401,7 +402,16 @@ class SqlBacktestChunkSession:
         for instrument_id in instrument_ids:
             spec = self.provider.spec_provider.resolve_spec(instrument_id, effective_at=datetime.combine(day, time(15), tzinfo=ZoneInfo(self.session.request.resolved_timezone)), data_cutoff=self.session.request.query_boundary.data_cutoff, rule_package_reference=self.session.request.rule_package, exception_set_reference=self.session.request.rule_exception_set)
             if spec is None: raise ProviderContractViolationError(f"instrument spec is unavailable for {instrument_id}")
-            result[instrument_id] = InstrumentFacts(instrument_id=instrument_id, price_tick=Decimal(str(spec.price_tick)), calendar_id=spec.calendar_id, suspended=False, buy_allowed=True, sell_allowed=True, board_lot=Decimal(str(spec.lot_size)))
+            result[instrument_id] = InstrumentFacts(
+                instrument_id=instrument_id,
+                price_tick=Decimal(str(spec.price_tick)),
+                calendar_id=spec.calendar_id,
+                suspended=False,
+                buy_allowed=True,
+                sell_allowed=True,
+                board_lot=Decimal(str(spec.lot_size)),
+                contract_multiplier=Decimal(str(spec.contract_multiplier)),
+            )
         return result
     def adjusted_series(self, _query): raise UnsupportedCapabilityError("formal v1 does not enable adjusted series")
     def trading_rules(self, _query): return ()
@@ -443,30 +453,174 @@ def default_components():
     return {
         TIMING_POLICY_KIND: {"key": "after_close_to_next_open", "version": 1, "parameters": {}},
         EXECUTION_MODEL_KIND: {"key": "bar_market", "version": 1, "parameters": {"commission_rate": "0.0003", "commission_minimum": "5", "slippage_bps": "0", "price_tick": "0.01"}},
-        DECISION_INTERPRETER_KIND: {"key": "target_weights", "version": 1, "parameters": {"board_lot": 100}},
+        # Formal sizing must use the interpreter that consumes frozen
+        # per-instrument rules, including contract_multiplier.
+        DECISION_INTERPRETER_KIND: {"key": "long_only_target_weights", "version": 1, "parameters": {"weight_sum_tolerance": "0"}},
         SLIPPAGE_MODEL_KIND: {"key": "none", "version": 1, "parameters": {"price_tick": "0.01"}},
         ANALYZER_COMPONENT_KIND: [],
     }
 
 
-def binding_from_row(row):
+def binding_from_row(row, *, session: Session | None = None):
+    """Rehydrate a persisted binding, including its frozen rule snapshot."""
+
     request = deserialize_data_request(row.data_request)
-    spec = SimpleNamespace(start_date=request.requested_window.start_date, end_date=request.requested_window.end_date, initial_cash=Decimal(str(row.initial_cash or "0")), initial_positions=tuple(SimpleNamespace(instrument_id=UUID(str(x["instrument_id"])), side=PositionSide(str(x["side"])), quantity=Decimal(str(x["quantity"])), available_quantity=Decimal(str(x.get("available_quantity", x["quantity"]))), average_price=Decimal(str(x["average_price"])) if x.get("average_price") is not None else None) for x in (row.initial_positions or [])), dynamic_universe=request.instrument_scope_mode in (InstrumentScopeMode.DYNAMIC, InstrumentScopeMode.HYBRID))
-    return SimpleNamespace(run_id=row.id, owner_scope=row.tenant_id, spec=spec, run_kind=row.run_kind, profile=row.profile, strategy={"revision_id": str(row.strategy_revision_id), "source_hash": row.strategy_source_hash, "contract_version": row.strategy_contract_version, "parameters": row.parameters or {}, "published": True, "is_draft": False}, components=default_components(), data_request=row.data_request, account=row.fee_schedule_snapshot or {}, metadata={"admission_report_hash": row.data_admission_preflight_hash, "preflight_hash": row.data_preflight_hash, "data_evidence": row.data_evidence or {}, "behavior_versions": row.behavior_versions or {}}, config_hash=row.config_hash, status=row.status)
+    spec = SimpleNamespace(
+        start_date=request.requested_window.start_date,
+        end_date=request.requested_window.end_date,
+        initial_cash=Decimal(str(row.initial_cash or "0")),
+        initial_positions=tuple(
+            SimpleNamespace(
+                instrument_id=UUID(str(item["instrument_id"])),
+                side=PositionSide(str(item["side"])),
+                quantity=Decimal(str(item["quantity"])),
+                available_quantity=Decimal(
+                    str(item.get("available_quantity", item["quantity"]))
+                ),
+                average_price=(
+                    Decimal(str(item["average_price"]))
+                    if item.get("average_price") is not None
+                    else None
+                ),
+            )
+            for item in (row.initial_positions or [])
+        ),
+        dynamic_universe=request.instrument_scope_mode
+        in (InstrumentScopeMode.DYNAMIC, InstrumentScopeMode.HYBRID),
+    )
+    rule_snapshot_bundle = None
+    if session is not None and row.run_kind == "backtest_run":
+        provider = SqlBacktestProvider(session)
+        definition = provider.rule_registry.require(request.rule_package)
+        rule_snapshot_bundle = RunRuleSnapshotRepository(session).load_bundle(
+            UUID(str(row.id)),
+            rule_package_definition=definition,
+        )
+    return SimpleNamespace(
+        run_id=row.id,
+        owner_scope=row.tenant_id,
+        spec=spec,
+        run_kind=row.run_kind,
+        profile=row.profile,
+        strategy={
+            "revision_id": str(row.strategy_revision_id),
+            "source_hash": row.strategy_source_hash,
+            "contract_version": row.strategy_contract_version,
+            "parameters": row.parameters or {},
+            "published": True,
+            "is_draft": False,
+        },
+        components=default_components(),
+        data_request=row.data_request,
+        account=row.fee_schedule_snapshot or {},
+        metadata={
+            "admission_report_hash": row.data_admission_preflight_hash,
+            "preflight_hash": row.data_preflight_hash,
+            "data_evidence": row.data_evidence or {},
+            "behavior_versions": row.behavior_versions or {},
+        },
+        config_hash=row.config_hash,
+        status=row.status,
+        rule_snapshot_bundle=rule_snapshot_bundle,
+    )
 
 
 def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
-    request = deserialize_data_request(binding.data_request); provider = SqlBacktestProvider(session); data_session = provider.open_session(request); report = data_session.preflight(); axis = TradingDayAxis(data_session.resolved_sessions); registry = build_default_component_registry(); components = binding.components or default_components()
+    """Build the worker runtime from persisted, immutable run inputs."""
+
+    del worker_id  # Worker identity belongs to supervision, not engine semantics.
+    request = deserialize_data_request(binding.data_request)
+    provider = SqlBacktestProvider(session)
+    data_session = provider.open_session(request)
+    data_session.preflight()
+    axis = TradingDayAxis(data_session.resolved_sessions)
+    registry = build_default_component_registry()
+    components = binding.components or default_components()
+
     def component(kind, fallback):
-        selected = components.get(kind, {"key": fallback, "version": 1, "parameters": {}})
-        if isinstance(selected, list): return ()
-        entry = registry.resolve(selected["key"], int(selected["version"])); return entry.factory(selected.get("parameters", {}))
-    timing, execution, interpreter = component(TIMING_POLICY_KIND, "after_close_to_next_open"), component(EXECUTION_MODEL_KIND, "bar_market"), component(DECISION_INTERPRETER_KIND, "target_weights"); component(SLIPPAGE_MODEL_KIND, "none")
-    view = SqlRuntimeViewFactory(provider, data_session, request); writer = BacktestResultPersistenceService(session, BacktestResultContext(run_id=UUID(str(binding.run_id)), run_kind=binding.run_kind, profile=binding.profile, config_hash=binding.config_hash, owner_scope=binding.owner_scope, launch_id=launch_id))
-    strategy = __import__("app.strategy_protocol.adapter", fromlist=["FunctionStrategyAdapter"]).FunctionStrategyAdapter(strategy_module, parameters=binding.strategy.get("parameters", {}))
-    dates = {cid: tuple(x.session_date for x in data_session.resolved_sessions) for cid in request.resolved_calendar_ids}
-    settlement = SimpleNamespace(next_open_session=lambda calendar_id, after_session: next((x for x in dates.get(calendar_id, ()) if x > after_session), None))
-    runner = DeterministicBacktestRunner(run_id=str(binding.run_id), axis=axis, timing_policy=timing, view_factory=view, strategy=strategy, interpreter=interpreter, execution_model=execution, accounting=AccountingPolicy(currency=DEFAULT_CURRENCY, settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH), initial_portfolio=_initial_portfolio(binding), settlement_calendar=settlement, fixed_authorized_instrument_ids=request.fixed_instrument_ids, result_sink=writer, progress_sink=progress_reporter)
+        selected = components.get(
+            kind, {"key": fallback, "version": 1, "parameters": {}}
+        )
+        if isinstance(selected, list):
+            return ()
+        entry = registry.resolve(selected["key"], int(selected["version"]))
+        return entry.factory(selected.get("parameters", {}))
+
+    timing = component(TIMING_POLICY_KIND, "after_close_to_next_open")
+    execution = component(EXECUTION_MODEL_KIND, "bar_market")
+    interpreter = component(
+        DECISION_INTERPRETER_KIND, "long_only_target_weights"
+    )
+    slippage = component(SLIPPAGE_MODEL_KIND, "none")
+    if hasattr(execution, "slippage_model"):
+        # Slippage is selected as its own versioned component; the execution
+        # model must not keep a second hidden slippage configuration.
+        execution = replace(execution, slippage_model=slippage)
+
+    rule_snapshot_bundle = None
+    if binding.run_kind == "backtest_run":
+        definition = provider.rule_registry.require(request.rule_package)
+        rule_snapshot_bundle = RunRuleSnapshotRepository(session).load_bundle(
+            UUID(str(binding.run_id)),
+            rule_package_definition=definition,
+        )
+        if rule_snapshot_bundle is None:
+            raise ProviderContractViolationError(
+                "formal run has no persisted frozen rule snapshot"
+            )
+
+    view = SqlRuntimeViewFactory(provider, data_session, request)
+    writer = BacktestResultPersistenceService(
+        session,
+        BacktestResultContext(
+            run_id=UUID(str(binding.run_id)),
+            run_kind=binding.run_kind,
+            profile=binding.profile,
+            config_hash=binding.config_hash,
+            owner_scope=binding.owner_scope,
+            launch_id=launch_id,
+        ),
+    )
+    strategy = __import__(
+        "app.strategy_protocol.adapter", fromlist=["FunctionStrategyAdapter"]
+    ).FunctionStrategyAdapter(
+        strategy_module, parameters=binding.strategy.get("parameters", {})
+    )
+    dates = {
+        calendar_id: tuple(
+            item.session_date for item in data_session.resolved_sessions
+        )
+        for calendar_id in request.resolved_calendar_ids
+    }
+    settlement = SimpleNamespace(
+        next_open_session=lambda calendar_id, after_session: next(
+            (
+                item
+                for item in dates.get(calendar_id, ())
+                if item > after_session
+            ),
+            None,
+        )
+    )
+    runner = DeterministicBacktestRunner(
+        run_id=str(binding.run_id),
+        axis=axis,
+        timing_policy=timing,
+        view_factory=view,
+        strategy=strategy,
+        interpreter=interpreter,
+        execution_model=execution,
+        accounting=AccountingPolicy(
+            currency=DEFAULT_CURRENCY,
+            settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
+        ),
+        initial_portfolio=_initial_portfolio(binding),
+        settlement_calendar=settlement,
+        fixed_authorized_instrument_ids=request.fixed_instrument_ids,
+        rule_snapshot_bundle=rule_snapshot_bundle,
+        result_sink=writer,
+        progress_sink=progress_reporter,
+    )
     return RuntimeBundle(runner, data_session, writer)
 
 

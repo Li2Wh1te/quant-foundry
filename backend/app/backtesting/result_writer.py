@@ -160,7 +160,7 @@ class BacktestResultPersistenceService:
                 instrument_id=order.instrument_id, display=InstrumentDisplaySnapshot(instrument_id=order.instrument_id),
                 side=order.side, order_type="market", quantity=order.quantity,
                 status=order.status, submitted_at=order.submitted_at, intent_id=order.intent_id,
-                filled_quantity=order.quantity if order.status == "filled" else 0,
+                filled_quantity=order.filled_quantity,
                 status_reason=order.status_reason))
         fills = []
         for sequence, event in enumerate((e for e in getattr(result, "events", ()) if getattr(e, "event_type", "") == "fill_created"), start=1):
@@ -172,10 +172,22 @@ class BacktestResultPersistenceService:
                     side=payload["side"], timestamp=event.event_time, fill_sequence=sequence,
                     reference_price=payload.get("reference_price"), price=payload.get("execution_price"),
                     quantity=payload.get("quantity"), fees=payload.get("fees", 0),
-                    slippage_bps=payload.get("slippage_bps"), slippage_model_key=payload.get("slippage_model_key"),
-                    slippage_model_version=payload.get("slippage_model_version")))
-            except (KeyError, TypeError, ValueError):
-                continue
+                    slippage_bps=payload.get("slippage_bps"),
+                    slippage_amount=payload.get("slippage_amount"),
+                    slippage_model_key=payload.get("slippage_model_key"),
+                    slippage_model_version=payload.get("slippage_model_version"),
+                    currency=payload.get("currency", "CNY"),
+                    contract_multiplier=payload.get("contract_multiplier", "1"),
+                    gross_notional=payload.get(
+                        "gross_notional", payload.get("notional")
+                    ),
+                    fee_breakdown=payload.get("fee_breakdown")))
+            except (KeyError, TypeError, ValueError) as exc:
+                from app.backtesting.domain import DomainValidationError
+
+                raise DomainValidationError(
+                    f"invalid fill result for event {sequence}: {exc}"
+                ) from exc
         equities = []
         for sample in getattr(result, "equity_curve", ()):
             status = ValuationStatus.BLOCKED if sample.equity is None else ValuationStatus.COMPLETE
