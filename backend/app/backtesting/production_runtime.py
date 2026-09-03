@@ -7,6 +7,7 @@ source and invokes this composition root; the API never executes strategy code.
 
 from __future__ import annotations
 
+from contextlib import ExitStack
 from dataclasses import dataclass, fields, replace
 from datetime import UTC, date, datetime, time
 from decimal import Decimal
@@ -26,7 +27,7 @@ from app.backtesting.data.errors import ProviderContractViolationError, Unsuppor
 from app.backtesting.data.protocols import ConsistencyTokenStatus, DataConsistencyEvidence
 from app.backtesting.data.requests import (
     BarQuery, CHUNK_POLICY, ConsistencyMode, ConsistencyValidation, ContractRef,
-    DataCapability, DataChunkQuery, DataPreflightRequest, DataRequest, DateRange,
+    CorporateActionQuery, DataCapability, DataChunkQuery, DataPreflightRequest, DataRequest, DateRange,
     InstrumentScopeMode, IssueSeverity, LookbackWindow, MarketScope, PriceBasis,
     PreflightStatus, QueryBoundary, UniverseQuery as DataUniverseQuery,
     UniverseQueryPolicy,
@@ -44,6 +45,7 @@ from app.backtesting.registry import (
 )
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
+from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
 from app.backtesting.spec import BacktestSpec, InitialPositionInput
 from app.backtesting.time_axis import TradingDayAxis
@@ -353,6 +355,67 @@ class SqlBacktestProvider:
         return SqlBacktestSession(self, request)
 
 
+def _corporate_action_snapshot(
+    data_session: Any,
+    request: DataRequest,
+) -> RunCorporateActionEventSnapshot:
+    """Freeze fixed-scope actions through validated provider chunks."""
+    instrument_ids = tuple(request.fixed_instrument_ids)
+    formal_sessions = tuple(data_session.resolved_sessions)
+    if not instrument_ids or not formal_sessions:
+        return RunCorporateActionEventSnapshot.from_events(
+            (),
+            coverage_summary={
+                "instrument_ids": [str(instrument_id) for instrument_id in instrument_ids],
+                "event_count": 0,
+            },
+        )
+    action_query = CorporateActionQuery(
+        instrument_ids=instrument_ids,
+        window=request.requested_window,
+        boundary=request.query_boundary,
+    )
+    chunks = []
+    with ExitStack() as stack:
+        for chunk_index in range(0, len(formal_sessions), request.data_chunk_size_sessions):
+            chunk_sessions = formal_sessions[
+                chunk_index : chunk_index + request.data_chunk_size_sessions
+            ]
+            chunk = stack.enter_context(
+                data_session.open_chunk(
+                    DataChunkQuery(
+                        chunk_index=chunk_index // request.data_chunk_size_sessions,
+                        first_session_id=chunk_sessions[0].session_id,
+                        last_session_id=chunk_sessions[-1].session_id,
+                        fact_types=(DataCapability.ACTIONS,),
+                    )
+                )
+            )
+            status = chunk.validate_consistency()
+            if status.status is not ConsistencyValidation.VALID:
+                raise ProviderContractViolationError(
+                    "corporate-action chunk consistency validation failed",
+                    details={"chunk_index": chunk_index // request.data_chunk_size_sessions},
+                )
+            chunks.append(chunk)
+        snapshot = RunCorporateActionEventSnapshot.from_chunk_sessions(
+            chunks,
+            lambda _chunk: action_query,
+            coverage_summary={
+                "instrument_ids": [str(instrument_id) for instrument_id in instrument_ids],
+                "event_count": None,
+            },
+        )
+    return replace(
+        snapshot,
+        coverage_summary={
+            **snapshot.coverage_summary,
+            "event_count": len(snapshot.cash_dividend_events),
+        },
+        snapshot_hash="",
+    )
+
+
 class SqlBacktestSession:
     def __init__(self, provider, request):
         self.provider, self.request = provider, request
@@ -369,15 +432,38 @@ class SqlBacktestSession:
     def preflight(self, _request=None):
         self._report = self.provider.preflight(self.provider.intent_from_data_request(self.request)); self._resolved_sessions = self._report.resolved_sessions; self._warmup_sessions = self._report.warmup_sessions; self._state = "ready" if self._report.status is PreflightStatus.READY else "blocked"; return self._report
     def open_chunk(self, query):
-        size = self.request.data_chunk_size_sessions; start = query.chunk_index * size; end = min(start + size, len(self._resolved_sessions)); return SqlBacktestChunkSession(self.provider, self, query.chunk_index, tuple(self._resolved_sessions[start:end]))
+        size = self.request.data_chunk_size_sessions
+        start = query.chunk_index * size
+        end = min(start + size, len(self._resolved_sessions))
+        return SqlBacktestChunkSession(
+            self.provider,
+            self,
+            query.chunk_index,
+            tuple(self._resolved_sessions[start:end]),
+            query.fact_types,
+        )
 
 
 class SqlBacktestChunkSession:
-    def __init__(self, provider, session, index, sessions):
-        self.provider, self.session, self.index, self.sessions = provider, session, index, sessions; self.validated = False; self.closed = False; self.current_date = sessions[-1].session_date
+    def __init__(self, provider, session, index, sessions, fact_types):
+        self.provider, self.session, self.index, self.sessions = provider, session, index, sessions
+        self._fact_types = tuple(fact_types)
+        self.validated = False
+        self.closed = False
+        self.current_date = sessions[-1].session_date
         from app.backtesting.data.reports import canonical_hash
         self._digest = canonical_hash({"run": str(session.request.requested_window), "chunk": index})
-        self._evidence = DataConsistencyEvidence(chunk_index=index, first_session_id=sessions[0].session_id, last_session_id=sessions[-1].session_id, mode=session.request.consistency_mode, validation_status=ConsistencyValidation.NOT_VALIDATED, fact_types=(DataCapability.BARS, DataCapability.UNIVERSE), coverage_summary={"chunk_session_count": len(sessions)}, token_digest=self._digest, failure_reason="consistency validation has not run yet")
+        self._evidence = DataConsistencyEvidence(
+            chunk_index=index,
+            first_session_id=sessions[0].session_id,
+            last_session_id=sessions[-1].session_id,
+            mode=session.request.consistency_mode,
+            validation_status=ConsistencyValidation.NOT_VALIDATED,
+            fact_types=self._fact_types,
+            coverage_summary={"chunk_session_count": len(sessions)},
+            token_digest=self._digest,
+            failure_reason="consistency validation has not run yet",
+        )
     def __enter__(self): return self
     def __exit__(self, *_): self.close()
     @property
@@ -430,7 +516,25 @@ class SqlBacktestChunkSession:
     def adjusted_series(self, _query): raise UnsupportedCapabilityError("formal v1 does not enable adjusted series")
     def trading_rules(self, _query): return ()
     def trading_status(self, _query): return ()
-    def corporate_actions(self, query): return self.provider.adapter.corporate_actions(query)
+    def corporate_actions(self, query):
+        self._require()
+        if DataCapability.ACTIONS not in self._fact_types:
+            raise ProviderContractViolationError(
+                "corporate-action reads were not declared for this chunk"
+            )
+        if not isinstance(query, CorporateActionQuery):
+            raise ProviderContractViolationError(
+                "corporate-action query has an invalid type"
+            )
+        first = self.sessions[0].session_date
+        last = self.sessions[-1].session_date
+        start = max(first, query.window.start_date)
+        end = min(last, query.window.end_date)
+        if start > end:
+            return ()
+        return self.provider.adapter.corporate_actions(
+            replace(query, window=DateRange(start, end))
+        )
 
 
 class SqlRuntimeViewFactory:
@@ -676,6 +780,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
     provider = SqlBacktestProvider(session)
     data_session = provider.open_session(request)
     data_session.preflight()
+    corporate_actions = _corporate_action_snapshot(provider, request)
     axis = TradingDayAxis(data_session.resolved_sessions)
     registry = build_default_component_registry()
     components = binding.components
@@ -774,6 +879,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
         ),
         initial_portfolio=_initial_portfolio(binding),
         settlement_calendar=settlement,
+        corporate_actions=corporate_actions,
         fixed_authorized_instrument_ids=request.fixed_instrument_ids,
         rule_snapshot_bundle=rule_snapshot_bundle,
         result_sink=writer,

@@ -6415,10 +6415,6 @@ class DeterministicBacktestRunner:
                     },
                 )
             )
-            hook = getattr(self._strategy, "on_order_update", None)
-            if callable(hook):
-                # Pass a frozen summary rather than the mutable Order object.
-                hook(staged_order_records[-1])
         return emitted
 
     def _freeze_dividend_entitlement(
@@ -6894,6 +6890,12 @@ class DeterministicBacktestRunner:
             self._submission_sequences.next_sequence()
         self._orders.extend(staged_orders)
         self._step_order_records.extend(staged_order_records)
+        hook = getattr(self._strategy, "on_order_update", None)
+        if callable(hook):
+            # Pass immutable summaries after all orders from this decision
+            # have been committed; no partial decision can leak to a strategy.
+            for record in staged_order_records:
+                hook(record)
         return emitted
 
     # ------------------------------------------------------------------

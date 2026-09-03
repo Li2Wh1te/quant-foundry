@@ -1,6 +1,6 @@
 """Scheduler registrations for ETF corporate-action ingestion."""
 
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from typing import Any
 
 import structlog
@@ -67,6 +67,57 @@ def _window(parameters: CorporateActionSyncParameters, context: TaskContext) -> 
     return start_date, end_date
 
 
+def _cash_calendar_resolver(session: Any):
+    """Build the production resolver for source date to named-session mapping."""
+    cache: dict[tuple[Any, date], dict[str, object]] = {}
+    identity_repository = None
+    calendar_provider = None
+    gateway = None
+
+    def resolve(item: Any, instrument_id: Any) -> dict[str, object]:
+        nonlocal identity_repository, calendar_provider, gateway
+        if identity_repository is None:
+            from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
+            from app.backtesting.settlement import CalendarAxisSettlementGateway
+            from app.instruments.identity_repository import InstrumentIdentityRepository
+
+            identity_repository = InstrumentIdentityRepository(session)
+            calendar_provider = SqlCalendarAxisDataProvider(session)
+            gateway = CalendarAxisSettlementGateway(calendar_provider)
+        source_date = item.payment_date
+        if source_date is None:
+            raise ValueError("corporate_action_cash_date_unresolved")
+        cache_key = (instrument_id, source_date)
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
+        identity = identity_repository.resolve_identity_at(
+            instrument_id,
+            effective_at=datetime.combine(source_date, time(15), tzinfo=UTC),
+            data_cutoff=datetime.now(UTC),
+        )
+        calendar_id = getattr(identity, "calendar_id", None)
+        if not calendar_id:
+            raise ValueError("corporate_action_calendar_unresolved")
+        definitions = tuple(calendar_provider.definitions(calendar_id))
+        applicable = tuple(
+            definition for definition in definitions if definition.applies_to(source_date)
+        )
+        if len(applicable) != 1:
+            raise ValueError("corporate_action_calendar_unresolved")
+        definition = applicable[0]
+        context = {
+            "calendar_id": calendar_id,
+            "timezone": definition.timezone,
+            "calendar_definition": definition,
+            "next_open_session": gateway.next_open_session,
+        }
+        cache[cache_key] = context
+        return context
+
+    return resolve
+
+
 def _run_sync(
     client: Any,
     session: Any,
@@ -76,6 +127,7 @@ def _run_sync(
     checkpoint: Any | None,
     start_date: date | None,
     end_date: date | None,
+    calendar_resolver: Any,
     *,
     is_full: bool,
     is_reconciliation: bool,
@@ -88,6 +140,7 @@ def _run_sync(
             ts_codes=tuple(mapping),
             session=session,
             instrument_map=mapping,
+            calendar_resolver=calendar_resolver,
             checkpoint_repo=checkpoint_repo,
             sync_key=context.sync_key,
             checkpoint_version=checkpoint.version if checkpoint else None,
@@ -110,6 +163,7 @@ def _run_sync(
         end_date=end_date.isoformat() if end_date else None,
         session=session,
         instrument_map=mapping,
+        calendar_resolver=calendar_resolver,
         checkpoint_repo=None if is_reconciliation else checkpoint_repo,
         sync_key=None if is_reconciliation else context.sync_key,
         checkpoint_cursor={"synced_through_date": end_date.isoformat()} if end_date else {},
@@ -132,6 +186,7 @@ def _handler(context: TaskContext, parameters: CorporateActionSyncParameters) ->
     task_type = context.task_type or "data.sync_etf_cash_dividend_incremental"
     is_full = task_type.endswith("_full")
     is_reconciliation = task_type.endswith("_reconciliation")
+    calendar_resolver = _cash_calendar_resolver(session)
 
     common = {
         "task_id": str(context.task_id),
@@ -166,6 +221,7 @@ def _handler(context: TaskContext, parameters: CorporateActionSyncParameters) ->
             checkpoint,
             start_date,
             end_date,
+            calendar_resolver,
             is_full=is_full,
             is_reconciliation=is_reconciliation,
         )

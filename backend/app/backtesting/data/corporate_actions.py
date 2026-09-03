@@ -18,6 +18,7 @@ from types import MappingProxyType
 from typing import Any, Iterable, Mapping
 from uuid import UUID
 
+from app.backtesting.data.errors import ProviderContractViolationError
 from app.backtesting.dividends import CashDividendEvent
 
 __all__ = ["RunCorporateActionEventSnapshot", "CorporateActionSnapshotConflict"]
@@ -113,18 +114,22 @@ class RunCorporateActionEventSnapshot:
         revisions: list[Mapping[str, Any]] = []
         cash_rules: list[str] = []
         timing_rules: list[str] = []
+        seen_metadata_ids: set[UUID] = set()
         for session in sessions:
             rows = session.corporate_actions(query_factory(session))
             for row in rows:
-                if isinstance(row, CashDividendEvent):
-                    events.append(row)
+                event = (
+                    row
+                    if isinstance(row, CashDividendEvent)
+                    else cls._event_from_provider_fact(row)
+                )
+                events.append(event)
+                if event.event_id in seen_metadata_ids:
                     continue
-                event = cls._event_from_provider_fact(row)
-                if event is not None:
-                    events.append(event)
-                    revisions.append(dict(event.source_evidence))
-                    cash_rules.append(f"{event.source_evidence.get('cash_date_rule', '')}")
-                    timing_rules.append(f"{event.source_evidence.get('timing_rule', '')}")
+                seen_metadata_ids.add(event.event_id)
+                revisions.append(dict(event.source_evidence))
+                cash_rules.append(str(event.source_evidence.get("cash_date_rule", "")))
+                timing_rules.append(str(event.source_evidence.get("timing_rule", "")))
         metadata.setdefault("source_revisions", tuple(revisions))
         metadata.setdefault("cash_date_rule_refs", tuple(x for x in cash_rules if x))
         metadata.setdefault("timing_rule_refs", tuple(x for x in timing_rules if x))
@@ -138,49 +143,117 @@ class RunCorporateActionEventSnapshot:
         return cls.from_chunk_sessions(sessions, query_factory, **metadata)
 
     @staticmethod
-    def _event_from_provider_fact(row: Any) -> CashDividendEvent | None:
-        """Normalize a provider ``CorporateAction`` projection to an event.
+    def _event_from_provider_fact(row: Any) -> CashDividendEvent:
+        """Normalize one provider fact without allowing silent omission.
 
-        The adapter intentionally accepts only the stable public fact shape;
-        ORM rows and arbitrary mappings are ignored.  Missing evidence or
-        dates therefore cannot silently enter accounting.
+        The first runtime version accounts only for cash dividends.  Quantity
+        actions and malformed cash facts are hard provider-contract failures;
+        returning ``None`` here would make them disappear from the audit trail.
         """
-        if getattr(row, "action_type", None) != "cash_dividend":
-            return None
+        action_type = getattr(row, "action_type", None)
         attrs = getattr(row, "attributes", None)
+        event_id = str(
+            attrs.get("event_id", getattr(row, "event_id", ""))
+            if isinstance(attrs, Mapping)
+            else getattr(row, "event_id", "")
+        )
+        if action_type != "cash_dividend":
+            quantity_action = action_type in {
+                "split",
+                "consolidation",
+                "share_change",
+            }
+            raise ProviderContractViolationError(
+                (
+                    "quantity-class corporate actions are unsupported in formal v1"
+                    if quantity_action
+                    else "provider returned an unsupported corporate action type"
+                ),
+                details={
+                    "event_id": event_id,
+                    "action_type": action_type,
+                    "reason_code": (
+                        "quantity_corporate_action_unsupported"
+                        if quantity_action
+                        else "corporate_action_type_unsupported"
+                    ),
+                },
+            )
         if not isinstance(attrs, Mapping):
-            return None
+            raise ProviderContractViolationError(
+                "cash corporate action attributes are missing",
+                details={"event_id": event_id, "reason_code": "corporate_action_attributes_missing"},
+            )
+        evidence = {
+            str(key): str(value)
+            for key, value in attrs.items()
+            if value is not None
+        }
+        source = getattr(getattr(row, "evidence", None), "source", None)
+        if source:
+            evidence["source"] = str(source)
+        required_evidence = ("calendar_id", "timezone", "cash_date_rule", "timing_rule")
+        missing_evidence = tuple(
+            name for name in required_evidence
+            if not evidence.get(name)
+        )
+        if missing_evidence:
+            raise ProviderContractViolationError(
+                "cash corporate action evidence is incomplete",
+                details={
+                    "event_id": event_id,
+                    "missing_evidence": missing_evidence,
+                    "reason_code": "corporate_action_evidence_incomplete",
+                },
+            )
+        source_payment = attrs.get("source_payment_date")
+        source_arrival = attrs.get("source_arrival_date")
+        if source_payment is None and source_arrival is None:
+            raise ProviderContractViolationError(
+                "cash corporate action has no source payment or arrival date",
+                details={
+                    "event_id": event_id,
+                    "reason_code": "corporate_action_cash_date_unresolved",
+                },
+            )
         try:
-            event_id = UUID(str(attrs["event_id"]))
-            instrument_id = row.instrument_id
+            event_id_value = UUID(event_id)
             ex_date = row.ex_date
             record_date = date.fromisoformat(str(attrs["record_date"]))
-            payment = date.fromisoformat(str(attrs.get("source_payment_date") or attrs["cash_effective_date"]))
-            arrival = date.fromisoformat(str(attrs.get("source_arrival_date") or attrs["cash_effective_date"]))
+            payment = date.fromisoformat(str(source_payment or source_arrival))
+            arrival = date.fromisoformat(str(source_arrival or source_payment))
             effective = date.fromisoformat(str(attrs["cash_effective_date"]))
             amount = attrs["cash_amount_per_unit"]
-            evidence = dict(attrs)
-            source = getattr(getattr(row, "evidence", None), "source", None)
-            if source:
-                evidence["source"] = source
             as_of = getattr(getattr(row, "evidence", None), "observed_at", None)
             if isinstance(as_of, datetime):
                 as_of = as_of.date()
             if not isinstance(as_of, date):
                 as_of = ex_date
             return CashDividendEvent(
-                event_id=event_id, instrument_id=instrument_id,
-                ex_date=ex_date, record_date=record_date,
-                source_payment_date=payment, source_arrival_date=arrival,
+                event_id=event_id_value,
+                instrument_id=row.instrument_id,
+                ex_date=ex_date,
+                record_date=record_date,
+                source_payment_date=payment,
+                source_arrival_date=arrival,
                 cash_effective_session_id=effective,
-                amount_per_share=amount, source_evidence=evidence,
-                as_of=as_of, currency=attrs.get("currency") or "CNY",
+                amount_per_share=amount,
+                source_evidence=evidence,
+                as_of=as_of,
+                currency=attrs.get("currency") or "CNY",
                 cash_effective_phase=attrs.get("cash_effective_phase", "after_open_match"),
                 derivation_rule_key=attrs.get("entitlement_rule", "record_date_entitlement"),
                 derivation_rule_version=1,
             )
-        except (KeyError, TypeError, ValueError):
-            return None
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ProviderContractViolationError(
+                "cash corporate action fact is malformed",
+                details={
+                    "event_id": event_id,
+                    "reason_code": "corporate_action_fact_invalid",
+                    "error_type": type(exc).__name__,
+                },
+            ) from exc
 
     def merge(self, other: "RunCorporateActionEventSnapshot") -> "RunCorporateActionEventSnapshot":
         """Merge chunk snapshots, rejecting conflicting duplicate events."""

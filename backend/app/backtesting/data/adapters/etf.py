@@ -1110,27 +1110,76 @@ class EtfFactsAdapter:
         if self.corporate_action_repository is None:
             raise UnsupportedCapabilityError("corporate_actions repository is unavailable")
         rows = self.corporate_action_repository.list_facts(
-            query.instrument_ids, query.window.start_date, query.window.end_date,
+            query.instrument_ids,
+            query.window.start_date,
+            query.window.end_date,
             cutoff=query.boundary.data_cutoff,
             action_types=query.action_types,
         )
         result = []
+        supported_types = {
+            "cash_dividend",
+            "split",
+            "consolidation",
+            "share_change",
+        }
         for row in rows:
-            if row.action_type not in {"cash_dividend", "split", "consolidation", "share_change"}:
-                continue
-            ex_date = row.ex_date or row.cash_effective_date
+            action_type = getattr(row, "action_type", None)
+            if action_type not in supported_types:
+                raise ProviderContractViolationError(
+                    "provider returned an unsupported corporate action type",
+                    details={
+                        "event_id": str(getattr(row, "event_id", "")),
+                        "action_type": action_type,
+                        "reason_code": "corporate_action_type_unsupported",
+                    },
+                )
+            if action_type in {"split", "consolidation", "share_change"}:
+                # v1 keeps quantity actions in the common fact model but does
+                # not account for them.  Failing here prevents a later
+                # snapshot conversion from silently dropping the event.
+                raise ProviderContractViolationError(
+                    "quantity-class corporate actions are unsupported in formal v1",
+                    details={
+                        "event_id": str(row.event_id),
+                        "action_type": action_type,
+                        "reason_code": "quantity_corporate_action_unsupported",
+                    },
+                )
+
+            evidence_payload = dict(getattr(row, "evidence", None) or {})
+            ex_date = row.ex_date
             if ex_date is None:
-                continue
+                raise ProviderContractViolationError(
+                    "corporate action has no usable effective date",
+                    details={
+                        "event_id": str(row.event_id),
+                        "action_type": action_type,
+                        "reason_code": "corporate_action_date_unresolved",
+                    },
+                )
             # Cash events must carry explicit calendar/date-rule evidence.
             # Never guess an exchange calendar or host timezone at runtime.
-            if row.action_type == "cash_dividend":
-                evidence_payload = row.evidence or {}
-                required = ("calendar_id", "timezone", "cash_date_rule", "timing_rule")
-                if not all((getattr(row, name, None) or evidence_payload.get(name)) for name in required):
-                    raise ProviderContractViolationError(
-                        "corporate action calendar/date-rule evidence is incomplete",
-                        details={"event_id": str(row.event_id), "reason_code": "corporate_action_calendar_unresolved"},
-                    )
+            required = ("calendar_id", "timezone", "cash_date_rule", "timing_rule")
+            if not all(
+                getattr(row, name, None) or evidence_payload.get(name)
+                for name in required
+            ):
+                raise ProviderContractViolationError(
+                    "corporate action calendar/date-rule evidence is incomplete",
+                    details={
+                        "event_id": str(row.event_id),
+                        "reason_code": "corporate_action_calendar_unresolved",
+                    },
+                )
+            if row.source_payment_date is None and row.source_arrival_date is None:
+                raise ProviderContractViolationError(
+                    "cash corporate action has no source payment or arrival date",
+                    details={
+                        "event_id": str(row.event_id),
+                        "reason_code": "corporate_action_cash_date_unresolved",
+                    },
+                )
             quality = row.quality or "complete"
             try:
                 quality_status = QualityStatus(quality)
@@ -1140,19 +1189,33 @@ class EtfFactsAdapter:
                     details={"event_id": str(row.event_id), "quality": quality},
                 ) from exc
             observed = row.created_at or datetime.now(timezone.utc)
-            result.append(CorporateAction(
-                instrument_id=row.instrument_id, action_type=row.action_type,
-                ex_date=ex_date,
-                evidence=FactEvidence(source=row.source, observed_at=observed, quality_status=quality_status, source_revision=str(row.fact_version)),
-                attributes={"event_id": str(row.event_id), "record_date": row.record_date.isoformat() if row.record_date else None,
-                            "source_payment_date": row.source_payment_date.isoformat() if row.source_payment_date else None,
-                            "source_arrival_date": row.source_arrival_date.isoformat() if row.source_arrival_date else None,
-                            "cash_effective_date": row.cash_effective_date.isoformat() if row.cash_effective_date else None,
-                            "cash_amount_per_unit": str(row.cash_amount_per_unit) if row.cash_amount_per_unit is not None else None,
-                            "currency": row.currency, "cash_effective_phase": row.cash_effective_phase,
-                            "entitlement_rule": row.entitlement_rule,
-                            "cash_date_rule": row.cash_date_rule, "timing_rule": row.timing_rule, **(row.evidence or {})},
-            ))
+            result.append(
+                CorporateAction(
+                    instrument_id=row.instrument_id,
+                    action_type=action_type,
+                    ex_date=ex_date,
+                    evidence=FactEvidence(
+                        source=row.source,
+                        observed_at=observed,
+                        quality_status=quality_status,
+                        source_revision=str(row.fact_version),
+                    ),
+                    attributes={
+                        "event_id": str(row.event_id),
+                        "record_date": row.record_date.isoformat() if row.record_date else None,
+                        "source_payment_date": row.source_payment_date.isoformat() if row.source_payment_date else None,
+                        "source_arrival_date": row.source_arrival_date.isoformat() if row.source_arrival_date else None,
+                        "cash_effective_date": row.cash_effective_date.isoformat() if row.cash_effective_date else None,
+                        "cash_amount_per_unit": str(row.cash_amount_per_unit) if row.cash_amount_per_unit is not None else None,
+                        "currency": row.currency,
+                        "cash_effective_phase": row.cash_effective_phase,
+                        "entitlement_rule": row.entitlement_rule,
+                        "cash_date_rule": row.cash_date_rule,
+                        "timing_rule": row.timing_rule,
+                        **evidence_payload,
+                    },
+                )
+            )
         result.sort(key=lambda x: (x.ex_date, str(x.instrument_id), x.action_type))
         return tuple(result)
 
