@@ -980,6 +980,47 @@ def _fixture_substitution_removals(
     return tuple(sorted(removable))
 
 
+def _bind_quantity_action_integrity(
+    report: DataPreflightReport,
+    request: DataPreflightRequest,
+    fixtures: Sequence[InternalFixture],
+) -> DataPreflightReport:
+    """Bind explicit quantity-action evidence without inferring it.
+
+    Cash-action coverage is not a substitute for split, consolidation, or
+    share-change coverage.  Only a provider-supplied integrity object or the
+    named internal fixture is allowed to populate this field.
+    """
+
+    if DataCapability.ACTIONS not in request.required_capabilities:
+        return report
+    if report.quantity_action_integrity is not None:
+        return report
+    fixture = next(
+        (
+            item
+            for item in fixtures
+            if str(item.capability) == FIXTURE_QUANTITY_ACTIONS
+        ),
+        None,
+    )
+    if fixture is None:
+        return report
+    return replace(
+        report,
+        quantity_action_integrity={
+            "status": "complete",
+            "source": fixture.source,
+            "fixture_key": fixture.fixture_key,
+            "fixture_version": fixture.fixture_version,
+            "content_hash": fixture.content_hash,
+            "scope": fixture.scope,
+            "proof_summary": fixture.proof_summary,
+        },
+        report_hash="",
+    )
+
+
 def _post_report_gate_issues(
     report: DataPreflightReport,
     request: DataPreflightRequest,
@@ -994,22 +1035,20 @@ def _post_report_gate_issues(
 
     issues: list[PreflightIssue] = []
     fixture_caps = {str(item.capability) for item in fixtures}
-    if (
-        DataCapability.ACTIONS in request.required_capabilities
-        and FIXTURE_QUANTITY_ACTIONS not in fixture_caps
-        and not any(
-            item.capability is DataCapability.ACTIONS
-            and item.quality_status.value == "complete"
-            for item in report.coverage_reports
-        )
-    ):
-        issues.append(
-            _issue(
-                "coverage_incomplete",
-                "请求要求公司行动覆盖证明，但报告未提供完整事实或具名 fixture，已阻断回测。",
-                field="coverage.actions",
+    if DataCapability.ACTIONS in request.required_capabilities:
+        integrity = report.quantity_action_integrity
+        if not isinstance(integrity, Mapping) or integrity.get("status") != "complete":
+            issues.append(
+                _issue(
+                    "quantity_action_integrity_incomplete",
+                    "请求要求数量类公司行动完整性证明，但报告未提供独立、完整的来源和覆盖证据，已阻断回测。",
+                    field="quantity_action_integrity",
+                    details={
+                        "required": True,
+                        "actual_status": integrity.get("status") if isinstance(integrity, Mapping) else None,
+                    },
+                )
             )
-        )
     non_raw = [item for item in request.strategy_price_bases if getattr(item, "value", item) in {"qfq", "hfq"}]
     if non_raw:
         if request.adjustment_series_policy is None or report.adjustment_policy_status != "active":
@@ -1128,6 +1167,47 @@ def _source_revision_audit_issues(
     if fixture_ok or production_ok:
         return ()
     return (_issue("source_revision_audit_missing", "来源修订审计证据缺失，且未提供合格 source_revision_audit@1 fixture，已阻断回测。", field="source_revisions", details={"fixture_failures": fixture_failures}),)
+
+
+def _pit_gate_issues(
+    report: DataPreflightReport,
+    request: DataPreflightRequest,
+) -> tuple[PreflightIssue, ...]:
+    """Validate the report's PIT declaration against the frozen boundary.
+
+    ``data_cutoff`` limits valid time.  ``knowledge_as_of`` is a stronger
+    cognition-time contract: a fact family without usable ``known_at`` data
+    cannot be silently consumed as strict historical cognition.
+    """
+
+    boundary = request.query_boundary
+    issues: list[PreflightIssue] = []
+    if report.knowledge_as_of != boundary.knowledge_as_of:
+        issues.append(
+            _issue(
+                "pit_boundary_mismatch",
+                "预检报告的 knowledge_as_of 与冻结查询边界不一致，已阻断回测。",
+                field="knowledge_as_of",
+                details={
+                    "expected": boundary.knowledge_as_of.isoformat() if boundary.knowledge_as_of else None,
+                    "actual": report.knowledge_as_of.isoformat() if report.knowledge_as_of else None,
+                },
+            )
+        )
+    non_strict = tuple(report.non_strict_pit_capabilities)
+    if boundary.knowledge_as_of is not None and non_strict:
+        issues.append(
+            _issue(
+                "strict_pit_unavailable",
+                "请求要求严格历史认知，但以下事实缺少可验证的认知时点证据，已阻断回测。",
+                field="non_strict_pit_capabilities",
+                details={
+                    "knowledge_as_of": boundary.knowledge_as_of.isoformat(),
+                    "capabilities": tuple(item.value for item in non_strict),
+                },
+            )
+        )
+    return tuple(issues)
 
 
 def _formal_capability_issues(
@@ -2124,6 +2204,10 @@ class DataPreflightService:
             fixed_ids=fixed_ids,
             resolution=dynamic_resolution,
         )
+        report = _bind_quantity_action_integrity(report, request, fixtures)
+        pit_gate_issues = _pit_gate_issues(report, request)
+        if pit_gate_issues:
+            report = _with_report_issues(report, pit_gate_issues)
         report_gate_issues = _post_report_gate_issues(report, request, fixtures)
         if profile.reference == FORMAL_PROFILE:
             report_gate_issues += _formal_capability_issues(report, request)
@@ -2138,7 +2222,6 @@ class DataPreflightService:
         removals = _fixture_substitution_removals(report, fixtures)
         if removals:
             report = _with_report_issues(report, (), remove_codes=removals)
-
         expected_dynamic_ids = set(dynamic_scope.get("resolved_calendar_ids", ()))
         if expected_dynamic_ids and not expected_dynamic_ids.issubset(set(report.resolved_calendar_ids)):
             report = _with_report_issues(
@@ -2437,11 +2520,16 @@ class DataPreflightService:
 
         if not isinstance(request, DataRequest):
             raise InvalidDataRequestError("open_session requires a frozen DataRequest")
-        page = admission.outcome if isinstance(admission, AdmissionDecision) else admission
-        if page is not None and page.status is not PreflightStatus.READY:
-            raise InvalidDataRequestError(
-                "a blocked admission cannot open an authoritative data session"
-            )
+        admitted = admission if isinstance(admission, AdmissionDecision) else None
+        page = admitted.outcome if admitted is not None else admission
+        if page is not None:
+            if page.status is PreflightStatus.BLOCKED or (
+                page.status is PreflightStatus.DEGRADED
+                and (admitted is None or not admitted.allowed)
+            ):
+                raise InvalidDataRequestError(
+                    "an unconfirmed data admission cannot open an authoritative data session"
+                )
         provider = self.provider
         if provider is None or not callable(getattr(provider, "open_session", None)):
             raise ProviderContractViolationError("preflight provider has no open_session method")

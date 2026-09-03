@@ -949,6 +949,11 @@ class DataPreflightReport:
     # The report-facing trading-status capability summary reuses this report
     # DTO; it is not a second status snapshot or fact store.
     trading_status: Mapping[str, object] | None = None
+    # Quantity-action evidence is deliberately a first-class field.  A
+    # generic ACTIONS coverage row (or a cash-dividend count) must never be
+    # mistaken for proof that split/consolidation/share-change handling is
+    # complete.
+    quantity_action_integrity: Mapping[str, object] | None = None
     # Recomputed in __post_init__; the placeholder keeps the field defaulted.
     report_hash: str = ""
 
@@ -2061,7 +2066,7 @@ class DataPreflightReport:
             frozen_context = freeze_json(dict(context), "pit_context")
             assert isinstance(frozen_context, MappingProxyType)
             object.__setattr__(self, "pit_context", frozen_context)
-        for name in ("calendar_summary", "session_summary"):
+        for name in ("calendar_summary", "session_summary", "quantity_action_integrity"):
             value = getattr(self, name)
             if value is not None:
                 frozen = freeze_json(dict(value), name) if isinstance(value, Mapping) else None
@@ -2205,6 +2210,7 @@ class DataPreflightReport:
             "source_revisions": self.source_revisions,
             "fixture_sources": self.fixture_sources,
             "issues": [issue.as_dict() for issue in self.issues],
+            "quantity_action_integrity": self.quantity_action_integrity,
             "requested_window": {
                 "start_date": self.requested_window.start_date,
                 "end_date": self.requested_window.end_date,
@@ -2487,6 +2493,7 @@ class DataPreflightReport:
                 report.machine_content() for report in self.coverage_reports
             ],
             "trading_status": _trading_status_machine_content(self.trading_status),
+            "quantity_action_integrity": self.quantity_action_integrity,
             "source_revisions": self.source_revisions,
             "issues": [issue.machine_fields() for issue in self.issues],
             # Candidate membership is deliberately absent.  These fields

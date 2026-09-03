@@ -2411,6 +2411,35 @@ class EtfFactsAdapter:
                 "__data_revision_summary__", {}
             ),
         }
+        quantity_action_integrity: dict[str, object] = {
+            "status": "not_required",
+            "reason": "the request does not require quantity-class company actions",
+        }
+        if DataCapability.ACTIONS in required_capabilities:
+            quantity_fixture = next(
+                (
+                    fixture
+                    for fixture in normalized_fixtures
+                    if fixture.capability == "quantity_action_coverage"
+                ),
+                None,
+            )
+            quantity_action_integrity = (
+                {
+                    "status": "complete",
+                    "source": quantity_fixture.source,
+                    "fixture_key": quantity_fixture.fixture_key,
+                    "fixture_version": quantity_fixture.fixture_version,
+                    "content_hash": quantity_fixture.content_hash,
+                    "scope": quantity_fixture.scope,
+                    "proof_summary": quantity_fixture.proof_summary,
+                }
+                if quantity_fixture is not None
+                else {
+                    "status": "unavailable",
+                    "reason": "no approved quantity-action source or coverage proof is configured",
+                }
+            )
         summary: dict[str, object] = {
             "provider_key": ETF_PROVIDER_KEY,
             "adapter_key": ETF_ADAPTER_KEY,
@@ -2428,6 +2457,7 @@ class EtfFactsAdapter:
                 if profile is not None
                 else None
             ),
+            "quantity_action_integrity": quantity_action_integrity,
             "trading_status": build_trading_status_summary(
                 ContractRef(key=ETF_RULE_PACKAGE[0], version=ETF_RULE_PACKAGE[1]),
                 capability_declarations=trading_status_applicability,
@@ -2585,6 +2615,10 @@ def build_data_preflight_payloads(
         ]
     if summary.get("trading_status"):
         coverage_payload["trading_status"] = summary["trading_status"]
+    if summary.get("quantity_action_integrity"):
+        coverage_payload["quantity_action_integrity"] = summary[
+            "quantity_action_integrity"
+        ]
     for field in ("bar_validity_summary", "invalid_bars"):
         if summary.get(field) is not None:
             coverage_payload[field] = summary[field]

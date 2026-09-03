@@ -831,7 +831,12 @@ class MemoryDataProvider:
             supported_frequencies=("1d",),
             supported_price_bases=(PriceBasis.RAW,),
             pit_support_by_capability={
-                capability: PitSupport.STRICT for capability in served
+                capability: (
+                    PitSupport.NON_STRICT
+                    if capability is DataCapability.BARS
+                    else PitSupport.STRICT
+                )
+                for capability in served
             },
             consistency_modes=(
                 ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
@@ -2071,6 +2076,21 @@ class MemoryDataProvider:
                     )
                 )
 
+        non_strict = self._non_strict_capabilities(request)
+        if request.query_boundary.knowledge_as_of is not None and non_strict:
+            issues.append(
+                PreflightIssue(
+                    code="strict_pit_unavailable",
+                    severity=IssueSeverity.ERROR,
+                    scope="pit",
+                    message="请求要求严格历史认知，但内存 Provider 的事实缺少可验证认知时点，已阻断回测。",
+                    field="non_strict_pit_capabilities",
+                    details={
+                        "knowledge_as_of": request.query_boundary.knowledge_as_of.isoformat(),
+                        "capabilities": tuple(item.value for item in non_strict),
+                    },
+                )
+            )
         scope_ids = tuple(sorted(_fixed_authorized_ids(request), key=str))
         known_ids = {spec.instrument_id for spec in self._dataset.instruments}
         for instrument_id in scope_ids:
@@ -2718,7 +2738,7 @@ class MemoryDataProvider:
             warmup_sessions=warmup_sessions,
             max_lookback_sessions=request.max_lookback_sessions,
             knowledge_as_of=request.query_boundary.knowledge_as_of,
-            non_strict_pit_capabilities=(),
+            non_strict_pit_capabilities=self._non_strict_capabilities(request),
             consistency_mode=request.consistency_mode,
             consistency_token_capability=(
                 request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN
@@ -2815,7 +2835,7 @@ class MemoryDataProvider:
             warmup_sessions=(),
             max_lookback_sessions=request.max_lookback_sessions,
             knowledge_as_of=request.query_boundary.knowledge_as_of,
-            non_strict_pit_capabilities=(),
+            non_strict_pit_capabilities=self._non_strict_capabilities(request),
             consistency_mode=request.consistency_mode,
             consistency_token_capability=False,
             consistency_token_contract=None,
@@ -3165,7 +3185,7 @@ class MemoryDataProvider:
             warmup_sessions=warmup,
             max_lookback_sessions=request.max_lookback_sessions,
             knowledge_as_of=request.query_boundary.knowledge_as_of,
-            non_strict_pit_capabilities=(),
+            non_strict_pit_capabilities=self._non_strict_capabilities(request),
             consistency_mode=request.consistency_mode,
             consistency_token_capability=(request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN and request.consistency_token_contract is not None),
             consistency_token_contract=request.consistency_token_contract if request.consistency_mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN else None,
@@ -3195,7 +3215,7 @@ class MemoryDataProvider:
             pit_context=pit_context.as_dict if snapshot is not None and pit_context is not None else None,
             calendar_revision_digest=revision_digest,
             snapshot_fingerprint=snapshot_fingerprint,
-            non_strict_pit=False,
+            non_strict_pit=DataCapability.BARS in request.required_capabilities,
             calendar_semantic_signature=semantic_signature,
             warmup_session_signature=warmup_signature,
             definition_usage_by_date=usage,
@@ -3331,6 +3351,18 @@ class MemoryDataProvider:
             self._coverage_envelope(),
         )
 
+    def _non_strict_capabilities(
+        self, request: DataPreflightRequest
+    ) -> tuple[DataCapability, ...]:
+        """Return requested fact families without strict cognition evidence."""
+
+        return tuple(
+            capability
+            for capability in request.required_capabilities
+            if self._manifest.pit_support_by_capability.get(capability)
+            is PitSupport.NON_STRICT
+        )
+
     def _covers_fact_type(self, capability: DataCapability) -> bool:
         """Whether the dataset actually backs one declared fact type."""
 
@@ -3353,6 +3385,9 @@ class MemoryDataProvider:
         first_session_id: str,
         last_session_id: str,
         fact_types: Sequence[DataCapability],
+        max_lookback_sessions: int = MAX_LOOKBACK_SESSIONS,
+        data_cutoff: datetime | None = None,
+        knowledge_as_of: datetime | None = None,
     ) -> str:
         """Deterministic logical-token digest over the revision vector.
 
@@ -3370,6 +3405,11 @@ class MemoryDataProvider:
             "revision": self._revision,
             "coverage_envelope": {
                 "earliest_provable_date": envelope.isoformat() if envelope else None,
+                "max_lookback_sessions": max_lookback_sessions,
+            },
+            "query_boundary": {
+                "data_cutoff": data_cutoff,
+                "knowledge_as_of": knowledge_as_of,
             },
             "formal_session_ids": list(formal_session_ids),
             "warmup_session_ids": list(warmup_session_ids),
@@ -3884,6 +3924,9 @@ class MemoryDataSession:
             "first_session_id": expected_first,
             "last_session_id": expected_last,
             "fact_types": query.fact_types,
+            "max_lookback_sessions": self._request.max_lookback_sessions,
+            "data_cutoff": self._request.query_boundary.data_cutoff,
+            "knowledge_as_of": self._request.query_boundary.knowledge_as_of,
         }
         mode = self._request.consistency_mode
         if mode is ConsistencyMode.CHUNKED_LOGICAL_TOKEN:
@@ -6140,6 +6183,27 @@ def _assert_rows_visible(
                     "data_cutoff": boundary.data_cutoff.isoformat(),
                 },
             )
+        known_at = bar.evidence.known_at
+        if boundary.knowledge_as_of is not None:
+            if known_at is None:
+                raise ProviderContractViolationError(
+                    "strict historical cognition requires bar known_at evidence",
+                    details={
+                        **details,
+                        "knowledge_as_of": boundary.knowledge_as_of.isoformat(),
+                        "reason_code": "strict_pit_evidence_missing",
+                    },
+                )
+            if known_at > boundary.knowledge_as_of:
+                raise ProviderContractViolationError(
+                    "provider returned a bar learned after the knowledge_as_of boundary",
+                    details={
+                        **details,
+                        "known_at": known_at.isoformat(),
+                        "knowledge_as_of": boundary.knowledge_as_of.isoformat(),
+                        "reason_code": "knowledge_as_of_exceeded",
+                    },
+                )
 
 
 def _lookback_limit_error(requested: int) -> Exception:

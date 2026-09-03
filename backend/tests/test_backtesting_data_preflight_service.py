@@ -289,6 +289,96 @@ class PreflightServiceTestCase(unittest.TestCase):
             serialized["details"]["fixture_sources"][0]["fixture_key"],
             "quantity_action_coverage",
         )
+        self.assertEqual(
+            outcome.report.quantity_action_integrity["status"],
+            "complete",
+        )
+
+    def test_strict_knowledge_cutoff_blocks_non_strict_provider_facts(self) -> None:
+        from app.backtesting.data.sessions import AuthoritativeDataSession
+        from tests.test_backtesting_data_session import (
+            COMMON_OPEN,
+            J5,
+            J7,
+            build_provider,
+            make_request,
+        )
+
+        frozen = make_request(J5, J7, calendar_ids=("SSE", "SZSE"), instrument_id=IID)
+        request = DataPreflightRequest(
+            **{
+                field.name: getattr(frozen, field.name)
+                for field in DataPreflightRequest.__dataclass_fields__.values()
+            }
+        )
+        request = replace(
+            request,
+            query_boundary=QueryBoundary(
+                data_cutoff=request.query_boundary.data_cutoff,
+                knowledge_as_of=datetime(2026, 1, 8, tzinfo=timezone.utc),
+                include_cutoff_day=request.query_boundary.include_cutoff_day,
+            ),
+        )
+        strict_frozen = replace(frozen, query_boundary=request.query_boundary)
+        ready = AuthoritativeDataSession(
+            request=strict_frozen,
+            calendar_provider=build_provider(COMMON_OPEN, COMMON_OPEN),
+        ).preflight()
+        non_strict = replace(
+            ready,
+            knowledge_as_of=request.query_boundary.knowledge_as_of,
+            non_strict_pit_capabilities=(DataCapability.BARS,),
+            non_strict_pit=True,
+            report_hash="",
+        )
+        provider = FakeProvider(non_strict)
+        outcome = DataPreflightService(provider, profile="formal@1").preflight(
+            PreflightContext(request=request, provider=provider, profile="formal@1")
+        )
+
+        self.assertEqual(outcome.status, PreflightStatus.BLOCKED)
+        self.assertIn(
+            "strict_pit_unavailable",
+            {issue.code for issue in outcome.report.issues},
+        )
+
+    def test_quantity_actions_require_independent_integrity_evidence(self) -> None:
+        from app.backtesting.data.sessions import AuthoritativeDataSession
+        from tests.test_backtesting_data_session import (
+            COMMON_OPEN,
+            J5,
+            J7,
+            build_provider,
+            make_request,
+        )
+
+        frozen = make_request(J5, J7, calendar_ids=("SSE", "SZSE"), instrument_id=IID)
+        request = DataPreflightRequest(
+            **{
+                field.name: getattr(frozen, field.name)
+                for field in DataPreflightRequest.__dataclass_fields__.values()
+            }
+        )
+        request = replace(
+            request,
+            required_capabilities=(DataCapability.BARS, DataCapability.ACTIONS),
+        )
+        ready = AuthoritativeDataSession(
+            request=replace(
+                frozen,
+                required_capabilities=(DataCapability.BARS, DataCapability.ACTIONS),
+            ),
+            calendar_provider=build_provider(COMMON_OPEN, COMMON_OPEN),
+        ).preflight()
+        outcome = DataPreflightService(FakeProvider(ready), profile="formal@1").preflight(
+            PreflightContext(request=request, provider=FakeProvider(ready), profile="formal@1")
+        )
+
+        self.assertEqual(outcome.status, PreflightStatus.BLOCKED)
+        self.assertIn(
+            "quantity_action_integrity_incomplete",
+            {issue.code for issue in outcome.report.issues},
+        )
 
     def test_request_without_status_does_not_require_status_manifest_fixture_or_coverage(self) -> None:
         from app.backtesting.data.sessions import AuthoritativeDataSession

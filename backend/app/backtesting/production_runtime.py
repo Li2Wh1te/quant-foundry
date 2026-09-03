@@ -26,8 +26,9 @@ from app.backtesting.data.protocols import ConsistencyTokenStatus, DataConsisten
 from app.backtesting.data.requests import (
     BarQuery, CHUNK_POLICY, ConsistencyMode, ConsistencyValidation, ContractRef,
     DataCapability, DataChunkQuery, DataPreflightRequest, DataRequest, DateRange,
-    InstrumentScopeMode, LookbackWindow, MarketScope, PriceBasis, PreflightStatus,
-    QueryBoundary, UniverseQuery as DataUniverseQuery, UniverseQueryPolicy,
+    InstrumentScopeMode, IssueSeverity, LookbackWindow, MarketScope, PriceBasis,
+    PreflightStatus, QueryBoundary, UniverseQuery as DataUniverseQuery,
+    UniverseQueryPolicy,
 )
 from app.backtesting.data.reports import DataCoverageReport, DataPreflightReport, PreflightIssue
 from app.backtesting.domain import PositionSide, PositionState, PortfolioState
@@ -245,8 +246,90 @@ class SqlBacktestProvider:
                 coverage_reports.append(self.adapter.project_coverage_report(instrument_id, expected, summary, SimpleNamespace(formal_envelope=request.requested_window, history_envelope=request.requested_window)))
             except Exception as exc:
                 issues.append(PreflightIssue(code="coverage_incomplete", severity=__import__("app.backtesting.data.requests", fromlist=["IssueSeverity"]).IssueSeverity.ERROR, scope="formal", message="ETF 行情覆盖预检失败，已阻断回测。", field="coverage.bars", instrument_id=instrument_id, details={"error_type": type(exc).__name__}))
-        summary = self.adapter.preflight_summary(instrument_ids=request.fixed_instrument_ids, expected_sessions=expected, bars_by_instrument=bars_by_instrument, mappings_by_instrument=mappings_by_instrument, daily_rows=source_rows, data_cutoff=request.query_boundary.data_cutoff, required_capabilities=request.required_capabilities, strategy_price_bases=request.strategy_price_bases, preflight_profile="formal@1", run_kind="backtest_run")
-        return __import__("dataclasses").replace(calendar_report, status=PreflightStatus.BLOCKED if issues else calendar_report.status, static_instrument_ids=request.static_instrument_ids, mandatory_instrument_ids=request.mandatory_instrument_ids, non_zero_initial_position_instrument_ids=request.non_zero_initial_position_instrument_ids, resolved_instruments=request.fixed_instrument_ids, coverage_reports=tuple(coverage_reports), source_revisions=summary.get("source_revisions") if isinstance(summary.get("source_revisions"), Mapping) else {}, non_strict_pit_capabilities=(DataCapability.BARS,), non_strict_pit=True, run_kind="backtest_run", preflight_profile_key="formal", preflight_profile_version=1, session_summary={"production_capabilities": {"status": "complete", "provider_key": self.provider_key}}, issues=tuple((*calendar_report.issues, *issues)))
+        summary = self.adapter.preflight_summary(
+            instrument_ids=request.fixed_instrument_ids,
+            expected_sessions=expected,
+            bars_by_instrument=bars_by_instrument,
+            mappings_by_instrument=mappings_by_instrument,
+            daily_rows=source_rows,
+            data_cutoff=request.query_boundary.data_cutoff,
+            required_capabilities=request.required_capabilities,
+            strategy_price_bases=request.strategy_price_bases,
+            preflight_profile="formal@1",
+            run_kind="backtest_run",
+        )
+        provider_issues = list(issues)
+        for item in summary.get("issues", ()):
+            if not isinstance(item, Mapping):
+                continue
+            provider_issues.append(
+                PreflightIssue(
+                    code=str(item.get("code", "provider_contract_violation")),
+                    severity=IssueSeverity.ERROR,
+                    scope="formal",
+                    message="ETF 数据准入证据未通过，已阻断回测。",
+                    field=str(item.get("field")) if item.get("field") else "provider",
+                    details={
+                        key: value
+                        for key, value in item.items()
+                        if key not in {"code", "field"}
+                    },
+                )
+            )
+        if summary.get("status") == "blocked" and not provider_issues:
+            provider_issues.append(
+                PreflightIssue(
+                    code="coverage_incomplete",
+                    severity=IssueSeverity.ERROR,
+                    scope="formal",
+                    message="ETF 数据覆盖证据未完整覆盖请求范围，已阻断回测。",
+                    field="coverage",
+                )
+            )
+        pit_status = summary.get("pit_status")
+        non_strict_capabilities = (
+            (DataCapability.BARS,)
+            if isinstance(pit_status, Mapping)
+            and pit_status.get("daily_bars") == "non_strict"
+            else ()
+        )
+        return __import__("dataclasses").replace(
+            calendar_report,
+            status=(
+                PreflightStatus.BLOCKED
+                if provider_issues
+                else calendar_report.status
+            ),
+            static_instrument_ids=request.static_instrument_ids,
+            mandatory_instrument_ids=request.mandatory_instrument_ids,
+            non_zero_initial_position_instrument_ids=request.non_zero_initial_position_instrument_ids,
+            resolved_instruments=request.fixed_instrument_ids,
+            coverage_reports=tuple(coverage_reports),
+            source_revisions=(
+                summary.get("source_revisions")
+                if isinstance(summary.get("source_revisions"), Mapping)
+                else {}
+            ),
+            non_strict_pit_capabilities=non_strict_capabilities,
+            non_strict_pit=bool(non_strict_capabilities),
+            quantity_action_integrity=(
+                summary.get("quantity_action_integrity")
+                if isinstance(summary.get("quantity_action_integrity"), Mapping)
+                else None
+            ),
+            run_kind="backtest_run",
+            preflight_profile_key="formal",
+            preflight_profile_version=1,
+            session_summary={
+                "production_capabilities": {
+                    "status": "complete",
+                    "provider_key": self.provider_key,
+                },
+                "pit_status": pit_status,
+                "adapter_preflight_status": summary.get("status"),
+            },
+            issues=tuple((*calendar_report.issues, *provider_issues)),
+        )
 
     @staticmethod
     def _bootstrap_request(request, calendars):

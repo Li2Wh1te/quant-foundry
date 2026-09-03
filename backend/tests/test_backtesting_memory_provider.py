@@ -905,6 +905,32 @@ class TestLookbackAndCutoff(unittest.TestCase):
             )
         self.assertEqual(provider.read_count, 0)
 
+    def test_strict_knowledge_boundary_rejects_bars_without_visible_evidence(self) -> None:
+        session = open_ready_session(
+            self.provider,
+            make_intent(start=LONG_START, end=LONG_END),
+        )
+        chunk = session.open_chunk(chunk_query(session, 0))
+        chunk.validate_consistency()
+        strict_boundary = QueryBoundary(
+            data_cutoff=LONG_CUTOFF,
+            knowledge_as_of=LONG_CUTOFF - timedelta(days=1),
+            include_cutoff_day=False,
+        )
+        with self.assertRaises(ProviderContractViolationError) as caught:
+            chunk.bars(
+                BarQuery(
+                    instrument_ids=IID_A,
+                    frequency="1d",
+                    boundary=strict_boundary,
+                    window=DateRange(
+                        start_date=LONG_START,
+                        end_date=LONG_START + timedelta(days=2),
+                    ),
+                )
+            )
+        self.assertEqual(caught.exception.details["reason_code"], "knowledge_as_of_exceeded")
+
     def test_future_bar_injection_is_intercepted(self) -> None:
         class LeakyProvider(MemoryDataProvider):
             def _raw_bars(self, instrument_ids, frequency, start_day, end_day):
