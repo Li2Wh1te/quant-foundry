@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 import inspect
 import logging
 import signal
+from types import ModuleType
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
@@ -236,6 +237,122 @@ def _stop_progress_reporter(reporter: Any) -> None:
         flush()
 
 
+def _load_strategy_module(source_code: str) -> ModuleType:
+    """Compile published source only inside the isolated backtest worker."""
+
+    if not isinstance(source_code, str) or not source_code.strip():
+        raise WorkerDependencyUnavailable("published strategy source is empty")
+    module = ModuleType("published_strategy")
+    module.__file__ = "published_strategy"
+    exec(compile(source_code, "published_strategy", "exec"), module.__dict__)  # noqa: S102
+    return module
+
+
+def _production_callbacks(run_id: UUID, launch_id: UUID, expected_config_hash: str | None):
+    """Build database callbacks for one Supervisor-owned worker launch."""
+
+    from sqlalchemy.orm import Session
+
+    from app.backtesting.models import BacktestRunRecord
+    from app.backtesting.production_runtime import binding_from_row, execute_runtime
+    from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
+    from app.core.config import get_settings
+    from app.db.session import get_engine
+    from app.strategies.models import StrategyRevision
+
+    engine = get_engine()
+
+    def load_binding(_run_id: UUID):
+        with Session(engine) as session:
+            row = session.get(BacktestRunRecord, _run_id)
+            if row is None:
+                raise WorkerDependencyUnavailable("persisted run root does not exist")
+            if expected_config_hash is not None and row.config_hash != expected_config_hash:
+                raise WorkerDependencyUnavailable("persisted run config hash does not match launch")
+            binding = binding_from_row(row)
+            revision = session.get(StrategyRevision, UUID(str(row.strategy_revision_id)))
+            if revision is None:
+                raise WorkerDependencyUnavailable("published strategy revision does not exist")
+            binding.strategy = dict(binding.strategy)
+            binding.strategy["source_code"] = revision.source_code
+            binding.strategy["parameter_schema"] = revision.parameter_schema or {}
+            binding.strategy["parameters"] = row.parameters or revision.default_parameters or {}
+            return binding
+
+    def write_handshake(payload: Mapping[str, Any]):
+        from app.backtesting.run_repository import DatabaseRunRepository
+        with Session(engine) as session:
+            row = session.get(BacktestRunRecord, run_id)
+            if row is None or row.launch_id != launch_id or row.status != "starting":
+                return False
+            changed = DatabaseRunRepository(session).record_handshake(
+                run_id,
+                WorkerHandshake(
+                    run_id=str(payload["run_id"]),
+                    launch_id=str(payload["launch_id"]),
+                    pid=int(payload["pid"]),
+                    start_identity=str(payload["start_identity"]),
+                    process_group_id=int(payload["process_group_id"]),
+                    protocol_version=str(payload.get("protocol_version", HANDSHAKE_PROTOCOL)),
+                    worker_id=payload.get("worker_id"),
+                    observed_at=(
+                        datetime.fromisoformat(str(payload["observed_at"]))
+                        if payload.get("observed_at")
+                        else datetime.now(UTC)
+                    ),
+                ),
+            )
+            session.commit()
+            return bool(changed)
+
+    def write_resource_evidence(payload: Mapping[str, Any]):
+        from sqlalchemy import update
+        with Session(engine) as session:
+            session.execute(
+                update(BacktestRunRecord)
+                .where(BacktestRunRecord.id == run_id, BacktestRunRecord.launch_id == launch_id)
+                .values(resource_limit_evidence=dict(payload))
+            )
+            session.commit()
+
+    def execute_one(binding, *, context, progress_reporter=None, signal_state=None):
+        del signal_state
+        with Session(engine) as session:
+            return execute_runtime(
+                binding,
+                session=session,
+                launch_id=launch_id,
+                strategy_module=_load_strategy_module(binding.strategy["source_code"]),
+                worker_id=context.worker_id,
+                progress_reporter=progress_reporter,
+            )
+
+    def persist_results(raw_result):
+        # execute_runtime writes result rows in savepoints; this outer commit
+        # is the transaction boundary that makes the marker eligible.
+        return True
+
+    def write_marker(payload: Mapping[str, Any]):
+        with Session(engine) as session:
+            row = session.get(BacktestRunRecord, run_id)
+            if row is None:
+                return False
+            context = BacktestResultContext(
+                run_id=run_id,
+                run_kind=row.run_kind,
+                profile=row.profile,
+                config_hash=row.config_hash,
+                owner_scope=row.tenant_id,
+                launch_id=launch_id,
+            )
+            writer = BacktestResultPersistenceService(session, context)
+            writer.record_completion_marker(payload, exit_code=0)
+            session.commit()
+            return True
+
+    return load_binding, execute_one, write_handshake, persist_results, write_marker, write_resource_evidence
+
+
 def run_worker(
     run_id: UUID | str,
     launch_id: UUID | str,
@@ -456,19 +573,63 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Production entry point remains closed until dependency wiring is present."""
+    """Load the frozen run and execute it inside this isolated child."""
 
     args = _parse_args(argv)
-    logger.error(
-        "回测 worker 正式依赖尚未接入，已拒绝执行策略源码。",
-        extra={
-            "event": "backtest_worker_not_configured",
-            "run_id": args.run_id,
-            "launch_id": args.launch_id,
-            "exit_code": CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value],
-        },
+    run_id = UUID(args.run_id)
+    launch_id = UUID(args.launch_id)
+    from sqlalchemy.orm import Session
+
+    from app.backtesting.models import BacktestRunRecord
+    from app.backtesting.runner_progress import DatabaseProgressPersistence, ProgressReporter
+    from app.core.config import get_settings
+    from app.db.session import get_engine
+
+    engine = get_engine()
+    with Session(engine) as session:
+        row = session.get(BacktestRunRecord, run_id)
+        if row is None:
+            logger.error(
+                "回测 worker 找不到持久化运行，已拒绝执行。",
+                extra={"event": "backtest_worker_dependency_unavailable", "run_id": args.run_id, "launch_id": args.launch_id},
+            )
+            return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
+        expected_hash = row.config_hash
+
+    (
+        load_binding,
+        execute,
+        write_handshake,
+        persist_results,
+        write_marker,
+        write_resource_evidence,
+    ) = _production_callbacks(run_id, launch_id, expected_hash)
+    settings = get_settings()
+    progress_persistence = DatabaseProgressPersistence(lambda: Session(engine))
+    reporter = ProgressReporter(
+        run_id,
+        launch_id=launch_id,
+        worker_id=f"backtest-worker:{run_id}",
+        persist_progress=progress_persistence.persist_progress,
+        persist_heartbeat=progress_persistence.persist_heartbeat,
+        heartbeat_max_interval_seconds=settings.backtest_heartbeat_max_interval_seconds,
+        progress_persist_interval_seconds=settings.backtest_progress_persist_interval_seconds,
+        lost_heartbeat_seconds=settings.backtest_lost_heartbeat_seconds,
     )
-    return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
+    return run_worker(
+        run_id,
+        launch_id,
+        load_binding=load_binding,
+        execute=execute,
+        write_handshake=write_handshake,
+        persist_results=persist_results,
+        write_marker=write_marker,
+        expected_config_hash=expected_hash,
+        worker_id=f"backtest-worker:{run_id}",
+        memory_limit_mib=settings.backtest_memory_limit_mib,
+        progress_reporter=reporter,
+        write_resource_evidence=write_resource_evidence,
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - exercised through subprocess tests

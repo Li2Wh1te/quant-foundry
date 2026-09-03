@@ -18,9 +18,11 @@ from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.core.logging import backtest_event_message
+from app.strategies.repository import StrategyRepository
 from app.db.session import get_db_session
 
 from .domain import PositionSide
+from .spec import BacktestSpec, InitialPositionInput
 from .run_admission import RunAdmissionService
 from .run_binding import (
     BacktestRun,
@@ -37,8 +39,10 @@ from .run_repository import (
     TERMINAL_STATUSES,
 )
 from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse
-from app.strategies.repository import StrategyRepository
-from .spec import BacktestSpec, InitialPositionInput
+from .production_runtime import (
+    DEFAULT_RULE_PACKAGE,
+    build_formal_binding,
+)
 
 
 router = APIRouter(prefix="/api/admin/backtest-runs", tags=["backtests"])
@@ -156,6 +160,9 @@ def _validate_spec(raw: Mapping[str, Any], expected_kind: str) -> None:
         "initial_cash",
         "initial_positions",
         "dynamic_universe",
+        "parameters",
+        "exchanges",
+        "instrument_ids",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -447,7 +454,21 @@ def _create(
     session: object,
     request: Request | None,
 ) -> RunResponse:
-    binding = _binding(payload, kind=kind)
+    if _is_session(session) and kind == FORMAL_KIND:
+        revision = StrategyRepository(session).get_revision(payload.strategy_revision_id)
+        if revision is None:
+            raise ValueError("published strategy revision is required")
+        binding_result = build_formal_binding(
+            spec=_build_spec(payload.spec),
+            revision=revision,
+            raw_spec=payload.spec,
+            session=session,
+            degraded=payload.degraded,
+            confirmed_report_hash=payload.confirmed_admission_report_hash,
+        )
+        binding = binding_result.binding
+    else:
+        binding = _binding(payload, kind=kind)
     scope = "default"
     if _is_session(session):
         repository = _db_repository(session, request)
@@ -461,7 +482,7 @@ def _create(
         )
         if existing is not None:
             return _response(existing)
-        if kind == FORMAL_KIND:
+        if kind == FORMAL_KIND and not _is_session(session):
             admission = _service.admission(
                 binding,
                 {},
@@ -556,6 +577,26 @@ def create_formal(
         ) from exc
     except Exception as exc:
         _rollback(session)
+        admission = getattr(exc, "admission_result", None)
+        if admission is not None:
+            outcome = getattr(admission, "outcome", None)
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": getattr(admission, "reason_code", None) or "formal_preflight_blocked",
+                    "message": str(exc),
+                    "status": getattr(outcome, "status", "blocked"),
+                    "report_hash": getattr(admission, "report_hash", None),
+                    "issues": [
+                        item.as_dict() if hasattr(item, "as_dict") else item
+                        for item in (
+                            getattr(getattr(outcome, "report", None), "issues", ())
+                            if outcome is not None
+                            else ()
+                        )
+                    ],
+                },
+            ) from exc
         raise HTTPException(
             status_code=422,
             detail={
@@ -567,16 +608,61 @@ def create_formal(
 
 
 @router.post("/preflight")
-def preflight(payload: RunCreateRequest) -> dict[str, Any]:
-    """Keep preflight side-effect free until task-08 provides its canonical gate."""
+def preflight(
+    payload: RunCreateRequest,
+    session: Session = Depends(get_db_session),
+) -> dict[str, Any]:
+    """Run the same side-effect-free formal admission used by creation."""
 
-    return {
-        "status": "blocked",
-        "code": "preflight_dependency_unavailable",
-        "message": "准入依赖未就绪，已拒绝运行",
-        "report_hash": None,
-        "issues": [],
-    }
+    try:
+        revision = StrategyRepository(session).get_revision(payload.strategy_revision_id)
+        if revision is None:
+            raise ValueError("published strategy revision is required")
+        binding_result = build_formal_binding(
+            spec=_build_spec(payload.spec),
+            revision=revision,
+            raw_spec=payload.spec,
+            session=session,
+            degraded=payload.degraded,
+            confirmed_report_hash=payload.confirmed_admission_report_hash,
+        )
+        binding = binding_result.binding
+        evidence = binding.metadata.get("data_evidence", {})
+        return {
+            "status": "ready",
+            "code": None,
+            "message": "正式回测准入预检通过",
+            "report_hash": binding.metadata.get("admission_report_hash"),
+            "issues": evidence.get("issues", []) if isinstance(evidence, Mapping) else [],
+        }
+    except Exception as exc:
+        admission = getattr(exc, "admission_result", None)
+        if admission is not None:
+            outcome = getattr(admission, "outcome", None)
+            return {
+                "status": getattr(outcome, "status", "blocked").value
+                if outcome is not None
+                else "blocked",
+                "code": getattr(admission, "reason_code", None) or "formal_preflight_blocked",
+                "message": str(exc),
+                "report_hash": getattr(admission, "report_hash", None),
+                "issues": [
+                    item.as_dict() if hasattr(item, "as_dict") else item
+                    for item in (
+                        getattr(getattr(outcome, "report", None), "issues", ())
+                        if outcome is not None
+                        else ()
+                    )
+                ],
+            }
+        session.rollback()
+        return {
+            "status": "blocked",
+            "code": "formal_preflight_failed",
+            "message": "正式回测准入预检失败",
+            "report_hash": None,
+            "issues": [{"error_type": type(exc).__name__}],
+        }
 
 
 @internal_router.post(
