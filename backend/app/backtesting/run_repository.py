@@ -433,6 +433,18 @@ class DatabaseRunRepository:
         data_request = (
             binding.data_request if isinstance(binding.data_request, Mapping) else {}
         )
+        chunk_policy = data_request.get("data_chunk_policy", {})
+        if not isinstance(chunk_policy, Mapping):
+            chunk_policy = {}
+        query_boundary = data_request.get("query_boundary", {})
+        if not isinstance(query_boundary, Mapping):
+            query_boundary = {}
+        pit_cutoff_at = query_boundary.get("data_cutoff")
+        if isinstance(pit_cutoff_at, str):
+            try:
+                pit_cutoff_at = datetime.fromisoformat(pit_cutoff_at)
+            except ValueError:
+                raise ValueError("frozen data request has an invalid data_cutoff")
         positions = [
             {
                 "instrument_id": str(item.instrument_id),
@@ -473,11 +485,16 @@ class DatabaseRunRepository:
             data_request=_json_value(data_request),
             data_evidence=_json_value(metadata.get("data_evidence", {})),
             pit_snapshot_hash=metadata.get("pit_snapshot_hash"),
+            pit_cutoff_at=pit_cutoff_at,
             data_provider_key=data_request.get("provider_key"),
             max_lookback_sessions=int(data_request.get("max_lookback_sessions", 512)),
-            data_chunk_policy_key="fixed_trading_sessions",
-            data_chunk_policy_version=1,
-            data_chunk_size_sessions=20,
+            data_chunk_policy_key=str(
+                chunk_policy.get("key", "fixed_trading_sessions")
+            ),
+            data_chunk_policy_version=int(chunk_policy.get("version", 1)),
+            data_chunk_size_sessions=int(
+                data_request.get("data_chunk_size_sessions", 20)
+            ),
             data_admission_preflight_hash=metadata.get("admission_report_hash"),
             data_preflight_hash=metadata.get("preflight_hash"),
             account_profile_id=(
@@ -501,8 +518,9 @@ class DatabaseRunRepository:
                 else None
             ),
             fee_schedule_snapshot=_json_value(fee_schedule),
+            random_seed=binding.random_seed,
             analyzer_specs=(
-                _json_value(binding.components.get("analyzers", ()))
+                _json_value(binding.components.get("analyzer", ()))
                 if isinstance(binding.components, Mapping)
                 else []
             ),
@@ -627,6 +645,7 @@ class DatabaseRunRepository:
             fee_schedule_snapshot=_json_value(original.fee_schedule_snapshot),
             analyzer_specs=_json_value(original.analyzer_specs),
             behavior_versions=_json_value(original.behavior_versions),
+            random_seed=original.random_seed,
         )
         try:
             with self.session.begin_nested():

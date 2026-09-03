@@ -57,7 +57,9 @@ class AccountProfileService:
             id=uuid4(),
             name=normalized_name,
             status=_normalize_status(status),
+            version=1,
             fee_schedule_key=schedule.key,
+            fee_schedule_version=1,
             fee_rules=_json_value(
                 [_fee_rule_payload(rule) for rule in schedule.fee_rules]
             ),
@@ -82,23 +84,33 @@ class AccountProfileService:
         record = self.repository.get(profile_id, for_update=True)
         if record is None:
             raise AccountProfileNotFoundError(str(profile_id))
+        changed = False
+        if record.fee_schedule_version is None:
+            record.fee_schedule_version = 1
         if name is not None:
             normalized_name = _normalize_name(name)
             if self.repository.name_exists(normalized_name, excluding_id=profile_id):
                 raise AccountProfileNameConflictError(normalized_name)
             record.name = normalized_name
+            changed = True
         if status is not None:
             record.status = _normalize_status(status)
+            changed = True
         if fee_schedule is not None:
             schedule = _build_schedule(fee_schedule)
             _validate_formal_schedule(schedule)
             record.fee_schedule_key = schedule.key
+            record.fee_schedule_version = int(record.fee_schedule_version or 1) + 1
             record.fee_rules = _json_value(
                 [_fee_rule_payload(rule) for rule in schedule.fee_rules]
             )
             record.fee_schedule_metadata = _json_value(dict(schedule.metadata))
+            changed = True
         if metadata is not None:
             record.profile_metadata = _json_value(dict(metadata))
+            changed = True
+        if changed:
+            record.version = int(record.version or 1) + 1
         self.session.flush()
         return record
 
@@ -165,6 +177,11 @@ def _build_schedule(payload: Mapping[str, Any]) -> FeeSchedule:
         schedule = FeeSchedule(
             key=str(payload["key"]),
             fee_rules=rules,
+            version=(
+                int(payload["version"])
+                if payload.get("version") is not None
+                else None
+            ),
             metadata=dict(payload.get("metadata", {})),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -221,6 +238,7 @@ def fee_schedule_from_record(record: BacktestAccountProfileRecord) -> FeeSchedul
     return _build_schedule(
         {
             "key": record.fee_schedule_key,
+            "version": int(getattr(record, "fee_schedule_version", None) or 1),
             "fee_rules": deepcopy(record.fee_rules),
             "metadata": deepcopy(record.fee_schedule_metadata),
         }

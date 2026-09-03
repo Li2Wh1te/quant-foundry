@@ -41,6 +41,7 @@ def test_runner_schema_exposes_all_supervision_fields_and_guard_model():
         "completion_marker_protocol",
         "completion_marker_validation",
         "result_integrity_evidence",
+        "random_seed",
         "terminal_decision_reason",
         "failure_phase",
         "failure_type",

@@ -114,6 +114,12 @@ def _request_fingerprint(payload: RunCreateRequest, kind: str) -> str:
         {
             "run_kind": kind,
             "strategy_revision_id": str(payload.strategy_revision_id),
+            "account_profile_id": (
+                str(payload.account_profile_id)
+                if payload.account_profile_id is not None
+                else None
+            ),
+            "random_seed": payload.random_seed,
             "spec": payload.spec,
             "degraded": payload.degraded,
             "confirmed_admission_report_hash": payload.confirmed_admission_report_hash,
@@ -206,6 +212,10 @@ def _validate_spec(raw: Mapping[str, Any], expected_kind: str) -> None:
         "parameters",
         "exchanges",
         "instrument_ids",
+        "currency",
+        "timezone",
+        "frequency",
+        "warmup_sessions",
     }
     unknown = set(raw) - allowed
     if unknown:
@@ -246,6 +256,10 @@ def _build_spec(raw: Mapping[str, Any], *, internal: bool = False) -> BacktestSp
         initial_cash=raw.get("initial_cash", 0),
         initial_positions=positions,
         dynamic_universe=bool(raw.get("dynamic_universe", False)),
+        currency=str(raw.get("currency", "CNY")),
+        timezone=str(raw.get("timezone", "Asia/Shanghai")),
+        frequency=str(raw.get("frequency", "1d")),
+        warmup_sessions=int(raw.get("warmup_sessions", 0)),
     )
 
 
@@ -260,6 +274,12 @@ def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
         run_kind=kind,
         strategy={"revision_id": str(payload.strategy_revision_id), "published": True},
         data_request={},
+        account=(
+            {"profile_id": str(payload.account_profile_id)}
+            if payload.account_profile_id is not None
+            else {}
+        ),
+        random_seed=payload.random_seed,
     )
 
 
@@ -302,25 +322,37 @@ def _response(run: BacktestRun | object) -> RunResponse:
                 if isinstance(binding.strategy, Mapping)
                 else None
             ),
-            "parameters": {
-                "start_date": spec.start_date,
-                "end_date": spec.end_date,
-                "initial_cash": str(spec.initial_cash),
-                "initial_positions": [
-                    {
-                        "instrument_id": str(position.instrument_id),
-                        "side": position.side.value,
-                        "quantity": str(position.quantity),
-                    }
-                    for position in spec.initial_positions
-                ],
-                "dynamic_universe": spec.dynamic_universe,
-            },
+            "parameters": _wire_value(
+                binding.strategy.get("parameters", {})
+                if isinstance(binding.strategy, Mapping)
+                else {}
+            ),
             "backtest_config": _wire_value(binding.config),
             "data_request": _wire_value(binding.data_request),
             "behavior_versions": _wire_value(binding.metadata.get("behavior_versions", {}))
             if isinstance(binding.metadata, Mapping)
             else {},
+            "account_profile_id": _uuid_or_none(
+                binding.account.get("profile_id", binding.account.get("account_profile_id"))
+                if isinstance(binding.account, Mapping)
+                else None
+            ),
+            "account_profile_version": (
+                str(binding.account.get("version"))
+                if isinstance(binding.account, Mapping) and binding.account.get("version") is not None
+                else None
+            ),
+            "fee_schedule_key": (
+                str(binding.account.get("fee_schedule_key"))
+                if isinstance(binding.account, Mapping) and binding.account.get("fee_schedule_key") is not None
+                else None
+            ),
+            "fee_schedule_version": (
+                str(binding.account.get("fee_schedule_version"))
+                if isinstance(binding.account, Mapping) and binding.account.get("fee_schedule_version") is not None
+                else None
+            ),
+            "random_seed": binding.random_seed,
             "progress_ratio": 0,
         }
         return RunResponse(**values)
@@ -372,6 +404,19 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "backtest_config": _wire_value(config or {}),
         "data_request": _wire_value(data_request),
         "behavior_versions": _wire_value(behavior_versions),
+        "account_profile_id": _uuid_or_none(getattr(run, "account_profile_id", None)),
+        "account_profile_version": (
+            str(getattr(run, "account_profile_version", None))
+            if getattr(run, "account_profile_version", None) is not None
+            else None
+        ),
+        "fee_schedule_key": getattr(run, "fee_schedule_key", None),
+        "fee_schedule_version": (
+            str(getattr(run, "fee_schedule_version", None))
+            if getattr(run, "fee_schedule_version", None) is not None
+            else None
+        ),
+        "random_seed": getattr(run, "random_seed", None),
         # The database column is retained for compatibility with the existing
         # run root, while the API exposes the canonical protocol name only.
         "progress_ratio": float(
@@ -527,6 +572,8 @@ def _create(
             session=session,
             degraded=payload.degraded,
             confirmed_report_hash=payload.confirmed_admission_report_hash,
+            account_profile_id=payload.account_profile_id,
+            random_seed=payload.random_seed,
         )
         binding = binding_result.binding
         rule_snapshot_bundle = binding_result.rule_snapshot_bundle
@@ -702,6 +749,8 @@ def preflight(
             session=session,
             degraded=payload.degraded,
             confirmed_report_hash=payload.confirmed_admission_report_hash,
+            account_profile_id=payload.account_profile_id,
+            random_seed=payload.random_seed,
         )
         binding = binding_result.binding
         evidence = binding.metadata.get("data_evidence", {})

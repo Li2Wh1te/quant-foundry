@@ -30,9 +30,9 @@ from app.db.base import Base
 class BacktestAccountProfileRecord(Base):
     """One editable account profile bound to one editable fee schedule.
 
-    The record intentionally has no user-managed version column.  A future
-    run-creation flow will copy the complete row into its own configuration
-    snapshot; this table remains the current operator-editable catalogue.
+    The row is the current editable catalogue entry.  ``version`` advances
+    whenever the profile is edited, while each run copies the complete row and
+    fee configuration into its own immutable snapshot.
     """
 
     __tablename__ = "backtest_account_profiles"
@@ -49,6 +49,11 @@ class BacktestAccountProfileRecord(Base):
         CheckConstraint(
             "fee_schedule_key <> 'zero_cost'",
             name="zero_cost_schedule_forbidden",
+        ),
+        CheckConstraint("version > 0", name="account_profile_version_positive"),
+        CheckConstraint(
+            "fee_schedule_version > 0",
+            name="fee_schedule_version_positive",
         ),
         CheckConstraint(
             "jsonb_typeof(fee_rules) = 'array'",
@@ -97,10 +102,24 @@ class BacktestAccountProfileRecord(Base):
         server_default="active",
         comment="Account lifecycle state; only active profiles are selectable.",
     )
+    version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Monotonic account configuration version captured by new runs.",
+    )
     fee_schedule_key: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
         comment="Stable fee-schedule key bound to this account profile.",
+    )
+    fee_schedule_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Monotonic fee configuration version captured by new runs.",
     )
     fee_rules: Mapped[list[dict[str, Any]]] = mapped_column(
         JSONB,
@@ -216,6 +235,7 @@ class BacktestRunRecord(Base):
     fee_schedule_snapshot: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     analyzer_specs: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     behavior_versions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
+    random_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
     progress: Mapped[float] = mapped_column(Numeric(6, 5), nullable=False, server_default="0")
     # Canonical supervisor progress fields.  ``current_date`` and the legacy
     # integer step column are retained below for rows created by task 08; all
@@ -302,9 +322,13 @@ _IMMUTABLE_RUN_FIELDS = (
     "tenant_id", "idempotency_scope", "run_kind", "profile", "idempotency_key",
     "idempotency_request_hash", "rerun_of_run_id", "config_hash",
     "backtest_config", "strategy_revision_id", "strategy_source_hash",
-    "parameters", "data_request", "account_profile_id", "account_profile_version",
+    "strategy_contract_version", "parameters", "initial_cash", "initial_positions",
+    "data_request", "data_provider_key", "max_lookback_sessions",
+    "data_chunk_policy_key", "data_chunk_policy_version", "data_chunk_size_sessions",
+    "data_admission_preflight_hash", "account_profile_id", "account_profile_version",
     "fee_schedule_key", "fee_schedule_version", "fee_schedule_snapshot",
-    "behavior_versions", "data_evidence", "pit_snapshot_hash", "pit_cutoff_at",
+    "analyzer_specs", "behavior_versions", "random_seed", "data_evidence",
+    "pit_snapshot_hash", "pit_cutoff_at",
 )
 
 

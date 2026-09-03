@@ -135,6 +135,7 @@ def _fee_schedule_payload(schedule: FeeScheduleSnapshot) -> dict[str, Any]:
 
     return {
         "key": schedule.key,
+        "version": schedule.version,
         "fee_rules": [_fee_rule_payload(rule) for rule in schedule.fee_rules],
         "metadata": schedule.metadata,
     }

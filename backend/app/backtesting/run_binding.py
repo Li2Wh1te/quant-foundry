@@ -44,7 +44,21 @@ def _safe_mapping(value: Mapping[str, Any]) -> dict[str, Any]:
     for key, item in value.items():
         name = str(key)
         lowered = name.lower()
-        if any(word in lowered for word in ("secret", "password", "credential", "access_token", "refresh_token", "token", "private_key")):
+        sensitive_name = (
+            any(
+                word in lowered
+                for word in (
+                    "secret",
+                    "password",
+                    "credential",
+                    "access_token",
+                    "refresh_token",
+                    "private_key",
+                )
+            )
+            or lowered in {"token", "api_token", "auth_token", "bearer_token"}
+        )
+        if sensitive_name:
             raise ValueError(f"sensitive field is forbidden in run binding: {name}")
         if isinstance(item, Mapping):
             result[name] = _safe_mapping(item)
@@ -65,6 +79,7 @@ class RunBinding:
     data_request: Mapping[str, Any] = field(default_factory=dict)
     account: Mapping[str, Any] = field(default_factory=dict)
     metadata: Mapping[str, Any] = field(default_factory=dict)
+    random_seed: int | None = None
     config: Mapping[str, Any] = field(init=False)
     config_hash: str = field(init=False)
 
@@ -75,10 +90,22 @@ class RunBinding:
             raise ValueError("formal runs must use formal@1")
         if self.run_kind == "internal_link_acceptance" and self.profile != "internal_link_acceptance@1":
             raise ValueError("internal runs must use internal_link_acceptance@1")
+        if self.random_seed is not None and (
+            isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int)
+        ):
+            raise ValueError("random_seed must be an integer or null")
         payload = {
+            # Bump this only when the serialized meaning of a run input
+            # changes.  The value is part of config_hash, so an old run can
+            # never be mistaken for a new snapshot shape.
+            "schema_version": 1,
             "spec": {
                 "start_date": self.spec.start_date,
                 "end_date": self.spec.end_date,
+                "currency": self.spec.currency,
+                "timezone": self.spec.timezone,
+                "frequency": self.spec.frequency,
+                "warmup_sessions": self.spec.warmup_sessions,
                 "initial_cash": str(self.spec.initial_cash),
                 "initial_positions": [
                     {"instrument_id": p.instrument_id, "side": p.side.value,
@@ -92,6 +119,7 @@ class RunBinding:
             "strategy": _safe_mapping(self.strategy), "components": _safe_mapping(self.components),
             "data_request": _safe_mapping(self.data_request), "account": _safe_mapping(self.account),
             "metadata": _safe_mapping(self.metadata),
+            "random_seed": self.random_seed,
         }
         object.__setattr__(self, "config", _freeze(_plain(payload)))
         object.__setattr__(self, "config_hash", canonical_hash(payload))
@@ -107,7 +135,8 @@ class RunBindingBuilder:
               metadata: Mapping[str, Any] | None = None,
               strategy_revision: Mapping[str, Any] | None = None,
               account_resolver: Any = None,
-              account_context: Any = None) -> RunBinding:
+              account_context: Any = None,
+              random_seed: int | None = None) -> RunBinding:
         if strategy_revision is not None:
             strategy = self.build_strategy(strategy_revision)
         if account_resolver is not None:
@@ -125,7 +154,17 @@ class RunBindingBuilder:
                 fee_key = schedule.get("key")
             if fee_key == "zero_cost":
                 raise ValueError("zero_cost fee schedule is reserved for tests")
-        return RunBinding(spec, run_kind, profile, strategy or {}, components or {}, data_request or {}, account or {}, metadata or {})
+        return RunBinding(
+            spec,
+            run_kind,
+            profile,
+            strategy or {},
+            components or {},
+            data_request or {},
+            account or {},
+            metadata or {},
+            random_seed,
+        )
 
     def build_strategy(self, revision: Mapping[str, Any]) -> Mapping[str, Any]:
         """Accept only an explicitly published, immutable strategy revision."""

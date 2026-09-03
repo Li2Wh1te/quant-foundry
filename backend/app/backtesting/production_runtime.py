@@ -19,6 +19,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.backtesting.accounting import AccountState, AccountingPolicy, SettlementPolicy
+from app.backtesting.fees import FeeCalculator, FeeRule, FeeSchedule
 from app.backtesting.data.adapters.etf import ETF_PROVIDER_KEY, EtfFactsAdapter
 from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
 from app.backtesting.data.errors import ProviderContractViolationError, UnsupportedCapabilityError
@@ -30,7 +31,12 @@ from app.backtesting.data.requests import (
     PreflightStatus, QueryBoundary, UniverseQuery as DataUniverseQuery,
     UniverseQueryPolicy,
 )
-from app.backtesting.data.reports import DataCoverageReport, DataPreflightReport, PreflightIssue
+from app.backtesting.data.reports import (
+    DataCoverageReport,
+    DataPreflightReport,
+    PreflightIssue,
+    canonical_hash,
+)
 from app.backtesting.domain import PositionSide, PositionState, PortfolioState
 from app.backtesting.registry import (
     ANALYZER_COMPONENT_KIND, DECISION_INTERPRETER_KIND, EXECUTION_MODEL_KIND,
@@ -39,6 +45,7 @@ from app.backtesting.registry import (
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
+from app.backtesting.spec import BacktestSpec, InitialPositionInput
 from app.backtesting.time_axis import TradingDayAxis
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.models.trading_calendar import TradingStatusFact
@@ -54,6 +61,8 @@ from app.instruments.rules.etf_china import register_china_listed_etf_rules
 from app.instruments.rules.registry import RulePackageRegistry
 from app.instruments.spec_provider import InstrumentSpecProvider
 from app.strategies.models import StrategyRevision
+from app.strategies.service import StrategyStorageService
+from app.backtesting.service import AccountProfileService, fee_schedule_from_record
 
 DATA_TOKEN_CONTRACT = ContractRef("sql_revision_vector", 1)
 DEFAULT_RULE_PACKAGE = ContractRef("china_listed_etf_rules", 1)
@@ -449,44 +458,186 @@ class RuntimeBundle:
     writer: Any
 
 
-def default_components():
-    return {
-        TIMING_POLICY_KIND: {"key": "after_close_to_next_open", "version": 1, "parameters": {}},
-        EXECUTION_MODEL_KIND: {"key": "bar_market", "version": 1, "parameters": {"commission_rate": "0.0003", "commission_minimum": "5", "slippage_bps": "0", "price_tick": "0.01"}},
+def default_components() -> dict[str, Any]:
+    """Return the complete versioned component snapshot for a v1 run.
+
+    The registry is the source of display names, schemas, and capabilities;
+    this function copies those values into the run binding so a later registry
+    default or label change cannot alter an existing run's explanation.
+    """
+
+    selections = {
+        TIMING_POLICY_KIND: (
+            "after_close_to_next_open",
+            1,
+            {},
+        ),
+        EXECUTION_MODEL_KIND: (
+            "bar_market",
+            1,
+            {
+                "commission_rate": "0.0003",
+                "commission_minimum": "5",
+                "slippage_bps": "0",
+                "price_tick": "0.01",
+            },
+        ),
         # Formal sizing must use the interpreter that consumes frozen
         # per-instrument rules, including contract_multiplier.
-        DECISION_INTERPRETER_KIND: {"key": "long_only_target_weights", "version": 1, "parameters": {"weight_sum_tolerance": "0"}},
-        SLIPPAGE_MODEL_KIND: {"key": "none", "version": 1, "parameters": {"price_tick": "0.01"}},
-        ANALYZER_COMPONENT_KIND: [],
+        DECISION_INTERPRETER_KIND: (
+            "long_only_target_weights",
+            1,
+            {"weight_sum_tolerance": "0"},
+        ),
+        SLIPPAGE_MODEL_KIND: ("none", 1, {"price_tick": "0.01"}),
+    }
+    registry = build_default_component_registry()
+    snapshot: dict[str, Any] = {}
+    for kind, (key, version, parameters) in selections.items():
+        entry = registry.resolve(key, version)
+        snapshot[kind] = {
+            "key": entry.key,
+            "version": entry.version,
+            "kind": entry.component_kind,
+            "name_zh": entry.name_zh,
+            "name_en": entry.name_en,
+            "display_name": entry.display_name,
+            "parameter_schema": _json_value(entry.parameter_schema),
+            "capabilities": _json_value(entry.capabilities),
+            "parameters": _json_value(parameters),
+        }
+    snapshot[ANALYZER_COMPONENT_KIND] = []
+    return snapshot
+
+
+def _account_snapshot(session: Session, profile_id: UUID | None) -> dict[str, Any]:
+    """Resolve one current account and detach every value needed by a run."""
+
+    if profile_id is None:
+        raise ValueError("account_profile_id is required for a formal run")
+    record = AccountProfileService(session).get(profile_id)
+    if str(record.status) != "active":
+        raise ValueError("selected account profile is not active")
+    schedule = fee_schedule_from_record(record)
+    schedule.validate_for_run()
+    snapshot = {
+        "profile_id": str(record.id),
+        "version": int(record.version or 1),
+        "display_name": record.name,
+        "status": str(record.status),
+        "metadata": _json_value(record.profile_metadata or {}),
+        "fee_schedule_key": record.fee_schedule_key,
+        "fee_schedule_version": int(record.fee_schedule_version or 1),
+        "fee_schedule": _json_value(schedule),
+    }
+    snapshot["snapshot_hash"] = canonical_hash(snapshot)
+    return snapshot
+
+
+def _fee_schedule_from_snapshot(account: Mapping[str, Any]) -> FeeSchedule:
+    """Rehydrate the exact fee schedule embedded in a run snapshot."""
+
+    payload = account.get("fee_schedule")
+    if not isinstance(payload, Mapping):
+        raise ProviderContractViolationError(
+            "formal run is missing its frozen fee schedule snapshot"
+        )
+    try:
+        schedule = FeeSchedule(
+            key=str(payload["key"]),
+            version=int(payload["version"]),
+            metadata=dict(payload.get("metadata", {})),
+            test_only=bool(payload.get("test_only", False)),
+            fee_rules=tuple(
+                FeeRule(**dict(rule))
+                for rule in payload.get("fee_rules", ())
+            ),
+        )
+        schedule.validate_for_run()
+        return schedule
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ProviderContractViolationError(
+            "formal run fee schedule snapshot is invalid"
+        ) from exc
+
+
+def _behavior_versions(
+    *, data_request: DataRequest, components: Mapping[str, Any], strategy: Mapping[str, Any], account: Mapping[str, Any]
+) -> dict[str, Any]:
+    """Build the audit projection from the same resolved inputs as execution."""
+
+    def ref(kind: str) -> dict[str, Any] | None:
+        value = components.get(kind)
+        if not isinstance(value, Mapping):
+            return None
+        return {"key": value.get("key"), "version": value.get("version")}
+
+    return {
+        "engine": {"key": "quant_foundry_backtesting_engine", "version": 1},
+        "strategy_contract": strategy.get("contract_version"),
+        "data_contract": data_request.data_contract_version,
+        "calendar_axis_policy": _json_value(data_request.calendar_axis_policy),
+        "time_axis": {"key": "trading_day", "version": 1},
+        "timing_policy": ref(TIMING_POLICY_KIND),
+        "execution_model": ref(EXECUTION_MODEL_KIND),
+        "slippage_model": ref(SLIPPAGE_MODEL_KIND),
+        "accounting_policy": {"key": "accounting_policy", "version": 1},
+        "rule_package": _json_value(data_request.rule_package),
+        "account_profile": {
+            "id": account.get("profile_id"),
+            "version": account.get("version"),
+        },
+        "fee_schedule": {
+            "key": account.get("fee_schedule_key"),
+            "version": account.get("fee_schedule_version"),
+        },
     }
 
 
 def binding_from_row(row, *, session: Session | None = None):
-    """Rehydrate a persisted binding, including its frozen rule snapshot."""
+    """Rehydrate a binding exclusively from its persisted configuration."""
 
-    request = deserialize_data_request(row.data_request)
-    spec = SimpleNamespace(
-        start_date=request.requested_window.start_date,
-        end_date=request.requested_window.end_date,
-        initial_cash=Decimal(str(row.initial_cash or "0")),
-        initial_positions=tuple(
-            SimpleNamespace(
-                instrument_id=UUID(str(item["instrument_id"])),
-                side=PositionSide(str(item["side"])),
-                quantity=Decimal(str(item["quantity"])),
-                available_quantity=Decimal(
-                    str(item.get("available_quantity", item["quantity"]))
-                ),
-                average_price=(
-                    Decimal(str(item["average_price"]))
-                    if item.get("average_price") is not None
-                    else None
-                ),
-            )
-            for item in (row.initial_positions or [])
+    config = row.backtest_config if isinstance(row.backtest_config, Mapping) else None
+    if not config or config.get("schema_version") != 1:
+        raise ValueError("persisted run has no supported frozen configuration snapshot")
+    if canonical_hash(config) != row.config_hash:
+        raise ValueError("persisted run configuration snapshot hash mismatch")
+
+    spec_payload = config.get("spec")
+    strategy = config.get("strategy")
+    components = config.get("components")
+    data_payload = config.get("data_request")
+    account = config.get("account")
+    metadata = config.get("metadata")
+    if not all(
+        isinstance(value, Mapping)
+        for value in (spec_payload, strategy, components, data_payload, account, metadata)
+    ):
+        raise ValueError("persisted run configuration snapshot is incomplete")
+
+    request = deserialize_data_request(data_payload)
+    positions = tuple(
+        InitialPositionInput(
+            instrument_id=UUID(str(item["instrument_id"])),
+            side=PositionSide(str(item["side"])),
+            quantity=item["quantity"],
+            available_quantity=item.get("available_quantity", item["quantity"]),
+            average_price=item.get("average_price"),
+        )
+        for item in spec_payload.get("initial_positions", [])
+    )
+    spec = BacktestSpec(
+        start_date=date.fromisoformat(str(spec_payload["start_date"])),
+        end_date=date.fromisoformat(str(spec_payload["end_date"])),
+        currency=str(spec_payload.get("currency", DEFAULT_CURRENCY)),
+        timezone=str(spec_payload.get("timezone", request.resolved_timezone)),
+        frequency=str(spec_payload.get("frequency", request.frequency)),
+        warmup_sessions=int(
+            spec_payload.get("warmup_sessions", request.warmup_sessions)
         ),
-        dynamic_universe=request.instrument_scope_mode
-        in (InstrumentScopeMode.DYNAMIC, InstrumentScopeMode.HYBRID),
+        initial_cash=spec_payload["initial_cash"],
+        initial_positions=positions,
+        dynamic_universe=bool(spec_payload.get("dynamic_universe", False)),
     )
     rule_snapshot_bundle = None
     if session is not None and row.run_kind == "backtest_run":
@@ -502,25 +653,14 @@ def binding_from_row(row, *, session: Session | None = None):
         spec=spec,
         run_kind=row.run_kind,
         profile=row.profile,
-        strategy={
-            "revision_id": str(row.strategy_revision_id),
-            "source_hash": row.strategy_source_hash,
-            "contract_version": row.strategy_contract_version,
-            "parameters": row.parameters or {},
-            "published": True,
-            "is_draft": False,
-        },
-        components=default_components(),
-        data_request=row.data_request,
-        account=row.fee_schedule_snapshot or {},
-        metadata={
-            "admission_report_hash": row.data_admission_preflight_hash,
-            "preflight_hash": row.data_preflight_hash,
-            "data_evidence": row.data_evidence or {},
-            "behavior_versions": row.behavior_versions or {},
-        },
+        strategy=dict(strategy),
+        components=dict(components),
+        data_request=dict(data_payload),
+        account=dict(account),
+        metadata=dict(metadata),
+        random_seed=config.get("random_seed"),
         config_hash=row.config_hash,
-        status=row.status,
+        status=getattr(row, "status", "queued"),
         rule_snapshot_bundle=rule_snapshot_bundle,
     )
 
@@ -535,12 +675,20 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
     data_session.preflight()
     axis = TradingDayAxis(data_session.resolved_sessions)
     registry = build_default_component_registry()
-    components = binding.components or default_components()
+    components = binding.components
+    if not isinstance(components, Mapping):
+        raise ProviderContractViolationError(
+            "persisted run has no frozen component snapshot"
+        )
 
     def component(kind, fallback):
-        selected = components.get(
-            kind, {"key": fallback, "version": 1, "parameters": {}}
-        )
+        selected = components.get(kind)
+        if selected is None:
+            if binding.run_kind == "backtest_run":
+                raise ProviderContractViolationError(
+                    f"formal run is missing frozen component {kind}"
+                )
+            selected = {"key": fallback, "version": 1, "parameters": {}}
         if isinstance(selected, list):
             return ()
         entry = registry.resolve(selected["key"], int(selected["version"]))
@@ -552,6 +700,13 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
         DECISION_INTERPRETER_KIND, "long_only_target_weights"
     )
     slippage = component(SLIPPAGE_MODEL_KIND, "none")
+    if binding.run_kind == "backtest_run":
+        execution = replace(
+            execution,
+            fee_calculator=FeeCalculator(
+                _fee_schedule_from_snapshot(binding.account)
+            ),
+        )
     if hasattr(execution, "slippage_model"):
         # Slippage is selected as its own versioned component; the execution
         # model must not keep a second hidden slippage configuration.
@@ -611,7 +766,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
         interpreter=interpreter,
         execution_model=execution,
         accounting=AccountingPolicy(
-            currency=DEFAULT_CURRENCY,
+            currency=binding.spec.currency,
             settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
         ),
         initial_portfolio=_initial_portfolio(binding),
@@ -625,8 +780,33 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
 
 
 def _initial_portfolio(binding):
-    positions = {x.instrument_id: PositionState(instrument_id=x.instrument_id, side=x.side, quantity=x.quantity, available_quantity=x.available_quantity, average_price=x.average_price) for x in binding.spec.initial_positions}
-    cash = Decimal(str(binding.spec.initial_cash)); return PortfolioState(account=AccountState(cash_balances={DEFAULT_CURRENCY: cash}, available_cash=cash, frozen_cash=0, margin_used=0, margin_available=0, equity=cash), as_of=datetime.combine(binding.spec.start_date, time(9, 30), tzinfo=ZoneInfo("Asia/Shanghai")), positions=positions)
+    positions = {
+        item.instrument_id: PositionState(
+            instrument_id=item.instrument_id,
+            side=item.side,
+            quantity=item.quantity,
+            available_quantity=item.available_quantity,
+            average_price=item.average_price,
+        )
+        for item in binding.spec.initial_positions
+    }
+    cash = Decimal(str(binding.spec.initial_cash))
+    return PortfolioState(
+        account=AccountState(
+            cash_balances={binding.spec.currency: cash},
+            available_cash=cash,
+            frozen_cash=0,
+            margin_used=0,
+            margin_available=0,
+            equity=cash,
+        ),
+        as_of=datetime.combine(
+            binding.spec.start_date,
+            time(9, 30),
+            tzinfo=ZoneInfo(binding.spec.timezone),
+        ),
+        positions=positions,
+    )
 
 
 def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
@@ -643,23 +823,161 @@ class FormalBindingResult:
     rule_snapshot_bundle: Any | None = None
 
 
-def build_formal_binding(*, spec, revision: StrategyRevision, raw_spec, session, degraded=False, confirmed_report_hash=None):
-    provider = SqlBacktestProvider(session); ids = tuple(sorted({*(UUID(str(x)) for x in raw_spec.get("instrument_ids", ())), *(x.instrument_id for x in spec.initial_positions)}, key=str)); cutoff = datetime.now(UTC)
-    intent = DataPreflightRequest(provider_key=provider.provider_key, requested_window=DateRange(spec.start_date, spec.end_date), frequency="1d", rule_package=DEFAULT_RULE_PACKAGE, market_scope=MarketScope(exchanges=tuple(raw_spec.get("exchanges", DEFAULT_CALENDARS)), asset_classes=("etf",), currencies=(DEFAULT_CURRENCY,)), universe_query_policy=UniverseQueryPolicy(), instrument_scope_mode=InstrumentScopeMode.DYNAMIC if spec.dynamic_universe else InstrumentScopeMode.FIXED, required_capabilities=(DataCapability.BARS,), strategy_price_bases=(PriceBasis.RAW,), consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN, consistency_token_contract=DATA_TOKEN_CONTRACT, query_boundary=QueryBoundary(cutoff, include_cutoff_day=True), static_instrument_ids=ids, non_zero_initial_position_instrument_ids=tuple(x.instrument_id for x in spec.initial_positions))
+def build_formal_binding(
+    *,
+    spec,
+    revision: StrategyRevision,
+    raw_spec,
+    session,
+    degraded=False,
+    confirmed_report_hash=None,
+    account_profile_id: UUID | None = None,
+    random_seed: int | None = None,
+):
+    """Resolve every mutable dependency once and return its frozen binding."""
+
+    provider = SqlBacktestProvider(session)
+    ids = tuple(
+        sorted(
+            {
+                *(UUID(str(value)) for value in raw_spec.get("instrument_ids", ())),
+                *(item.instrument_id for item in spec.initial_positions),
+            },
+            key=str,
+        )
+    )
+    cutoff = datetime.now(UTC)
+    intent = DataPreflightRequest(
+        provider_key=provider.provider_key,
+        requested_window=DateRange(spec.start_date, spec.end_date),
+        frequency=spec.frequency,
+        rule_package=DEFAULT_RULE_PACKAGE,
+        market_scope=MarketScope(
+            exchanges=tuple(raw_spec.get("exchanges", DEFAULT_CALENDARS)),
+            asset_classes=("etf",),
+            currencies=(spec.currency,),
+        ),
+        universe_query_policy=UniverseQueryPolicy(),
+        instrument_scope_mode=(
+            InstrumentScopeMode.DYNAMIC
+            if spec.dynamic_universe
+            else InstrumentScopeMode.FIXED
+        ),
+        required_capabilities=(DataCapability.BARS,),
+        strategy_price_bases=(PriceBasis.RAW,),
+        consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
+        consistency_token_contract=DATA_TOKEN_CONTRACT,
+        query_boundary=QueryBoundary(cutoff, include_cutoff_day=True),
+        static_instrument_ids=ids,
+        non_zero_initial_position_instrument_ids=tuple(
+            item.instrument_id for item in spec.initial_positions
+        ),
+        warmup_sessions=spec.warmup_sessions,
+    )
     rule_report = None
     if ids:
-        from app.instruments.rule_preflight import FixedInstrumentRulePreflightRequest, FixedInstrumentRulePreflightService
-        rule_report = FixedInstrumentRulePreflightService(provider.rule_registry, provider, provider.spec_provider).run(FixedInstrumentRulePreflightRequest(instrument_ids=ids, start_date=spec.start_date, end_date=spec.end_date, data_cutoff=cutoff, rule_package_reference=DEFAULT_RULE_PACKAGE))
-    from app.backtesting.data.preflight_service import DataPreflightService, PreflightContext
-    outcome = DataPreflightService(provider, profile="formal@1").admit(PreflightContext(request=intent, provider=provider, profile="formal@1", run_kind="backtest_run", rule_preflight_report=rule_report), confirmed_report_hash=confirmed_report_hash if degraded else None)
+        from app.instruments.rule_preflight import (
+            FixedInstrumentRulePreflightRequest,
+            FixedInstrumentRulePreflightService,
+        )
+
+        rule_report = FixedInstrumentRulePreflightService(
+            provider.rule_registry,
+            provider,
+            provider.spec_provider,
+        ).run(
+            FixedInstrumentRulePreflightRequest(
+                instrument_ids=ids,
+                start_date=spec.start_date,
+                end_date=spec.end_date,
+                data_cutoff=cutoff,
+                rule_package_reference=DEFAULT_RULE_PACKAGE,
+            )
+        )
+    from app.backtesting.data.preflight_service import (
+        DataPreflightService,
+        PreflightContext,
+    )
+
+    outcome = DataPreflightService(provider, profile="formal@1").admit(
+        PreflightContext(
+            request=intent,
+            provider=provider,
+            profile="formal@1",
+            run_kind="backtest_run",
+            rule_preflight_report=rule_report,
+        ),
+        confirmed_report_hash=confirmed_report_hash if degraded else None,
+    )
     if not outcome.allowed:
-        error = ValueError("formal backtest admission was blocked"); error.admission_result = outcome; raise error
-    frozen = DataRequest.from_admission(intent, outcome.outcome.report, accepted_degraded=degraded, rule_preflight_report=rule_report)
+        error = ValueError("formal backtest admission was blocked")
+        error.admission_result = outcome
+        raise error
+    frozen = DataRequest.from_admission(
+        intent,
+        outcome.outcome.report,
+        accepted_degraded=degraded,
+        rule_preflight_report=rule_report,
+    )
+    # Calendar resolution is authoritative.  The request cannot retain a
+    # caller-supplied timezone or frequency that disagrees with the admitted
+    # data contract.
+    spec = replace(
+        spec,
+        timezone=frozen.resolved_timezone,
+        frequency=frozen.frequency,
+        warmup_sessions=frozen.warmup_sessions,
+    )
+
     from app.backtesting.run_binding import RunBindingBuilder
-    strategy = RunBindingBuilder().build_strategy({"strategy_id": str(revision.strategy_id), "revision_id": str(revision.id), "revision_number": revision.revision_number, "source_hash": revision.source_hash, "contract_version": (revision.runtime_manifest or {}).get("strategy_contract_version"), "parameter_schema": revision.parameter_schema or {}, "parameters": raw_spec.get("parameters", revision.default_parameters or {}), "published": True, "is_draft": False})
-    metadata = {"admission_report_hash": frozen.admission_preflight_hash, "preflight_hash": frozen.admission_preflight_hash, "data_evidence": _json_value(outcome.outcome.as_dict()), "behavior_versions": {"data_contract": "data_contract@1", "timing_policy": "after_close_to_next_open@1", "execution_model": "bar_market@1", "decision_interpreter": "target_weights@1", "slippage_model": "none@1", "accounting_policy": "accounting_policy@1"}}
-    account = {"profile_id": "default_formal_account", "version": "1", "fee_schedule_key": "bar_market_flat_commission", "fee_schedule_version": "1", "fee_schedule": {"key": "bar_market_flat_commission", "version": 1, "rate": "0.0003", "minimum": "5"}}
-    return FormalBindingResult(RunBindingBuilder().build(spec, run_kind="backtest_run", strategy=strategy, components=default_components(), data_request=serialize_data_request(frozen), account=account, metadata=metadata), getattr(rule_report, "snapshot_bundle", None))
+
+    strategy_binding = StrategyStorageService(session).bind_published_revision(
+        revision.strategy_id,
+        revision.id,
+        parameters=raw_spec.get("parameters"),
+    )
+    strategy = RunBindingBuilder().build_strategy(
+        {
+            "strategy_id": str(strategy_binding.strategy_id),
+            "revision_id": str(strategy_binding.revision_id),
+            "revision_number": strategy_binding.revision_number,
+            "source_hash": strategy_binding.source_hash,
+            "contract_version": strategy_binding.strategy_contract_version,
+            "parameter_schema": _json_value(strategy_binding.parameter_schema),
+            "parameters": _json_value(strategy_binding.parameters),
+            "runtime_manifest": _json_value(strategy_binding.runtime_manifest),
+            "published": True,
+            "is_draft": False,
+        }
+    )
+    account = _account_snapshot(session, account_profile_id)
+    components = default_components()
+    metadata = {
+        "admission_report_hash": frozen.admission_preflight_hash,
+        "preflight_hash": frozen.admission_preflight_hash,
+        "data_evidence": _json_value(outcome.outcome.as_dict()),
+        "data_preflight_status": frozen.admission_preflight_status.value,
+        "behavior_versions": _behavior_versions(
+            data_request=frozen,
+            components=components,
+            strategy=strategy,
+            account=account,
+        ),
+    }
+    binding = RunBindingBuilder().build(
+        spec,
+        run_kind="backtest_run",
+        strategy=strategy,
+        components=components,
+        data_request=serialize_data_request(frozen),
+        account=account,
+        metadata=metadata,
+        random_seed=random_seed,
+    )
+    return FormalBindingResult(
+        binding,
+        getattr(rule_report, "snapshot_bundle", None),
+    )
 
 
 __all__ = ["DATA_TOKEN_CONTRACT", "DEFAULT_RULE_PACKAGE", "FormalBindingResult", "RuntimeBundle", "SqlBacktestProvider", "SqlBacktestSession", "build_formal_binding", "build_runtime", "default_components", "deserialize_data_request", "execute_runtime", "serialize_data_request", "binding_from_row"]

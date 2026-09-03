@@ -11,6 +11,17 @@ export type BacktestRun = {
   message?: string;
   error_message?: string | null;
   terminal_decision_reason?: string | null;
+  strategy_revision_id?: string | null;
+  parameters?: Record<string, unknown>;
+  backtest_config?: Record<string, unknown>;
+  data_request?: Record<string, unknown>;
+  behavior_versions?: Record<string, unknown>;
+  account_profile_id?: string | null;
+  account_profile_version?: string | null;
+  fee_schedule_key?: string | null;
+  fee_schedule_version?: string | null;
+  random_seed?: number | null;
+  spec?: Record<string, unknown>;
   completion_marker?: Record<string, unknown> | null;
   child_pid?: number | null;
   child_process_group_id?: number | null;

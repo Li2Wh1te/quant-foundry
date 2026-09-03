@@ -158,8 +158,11 @@ def _response(record: BacktestAccountProfileRecord) -> AccountProfileResponse:
         id=record.id,
         name=record.name,
         status=record.status,
+        version=int(getattr(record, "version", None) or 1),
+        fee_schedule_version=int(getattr(record, "fee_schedule_version", None) or 1),
         fee_schedule=FeeScheduleResponse(
             key=schedule.key,
+            version=int(schedule.version or 1),
             fee_rules=[
                 FeeRuleResponse.model_validate(
                     {

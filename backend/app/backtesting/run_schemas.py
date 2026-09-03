@@ -9,6 +9,10 @@ class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     spec: dict[str, Any]
     strategy_revision_id: UUID
+    # Account selection belongs to a run, not to the strategy.  The server
+    # resolves this profile once and freezes its complete configuration.
+    account_profile_id: UUID | None = None
+    random_seed: int | None = None
     # Body form remains supported for existing clients; the canonical API
     # also accepts the standard Idempotency-Key header.
     idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
@@ -33,6 +37,11 @@ class RunResponse(BaseModel):
     backtest_config: dict[str, Any] = Field(default_factory=dict)
     data_request: dict[str, Any] = Field(default_factory=dict)
     behavior_versions: dict[str, Any] = Field(default_factory=dict)
+    account_profile_id: UUID | None = None
+    account_profile_version: str | None = None
+    fee_schedule_key: str | None = None
+    fee_schedule_version: str | None = None
+    random_seed: int | None = None
     # ``progress_ratio`` is the public protocol field.  The persistence layer
     # still stores the task-08/22 ``progress`` column, so the router performs
     # the one-way projection at this boundary instead of exposing both names.

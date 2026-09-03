@@ -18,6 +18,7 @@ export interface FeeRule {
 
 export interface FeeSchedule {
   key: string;
+  version?: number;
   fee_rules: FeeRule[];
   metadata: Record<string, string>;
 }
@@ -26,6 +27,8 @@ export interface AccountProfile {
   id: string;
   name: string;
   status: AccountProfileStatus;
+  version: number;
+  fee_schedule_version: number;
   fee_schedule: FeeSchedule;
   metadata: Record<string, unknown>;
   created_at: string;

@@ -13,6 +13,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Sequence
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.backtesting.domain import (
     ZERO,
@@ -129,6 +130,14 @@ class BacktestSpec:
     initial_cash: Decimal | int | str
     initial_positions: Sequence[InitialPositionInput]
     dynamic_universe: bool = False
+    # These values are part of the run input even though the first engine
+    # implementation currently supports only domestic daily data.  Keeping
+    # them on the immutable spec prevents a future default from changing the
+    # meaning of an already-created run.
+    currency: str = "CNY"
+    timezone: str = "Asia/Shanghai"
+    frequency: str = "1d"
+    warmup_sessions: int = 0
 
     def __post_init__(self) -> None:
         start_date = _plain_date(self.start_date, "start_date")
@@ -144,6 +153,23 @@ class BacktestSpec:
         object.__setattr__(
             self, "initial_positions", _normalize_initial_positions(self.initial_positions)
         )
+
+        if not isinstance(self.currency, str) or not self.currency.strip():
+            raise DomainValidationError("currency must be non-blank text")
+        object.__setattr__(self, "currency", self.currency.strip().upper())
+        if self.frequency != "1d":
+            raise DomainValidationError("frequency must be 1d")
+        if (
+            isinstance(self.warmup_sessions, bool)
+            or not isinstance(self.warmup_sessions, int)
+            or self.warmup_sessions < 0
+        ):
+            raise DomainValidationError("warmup_sessions must be a non-negative integer")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise DomainValidationError("timezone must be an IANA time-zone name") from exc
+        object.__setattr__(self, "timezone", self.timezone)
 
     @property
     def non_zero_initial_positions(self) -> tuple[InitialPositionInput, ...]:

@@ -273,10 +273,15 @@ def _production_callbacks(run_id: UUID, launch_id: UUID, expected_config_hash: s
             revision = session.get(StrategyRevision, UUID(str(row.strategy_revision_id)))
             if revision is None:
                 raise WorkerDependencyUnavailable("published strategy revision does not exist")
+            if binding.strategy.get("source_hash") != revision.source_hash:
+                raise WorkerDependencyUnavailable(
+                    "frozen strategy source hash does not match the published revision"
+                )
             binding.strategy = dict(binding.strategy)
+            # Source code is immutable revision content, not mutable run
+            # configuration.  Parameters and the schema remain those captured
+            # in backtest_config; never refill them from current defaults.
             binding.strategy["source_code"] = revision.source_code
-            binding.strategy["parameter_schema"] = revision.parameter_schema or {}
-            binding.strategy["parameters"] = row.parameters or revision.default_parameters or {}
             return binding
 
     def write_handshake(payload: Mapping[str, Any]):
