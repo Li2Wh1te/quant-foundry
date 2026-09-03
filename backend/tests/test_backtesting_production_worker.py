@@ -16,7 +16,11 @@ from app.backtesting.data.requests import (
     QueryBoundary,
     UniverseQueryPolicy,
 )
-from app.backtesting.production_runtime import deserialize_data_request, serialize_data_request
+from app.backtesting.production_runtime import (
+    build_runtime,
+    deserialize_data_request,
+    serialize_data_request,
+)
 from app.backtesting.runner_protocol import CATEGORY_TO_EXIT_CODE, ExitCategory
 from app.backtesting.runner_worker import WorkerExecutionResult, main
 
@@ -84,6 +88,44 @@ def test_production_worker_main_uses_wired_callbacks_instead_of_fixed_rejection(
 
     assert result == CATEGORY_TO_EXIT_CODE[ExitCategory.SUCCEEDED.value]
     assert calls == ["resource", "handshake", "results", "marker"]
+
+
+def test_build_runtime_freezes_corporate_actions_from_the_open_data_session():
+    request = object()
+    data_session = SimpleNamespace(preflight=lambda: None)
+    provider = SimpleNamespace(open_session=lambda _request: data_session)
+    captured = []
+
+    class SnapshotReached(Exception):
+        pass
+
+    def capture(snapshot_session, snapshot_request):
+        captured.append((snapshot_session, snapshot_request))
+        raise SnapshotReached
+
+    binding = SimpleNamespace(data_request=object())
+    with (
+        patch("app.backtesting.production_runtime.deserialize_data_request", return_value=request),
+        patch("app.backtesting.production_runtime.SqlBacktestProvider", return_value=provider),
+        patch(
+            "app.backtesting.production_runtime._corporate_action_snapshot",
+            side_effect=capture,
+        ),
+    ):
+        try:
+            build_runtime(
+                binding,
+                session=object(),
+                launch_id=uuid4(),
+                strategy_module=SimpleNamespace(),
+                worker_id="test-worker",
+            )
+        except SnapshotReached:
+            pass
+        else:
+            raise AssertionError("build_runtime did not build a corporate-action snapshot")
+
+    assert captured == [(data_session, request)]
 
 
 def test_frozen_data_request_round_trips_through_the_worker_snapshot():

@@ -780,7 +780,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
     provider = SqlBacktestProvider(session)
     data_session = provider.open_session(request)
     data_session.preflight()
-    corporate_actions = _corporate_action_snapshot(provider, request)
+    corporate_actions = _corporate_action_snapshot(data_session, request)
     axis = TradingDayAxis(data_session.resolved_sessions)
     registry = build_default_component_registry()
     components = binding.components
