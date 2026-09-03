@@ -5,8 +5,10 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from starlette.requests import Request
 
 from app.backtesting.run_admission import AdmissionResult
+from app.core.auth import AuthenticatedPrincipal
 from app.backtesting.run_router import (
     _runs,
     cancel,
@@ -39,6 +41,43 @@ def test_formal_request_cannot_control_run_kind_or_profile():
     with pytest.raises(HTTPException) as raised:
         create_formal(payload)
     assert raised.value.status_code == 422
+
+
+def test_standard_idempotency_header_is_accepted():
+    key = str(uuid4())
+    with patch(
+        "app.backtesting.run_router._service.admission",
+        return_value=AdmissionResult(True),
+    ):
+        payload = RunCreateRequest(
+            spec={
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-02",
+                "initial_cash": "10000",
+            },
+            strategy_revision_id=uuid4(),
+            idempotency_key=None,
+        )
+        created = create_formal(payload, idempotency_header=key)
+    assert created.run_id
+
+
+def test_owner_scope_is_derived_from_authenticated_principal():
+    key = str(uuid4())
+    request_a = Request({"type": "http", "headers": []})
+    request_a.state.authenticated_principal = AuthenticatedPrincipal("owner-a")
+    request_b = Request({"type": "http", "headers": []})
+    request_b.state.authenticated_principal = AuthenticatedPrincipal("owner-b")
+    with patch(
+        "app.backtesting.run_router._service.admission",
+        return_value=AdmissionResult(True),
+    ):
+        owner_a = create_formal(_payload(key=key), request=request_a)
+        owner_b = create_formal(_payload(key=key), request=request_b)
+    assert owner_a.run_id != owner_b.run_id
+    with pytest.raises(HTTPException) as raised:
+        get_run(str(owner_a.run_id), request=request_b)
+    assert raised.value.status_code == 404
 
 
 def test_formal_create_is_idempotent_and_cancel_only_records_request():

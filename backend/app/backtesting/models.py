@@ -11,6 +11,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
+    ForeignKey,
     Index,
     Integer,
     Numeric,
@@ -177,6 +178,14 @@ class BacktestRunRecord(Base):
     status: Mapped[str] = mapped_column(String(24), nullable=False, server_default="queued")
     terminal_status: Mapped[str | None] = mapped_column(String(24), nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(200), nullable=False)
+    idempotency_request_hash: Mapped[str | None] = mapped_column(
+        String(64), nullable=True
+    )
+    rerun_of_run_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("backtest_runs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     config_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     backtest_config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     strategy_revision_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -290,7 +299,8 @@ __all__.append("BacktestQueueGuardRecord")
 
 
 _IMMUTABLE_RUN_FIELDS = (
-    "tenant_id", "run_kind", "profile", "idempotency_key", "config_hash",
+    "tenant_id", "idempotency_scope", "run_kind", "profile", "idempotency_key",
+    "idempotency_request_hash", "rerun_of_run_id", "config_hash",
     "backtest_config", "strategy_revision_id", "strategy_source_hash",
     "parameters", "data_request", "account_profile_id", "account_profile_version",
     "fee_schedule_key", "fee_schedule_version", "fee_schedule_snapshot",

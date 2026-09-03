@@ -16,6 +16,10 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
+from app.core.auth import (
+    AuthenticatedPrincipal,
+    require_internal_backtest_token,
+)
 from app.core.config import get_settings
 from app.core.logging import backtest_event_message
 from app.strategies.repository import StrategyRepository
@@ -43,6 +47,7 @@ from .production_runtime import (
     DEFAULT_RULE_PACKAGE,
     build_formal_binding,
 )
+from .data.reports import canonical_hash
 
 
 router = APIRouter(prefix="/api/admin/backtest-runs", tags=["backtests"])
@@ -81,19 +86,56 @@ ERROR_MESSAGES = {
 
 
 def require_internal_capability(
-    x_backtest_capability: str | None = Header(default=None),
+    capability: str = Depends(require_internal_backtest_token),
 ) -> str:
-    """Allow internal diagnostics only to explicitly identified operators/services."""
+    """Keep the internal capability dependency name for route compatibility."""
 
-    if x_backtest_capability not in {"operator", "service"}:
-        raise HTTPException(
-            status_code=403,
-            detail={
-                "code": "internal_capability_required",
-                "message": "需要运维或服务能力才可访问内部验收入口",
-            },
-        )
-    return x_backtest_capability
+    # Direct unit callers historically passed the capability label itself;
+    # deployed requests always receive the value from the private token
+    # dependency above, never from a client-controlled role header.
+    return capability
+
+
+def _owner_scope(request: Request | None) -> str:
+    """Return the authenticated owner, with a test-only direct-call fallback."""
+
+    if request is not None:
+        principal = getattr(request.state, "authenticated_principal", None)
+        if isinstance(principal, AuthenticatedPrincipal):
+            return principal.owner_scope
+    return "default"
+
+
+def _request_fingerprint(payload: RunCreateRequest, kind: str) -> str:
+    """Hash request-controlled inputs before resolving external dependencies."""
+
+    return canonical_hash(
+        {
+            "run_kind": kind,
+            "strategy_revision_id": str(payload.strategy_revision_id),
+            "spec": payload.spec,
+            "degraded": payload.degraded,
+            "confirmed_admission_report_hash": payload.confirmed_admission_report_hash,
+        }
+    )
+
+
+def _effective_idempotency_key(
+    payload: RunCreateRequest,
+    header_key: str | None,
+) -> str:
+    """Prefer the standard header, then the explicit client request id/body key."""
+
+    candidates = [
+        value.strip()
+        for value in (header_key, payload.client_request_id, payload.idempotency_key)
+        if isinstance(value, str) and value.strip()
+    ]
+    if not candidates:
+        raise ValueError("Idempotency-Key or client_request_id is required")
+    if len(set(candidates)) != 1:
+        raise ValueError("Idempotency-Key and body idempotency identifiers differ")
+    return candidates[0]
 
 
 def _is_session(value: object) -> bool:
@@ -453,7 +495,25 @@ def _create(
     kind: str,
     session: object,
     request: Request | None,
+    idempotency_key: str | None = None,
 ) -> RunResponse:
+    scope = _owner_scope(request)
+    effective_key = idempotency_key or _effective_idempotency_key(payload, None)
+    request_fingerprint = _request_fingerprint(payload, kind)
+    repository = _db_repository(session, request) if _is_session(session) else None
+    if repository is not None:
+        # Idempotency lookup must precede revision/account/data resolution. A
+        # retry can return its committed run even if a dependency is currently
+        # unavailable, and a full queue cannot turn it into a duplicate.
+        existing = repository.get_by_idempotency(scope, effective_key)
+        if existing is not None:
+            existing_fingerprint = getattr(existing, "idempotency_request_hash", None)
+            if existing_fingerprint and existing_fingerprint != request_fingerprint:
+                raise IdempotencyKeyReusedError(
+                    "idempotency key already used with different request"
+                )
+            return _response(existing)
+
     if _is_session(session) and kind == FORMAL_KIND:
         revision = StrategyRepository(session).get_revision(payload.strategy_revision_id)
         if revision is None:
@@ -469,15 +529,13 @@ def _create(
         binding = binding_result.binding
     else:
         binding = _binding(payload, kind=kind)
-    scope = "default"
     if _is_session(session):
-        repository = _db_repository(session, request)
         # Idempotency lookup is before admission/capacity.  A retry therefore
         # succeeds even when the queue filled after the original request.
         existing = _existing_or_conflict(
             repository,
             scope=scope,
-            key=payload.idempotency_key,
+            key=effective_key,
             binding=binding,
         )
         if existing is not None:
@@ -495,7 +553,8 @@ def _create(
             binding,
             tenant_id=scope,
             idempotency_scope=scope,
-            idempotency_key=payload.idempotency_key,
+            idempotency_key=effective_key,
+            idempotency_request_hash=request_fingerprint,
         )
         session.commit()
         session.refresh(row)
@@ -522,8 +581,9 @@ def _create(
         (
             item
             for item in _runs.values()
-            if item.idempotency_key == payload.idempotency_key
+            if item.idempotency_key == effective_key
             and item.binding.run_kind == kind
+            and item.owner_scope == scope
         ),
         None,
     )
@@ -544,7 +604,11 @@ def _create(
         )
         if not admission.allowed:
             raise ValueError(admission.message)
-    run = _creation.create(binding, idempotency_key=payload.idempotency_key)
+    run = _creation.create(
+        binding,
+        idempotency_key=effective_key,
+        tenant_id=scope,
+    )
     _runs[str(run.run_id)] = run
     return _response(run)
 
@@ -554,6 +618,9 @@ def create_formal(
     payload: RunCreateRequest,
     session: Session = Depends(get_db_session),
     request: Request = None,  # type: ignore[assignment]
+    idempotency_header: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
 ) -> RunResponse:
     try:
         return _create(
@@ -561,6 +628,7 @@ def create_formal(
             kind=FORMAL_KIND,
             session=session,
             request=request,
+            idempotency_key=_effective_idempotency_key(payload, idempotency_header),
         )
     except QueueFullError as exc:
         _rollback(session)
@@ -675,6 +743,9 @@ def create_internal(
     payload: InternalRunCreateRequest,
     session: Session = Depends(get_db_session),
     request: Request = None,  # type: ignore[assignment]
+    idempotency_header: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
 ) -> RunResponse:
     try:
         return _create(
@@ -682,6 +753,7 @@ def create_internal(
             kind=INTERNAL_KIND,
             session=session,
             request=request,
+            idempotency_key=_effective_idempotency_key(payload, idempotency_header),
         )
     except QueueFullError as exc:
         _rollback(session)
@@ -715,10 +787,11 @@ def _cancel(
     *,
     expected_kind: str,
     session: object,
+    owner_scope: str = "default",
 ) -> RunResponse:
     if _is_session(session):
         row = DatabaseRunRepository(session).request_cancel(
-            run_id, expected_kind=expected_kind
+            run_id, expected_kind=expected_kind, owner_scope=owner_scope
         )
         if row is None:
             raise HTTPException(
@@ -757,9 +830,15 @@ def _cancel(
 def cancel(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> RunResponse:
     try:
-        return _cancel(run_id, expected_kind=FORMAL_KIND, session=session)
+        return _cancel(
+            run_id,
+            expected_kind=FORMAL_KIND,
+            session=session,
+            owner_scope=_owner_scope(request),
+        )
     except HTTPException:
         _rollback(session)
         raise
@@ -779,9 +858,15 @@ def cancel(
 def cancel_internal(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> RunResponse:
     try:
-        return _cancel(run_id, expected_kind=INTERNAL_KIND, session=session)
+        return _cancel(
+            run_id,
+            expected_kind=INTERNAL_KIND,
+            session=session,
+            owner_scope=_owner_scope(request),
+        )
     except HTTPException:
         _rollback(session)
         raise
@@ -803,6 +888,7 @@ def _list(
     session: object,
     limit: int,
     offset: int,
+    owner_scope: str = "default",
     strategy_revision_id: str | None = None,
     strategy_id: str | None = None,
 ) -> dict[str, list[RunResponse]]:
@@ -815,6 +901,7 @@ def _list(
     if _is_session(session):
         rows = DatabaseRunRepository(session).list(
             queue_kind=kind,
+            owner_scope=owner_scope,
             limit=limit,
             offset=offset,
             strategy_revision_id=strategy_revision_id,
@@ -825,6 +912,7 @@ def _list(
         run
         for run in _runs.values()
         if run.binding.run_kind == kind
+        and run.owner_scope == owner_scope
         and (
             strategy_revision_id is None
             or str(run.binding.strategy.get("strategy_id", run.binding.strategy.get("revision_id", "")))
@@ -837,25 +925,40 @@ def _list(
 @router.get("")
 def list_runs(
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, list[RunResponse]]:
-    return _list(kind=FORMAL_KIND, session=session, limit=limit, offset=offset)
+    return _list(
+        kind=FORMAL_KIND,
+        session=session,
+        owner_scope=_owner_scope(request),
+        limit=limit,
+        offset=offset,
+    )
 
 
 @internal_router.get("", dependencies=[Depends(require_internal_capability)])
 def list_internal_runs(
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, list[RunResponse]]:
-    return _list(kind=INTERNAL_KIND, session=session, limit=limit, offset=offset)
+    return _list(
+        kind=INTERNAL_KIND,
+        session=session,
+        owner_scope=_owner_scope(request),
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/strategies/{strategy_id}/backtests")
 def list_strategy_runs(
     strategy_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, list[RunResponse]]:
@@ -864,6 +967,7 @@ def list_strategy_runs(
         session=session,
         limit=limit,
         offset=offset,
+        owner_scope=_owner_scope(request),
         strategy_id=strategy_id,
     )
 
@@ -872,11 +976,14 @@ def list_strategy_runs(
 def get_run(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> RunResponse:
     if _is_session(session):
         try:
             row = DatabaseRunRepository(session).get(
-                run_id, expected_kind=FORMAL_KIND
+                run_id,
+                expected_kind=FORMAL_KIND,
+                owner_scope=_owner_scope(request),
             )
         except (TypeError, ValueError):
             row = None
@@ -887,7 +994,11 @@ def get_run(
             )
         return _response(row)
     run = _runs.get(run_id)
-    if run is None or run.binding.run_kind != FORMAL_KIND:
+    if (
+        run is None
+        or run.binding.run_kind != FORMAL_KIND
+        or run.owner_scope != _owner_scope(request)
+    ):
         raise HTTPException(
             status_code=404,
             detail={"code": "run_not_found", "message": ERROR_MESSAGES["run_not_found"]},
@@ -899,11 +1010,14 @@ def get_run(
 def get_internal_run(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, Any]:
     if _is_session(session):
         try:
             row = DatabaseRunRepository(session).get(
-                run_id, expected_kind=INTERNAL_KIND
+                run_id,
+                expected_kind=INTERNAL_KIND,
+                owner_scope=_owner_scope(request),
             )
         except (TypeError, ValueError):
             row = None
@@ -925,7 +1039,11 @@ def get_internal_run(
         )
         return response
     run = _runs.get(run_id)
-    if run is None or run.binding.run_kind != INTERNAL_KIND:
+    if (
+        run is None
+        or run.binding.run_kind != INTERNAL_KIND
+        or run.owner_scope != _owner_scope(request)
+    ):
         raise HTTPException(
             status_code=404,
             detail={
@@ -945,46 +1063,115 @@ def create_formal_alias(
     payload: RunCreateRequest,
     session: Session = Depends(get_db_session),
     request: Request = None,  # type: ignore[assignment]
+    idempotency_header: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
 ) -> RunResponse:
-    return create_formal(payload, session=session, request=request)
+    return create_formal(
+        payload,
+        session=session,
+        request=request,
+        idempotency_header=idempotency_header,
+    )
 
 
 @formal_alias_router.get("")
 def list_runs_alias(
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, list[RunResponse]]:
-    return list_runs(session=session, limit=limit, offset=offset)
+    return list_runs(session=session, request=request, limit=limit, offset=offset)
 
 
 @formal_alias_router.get("/{run_id}")
 def get_run_alias(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> RunResponse:
-    return get_run(run_id, session=session)
+    return get_run(run_id, session=session, request=request)
 
 
 @formal_alias_router.post("/{run_id}/cancel")
 def cancel_alias(
     run_id: str,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> RunResponse:
-    return cancel(run_id, session=session)
+    return cancel(run_id, session=session, request=request)
 
 
 @formal_alias_router.post("/{run_id}/rerun", response_model=RunResponse, status_code=201)
-def rerun_alias(run_id: str) -> RunResponse:
-    # Manual rerun is retained only for compatibility with the existing 09 API;
-    # supervisor recovery never invokes it automatically.
-    return rerun(run_id)
+def rerun_alias(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+    idempotency_header: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
+) -> RunResponse:
+    return rerun(
+        run_id,
+        session=session,
+        request=request,
+        idempotency_header=idempotency_header,
+    )
 
 
 @router.post("/{run_id}/rerun", response_model=RunResponse, status_code=201)
-def rerun(run_id: str) -> RunResponse:
+def rerun(
+    run_id: str,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+    idempotency_header: str | None = Header(
+        default=None, alias="Idempotency-Key"
+    ),
+) -> RunResponse:
+    import uuid as _uuid
+
+    owner_scope = _owner_scope(request)
+    key = idempotency_header or str(_uuid.uuid4())
+    if _is_session(session):
+        repository = _db_repository(session, request)
+        try:
+            fresh = repository.create_rerun(
+                run_id,
+                owner_scope=owner_scope,
+                idempotency_key=key,
+            )
+        except QueueFullError as exc:
+            _rollback(session)
+            raise _queue_error(exc) from exc
+        except IdempotencyKeyReusedError as exc:
+            _rollback(session)
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "code": "idempotency_key_reused",
+                    "message": ERROR_MESSAGES["idempotency_key_reused"],
+                },
+            ) from exc
+        if fresh is None:
+            _rollback(session)
+            raise HTTPException(
+                status_code=404,
+                detail={
+                    "code": "backtest_rerun_not_allowed",
+                    "message": "正式回测不存在或不可重新运行",
+                },
+            )
+        session.commit()
+        session.refresh(fresh)
+        return _response(fresh)
+
     original = _runs.get(run_id)
-    if original is None or original.binding.run_kind != FORMAL_KIND:
+    if (
+        original is None
+        or original.binding.run_kind != FORMAL_KIND
+        or original.owner_scope != owner_scope
+    ):
         raise HTTPException(
             status_code=404,
             detail={
@@ -992,15 +1179,19 @@ def rerun(run_id: str) -> RunResponse:
                 "message": "正式回测不存在或不可重新运行",
             },
         )
-    import uuid as _uuid
-
     try:
         fresh = _creation.create(
-            original.binding, idempotency_key=str(_uuid.uuid4())
+            original.binding,
+            idempotency_key=key,
+            tenant_id=owner_scope,
         )
     except QueueFullError as exc:
         raise _queue_error(exc) from exc
-    fresh = replace(fresh, rerun_of_run_id=original.run_id)
+    fresh = replace(
+        fresh,
+        rerun_of_run_id=original.run_id,
+        owner_scope=owner_scope,
+    )
     _runs[str(fresh.run_id)] = fresh
     return _response(fresh)
 

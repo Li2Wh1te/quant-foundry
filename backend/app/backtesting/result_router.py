@@ -17,6 +17,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.backtesting.models import BacktestRunRecord
+from app.core.auth import AuthenticatedPrincipal
 from app.backtesting.result_records import BacktestEquityCurveRecord, BacktestMetricRecord
 
 from app.backtesting.pagination import (
@@ -62,10 +63,21 @@ compare_router = APIRouter(prefix="/api/admin/backtests", tags=["backtest-compar
 formal_result_alias_router = APIRouter(prefix="/api/admin/backtests/{run_id}", tags=["backtest-results"])
 
 
+def _owner_scope(request: Request | None) -> str:
+    """Use the authenticated credential as the result ownership boundary."""
+
+    if request is not None:
+        principal = getattr(request.state, "authenticated_principal", None)
+        if isinstance(principal, AuthenticatedPrincipal):
+            return principal.owner_scope
+    return "default"
+
+
 @compare_router.post("/compare")
 def compare_runs(
     payload: dict = Body(...),
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """Compare persisted formal runs without invoking runtime or analyzers."""
     run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
@@ -75,7 +87,14 @@ def compare_runs(
         ids = [UUID(str(value)) for value in run_ids]
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="run_ids 包含无效 UUID") from exc
-    roots = list(session.scalars(select(BacktestRunRecord).where(BacktestRunRecord.id.in_(ids))))
+    roots = list(
+        session.scalars(
+            select(BacktestRunRecord).where(
+                BacktestRunRecord.id.in_(ids),
+                BacktestRunRecord.idempotency_scope == _owner_scope(request),
+            )
+        )
+    )
     by_id = {row.id: row for row in roots}
     # Apply the same root/visibility guard as every result handler. Unknown
     # roots and internal runs intentionally share one non-disclosing 404.
@@ -183,6 +202,7 @@ def _read_page(
     session: Session,
     signing_key: str,
     query_context: dict[str, object] | None = None,
+    request: Request | None = None,
     **filters: object,
 ) -> dict[str, object]:
     repository = BacktestResultRepository(
@@ -198,6 +218,7 @@ def _read_page(
             limit=limit,
             cursor=cursor,
             query_context=query_context,
+            owner_scope=_owner_scope(request),
             **filters,
         )
     except ResultFilterError as exc:
@@ -231,11 +252,12 @@ def list_steps(
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     phase: Annotated[str | None, Query(min_length=1, max_length=32)] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List time steps in stable step-sequence order."""
 
     return _read_page(
-        "steps", run_id=run_id, limit=limit, cursor=cursor, session=session, signing_key=signing_key, phase=phase
+        "steps", run_id=run_id, limit=limit, cursor=cursor, session=session, signing_key=signing_key, request=request, phase=phase
     )
 
 
@@ -249,6 +271,7 @@ def list_decisions(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List strategy decisions ordered by step, time, and decision id."""
 
@@ -259,6 +282,7 @@ def list_decisions(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         mode=mode,
         start_time=start_time,
         end_time=end_time,
@@ -277,6 +301,7 @@ def list_orders(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List orders ordered by submission time with id tie-breaking."""
 
@@ -287,6 +312,7 @@ def list_orders(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         instrument_id=instrument_id,
         status=status,
         side=side,
@@ -305,6 +331,7 @@ def list_order_updates(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List order state transitions in update order."""
 
@@ -315,6 +342,7 @@ def list_order_updates(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         status=status,
         start_time=start_time,
         end_time=end_time,
@@ -332,6 +360,7 @@ def list_fills(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List simulated fills ordered by execution time and fill id."""
 
@@ -342,6 +371,7 @@ def list_fills(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         instrument_id=instrument_id,
         side=side,
         start_time=start_time,
@@ -360,6 +390,7 @@ def list_positions(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List raw non-zero position snapshots; rows are never collapsed."""
 
@@ -370,6 +401,7 @@ def list_positions(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         instrument_id=instrument_id,
         side=side,
         start_time=start_time,
@@ -386,6 +418,7 @@ def list_equity_curve(
     start_time: Annotated[datetime | None, Query()] = None,
     end_time: Annotated[datetime | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List account valuation points ordered by valuation time and sequence."""
 
@@ -396,6 +429,7 @@ def list_equity_curve(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         start_time=start_time,
         end_time=end_time,
     )
@@ -408,6 +442,7 @@ def list_metrics(
     limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List metric values; unavailable metrics expose their reason."""
 
@@ -418,6 +453,7 @@ def list_metrics(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
     )
 
 
@@ -425,6 +461,7 @@ def list_metrics(
 def get_analysis_summary(
     run_id: Annotated[UUID, Path()],
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> object:
     """Return the run's frozen analysis summary without recomputation."""
 
@@ -439,7 +476,9 @@ def get_analysis_summary(
         cursor_signing_key="internal:analysis-summary-read",
     )
     try:
-        summary = repository.get_analysis_summary(run_id)
+        summary = repository.get_analysis_summary(
+            run_id, owner_scope=_owner_scope(request)
+        )
     except (
         UnknownResultKindError,
         InternalResultNotVisibleError,
@@ -541,6 +580,7 @@ def _preflight_section_page(
     cursor: str | None,
     session: Session,
     signing_key: str,
+    request: Request | None = None,
 ) -> dict[str, object]:
     """Page calendar/session evidence inside persisted report JSON.
 
@@ -557,6 +597,7 @@ def _preflight_section_page(
         cursor=None,
         session=session,
         signing_key=signing_key,
+        request=request,
     )
     flattened: list[tuple[dict[str, object], object]] = []
     report_hashes: list[str] = []
@@ -691,6 +732,7 @@ def list_data_preflight(
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     section: Annotated[str | None, Query()] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List reports, with optional calendar/session detail projection."""
 
@@ -709,6 +751,7 @@ def list_data_preflight(
                 cursor=cursor,
                 session=session,
                 signing_key=signing_key,
+                request=request,
             )
         except CursorError as exc:
             raise HTTPException(
@@ -722,6 +765,7 @@ def list_data_preflight(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
     )
     page["items"] = [_project_preflight_item(row, compact=True) for row in page["items"]]
     # A default report row carries only the bounded 100-difference summary.
@@ -739,6 +783,7 @@ def list_data_preflight(
                 cursor=None,
                 session=session,
                 signing_key=signing_key,
+                request=request,
             )
         except (HTTPException, CursorError):
             # The ordinary list remains usable even if a concurrent report
@@ -783,6 +828,7 @@ def legacy_data_preflight_redirect(
             root is None
             or root.run_kind != "backtest_run"
             or root.profile != "formal@1"
+            or root.idempotency_scope != _owner_scope(request)
             or root.status == "indeterminate"
             or root.terminal_status == "indeterminate"
         ):
@@ -810,6 +856,7 @@ def list_data_chunks(
     cursor: Annotated[str | None, Query(min_length=1)] = None,
     phase: Annotated[str | None, Query(min_length=1, max_length=16)] = None,
     session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
 ) -> dict[str, object]:
     """List bounded data chunks in phase and chunk-sequence order."""
 
@@ -820,6 +867,7 @@ def list_data_chunks(
         cursor=cursor,
         session=session,
         signing_key=signing_key,
+        request=request,
         phase=phase,
     )
 

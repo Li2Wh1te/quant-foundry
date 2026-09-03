@@ -1358,8 +1358,13 @@ class BacktestResultRepository:
             return "internal"
         raise UnknownResultKindError("backtest run root kind/profile is invalid")
 
-    def get_run_root(self, run_id: UUID | str) -> BacktestRunRecord:
-        """Load one root for server-side visibility decisions."""
+    def get_run_root(
+        self,
+        run_id: UUID | str,
+        *,
+        owner_scope: str | None = None,
+    ) -> BacktestRunRecord:
+        """Load one owner-visible root for server-side visibility decisions."""
 
         run_uuid = _require_uuid("run_id", run_id)
         try:
@@ -1368,7 +1373,11 @@ class BacktestResultRepository:
             if _legacy_result_fixture_without_root(self.session, exc):
                 return
             raise
-        if root is None:
+        if root is None or (
+            owner_scope is not None
+            and getattr(root, "idempotency_scope", getattr(root, "tenant_id", None))
+            != owner_scope
+        ):
             raise UnknownResultKindError("backtest run root not found")
         return root
 
@@ -1377,6 +1386,7 @@ class BacktestResultRepository:
         run_id: UUID | str,
         *,
         expected_kind: str = "backtest_run",
+        owner_scope: str | None = None,
         allow_indeterminate: bool = False,
     ) -> BacktestRunRecord:
         """Apply root kind and determinate-result guards in one place.
@@ -1387,7 +1397,7 @@ class BacktestResultRepository:
         check; formal handlers retain the default.
         """
 
-        root = self.get_run_root(run_id)
+        root = self.get_run_root(run_id, owner_scope=owner_scope)
         # Historical SQLite repository fixtures predate the root table and
         # intentionally exercise only result-table contracts.  Keep those
         # isolated fixtures readable, while get_run_root still raises for an
@@ -1419,6 +1429,7 @@ class BacktestResultRepository:
         run_id: UUID,
         *,
         include_internal: bool,
+        owner_scope: str | None = None,
     ) -> None:
         """Enforce formal-default visibility for every result kind."""
 
@@ -1429,10 +1440,13 @@ class BacktestResultRepository:
             self.assert_result_visible(
                 run_id,
                 expected_kind="internal_link_acceptance",
+                owner_scope=owner_scope,
                 allow_indeterminate=True,
             )
             return
-        self.assert_result_visible(run_id, expected_kind="backtest_run")
+        self.assert_result_visible(
+            run_id, expected_kind="backtest_run", owner_scope=owner_scope
+        )
 
     # -- integrity projection --------------------------------------------
 
@@ -1441,6 +1455,7 @@ class BacktestResultRepository:
         run_id: UUID | str,
         *,
         include_internal: bool = False,
+        owner_scope: str | None = None,
     ) -> dict[str, list[Any]]:
         """Read the fixed eight result tables for one run in one transaction.
 
@@ -1456,6 +1471,7 @@ class BacktestResultRepository:
             expected_kind=(
                 "internal_link_acceptance" if include_internal else "backtest_run"
             ),
+            owner_scope=owner_scope,
             allow_indeterminate=True,
         )
         table_records: tuple[tuple[str, type], ...] = (
@@ -1940,6 +1956,7 @@ class BacktestResultRepository:
         run_id: UUID | str,
         *,
         include_internal: bool = False,
+        owner_scope: str | None = None,
     ) -> BacktestAnalysisSummaryDto | None:
         """Read the single analysis summary bound to one run."""
 
@@ -1949,7 +1966,9 @@ class BacktestResultRepository:
         # path with ``include_internal`` at the owning API boundary.
         if include_internal:
             raise InternalResultNotVisibleError("公开结果接口不支持 include_internal")
-        self.assert_result_visible(run_uuid, expected_kind="backtest_run")
+        self.assert_result_visible(
+            run_uuid, expected_kind="backtest_run", owner_scope=owner_scope
+        )
         record = self.session.scalars(
             select(BacktestAnalysisSummaryRecord).where(
                 BacktestAnalysisSummaryRecord.run_id == run_uuid
@@ -1970,6 +1989,7 @@ class BacktestResultRepository:
         cursor: str | None = None,
         query_context: Mapping[str, Any] | None = None,
         include_internal: bool = False,
+        owner_scope: str | None = None,
         **raw_filters: Any,
     ) -> CursorPage:
         """Return one stable page of results for a run.
@@ -1990,7 +2010,11 @@ class BacktestResultRepository:
         # query_context is caller-controlled pagination/filter evidence.  It
         # must never grant access; only the explicit server-owned argument at
         # this repository boundary may opt into internal artifacts.
-        self._assert_visible_run(run_uuid, include_internal=include_internal)
+        self._assert_visible_run(
+            run_uuid,
+            include_internal=include_internal,
+            owner_scope=owner_scope,
+        )
         checked_limit = normalize_limit(limit)
 
         filters: dict[str, str] = {}

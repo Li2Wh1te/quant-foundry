@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
@@ -24,7 +24,7 @@ from app.strategies.schemas import (
     StrategyBacktestWorkspaceResponse,
 )
 from app.backtesting.run_repository import DatabaseRunRepository, FORMAL_KIND
-from app.backtesting.run_router import _response as _run_response
+from app.backtesting.run_router import _owner_scope, _response as _run_response
 from app.backtesting.pagination import CursorError
 from app.backtesting.result_router import _cursor_signing_key
 from app.strategies.service import (
@@ -50,6 +50,7 @@ def strategy_backtest_workspace(
     strategy_id: UUID,
     session: Annotated[Session, Depends(get_db_session)],
     signing_key: Annotated[str, Depends(_cursor_signing_key)],
+    request: Request = None,  # type: ignore[assignment]
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     cursor: str | None = None,
 ) -> StrategyBacktestWorkspaceResponse:
@@ -62,6 +63,7 @@ def strategy_backtest_workspace(
         page = DatabaseRunRepository(session).list_page(
             queue_kind=FORMAL_KIND,
             strategy_id=str(strategy_id),
+            owner_scope=_owner_scope(request),
             limit=limit,
             cursor=cursor,
             signing_key=signing_key,

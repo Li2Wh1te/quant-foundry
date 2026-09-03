@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     server_host: IPvAnyAddress = "127.0.0.1"
     server_port: int = Field(default=8000, ge=1, le=65535)
     api_token: SecretStr = Field(min_length=32)
+    # Separate credential for the non-public Phase 2a endpoint.  Keeping it
+    # distinct from the general API token prevents an ordinary API caller from
+    # self-assigning operator/service capability with a request header.
+    backtest_internal_token: SecretStr | None = Field(default=None, min_length=32)
     # Server-only HMAC secret for opaque result cursors.  Unlike the API
     # token, this value is never presented by clients, so a holder of the
     # API token cannot forge validly signed cursors.

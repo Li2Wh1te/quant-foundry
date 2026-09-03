@@ -249,6 +249,7 @@ class DatabaseRunRepository:
         run_id: UUID | str,
         *,
         expected_kind: str | None = None,
+        owner_scope: str | None = None,
         for_update: bool = False,
     ) -> BacktestRunRecord | None:
         """Load one root with an optional authoritative kind guard."""
@@ -258,6 +259,10 @@ class DatabaseRunRepository:
         if expected_kind is not None:
             self._validate_kind(expected_kind)
             statement = statement.where(BacktestRunRecord.run_kind == expected_kind)
+        if owner_scope is not None:
+            statement = statement.where(
+                BacktestRunRecord.idempotency_scope == owner_scope
+            )
         if for_update:
             statement = statement.with_for_update()
         return self.session.scalar(statement)
@@ -362,6 +367,7 @@ class DatabaseRunRepository:
         tenant_id: str = "default",
         idempotency_key: str,
         idempotency_scope: str | None = None,
+        idempotency_request_hash: str | None = None,
     ) -> BacktestRunRecord:
         """Create one queued root with idempotency-before-capacity ordering.
 
@@ -378,7 +384,14 @@ class DatabaseRunRepository:
 
         existing = self.get_by_idempotency(scope, idempotency_key)
         if existing is not None:
-            if existing.config_hash != binding.config_hash:
+            if (
+                existing.config_hash != binding.config_hash
+                or (
+                    idempotency_request_hash is not None
+                    and getattr(existing, "idempotency_request_hash", None)
+                    not in (None, idempotency_request_hash)
+                )
+            ):
                 raise IdempotencyKeyReusedError(
                     "idempotency key already used with different request"
                 )
@@ -393,7 +406,14 @@ class DatabaseRunRepository:
         self.lock_queue_guard(kind)
         existing = self.get_by_idempotency(scope, idempotency_key)
         if existing is not None:
-            if existing.config_hash != binding.config_hash:
+            if (
+                existing.config_hash != binding.config_hash
+                or (
+                    idempotency_request_hash is not None
+                    and getattr(existing, "idempotency_request_hash", None)
+                    not in (None, idempotency_request_hash)
+                )
+            ):
                 raise IdempotencyKeyReusedError(
                     "idempotency key already used with different request"
                 )
@@ -430,6 +450,7 @@ class DatabaseRunRepository:
             tenant_id=tenant_id,
             idempotency_scope=scope,
             idempotency_key=idempotency_key,
+            idempotency_request_hash=idempotency_request_hash,
             run_kind=kind,
             profile=binding.profile,
             status="queued",
@@ -497,9 +518,129 @@ class DatabaseRunRepository:
         except IntegrityError:
             existing = self.get_by_idempotency(scope, idempotency_key)
             if existing is not None:
-                if existing.config_hash != binding.config_hash:
+                if (
+                    existing.config_hash != binding.config_hash
+                    or (
+                        idempotency_request_hash is not None
+                        and getattr(existing, "idempotency_request_hash", None)
+                        not in (None, idempotency_request_hash)
+                    )
+                ):
                     raise IdempotencyKeyReusedError(
                         "idempotency key already used with different request"
+                    )
+                return existing
+            raise
+        return row
+
+    def create_rerun(
+        self,
+        original_run_id: UUID | str,
+        *,
+        owner_scope: str,
+        idempotency_key: str,
+    ) -> BacktestRunRecord | None:
+        """Create a queued formal run from an owner-visible frozen root.
+
+        Reruns copy persisted inputs rather than rebuilding a binding from
+        mutable strategy/account defaults.  The original row remains
+        untouched and is linked from the new root for auditability.
+        """
+
+        if not owner_scope or not isinstance(idempotency_key, str) or not idempotency_key.strip():
+            raise ValueError("owner_scope and idempotency_key are required")
+        original = self.get(
+            original_run_id,
+            expected_kind=FORMAL_KIND,
+            owner_scope=owner_scope,
+        )
+        if original is None:
+            return None
+
+        existing = self.get_by_idempotency(owner_scope, idempotency_key)
+        if existing is not None:
+            if (
+                existing.config_hash != original.config_hash
+                or existing.rerun_of_run_id != original.id
+            ):
+                raise IdempotencyKeyReusedError(
+                    "idempotency key already used for a different rerun"
+                )
+            return existing
+
+        self.lock_queue_guard(FORMAL_KIND)
+        original = self.get(
+            original.id,
+            expected_kind=FORMAL_KIND,
+            owner_scope=owner_scope,
+            for_update=True,
+        )
+        if original is None:
+            return None
+        existing = self.get_by_idempotency(owner_scope, idempotency_key)
+        if existing is not None:
+            if (
+                existing.config_hash != original.config_hash
+                or existing.rerun_of_run_id != original.id
+            ):
+                raise IdempotencyKeyReusedError(
+                    "idempotency key already used for a different rerun"
+                )
+            return existing
+        queued = self.queued_count(FORMAL_KIND)
+        limit = self.limits[FORMAL_KIND]
+        if limit is None or queued >= limit:
+            raise self._capacity_error(FORMAL_KIND, queued)
+
+        row = BacktestRunRecord(
+            id=uuid4(),
+            tenant_id=owner_scope,
+            idempotency_scope=owner_scope,
+            idempotency_key=idempotency_key,
+            rerun_of_run_id=original.id,
+            run_kind=original.run_kind,
+            profile=original.profile,
+            status="queued",
+            config_hash=original.config_hash,
+            backtest_config=_json_value(original.backtest_config),
+            strategy_revision_id=original.strategy_revision_id,
+            strategy_source_hash=original.strategy_source_hash,
+            strategy_contract_version=original.strategy_contract_version,
+            parameters=_json_value(original.parameters),
+            initial_cash=original.initial_cash,
+            initial_positions=_json_value(original.initial_positions),
+            data_request=_json_value(original.data_request),
+            data_evidence=_json_value(original.data_evidence),
+            pit_snapshot_hash=original.pit_snapshot_hash,
+            pit_cutoff_at=original.pit_cutoff_at,
+            data_provider_key=original.data_provider_key,
+            max_lookback_sessions=original.max_lookback_sessions,
+            data_chunk_policy_key=original.data_chunk_policy_key,
+            data_chunk_policy_version=original.data_chunk_policy_version,
+            data_chunk_size_sessions=original.data_chunk_size_sessions,
+            data_admission_preflight_hash=original.data_admission_preflight_hash,
+            data_preflight_hash=original.data_preflight_hash,
+            account_profile_id=original.account_profile_id,
+            account_profile_version=original.account_profile_version,
+            fee_schedule_key=original.fee_schedule_key,
+            fee_schedule_version=original.fee_schedule_version,
+            fee_schedule_snapshot=_json_value(original.fee_schedule_snapshot),
+            analyzer_specs=_json_value(original.analyzer_specs),
+            behavior_versions=_json_value(original.behavior_versions),
+        )
+        try:
+            with self.session.begin_nested():
+                self.session.add(row)
+                self.session.flush()
+        except IntegrityError:
+            existing = self.get_by_idempotency(owner_scope, idempotency_key)
+            if existing is not None:
+                if (
+                    existing.config_hash != original.config_hash
+                    or existing.rerun_of_run_id != original.id
+                ):
+                    raise IdempotencyKeyReusedError(
+                        "idempotency key already used for a different rerun"
                     )
                 return existing
             raise
@@ -510,6 +651,7 @@ class DatabaseRunRepository:
         *,
         queue_kind: str = FORMAL_KIND,
         tenant_id: str | None = None,
+        owner_scope: str | None = None,
         strategy_revision_id: str | None = None,
         strategy_id: str | None = None,
         limit: int = 100,
@@ -523,8 +665,11 @@ class DatabaseRunRepository:
         statement = select(BacktestRunRecord).where(
             BacktestRunRecord.run_kind == queue_kind
         )
-        if tenant_id is not None:
-            statement = statement.where(BacktestRunRecord.idempotency_scope == tenant_id)
+        visible_scope = owner_scope if owner_scope is not None else tenant_id
+        if visible_scope is not None:
+            statement = statement.where(
+                BacktestRunRecord.idempotency_scope == visible_scope
+            )
         if strategy_revision_id is not None:
             statement = statement.where(
                 BacktestRunRecord.strategy_revision_id == strategy_revision_id
@@ -547,6 +692,7 @@ class DatabaseRunRepository:
         signing_key: str,
         queue_kind: str = FORMAL_KIND,
         tenant_id: str | None = None,
+        owner_scope: str | None = None,
         strategy_revision_id: str | None = None,
         strategy_id: str | None = None,
         limit: int = 100,
@@ -565,9 +711,10 @@ class DatabaseRunRepository:
         statement = select(BacktestRunRecord).where(
             BacktestRunRecord.run_kind == queue_kind
         )
-        if tenant_id is not None:
+        visible_scope = owner_scope if owner_scope is not None else tenant_id
+        if visible_scope is not None:
             statement = statement.where(
-                BacktestRunRecord.idempotency_scope == tenant_id
+                BacktestRunRecord.idempotency_scope == visible_scope
             )
         if strategy_revision_id is not None:
             statement = statement.where(
@@ -582,7 +729,7 @@ class DatabaseRunRepository:
         query_payload = {
             "resource": "backtest_runs",
             "run_kind": queue_kind,
-            "tenant_id": tenant_id,
+            "tenant_id": visible_scope,
             "strategy_revision_id": strategy_revision_id,
             "strategy_id": strategy_id,
             "limit": checked_limit,
@@ -788,11 +935,17 @@ class DatabaseRunRepository:
         run_id: UUID | str,
         *,
         expected_kind: str | None = None,
+        owner_scope: str | None = None,
         now: datetime | None = None,
     ) -> BacktestRunRecord | None:
         """Record a cancellation request, never a terminal decision."""
 
-        row = self.get(run_id, expected_kind=expected_kind, for_update=True)
+        row = self.get(
+            run_id,
+            expected_kind=expected_kind,
+            owner_scope=owner_scope,
+            for_update=True,
+        )
         if row is None:
             return None
         if row.status in TERMINAL_STATUSES:

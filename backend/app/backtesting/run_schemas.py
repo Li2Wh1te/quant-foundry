@@ -9,7 +9,10 @@ class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     spec: dict[str, Any]
     strategy_revision_id: UUID
-    idempotency_key: str = Field(min_length=1, max_length=200)
+    # Body form remains supported for existing clients; the canonical API
+    # also accepts the standard Idempotency-Key header.
+    idempotency_key: str | None = Field(default=None, min_length=1, max_length=200)
+    client_request_id: str | None = Field(default=None, min_length=1, max_length=200)
     degraded: bool = False
     confirmed_admission_report_hash: str | None = None
 

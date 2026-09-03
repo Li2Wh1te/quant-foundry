@@ -25,11 +25,18 @@ SERVER_HOST_KEY = "QF_SERVER_HOST"
 LEGACY_SERVER_HOST = "127.0.0.1"
 DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
+BACKTEST_INTERNAL_TOKEN_KEY = "QF_BACKTEST_INTERNAL_TOKEN"
 CURSOR_SIGNING_KEY = "QF_CURSOR_SIGNING_KEY"
-SECRET_KEYS = (DATABASE_PASSWORD_KEY, API_TOKEN_KEY, CURSOR_SIGNING_KEY)
+SECRET_KEYS = (
+    DATABASE_PASSWORD_KEY,
+    API_TOKEN_KEY,
+    BACKTEST_INTERNAL_TOKEN_KEY,
+    CURSOR_SIGNING_KEY,
+)
 LEGACY_URL_KEY = "QF_DATABASE_URL"
 WEAK_DATABASE_PASSWORDS = {"", "change-me", "postgres"}
 WEAK_API_TOKENS = {"", "change-me"}
+WEAK_BACKTEST_INTERNAL_TOKENS = {"", "change-me"}
 WEAK_CURSOR_SIGNING_KEYS = {"", "change-me"}
 ENV_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
@@ -59,6 +66,21 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         generated_keys,
         minimum_length=32,
     )
+    internal_token_configured = (
+        BACKTEST_INTERNAL_TOKEN_KEY in values
+        or BACKTEST_INTERNAL_TOKEN_KEY in template_values
+    )
+    backtest_internal_token = (
+        _ensure_secret(
+            values,
+            BACKTEST_INTERNAL_TOKEN_KEY,
+            WEAK_BACKTEST_INTERNAL_TOKENS,
+            generated_keys,
+            minimum_length=32,
+        )
+        if internal_token_configured
+        else None
+    )
     cursor_signing_key = _ensure_secret(
         values,
         CURSOR_SIGNING_KEY,
@@ -81,6 +103,11 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         **DATABASE_DEFAULTS,
         DATABASE_PASSWORD_KEY: database_password,
         API_TOKEN_KEY: api_token,
+        **(
+            {BACKTEST_INTERNAL_TOKEN_KEY: backtest_internal_token}
+            if internal_token_configured
+            else {}
+        ),
         CURSOR_SIGNING_KEY: cursor_signing_key,
     }
 
@@ -175,6 +202,11 @@ def main() -> None:
     secrets_to_report = (
         (DATABASE_PASSWORD_KEY, "PostgreSQL password"),
         (API_TOKEN_KEY, "API token"),
+        *(
+            [(BACKTEST_INTERNAL_TOKEN_KEY, "backtest internal token")]
+            if BACKTEST_INTERNAL_TOKEN_KEY in generated_keys
+            else []
+        ),
         (CURSOR_SIGNING_KEY, "cursor signing key"),
     )
     for key, label in secrets_to_report:

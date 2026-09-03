@@ -267,6 +267,7 @@ class BacktestRun:
     run_id: UUID
     binding: RunBinding
     status: str = "queued"
+    owner_scope: str = "default"
     idempotency_key: str | None = None
     terminal_status: str | None = None
     rerun_of_run_id: UUID | None = None
@@ -310,7 +311,12 @@ class RunCreationService:
                 queue_limit=cap,
                 disabled=cap is None,
             )
-        run = BacktestRun(uuid4(), binding, idempotency_key=idempotency_key)
+        run = BacktestRun(
+            uuid4(),
+            binding,
+            idempotency_key=idempotency_key,
+            owner_scope=tenant_id,
+        )
         if idempotency_key:
             self._runs[key] = run
         self._queued[binding.run_kind] += 1
