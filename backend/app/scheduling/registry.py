@@ -11,6 +11,13 @@ from pydantic import BaseModel
 class TaskContext:
     task_id: UUID
     run_id: UUID
+    task_type: str | None = None
+    # Ingestion tasks receive these resources from the scheduler so their
+    # handler runs inside the same transaction as fact and checkpoint writes.
+    client: Any | None = None
+    session: Any | None = None
+    checkpoint_repo: Any | None = None
+    sync_key: str | None = None
 
 
 class TaskHandler(Protocol):

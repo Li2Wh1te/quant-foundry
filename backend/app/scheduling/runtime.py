@@ -14,6 +14,8 @@ from structlog.contextvars import bound_contextvars
 
 from app.core.config import Settings
 from app.db.session import get_engine
+from app.data_ingestion.clients.tushare import TushareClient
+from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.scheduling.registry import TaskContext, TaskRegistry, task_registry
 from app.scheduling.repository import SchedulerRepository
 from app.scheduling.schemas import (
@@ -30,6 +32,12 @@ from app.scheduling.triggers import build_trigger
 logger = structlog.get_logger(__name__)
 TASK_JOB_PREFIX = "scheduled-task:"
 DISPATCH_JOB_ID = "scheduler:dispatch"
+INGESTION_SYNC_KEYS = {
+    "data.sync_etf_cash_dividend_full": "tushare.fund_div.full",
+    "data.sync_etf_cash_dividend_incremental": "tushare.fund_div.incremental",
+    "data.sync_etf_cash_dividend_reconciliation": "tushare.fund_div.reconciliation",
+    "data.sync_trading_status": "tushare.trading_status",
+}
 
 
 class SchedulerDisabledError(Exception):
@@ -222,6 +230,7 @@ class SchedulerRuntime:
     def _execute_run(self, run_id: UUID) -> None:
         task_id: UUID | None = None
         task_type: str | None = None
+        ingestion_session: Session | None = None
         try:
             with Session(get_engine()) as session:
                 repository = SchedulerRepository(session)
@@ -260,12 +269,33 @@ class SchedulerRuntime:
                         f"for task type {task_type}"
                     )
                 validated_parameters = definition.parameters_model.model_validate(parameters)
-                result = definition.handler(
-                    TaskContext(task_id=task_id, run_id=run_id),
-                    validated_parameters,
-                )
+
+                if task_type in INGESTION_SYNC_KEYS:
+                    # Keep source facts and their checkpoint in one transaction.
+                    # This prevents a successful-looking cursor from advancing
+                    # when fact persistence fails halfway through the handler.
+                    ingestion_session = Session(get_engine())
+                    context = TaskContext(
+                        task_id=task_id,
+                        run_id=run_id,
+                        task_type=task_type,
+                        client=TushareClient(self.settings),
+                        session=ingestion_session,
+                        checkpoint_repo=DataSyncCheckpointRepository(ingestion_session),
+                        sync_key=INGESTION_SYNC_KEYS[task_type],
+                    )
+                else:
+                    context = TaskContext(
+                        task_id=task_id, run_id=run_id, task_type=task_type
+                    )
+
+                result = definition.handler(context, validated_parameters)
                 if result is not None and not isinstance(result, dict):
                     raise TypeError("task handlers must return a dictionary or None")
+                if ingestion_session is not None:
+                    ingestion_session.commit()
+                    ingestion_session.close()
+                    ingestion_session = None
 
                 with Session(get_engine()) as session:
                     SchedulerRepository(session).finish_run(
@@ -289,6 +319,10 @@ class SchedulerRuntime:
                     completion_marker="reported", error_type=None,
                 )
         except Exception as exc:
+            if ingestion_session is not None:
+                ingestion_session.rollback()
+                ingestion_session.close()
+                ingestion_session = None
             logger.exception(
                 "task_run_failed",
                 message=f"任务运行执行失败：范围为task={task_id}, run={run_id}, task_type={task_type}，错误为{type(exc).__name__}。",

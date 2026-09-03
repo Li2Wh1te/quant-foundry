@@ -8,7 +8,7 @@ def normalize_suspend(rows):
     raw = rows.to_dict("records") if hasattr(rows, "to_dict") else rows
     return [normalize_suspend_row(dict(row)) for row in raw]
 
-def sync_suspend_d(client, *, session=None, checkpoint_repo=None, sync_key=None, scope_key="trading_status", checkpoint_cursor=None, **kwargs):
+def sync_suspend_d(client, *, session=None, checkpoint_repo=None, sync_key=None, scope_key="trading_status", checkpoint_cursor=None, checkpoint_version=None, **kwargs):
     """Fetch, normalize, and optionally persist suspension facts."""
     rows = fetch_suspend_d(client, **kwargs)
     items = normalize_suspend(rows)
@@ -25,10 +25,12 @@ def sync_suspend_d(client, *, session=None, checkpoint_repo=None, sync_key=None,
                 changed -= 1
     advanced = False
     if checkpoint_repo is not None and sync_key:
-        checkpoint_repo.advance(sync_key=sync_key, scope_key=scope_key, cursor=checkpoint_cursor or {}, expected_version=None)
+        checkpoint = checkpoint_repo.advance(sync_key=sync_key, scope_key=scope_key, cursor=checkpoint_cursor or {}, expected_version=checkpoint_version)
         advanced = True
+    else:
+        checkpoint = None
     return {"items": items, "fetched": len(items), "changed": changed,
             "unchanged": len(items)-changed, "failed": 0, "checkpoint_advanced": advanced,
-            "checkpoint_scope": "trading_status", "checkpoint_after": (checkpoint_cursor or {}) if advanced else None,
+            "checkpoint_scope": "trading_status", "checkpoint_after": checkpoint.cursor if advanced else None,
             "coverage_status": "complete" if items else "unknown",
             "evidence": {"source": "tushare", "endpoint": "suspend_d", "row_count": len(items)}}

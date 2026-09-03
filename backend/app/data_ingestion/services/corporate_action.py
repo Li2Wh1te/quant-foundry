@@ -52,7 +52,7 @@ def derive_cash_effective_session(item, *, calendar_id, timezone_name, calendar_
 
 def sync_fund_div(client, *, session=None, checkpoint_repo=None, sync_key=None,
                   scope_key="fund_div", checkpoint_cursor=None,
-                  instrument_map=None, **kwargs):
+                  checkpoint_version=None, instrument_map=None, **kwargs):
     """Fetch and optionally persist one atomic synchronization unit.
 
     Persistence is deliberately duck-typed so worker tests can provide a fake
@@ -63,16 +63,30 @@ def sync_fund_div(client, *, session=None, checkpoint_repo=None, sync_key=None,
     # Save the complete response, including an empty response, before parsing.
     if session is not None:
         from app.data_ingestion.models.corporate_action import CorporateActionSourceFact
-        snap = CorporateActionSourceFact(id=uuid4(), source="tushare", endpoint="fund_div",
-            query_kind="ann_date" if kwargs.get("ann_date") else "ts_code" if kwargs.get("ts_code") else "range",
-            query_value=kwargs.get("ann_date") or kwargs.get("ts_code"), ts_code=kwargs.get("ts_code") or "*",
-            ann_date=None, payload={"rows": raw_rows}, source_hash=__import__("hashlib").sha256(
-                __import__("json").dumps(raw_rows, sort_keys=True, default=str).encode()).hexdigest())
-        session.add(snap)
+        source_hash = __import__("hashlib").sha256(
+            __import__("json").dumps(raw_rows, sort_keys=True, default=str).encode()
+        ).hexdigest()
+        existing_snapshot = None
+        query = getattr(session, "query", None)
+        if callable(query):
+            existing_snapshot = query(CorporateActionSourceFact).filter_by(
+                source="tushare",
+                endpoint="fund_div",
+                query_kind="ann_date" if kwargs.get("ann_date") else "ts_code" if kwargs.get("ts_code") else "range",
+                query_value=kwargs.get("ann_date") or kwargs.get("ts_code"),
+                source_hash=source_hash,
+            ).first()
+        if existing_snapshot is None:
+            snap = CorporateActionSourceFact(id=uuid4(), source="tushare", endpoint="fund_div",
+                query_kind="ann_date" if kwargs.get("ann_date") else "ts_code" if kwargs.get("ts_code") else "range",
+                query_value=kwargs.get("ann_date") or kwargs.get("ts_code"), ts_code=kwargs.get("ts_code") or "*",
+                ann_date=None, payload={"rows": raw_rows}, source_hash=source_hash)
+            session.add(snap)
     items = normalize_fund_div(raw_rows)
     conflicts = detect_logical_key_conflicts(items)
     failed = len(conflicts)
     persisted = 0
+    unchanged = 0
     if session is not None and instrument_map is not None:
         from app.data_ingestion.models.corporate_action import CorporateActionFact
         for item in items:
@@ -90,6 +104,7 @@ def sync_fund_div(client, *, session=None, checkpoint_repo=None, sync_key=None,
             except Exception:
                 previous = None
             if previous is not None and previous.evidence.get("source_hash") == item.source_hash:
+                unchanged += 1
                 continue
             version = (previous.fact_version + 1) if previous is not None else 1
             fact = CorporateActionFact(event_id=uuid4(), logical_fact_key=key,
@@ -104,16 +119,19 @@ def sync_fund_div(client, *, session=None, checkpoint_repo=None, sync_key=None,
             session.add(fact); persisted += 1
     advanced = False
     if checkpoint_repo is not None and sync_key and not failed:
-        checkpoint_repo.advance(sync_key=sync_key, scope_key=scope_key,
-                                cursor=checkpoint_cursor or {}, expected_version=None)
+        checkpoint = checkpoint_repo.advance(sync_key=sync_key, scope_key=scope_key,
+                                              cursor=checkpoint_cursor or {},
+                                              expected_version=checkpoint_version)
         advanced = True
-    return {"items": items, "fetched": len(raw_rows), "changed": persisted or max(0, len(items)-failed),
-            "unchanged": 0, "failed": failed, "skipped_non_target": 0,
-            "checkpoint_advanced": advanced, "checkpoint_after": (checkpoint_cursor or {}) if advanced else None, "conflicts": conflicts}
+    return {"items": items, "fetched": len(raw_rows), "changed": persisted,
+            "unchanged": unchanged, "failed": failed, "skipped_non_target": 0,
+            "checkpoint_advanced": advanced,
+            "checkpoint_after": checkpoint.cursor if advanced else None, "conflicts": conflicts}
 
 
 def sync_fund_div_full(client, *, ts_codes, session=None, checkpoint_repo=None,
-                       sync_key=None, instrument_map=None, **kwargs):
+                       sync_key=None, instrument_map=None, checkpoint_version=None,
+                       **kwargs):
     """Scan every resolved ETF source code and commit only after all succeed.
 
     The helper intentionally treats a page at the client limit as potentially
@@ -125,6 +143,7 @@ def sync_fund_div_full(client, *, ts_codes, session=None, checkpoint_repo=None,
                  "conflicts": []}
     for code in tuple(ts_codes):
         result = sync_fund_div(client, session=session, instrument_map=instrument_map,
+                               checkpoint_repo=None, sync_key=None,
                                ts_code=code, **kwargs)
         for key in ("items", "conflicts"):
             aggregate[key].extend(result.get(key, ()))
@@ -147,8 +166,13 @@ def sync_fund_div_full(client, *, ts_codes, session=None, checkpoint_repo=None,
                 validation_rule="tushare_fund_div_coverage@1", summary={"full_scan": True},
             ))
     if checkpoint_repo is not None and sync_key and aggregate["failed"] == 0:
-        checkpoint_repo.advance(sync_key=sync_key, scope_key="fund_div",
-                                cursor={"ts_codes": list(ts_codes)}, expected_version=None)
+        cursor = {
+            **(kwargs.get("checkpoint_cursor") or {}),
+            "ts_codes": list(ts_codes),
+        }
+        checkpoint = checkpoint_repo.advance(sync_key=sync_key, scope_key="fund_div",
+                                              cursor=cursor,
+                                              expected_version=checkpoint_version)
         aggregate["checkpoint_advanced"] = True
-        aggregate["checkpoint_after"] = {"ts_codes": list(ts_codes)}
+        aggregate["checkpoint_after"] = checkpoint.cursor
     return aggregate
