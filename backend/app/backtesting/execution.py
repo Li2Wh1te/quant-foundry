@@ -340,10 +340,19 @@ class MarketState:
     # Deep-frozen provenance of a formal construction: per-dimension fact
     # states, applicability, and evidence.  ``None`` marks fixture use.
     facts_basis: Mapping[str, object] | None = None
+    # The multiplier is an explicit market fact for compatibility execution
+    # paths. Formal rule-snapshot matching also receives it through its
+    # per-instrument execution facts.
+    contract_multiplier: Decimal | int | str = Decimal("1")
 
     def __post_init__(self) -> None:
         _aware_datetime(self.timestamp, "timestamp")
         object.__setattr__(self, "price_tick", _positive(self.price_tick, "price_tick"))
+        object.__setattr__(
+            self,
+            "contract_multiplier",
+            _positive(self.contract_multiplier, "contract_multiplier"),
+        )
         if self.open_price is not None:
             object.__setattr__(self, "open_price", _positive(self.open_price, "open_price"))
         try:
@@ -474,11 +483,16 @@ class BarMarketExecutionModel:
                 price_tick=state.price_tick,
             )
             quantity = order.remaining_quantity
-            notional = slippage.execution_price * quantity
+            notional = (
+                slippage.execution_price
+                * quantity
+                * state.contract_multiplier
+            )
             breakdown = self.fee_calculator.calculate(
                 side=order.side,
                 notional=notional,
                 currency=context.currency,
+                quantity=quantity,
             )
             total_cost = notional + breakdown.total
             available_quantity = context.available_quantities.get(order.instrument_id, ZERO)
@@ -551,9 +565,14 @@ class BarMarketExecutionModel:
             quantity=quantity,
             fees=breakdown.total,
             currency=breakdown.currency,
+            contract_multiplier=state.contract_multiplier,
             fee_breakdown=breakdown,
             slippage_bps=slippage.slippage_bps,
-            slippage_amount=abs(slippage.price_delta) * quantity,
+            slippage_amount=(
+                abs(slippage.price_delta)
+                * quantity
+                * state.contract_multiplier
+            ),
             slippage_model_key=slippage.model_key,
             slippage_model_version=slippage.model_version,
             slippage_model_parameters=slippage.parameters,

@@ -621,6 +621,40 @@ class BuyAllocationTests(MatchingFixture):
         self.assertEqual(result.unsubmitted_order_ids, (tiny.order_id,))
         self.assertEqual(ledger.available_cash, Decimal("600"))
 
+    def test_lot_reduction_never_leaves_a_below_minimum_buy(self) -> None:
+        model = BarOpenMatchingModel(
+            slippage_model=BpsSlippageModel.none(price_tick="0.01"),
+            fee_quote_provider=StatelessFeeQuoteProvider(
+                fee_schedule=min_fee_schedule()
+            ),
+        )
+        facts = {
+            self.iid: self.make_facts(
+                lot_size="100", minimum_order_quantity="150"
+            )
+        }
+        first = self.make_order(OrderSide.BUY, "300", 1)
+        second = self.make_order(OrderSide.BUY, "300", 2)
+
+        result = model.match(
+            orders=[first, second],
+            market_states={self.iid: self.make_state(open_price="1")},
+            ledger=self.make_ledger(cash="407"),
+            facts=facts,
+            match_at=OPEN_TS,
+        )
+
+        allocations = {
+            record.intent_id: record for record in result.buy_allocation_results
+        }
+        self.assertEqual(allocations[first.intent_id].allocated_quantity, Decimal("0"))
+        self.assertEqual(allocations[second.intent_id].allocated_quantity, Decimal("200"))
+        self.assertEqual(len(result.fills), 1)
+        self.assertEqual(result.fills[0].quantity, Decimal("200"))
+        self.assertGreaterEqual(
+            result.fills[0].quantity, facts[self.iid].minimum_order_quantity
+        )
+
     def test_lot_reduction_recomputes_the_fee_quote_at_each_step(self) -> None:
         model = BarOpenMatchingModel(
             slippage_model=BpsSlippageModel.none(price_tick="0.01"),

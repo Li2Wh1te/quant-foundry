@@ -212,6 +212,34 @@ class BarMarketExecutionTestCase(unittest.TestCase):
         self.assertEqual(result.fills, ())
         self.assertEqual(result.skipped_orders[0].reason, "buy_unavailable_at_price_limit")
 
+    def test_multiplier_drives_legacy_match_notional_and_slippage_amount(self) -> None:
+        model = BarMarketExecutionModel(
+            slippage_model=BpsSlippageModel(
+                slippage_bps="100", price_tick="0.01"
+            ),
+            fee_calculator=self.model.fee_calculator,
+        )
+        buy = order(side=OrderSide.BUY, quantity="100")
+        state = MarketState(
+            instrument_id=INSTRUMENT_ID,
+            timestamp=OPEN,
+            open_price="10",
+            price_tick="0.01",
+            contract_multiplier="10",
+        )
+
+        result = model.match(
+            [buy],
+            {INSTRUMENT_ID: state},
+            MatchContext(currency="CNY", available_cash="10105"),
+        )
+
+        fill = result.fills[0]
+        self.assertEqual(fill.price, Decimal("10.10"))
+        self.assertEqual(fill.gross_notional, Decimal("10100"))
+        self.assertEqual(fill.contract_multiplier, Decimal("10"))
+        self.assertEqual(fill.slippage_amount, Decimal("100"))
+
     def test_sell_orders_are_processed_before_buys(self) -> None:
         sell = order(side=OrderSide.SELL, quantity="100")
         buy = order(side=OrderSide.BUY, quantity="100")

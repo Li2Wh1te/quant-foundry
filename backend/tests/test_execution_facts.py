@@ -410,6 +410,7 @@ class NotApplicableTestCase(unittest.TestCase):
             open_price="10",
             price_tick="0.01",
             timestamp=OPEN_TS,
+            contract_multiplier="10",
         )
 
         # The permissive mapping is explicit, never a silent default.
@@ -418,6 +419,7 @@ class NotApplicableTestCase(unittest.TestCase):
         self.assertFalse(state.is_suspended)
         self.assertTrue(state.open_available)
         self.assertIs(state.price_limit_status, PriceLimitStatus.NONE)
+        self.assertEqual(state.contract_multiplier, Decimal("10"))
         # The declaration stays auditable in the provenance record.
         self.assertEqual(state.facts_basis[LIMIT]["applicability"], "not_applicable")
 

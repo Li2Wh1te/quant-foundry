@@ -1019,7 +1019,13 @@ class BarOpenMatchingModel:
                 if outcome.allocated == ZERO:
                     continue
                 reduced = outcome.allocated - outcome.facts.lot_size
-                if reduced < ZERO:
+                # The lot grid alone is not enough: a reduction that lands
+                # below the frozen minimum order quantity is not executable
+                # and must be removed rather than emitted as an illegal fill.
+                if (
+                    reduced < outcome.facts.minimum_order_quantity
+                    or reduced < ZERO
+                ):
                     reduced = ZERO
                 outcome.allocated = reduced
                 outcome.allocation_phase = ALLOCATION_PHASE_LOT_REDUCTION

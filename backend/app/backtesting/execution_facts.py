@@ -636,6 +636,7 @@ def market_state_from_execution_facts(
     open_price: Decimal | int | str | None,
     price_tick: Decimal | int | str,
     timestamp: datetime,
+    contract_multiplier: Decimal | int | str = Decimal("1"),
 ) -> "MarketState":
     """Build a :class:`MarketState` explicitly from normalized facts.
 
@@ -688,6 +689,7 @@ def market_state_from_execution_facts(
         timestamp=timestamp,
         open_price=open_price,
         price_tick=price_tick,
+        contract_multiplier=contract_multiplier,
         is_suspended=facts.suspension_state is SuspensionState.SUSPENDED,
         # UNAVAILABLE is the only closing state; NOT_APPLICABLE never blocks.
         open_available=facts.opening_state is not OpeningState.UNAVAILABLE,

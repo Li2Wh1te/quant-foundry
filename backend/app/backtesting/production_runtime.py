@@ -420,6 +420,11 @@ class SqlBacktestChunkSession:
                 sell_allowed=True,
                 board_lot=Decimal(str(spec.lot_size)),
                 contract_multiplier=Decimal(str(spec.contract_multiplier)),
+                fee_applicability_context={
+                    "asset_class": spec.asset_class,
+                    "exchange": spec.exchange,
+                    "currency": spec.currency,
+                },
             )
         return result
     def adjusted_series(self, _query): raise UnsupportedCapabilityError("formal v1 does not enable adjusted series")
@@ -478,8 +483,6 @@ def default_components() -> dict[str, Any]:
             {
                 "commission_rate": "0.0003",
                 "commission_minimum": "5",
-                "slippage_bps": "0",
-                "price_tick": "0.01",
             },
         ),
         # Formal sizing must use the interpreter that consumes frozen

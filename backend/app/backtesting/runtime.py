@@ -491,6 +491,7 @@ class InstrumentFacts:
     sell_allowed: bool
     board_lot: Decimal = Decimal("100")
     contract_multiplier: Decimal = Decimal("1")
+    fee_applicability_context: Mapping[str, str] = MappingProxyType({})
 
     def __post_init__(self) -> None:
         if not isinstance(self.instrument_id, UUID):
@@ -512,6 +513,22 @@ class InstrumentFacts:
         object.__setattr__(self, "board_lot", lot)
         multiplier = _positive(self.contract_multiplier, "contract_multiplier")
         object.__setattr__(self, "contract_multiplier", multiplier)
+        context: dict[str, str] = {}
+        for key, value in dict(self.fee_applicability_context).items():
+            if not isinstance(key, str) or not key.strip():
+                raise DomainValidationError(
+                    "fee_applicability_context keys must be non-blank text"
+                )
+            if not isinstance(value, str) or not value.strip():
+                raise DomainValidationError(
+                    "fee_applicability_context values must be non-blank text"
+                )
+            context[key.strip()] = value.strip()
+        object.__setattr__(
+            self,
+            "fee_applicability_context",
+            MappingProxyType(context),
+        )
 
 
 class EngineMarketData(Protocol):
@@ -644,6 +661,7 @@ class EngineDataView:
             timestamp=timestamp,
             open_price=quote.open_price if quote is not None else None,
             price_tick=facts.price_tick,
+            contract_multiplier=facts.contract_multiplier,
             is_suspended=facts.suspended,
             open_available=quote is not None and quote.open_price is not None,
             buy_allowed=facts.buy_allowed,
@@ -4708,9 +4726,15 @@ class DeterministicBacktestRunner:
         segment = bundle.segment_for(instrument_id, effective_date)
         from app.backtesting.execution_policy import InstrumentExecutionPolicy
 
+        instrument_facts = self._instrument_facts.get(instrument_id)
         policy = InstrumentExecutionPolicy.from_rule_snapshot(
             segment,
             package_reference=bundle.rule_package_reference,
+            fee_applicability_context=(
+                instrument_facts.fee_applicability_context
+                if instrument_facts is not None
+                else None
+            ),
         )
         if policy.currency != self._currency:
             raise DomainValidationError(
@@ -5891,6 +5915,7 @@ class DeterministicBacktestRunner:
             facts,
             open_price=quote.open_price if quote is not None else None,
             price_tick=policy.price_tick,
+            contract_multiplier=policy.contract_multiplier,
             timestamp=timestamp,
         )
 
@@ -6475,6 +6500,13 @@ class DeterministicBacktestRunner:
         marks = view.close_marks()
         valuation_kwargs: dict[str, Any] = {}
         if self._rule_snapshot_bundle is not None:
+            # Cache the complete PIT instrument facts before resolving the
+            # policy.  The same facts carry fee applicability (asset class,
+            # exchange, currency) into any later execution-policy cache hit.
+            for instrument_id in self._portfolio.positions:
+                self._instrument_facts.setdefault(
+                    instrument_id, view.facts(instrument_id)
+                )
             valuation_kwargs["contract_multipliers"] = {
                 instrument_id: self.execution_policy_for(
                     instrument_id, context.session_date
