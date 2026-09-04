@@ -1,7 +1,10 @@
-from datetime import date
+from datetime import UTC, date, datetime
+from types import SimpleNamespace
 
 import pytest
 
+from app.backtesting.production_runtime import _formal_gate_checks
+from app.backtesting.run_admission import build_gate_evidence
 from app.backtesting.run_binding import (
     GateOrchestrator,
     IdempotencyKeyReusedError,
@@ -40,3 +43,61 @@ def test_queue_capacity_and_metric_disable():
         metric_checks={"sharpe": False},
     )
     assert decision.allowed and decision.disabled_metrics == ("sharpe",)
+
+
+def test_formal_creation_projects_and_persists_all_gate_evidence():
+    report = SimpleNamespace(
+        session_summary={"production_capabilities": {"status": "complete"}},
+        status="ready",
+        report_hash="a" * 64,
+        issues=(),
+    )
+    checks = _formal_gate_checks(
+        report,
+        preflight_allowed=True,
+        strategy={"revision_id": "revision"},
+        account={"profile_id": "account"},
+        components={"execution_model": {"key": "bar_market"}},
+    )
+    decision = GateOrchestrator().evaluate(run_kind="backtest_run", checks=checks)
+    evidence = build_gate_evidence(
+        decision,
+        report_hash=report.report_hash,
+        report_status=report.status,
+        checked_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+
+    assert checks == {
+        "phase1": True,
+        "phase2a": True,
+        "formal_basic": True,
+        "formal_complete": True,
+    }
+    assert evidence["allowed"] is True
+    assert set(evidence["gates"]) == {
+        "phase1",
+        "phase2a",
+        "formal_basic",
+        "formal_complete",
+    }
+    assert all(item["report_hash"] == report.report_hash for item in evidence["gates"].values())
+    assert all(item["status"] == "ready" for item in evidence["gates"].values())
+
+    blocked_report = SimpleNamespace(
+        session_summary={"production_capabilities": {"status": "incomplete"}},
+        status="blocked",
+        report_hash="b" * 64,
+        issues=(),
+    )
+    blocked_checks = _formal_gate_checks(
+        blocked_report,
+        preflight_allowed=True,
+        strategy={"revision_id": "revision"},
+        account={"profile_id": "account"},
+        components={"execution_model": {"key": "bar_market"}},
+    )
+    blocked = GateOrchestrator().evaluate(
+        run_kind="backtest_run", checks=blocked_checks
+    )
+    assert not blocked.allowed
+    assert blocked.reason == "formal_complete"

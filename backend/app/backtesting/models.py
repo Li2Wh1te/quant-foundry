@@ -219,6 +219,10 @@ class BacktestRunRecord(Base):
     # from the request so query projections can expose evidence without
     # re-resolving a mutable provider.
     data_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    # Immutable four-level admission evidence.  The binding snapshot remains
+    # the source of truth; this projection makes gate status queryable without
+    # reopening mutable data or strategy dependencies.
+    formal_gate_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     pit_snapshot_hash: Mapped[str | None] = mapped_column(String(71), nullable=True)
     pit_cutoff_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     data_provider_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -336,7 +340,7 @@ _IMMUTABLE_RUN_FIELDS = (
     "data_admission_preflight_hash", "account_profile_id", "account_profile_version",
     "fee_schedule_key", "fee_schedule_version", "fee_schedule_snapshot",
     "analyzer_specs", "behavior_versions", "random_seed", "data_evidence",
-    "pit_snapshot_hash", "pit_cutoff_at",
+    "formal_gate_evidence", "pit_snapshot_hash", "pit_cutoff_at",
 )
 
 

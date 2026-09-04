@@ -46,6 +46,8 @@ from app.backtesting.registry import (
 )
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
+from app.backtesting.run_admission import RunAdmissionService, build_gate_evidence
+from app.backtesting.run_binding import Gate
 from app.backtesting.runner_failure import build_failure_evidence
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
@@ -703,6 +705,60 @@ def _behavior_versions(
     }
 
 
+def _formal_gate_checks(
+    report: DataPreflightReport,
+    *,
+    preflight_allowed: bool,
+    strategy: Mapping[str, Any] | None = None,
+    account: Mapping[str, Any] | None = None,
+    components: Mapping[str, Any] | None = None,
+) -> dict[str, bool]:
+    """Project one formal preflight into the four production gate checks.
+
+    DataPreflightService remains the authority for data facts.  This adapter
+    only turns its frozen outcome and the already-resolved run inputs into the
+    single GateOrchestrator contract consumed by the creation path.
+    """
+
+    phase1 = bool(strategy) and bool(account) and bool(components)
+    phase2a = bool(preflight_allowed)
+    formal_basic = phase1 and phase2a
+    summary = report.session_summary if isinstance(report.session_summary, Mapping) else {}
+    production = summary.get("production_capabilities")
+    formal_complete = formal_basic and isinstance(production, Mapping) and production.get("status") == "complete"
+    declared = summary.get("formal_gates")
+    if isinstance(declared, Mapping) and "formal_complete" in declared:
+        value = declared["formal_complete"]
+        if isinstance(value, Mapping):
+            value = value.get("allowed", value.get("status"))
+        value = getattr(value, "value", value)
+        formal_complete = formal_basic and value in {True, "ready", "available", "complete"}
+    return {
+        Gate.PHASE1.value: phase1,
+        Gate.PHASE2A.value: phase2a,
+        Gate.FORMAL_BASIC.value: formal_basic,
+        Gate.FORMAL_COMPLETE.value: formal_complete,
+    }
+
+
+def _formal_gate_error(
+    message: str,
+    *,
+    decision,
+    report: DataPreflightReport,
+) -> ValueError:
+    """Attach structured gate evidence before the API translates the error."""
+
+    error = ValueError(message)
+    error.formal_gate_evidence = build_gate_evidence(
+        decision,
+        report_hash=report.report_hash,
+        report_status=report.status,
+        issues=report.issues,
+    )
+    return error
+
+
 def binding_from_row(row, *, session: Session | None = None):
     """Rehydrate a binding exclusively from its persisted configuration."""
 
@@ -983,6 +1039,9 @@ def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, 
 class FormalBindingResult:
     binding: Any
     rule_snapshot_bundle: Any | None = None
+    # Keep volatile audit timestamps outside the binding so config_hash remains
+    # stable for idempotent retries of the same request.
+    formal_gate_evidence: Mapping[str, Any] | None = None
 
 
 def build_formal_binding(
@@ -1114,6 +1173,26 @@ def build_formal_binding(
     )
     account = _account_snapshot(session, account_profile_id)
     components = default_components()
+    gate_checks = _formal_gate_checks(
+        outcome.outcome.report,
+        preflight_allowed=outcome.allowed,
+        strategy=strategy,
+        account=account,
+        components=components,
+    )
+    gate_decision, formal_gate_evidence = RunAdmissionService().evaluate_gates(
+        run_kind="backtest_run",
+        checks=gate_checks,
+        report_hash=outcome.report_hash,
+        report_status=outcome.outcome.status,
+        issues=outcome.outcome.report.issues,
+    )
+    if not gate_decision.allowed:
+        raise _formal_gate_error(
+            "formal backtest admission gate was blocked",
+            decision=gate_decision,
+            report=outcome.outcome.report,
+        )
     metadata = {
         "admission_report_hash": frozen.admission_preflight_hash,
         "preflight_hash": frozen.admission_preflight_hash,
@@ -1139,6 +1218,7 @@ def build_formal_binding(
     return FormalBindingResult(
         binding,
         getattr(rule_report, "snapshot_bundle", None),
+        formal_gate_evidence,
     )
 
 

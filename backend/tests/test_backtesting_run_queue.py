@@ -47,6 +47,7 @@ def test_runner_schema_exposes_all_supervision_fields_and_guard_model():
         "failure_type",
         "error_message",
         "recovery_action",
+        "formal_gate_evidence",
     }
     assert required <= columns
     assert BacktestQueueGuardRecord.__table__.primary_key.columns.keys() == [
@@ -58,6 +59,15 @@ def test_runner_schema_exposes_all_supervision_fields_and_guard_model():
     assert any(name.endswith("backtest_finished_at_consistent") for name in constraint_names)
     assert any(name.endswith("backtest_queued_identity_clear") for name in constraint_names)
     assert any(name.endswith("backtest_running_identity_complete") for name in constraint_names)
+
+
+def test_formal_gate_migration_persists_an_immutable_projection():
+    migration = (
+        Path(__file__).parents[1]
+        / "app/db/migrations/versions/20260905_01_add_formal_gate_evidence.py"
+    ).read_text(encoding="utf-8")
+    assert "formal_gate_evidence" in migration
+    assert "formal_gate_evidence_immutable" in migration
 
 
 def test_runner_migration_installs_permanent_guards_and_orphan_check():

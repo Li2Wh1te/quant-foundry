@@ -368,6 +368,7 @@ class DatabaseRunRepository:
         idempotency_key: str,
         idempotency_scope: str | None = None,
         idempotency_request_hash: str | None = None,
+        formal_gate_evidence: Mapping[str, Any] | None = None,
     ) -> BacktestRunRecord:
         """Create one queued root with idempotency-before-capacity ordering.
 
@@ -433,6 +434,10 @@ class DatabaseRunRepository:
         data_request = (
             binding.data_request if isinstance(binding.data_request, Mapping) else {}
         )
+        if formal_gate_evidence is None:
+            formal_gate_evidence = metadata.get("formal_gates", {})
+        if not isinstance(formal_gate_evidence, Mapping):
+            formal_gate_evidence = {}
         chunk_policy = data_request.get("data_chunk_policy", {})
         if not isinstance(chunk_policy, Mapping):
             chunk_policy = {}
@@ -484,6 +489,7 @@ class DatabaseRunRepository:
             initial_positions=positions,
             data_request=_json_value(data_request),
             data_evidence=_json_value(metadata.get("data_evidence", {})),
+            formal_gate_evidence=_json_value(formal_gate_evidence or {}),
             pit_snapshot_hash=metadata.get("pit_snapshot_hash"),
             pit_cutoff_at=pit_cutoff_at,
             data_provider_key=data_request.get("provider_key"),
@@ -629,6 +635,7 @@ class DatabaseRunRepository:
             initial_positions=_json_value(original.initial_positions),
             data_request=_json_value(original.data_request),
             data_evidence=_json_value(original.data_evidence),
+            formal_gate_evidence=_json_value(original.formal_gate_evidence),
             pit_snapshot_hash=original.pit_snapshot_hash,
             pit_cutoff_at=original.pit_cutoff_at,
             data_provider_key=original.data_provider_key,

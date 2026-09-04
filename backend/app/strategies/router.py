@@ -75,6 +75,23 @@ def strategy_backtest_workspace(
         ) from exc
     rows = page.items
     current = next((r for r in revisions if r.id == strategy.current_revision_id), None)
+    formal_gate: dict[str, object] = {
+        "status": "待配置" if current is None else "待预检",
+        "allowed": False,
+        "blocking_issues": [],
+        "metric_decisions": [],
+        "checked_at": None,
+    }
+    if current is not None:
+        for row in rows:
+            candidate = getattr(row, "formal_gate_evidence", None)
+            if not isinstance(candidate, dict):
+                data_evidence = getattr(row, "data_evidence", {})
+                evidence = data_evidence if isinstance(data_evidence, dict) else {}
+                candidate = evidence.get("formal_gates")
+            if isinstance(candidate, dict) and candidate:
+                formal_gate = candidate
+                break
     return StrategyBacktestWorkspaceResponse(
         strategy={
             "id": strategy.id, "name": strategy.name, "state": strategy.state,
@@ -87,8 +104,7 @@ def strategy_backtest_workspace(
             "parameter_schema": r.parameter_schema, "default_parameters": r.default_parameters,
             "runtime_manifest": r.runtime_manifest, "published_at": r.published_at,
         } for r in revisions],
-        formal_gate={"status": "待配置" if current is None else "待预检", "allowed": False,
-                     "blocking_issues": [], "metric_decisions": [], "checked_at": None},
+        formal_gate=formal_gate,
         runs={"items": [_run_response(r) for r in rows],
               "next_cursor": page.next_cursor,
               "has_more": page.has_more,

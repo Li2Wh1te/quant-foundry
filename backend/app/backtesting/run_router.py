@@ -332,6 +332,9 @@ def _response(run: BacktestRun | object) -> RunResponse:
             "behavior_versions": _wire_value(binding.metadata.get("behavior_versions", {}))
             if isinstance(binding.metadata, Mapping)
             else {},
+            "formal_gates": _wire_value(binding.metadata.get("formal_gates", {}))
+            if isinstance(binding.metadata, Mapping)
+            else {},
             "account_profile_id": _uuid_or_none(
                 binding.account.get("profile_id", binding.account.get("account_profile_id"))
                 if isinstance(binding.account, Mapping)
@@ -382,6 +385,15 @@ def _response(run: BacktestRun | object) -> RunResponse:
         config = dict(binding.config)
     data_request = getattr(run, "data_request", None) or {}
     behavior_versions = getattr(run, "behavior_versions", None) or {}
+    formal_gates = getattr(run, "formal_gate_evidence", None) or getattr(run, "formal_gates", None) or {}
+    if not formal_gates:
+        data_evidence = getattr(run, "data_evidence", None)
+        if isinstance(data_evidence, Mapping):
+            formal_gates = data_evidence.get("formal_gates", {}) or {}
+    if not formal_gates and isinstance(config, Mapping):
+        metadata = config.get("metadata")
+        if isinstance(metadata, Mapping):
+            formal_gates = metadata.get("formal_gates", {}) or {}
     failure_evidence = getattr(run, "failure_evidence", None)
     if not isinstance(failure_evidence, Mapping):
         failure_evidence = {}
@@ -407,6 +419,7 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "backtest_config": _wire_value(config or {}),
         "data_request": _wire_value(data_request),
         "behavior_versions": _wire_value(behavior_versions),
+        "formal_gates": _wire_value(formal_gates),
         "account_profile_id": _uuid_or_none(getattr(run, "account_profile_id", None)),
         "account_profile_version": (
             str(getattr(run, "account_profile_version", None))
@@ -547,6 +560,35 @@ def _existing_or_conflict(
     return existing
 
 
+def _admit_internal_binding(binding: RunBinding) -> RunBinding:
+    """Apply the internal Phase 1/2a gate before accepting a run root."""
+
+    admission = _service.admission(
+        binding,
+        {
+            "phase1": bool(binding.strategy),
+            "phase2a": bool(binding.data_request),
+        },
+    )
+    if not admission.allowed:
+        error = ValueError(admission.message)
+        error.admission_result = admission
+        raise error
+    if not admission.formal_gates:
+        return binding
+    metadata = dict(binding.metadata)
+    data_evidence = metadata.get("data_evidence", {})
+    data_evidence = dict(data_evidence) if isinstance(data_evidence, Mapping) else {}
+    data_evidence["formal_gates"] = dict(admission.formal_gates)
+    metadata.update(
+        {
+            "data_evidence": data_evidence,
+            "formal_gates": dict(admission.formal_gates),
+        }
+    )
+    return replace(binding, metadata=metadata)
+
+
 def _create(
     payload: RunCreateRequest,
     *,
@@ -573,6 +615,7 @@ def _create(
             return _response(existing)
 
     rule_snapshot_bundle = None
+    formal_gate_evidence: Mapping[str, Any] | None = None
     if _is_session(session) and kind == FORMAL_KIND:
         revision = StrategyRepository(session).get_revision(payload.strategy_revision_id)
         if revision is None:
@@ -589,6 +632,7 @@ def _create(
         )
         binding = binding_result.binding
         rule_snapshot_bundle = binding_result.rule_snapshot_bundle
+        formal_gate_evidence = binding_result.formal_gate_evidence
     else:
         binding = _binding(payload, kind=kind)
     if _is_session(session):
@@ -602,21 +646,15 @@ def _create(
         )
         if existing is not None:
             return _response(existing)
-        if kind == FORMAL_KIND and not _is_session(session):
-            admission = _service.admission(
-                binding,
-                {},
-                degraded=payload.degraded,
-                confirmed_report_hash=payload.confirmed_admission_report_hash,
-            )
-            if not admission.allowed:
-                raise ValueError(admission.message)
+        if kind == INTERNAL_KIND:
+            binding = _admit_internal_binding(binding)
         row = repository.create(
             binding,
             tenant_id=scope,
             idempotency_scope=scope,
             idempotency_key=effective_key,
             idempotency_request_hash=request_fingerprint,
+            formal_gate_evidence=formal_gate_evidence,
         )
         if rule_snapshot_bundle is not None:
             snapshot_repository = RunRuleSnapshotRepository(session)
@@ -663,6 +701,8 @@ def _create(
         return _response(existing)
     # Compatibility for direct calls that bypass FastAPI dependency injection.
     # Keep the same idempotency-before-admission order as the DB path.
+    if kind == INTERNAL_KIND:
+        binding = _admit_internal_binding(binding)
     if kind == FORMAL_KIND:
         admission = _service.admission(
             binding,
@@ -713,16 +753,31 @@ def create_formal(
         ) from exc
     except Exception as exc:
         _rollback(session)
+        gate_evidence = getattr(exc, "formal_gate_evidence", None)
+        if gate_evidence is not None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "formal_gate_blocked",
+                    "message": "正式回测门禁未通过。",
+                    "status": "blocked",
+                    "report_hash": gate_evidence.get("report_hash"),
+                    "gates": gate_evidence.get("gates", {}),
+                    "issues": gate_evidence.get("issues", []),
+                },
+            ) from exc
         admission = getattr(exc, "admission_result", None)
         if admission is not None:
             outcome = getattr(admission, "outcome", None)
+            outcome_status = getattr(outcome, "status", "blocked") if outcome is not None else "blocked"
             raise HTTPException(
                 status_code=422,
                 detail={
                     "code": getattr(admission, "reason_code", None) or "formal_preflight_blocked",
                     "message": str(exc),
-                    "status": getattr(outcome, "status", "blocked"),
+                    "status": getattr(outcome_status, "value", outcome_status),
                     "report_hash": getattr(admission, "report_hash", None),
+                    "gates": getattr(admission, "formal_gates", {}) or {},
                     "issues": [
                         item.as_dict() if hasattr(item, "as_dict") else item
                         for item in (
@@ -767,23 +822,34 @@ def preflight(
         binding = binding_result.binding
         evidence = binding.metadata.get("data_evidence", {})
         return {
-            "status": "ready",
+            "status": binding.metadata.get("data_preflight_status", "ready"),
             "code": None,
             "message": "正式回测准入预检通过",
             "report_hash": binding.metadata.get("admission_report_hash"),
             "issues": evidence.get("issues", []) if isinstance(evidence, Mapping) else [],
+            "gates": binding_result.formal_gate_evidence or {},
         }
     except Exception as exc:
+        gate_evidence = getattr(exc, "formal_gate_evidence", None)
+        if gate_evidence is not None:
+            return {
+                "status": "blocked",
+                "code": "formal_gate_blocked",
+                "message": "正式回测门禁未通过。",
+                "report_hash": gate_evidence.get("report_hash"),
+                "issues": gate_evidence.get("issues", []),
+                "gates": gate_evidence.get("gates", {}),
+            }
         admission = getattr(exc, "admission_result", None)
         if admission is not None:
             outcome = getattr(admission, "outcome", None)
+            outcome_status = getattr(outcome, "status", "blocked") if outcome is not None else "blocked"
             return {
-                "status": getattr(outcome, "status", "blocked").value
-                if outcome is not None
-                else "blocked",
+                "status": getattr(outcome_status, "value", outcome_status),
                 "code": getattr(admission, "reason_code", None) or "formal_preflight_blocked",
                 "message": str(exc),
                 "report_hash": getattr(admission, "report_hash", None),
+                "gates": getattr(admission, "formal_gates", {}) or {},
                 "issues": [
                     item.as_dict() if hasattr(item, "as_dict") else item
                     for item in (
@@ -842,6 +908,20 @@ def create_internal(
         _rollback(session)
         if isinstance(exc, QueueFullError) and getattr(exc, "disabled", False):
             raise _queue_error(exc) from exc
+        admission = getattr(exc, "admission_result", None)
+        if admission is not None:
+            outcome = getattr(admission, "outcome", None)
+            status_value = getattr(getattr(outcome, "status", None), "value", getattr(outcome, "status", "blocked"))
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": getattr(admission, "code", None) or getattr(admission, "reason_code", None) or "internal_preflight_blocked",
+                    "message": str(exc),
+                    "status": status_value,
+                    "report_hash": getattr(admission, "report_hash", None),
+                    "gates": getattr(admission, "formal_gates", {}) or {},
+                },
+            ) from exc
         raise HTTPException(
             status_code=422,
             detail={

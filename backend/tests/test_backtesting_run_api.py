@@ -1,5 +1,6 @@
 """Formal/internal API boundary tests without starting a database or worker."""
 
+from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
 
@@ -10,6 +11,7 @@ from starlette.requests import Request
 from app.backtesting.run_admission import AdmissionResult
 from app.core.auth import AuthenticatedPrincipal
 from app.backtesting.run_router import (
+    _response,
     _runs,
     cancel,
     create_formal,
@@ -103,15 +105,53 @@ def test_formal_create_is_idempotent_and_cancel_only_records_request():
     assert get_run(str(first.run_id)).status == "cancel_requested"
 
 
+def test_persisted_gate_evidence_is_projected_from_immutable_data_evidence():
+    gates = {"phase1": {"allowed": True, "status": "ready"}}
+    row = SimpleNamespace(
+        id=uuid4(),
+        run_kind="backtest_run",
+        profile="formal@1",
+        status="queued",
+        config_hash="a" * 64,
+        backtest_config={},
+        formal_gate_evidence=gates,
+        data_evidence={},
+    )
+
+    response = _response(row)
+
+    assert response.formal_gates == gates
+
+
+def test_internal_creation_fails_closed_without_phase_two_a_evidence():
+    with patch("app.backtesting.run_router._creation.internal_capacity", 1):
+        with pytest.raises(HTTPException) as raised:
+            create_internal(_payload(internal=True))
+
+    assert raised.value.status_code == 422
+    detail = raised.value.detail
+    assert detail["code"] == "preflight_blocked"
+    assert detail["gates"]["checks"] == {"phase1": True, "phase2a": False}
+
+
 def test_internal_runs_are_hidden_from_formal_list_and_need_capability():
+    observed = {}
+    gates = {"phase1": {"allowed": True, "status": "ready"}}
+
+    def admit(binding, checks, **_kwargs):
+        observed.update(checks)
+        return AdmissionResult(True, formal_gates=gates)
+
     with patch(
         "app.backtesting.run_router._creation.internal_capacity",
         1,
     ), patch(
         "app.backtesting.run_router._service.admission",
-        return_value=AdmissionResult(True),
+        side_effect=admit,
     ):
         internal = create_internal(_payload(internal=True))
+    assert observed == {"phase1": True, "phase2a": False}
+    assert internal.formal_gates == gates
     assert all(item.run_kind == "backtest_run" for item in list_runs()["items"])
     with pytest.raises(HTTPException) as raised:
         get_run(str(internal.run_id))
