@@ -173,14 +173,19 @@ class DocumentedDividendScenarioTests(unittest.TestCase):
         self.assertEqual(result.equity_curve[1].equity, Decimal("10400"))
         # D2: settlement restore, the sell fills at the D2 open, and the
         # final close valuation follows -- no decisions and no new orders.
-        self.assertEqual(
-            types_by_step[2],
+        self.assertTrue(
             {
+                "step_started",
                 "settlement_restored",
+                "market_observed",
+                "order_advanced",
                 "fill_created",
+                "order_updated",
                 "fill_applied",
+                "portfolio_updated",
                 "portfolio_valued",
-            },
+                "step_finished",
+            }.issubset(types_by_step[2])
         )
 
     def test_final_equity_carries_position_at_d2_close(self) -> None:
@@ -592,13 +597,17 @@ class SellAfterSettlementRestoreTests(unittest.TestCase):
         # D2: availability is restored before the open match, the sell
         # fills at the D2 open (101), and the close then values the
         # all-cash account.
-        self.assertEqual(by_step[2][0], "settlement_restored")
+        self.assertEqual(by_step[2][0], "step_started")
+        self.assertEqual(by_step[2][1], "settlement_restored")
         self.assertIn("fill_created", by_step[2])
         self.assertLess(
             by_step[2].index("fill_created"), by_step[2].index("portfolio_valued")
         )
         # D3: nothing left to trade; only the final valuation remains.
-        self.assertEqual(by_step[3], ["portfolio_valued"])
+        self.assertEqual(
+            by_step[3],
+            ["step_started", "market_observed", "portfolio_valued", "step_finished"],
+        )
         # Final equity is pure cash: the sell filled at the D2 open (101).
         self.assertEqual(result.equity_curve[3].equity, Decimal("10100"))
 

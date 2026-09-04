@@ -8,7 +8,11 @@ from app.backtesting.result_writer import (
     BacktestResultPersistenceService,
     ResultBatch,
 )
-from app.backtesting.runtime import EquitySample, EventEnvelope
+from app.backtesting.runtime import (
+    EquitySample,
+    EventEnvelope,
+    OrderOutcomeRecord,
+)
 
 
 UTC = timezone.utc
@@ -44,11 +48,27 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
         time_end=event_time,
         data_cutoff_at=datetime(2026, 6, 1, 9, 30, tzinfo=UTC),
     )
+    decision_id = uuid4()
     result = SimpleNamespace(
         events=(event,),
         equity_curve=(sample,),
         decisions=(),
-        order_outcomes=(),
+        order_outcomes=(
+            OrderOutcomeRecord(
+                order_id=uuid4(),
+                intent_id=uuid4(),
+                instrument_id=uuid4(),
+                side="buy",
+                quantity=Decimal("1"),
+                filled_quantity=Decimal("1"),
+                status="filled",
+                status_reason=None,
+                submitted_at=event_time,
+                valid_from=event_time,
+                valid_until=None,
+                decision_id=decision_id,
+            ),
+        ),
         order_updates=(),
         components={
             "time_axis": {"key": "trading_day", "version": 1},
@@ -77,6 +97,7 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
     assert committed is False
     assert len(batch.events) == 1
     assert batch.events[0].payload["equity"] == "101.25"
+    assert batch.events[0].event_version == 1
     assert batch.steps[0].time_start == sample.time_start
     assert batch.steps[0].time_end == sample.time_end
     assert batch.steps[0].data_cutoff_at == sample.data_cutoff_at
@@ -84,6 +105,7 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
     assert batch.equity_curve[0].market_value == Decimal("3.00")
     assert batch.equity_curve[0].period_return == Decimal("0.0125")
     assert batch.equity_curve[0].cumulative_fees == Decimal("0.10")
+    assert batch.orders[0].decision_id == decision_id
     assert batch.component_snapshot["time_axis"]["key"] == "trading_day"
     assert batch.result_summary["random_seed"] == 17
 

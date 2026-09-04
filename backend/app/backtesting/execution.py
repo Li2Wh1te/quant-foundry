@@ -120,6 +120,8 @@ class OrderIntent:
             _aware_datetime(self.valid_until, "valid_until")
             if self.valid_until < self.valid_from:
                 raise ExecutionError("valid_until cannot precede valid_from")
+        if self.decision_id is not None and not isinstance(self.decision_id, UUID):
+            raise ExecutionError("decision_id must be a UUID when provided")
         object.__setattr__(self, "side", _side(self.side))
         object.__setattr__(self, "quantity", _positive(self.quantity, "quantity"))
 
@@ -146,6 +148,10 @@ class Order:
     # for legacy direct constructions and makes the order ineligible for
     # sequenced batch matching.
     submission_sequence: int | None = None
+    # The originating strategy decision is retained on the mutable runtime
+    # order so every later fill and status transition can be traced back to
+    # the decision that created it.
+    decision_id: UUID | None = None
 
     def __post_init__(self) -> None:
         _aware_datetime(self.submitted_at, "submitted_at")
@@ -156,6 +162,8 @@ class Order:
         if self.valid_from is not None and self.valid_until is not None:
             if self.valid_until < self.valid_from:
                 raise ExecutionError("valid_until cannot precede valid_from")
+        if self.decision_id is not None and not isinstance(self.decision_id, UUID):
+            raise ExecutionError("decision_id must be a UUID when provided")
         object.__setattr__(self, "side", _side(self.side))
         object.__setattr__(self, "quantity", _positive(self.quantity, "quantity"))
         object.__setattr__(self, "filled_quantity", _non_negative(self.filled_quantity, "filled_quantity"))
@@ -193,6 +201,7 @@ class Order:
             side=intent.side,
             quantity=intent.quantity,
             submitted_at=submitted_at,
+            decision_id=intent.decision_id,
             valid_from=intent.valid_from,
             valid_until=intent.valid_until,
             submission_sequence=submission_sequence,

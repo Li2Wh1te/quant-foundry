@@ -191,6 +191,12 @@ class BacktestEventResultRecord(_RunBoundRecord):
         nullable=False,
         comment="Stable domain-event type.",
     )
+    event_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        comment="Version of the event payload contract.",
+    )
     event_time: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
@@ -299,6 +305,11 @@ class BacktestOrderResultRecord(_RunBoundRecord):
             "run_id",
             "instrument_id",
         ),
+        Index(
+            "ix_backtest_orders_run_decision",
+            "run_id",
+            "decision_id",
+        ),
     )
 
     order_id: Mapped[UUID] = mapped_column(
@@ -310,6 +321,11 @@ class BacktestOrderResultRecord(_RunBoundRecord):
         Uuid,
         nullable=True,
         comment="Originating order intent, when the pipeline recorded one.",
+    )
+    decision_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        nullable=True,
+        comment="Originating strategy decision, when the pipeline recorded one.",
     )
     instrument_id: Mapped[UUID] = mapped_column(
         Uuid,

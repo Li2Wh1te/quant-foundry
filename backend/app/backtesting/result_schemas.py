@@ -70,6 +70,17 @@ class BacktestStepItem(_ResultItem):
     data_quality: str
 
 
+class BacktestEventItem(_ResultItem):
+    event_sequence: int
+    step_sequence: int
+    phase_sequence: int
+    phase_key: str
+    event_type: str
+    event_time: datetime
+    event_version: int = 1
+    payload: dict | list | None = None
+
+
 class BacktestDecisionItem(_ResultItem):
     decision_id: UUID
     step_sequence: int
@@ -87,6 +98,7 @@ class BacktestDecisionItem(_ResultItem):
 class BacktestOrderItem(_ResultItem):
     order_id: UUID
     intent_id: UUID | None = None
+    decision_id: UUID | None = None
     instrument_id: UUID
     event_trading_code: str | None = None
     event_name: str | None = None
@@ -416,6 +428,7 @@ __all__ = [
     "BacktestDataChunkItem",
     "BacktestDataPreflightItem",
     "BacktestDecisionItem",
+    "BacktestEventItem",
     "BacktestEquityCurveItem",
     "BacktestFillItem",
     "BacktestMetricItem",

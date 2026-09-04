@@ -22,7 +22,10 @@ COMPLETION_MARKER_PROTOCOL = "completion_marker@1"
 EXIT_CODE_PROTOCOL = "runner_exit_code@1"
 RESULT_INTEGRITY_ALGORITHM = "sha256"
 RESULT_INTEGRITY_CANONICALIZATION = "jcs@1"
-RESULT_INTEGRITY_SCOPE = "backtest_result_rows@1"
+# Version 2 includes the event payload version and direct order-to-decision
+# linkage in canonical result rows.  Reusing v1 here would make old completion
+# markers claim coverage they do not actually provide.
+RESULT_INTEGRITY_SCOPE = "backtest_result_rows@2"
 
 # The order is part of the protocol.  It is used by both the marker validator
 # and the canonical result digest implementation; changing it would make old
@@ -489,7 +492,9 @@ def validate_completion_marker(
         if integrity.get("canonicalization") != RESULT_INTEGRITY_CANONICALIZATION:
             errors.append("result_integrity.canonicalization must be jcs@1")
         if integrity.get("scope") != RESULT_INTEGRITY_SCOPE:
-            errors.append("result_integrity.scope must be backtest_result_rows@1")
+            errors.append(
+        f"result_integrity.scope must be {RESULT_INTEGRITY_SCOPE}"
+    )
         covered = integrity.get("covered_tables")
         normalized_covered = tuple(covered) if isinstance(covered, list) else None
         if normalized_covered != COVERED_RESULT_TABLES:

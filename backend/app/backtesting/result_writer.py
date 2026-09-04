@@ -228,6 +228,7 @@ class BacktestResultPersistenceService:
                 event_type=event.event_type,
                 event_time=event.event_time,
                 payload=_json_value(event.payload),
+                event_version=getattr(event, "event_version", 1),
             )
             for event in getattr(result, "events", ())
         )
@@ -271,11 +272,13 @@ class BacktestResultPersistenceService:
                 instrument_id=order.instrument_id,
                 display=_display_for(result, order.instrument_id),
                 side=order.side,
-                order_type=order.order_type.value,
+                order_type=getattr(order.order_type, "value", order.order_type),
+                price=getattr(order, "price", None),
                 quantity=order.quantity,
                 status=order.status,
                 submitted_at=order.submitted_at,
                 intent_id=order.intent_id,
+                decision_id=order.decision_id,
                 filled_quantity=order.filled_quantity,
                 status_reason=order.status_reason,
             )

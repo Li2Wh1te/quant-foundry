@@ -95,14 +95,14 @@ _TABLE_INTEGRITY_COLUMNS = {
     ),
     "backtest_events": (
         "run_id", "event_sequence", "step_sequence", "phase_sequence",
-        "phase_key", "event_type", "event_time", "payload",
+        "phase_key", "event_type", "event_version", "event_time", "payload",
     ),
     "backtest_decisions": (
         "run_id", "decision_id", "step_sequence", "decision_time", "mode",
         "targets", "validation_status", "validation_issues", "duration_ms", "error",
     ),
     "backtest_orders": (
-        "run_id", "order_id", "intent_id", "instrument_id", "event_trading_code",
+        "run_id", "order_id", "intent_id", "decision_id", "instrument_id", "event_trading_code",
         "event_name", "event_display_name", "side", "order_type", "price",
         "quantity", "filled_quantity", "status", "status_reason", "submitted_at",
     ),

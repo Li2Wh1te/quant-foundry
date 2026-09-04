@@ -35,6 +35,7 @@ from enum import StrEnum
 from inspect import Parameter, signature
 import logging
 from types import MappingProxyType
+from time import perf_counter_ns
 from typing import Any, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 
@@ -111,6 +112,7 @@ from app.backtesting.data.requests import ConsistencyValidation, DataChunkQuery,
 logger = logging.getLogger("backtesting.runtime")
 
 __all__ = [
+    "BACKTEST_EVENT_VERSIONS",
     "BacktestEventType",
     "BacktestRunResult",
     "BacktestViewFactory",
@@ -353,14 +355,35 @@ def _require_registered_identity(
 class BacktestEventType(StrEnum):
     """Business event types emitted by the phase loop."""
 
-    SETTLEMENT_RESTORED = "settlement_restored"
+    # These lifecycle events are the stable audit vocabulary.  Existing
+    # business-specific events remain below them and use the same stream.
+    STEP_STARTED = "step_started"
+    MARKET_OBSERVED = "market_observed"
+    ORDER_ADVANCED = "order_advanced"
+    ORDER_UPDATED = "order_updated"
     FILL_CREATED = "fill_created"
-    FILL_APPLIED = "fill_applied"
+    PORTFOLIO_UPDATED = "portfolio_updated"
+    STRATEGY_CALLED = "strategy_called"
+    DECISION_CREATED = "decision_created"
     ORDER_SUBMITTED = "order_submitted"
+    PORTFOLIO_VALUED = "portfolio_valued"
+    STEP_FINISHED = "step_finished"
+    # Existing business events remain part of the audit vocabulary.
+    SETTLEMENT_RESTORED = "settlement_restored"
+    FILL_APPLIED = "fill_applied"
     ORDER_EXPIRED = "order_expired"
     CASH_DIVIDEND_APPLIED = "cash_dividend_applied"
-    PORTFOLIO_VALUED = "portfolio_valued"
+    # Keep the old key registered for reading legacy envelopes.  New
+    # envelopes intentionally use the documented ``decision_created`` value.
     STRATEGY_DECISION_CREATED = "strategy_decision_created"
+
+
+# One version per event type is enough for the current payload contracts.  The
+# explicit registry prevents a new event from entering the persisted stream
+# without a stable, independently auditable identity.
+BACKTEST_EVENT_VERSIONS: Mapping[str, int] = MappingProxyType(
+    {event.value: 1 for event in BacktestEventType}
+)
 
 
 def _freeze_payload(value: Any) -> Any:
@@ -402,9 +425,27 @@ class EventEnvelope:
     # that mention several instruments use ``display_snapshots`` below.
     display_snapshot: InstrumentDisplaySnapshot | None = None
     display_snapshots: Mapping[UUID, InstrumentDisplaySnapshot] = MappingProxyType({})
+    event_version: int = 1
 
     def __post_init__(self) -> None:
         _aware_datetime(self.event_time, "event_time")
+        event_type = getattr(self.event_type, "value", self.event_type)
+        if not isinstance(event_type, str) or not event_type.strip():
+            raise DomainValidationError("event_type must be non-blank text")
+        expected_version = BACKTEST_EVENT_VERSIONS.get(event_type)
+        if expected_version is None:
+            raise DomainValidationError(
+                f"event_type {event_type!r} is not registered"
+            )
+        object.__setattr__(self, "event_type", event_type)
+        if (
+            isinstance(self.event_version, bool)
+            or not isinstance(self.event_version, int)
+            or self.event_version != expected_version
+        ):
+            raise DomainValidationError(
+                f"event_version for {event_type!r} must be {expected_version}"
+            )
         if isinstance(self.event_sequence, bool) or not isinstance(
             self.event_sequence, int
         ):
@@ -1537,6 +1578,9 @@ class OrderOutcomeRecord:
     submitted_at: datetime
     valid_from: datetime | None
     valid_until: datetime | None
+    decision_id: UUID | None = None
+    order_type: str = "market"
+    price: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -4858,8 +4902,10 @@ class DeterministicBacktestRunner:
                 OrderOutcomeRecord(
                     order_id=order.order_id,
                     intent_id=order.intent_id,
+                    decision_id=order.decision_id,
                     instrument_id=order.instrument_id,
                     side=order.side.value,
+                    order_type=order.order_type.value,
                     quantity=Decimal(str(order.quantity)),
                     filled_quantity=Decimal(str(order.filled_quantity)),
                     status=order.status.value,
@@ -5676,6 +5722,15 @@ class DeterministicBacktestRunner:
                 next_step: TimeStep | None = ordered[index + 1]
             else:
                 next_step = next_after_last
+            self._append_control_event(
+                BacktestEventType.STEP_STARTED,
+                step,
+                event_time=step.start_time,
+                payload={
+                    "session_date": step.metadata.get("session_date"),
+                    "step_sequence": step.sequence,
+                },
+            )
             try:
                 instructions = self._timing_policy.phases(
                     step, next_step=next_step
@@ -5712,6 +5767,16 @@ class DeterministicBacktestRunner:
                     details=getattr(exc, "details", None),
                 ) from exc
             self._complete_step(step)
+            self._append_control_event(
+                BacktestEventType.STEP_FINISHED,
+                step,
+                event_time=step.end_time,
+                phase_sequence=10,
+                payload={
+                    "session_date": step.metadata.get("session_date"),
+                    "step_sequence": step.sequence,
+                },
+            )
             self._notify_progress(
                 "step_completed",
                 step,
@@ -5780,31 +5845,22 @@ class DeterministicBacktestRunner:
             payloads_events = handler(context)
             envelopes: list[EventEnvelope] = []
             for offset, (event_type, payload) in enumerate(payloads_events):
-                event_payload = dict(payload)
-                single_snapshot, snapshots = self._event_display_snapshots(
-                    event_payload, context
+                envelope = self._event_envelope(
+                    event_type=event_type,
+                    payload=payload,
+                    step_sequence=context.step_sequence,
+                    phase_sequence=context.phase_sequence,
+                    phase_key=context.phase_key,
+                    event_time=context.decision_time,
+                    context=context,
                 )
-                if single_snapshot is not None:
-                    event_payload["display"] = self._display_snapshot_payload(
-                        single_snapshot
-                    )
-                elif snapshots:
-                    event_payload["displays"] = tuple(
-                        self._display_snapshot_payload(snapshot)
-                        for snapshot in snapshots.values()
-                    )
+                # Deferred phase output is not appended until the handler
+                # returns, so account for all envelopes already built in this
+                # phase when assigning its run-global sequence.
                 envelopes.append(
-                    EventEnvelope(
-                        run_id=self._run_id,
+                    replace(
+                        envelope,
                         event_sequence=len(self._events) + offset + 1,
-                        step_sequence=context.step_sequence,
-                        phase_sequence=context.phase_sequence,
-                        phase_key=context.phase_key,
-                        event_type=event_type,
-                        event_time=context.decision_time,
-                        payload=event_payload,
-                        display_snapshot=single_snapshot,
-                        display_snapshots=snapshots,
                     )
                 )
             return tuple(envelopes)
@@ -5934,9 +5990,106 @@ class DeterministicBacktestRunner:
             "event_display_name": snapshot.event_display_name,
         }
 
+    def _event_envelope(
+        self,
+        *,
+        event_type: str,
+        payload: Mapping[str, Any],
+        step_sequence: int,
+        phase_sequence: int,
+        phase_key: str,
+        event_time: datetime,
+        context: PhaseContext | None = None,
+    ) -> EventEnvelope:
+        """Build one versioned event with the same display enrichment path."""
+
+        event_type = getattr(event_type, "value", event_type)
+        if event_type not in BACKTEST_EVENT_VERSIONS:
+            raise DomainValidationError(
+                f"event_type {event_type!r} is not registered"
+            )
+        event_payload = dict(payload)
+        single_snapshot = None
+        snapshots: Mapping[UUID, InstrumentDisplaySnapshot] = MappingProxyType({})
+        if context is not None:
+            single_snapshot, snapshots = self._event_display_snapshots(
+                event_payload, context
+            )
+            if single_snapshot is not None:
+                event_payload["display"] = self._display_snapshot_payload(
+                    single_snapshot
+                )
+            elif snapshots:
+                event_payload["displays"] = tuple(
+                    self._display_snapshot_payload(snapshot)
+                    for snapshot in snapshots.values()
+                )
+        return EventEnvelope(
+            run_id=self._run_id,
+            event_sequence=len(self._events) + 1,
+            step_sequence=step_sequence,
+            phase_sequence=phase_sequence,
+            phase_key=phase_key,
+            event_type=event_type,
+            event_time=event_time,
+            payload=event_payload,
+            display_snapshot=single_snapshot,
+            display_snapshots=snapshots,
+            event_version=BACKTEST_EVENT_VERSIONS[event_type],
+        )
+
+    def _append_control_event(
+        self,
+        event_type: str,
+        step: TimeStep,
+        *,
+        event_time: datetime,
+        payload: Mapping[str, Any],
+        phase_sequence: int = 0,
+    ) -> None:
+        """Append a step-boundary event before/after phase execution."""
+
+        self._events.append(
+            self._event_envelope(
+                event_type=event_type,
+                payload=payload,
+                step_sequence=step.sequence,
+                phase_sequence=phase_sequence,
+                phase_key="step",
+                event_time=event_time,
+            )
+        )
+
+    def _append_context_event(
+        self,
+        context: PhaseContext,
+        event_type: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        """Append an event immediately when a later phase may fail."""
+
+        self._events.append(
+            self._event_envelope(
+                event_type=event_type,
+                payload=payload,
+                step_sequence=context.step_sequence,
+                phase_sequence=context.phase_sequence,
+                phase_key=context.phase_key,
+                event_time=context.decision_time,
+                context=context,
+            )
+        )
+
     def _emit_pair(
         self, event_type: str, payload: Mapping[str, Any]
     ) -> tuple[str, Mapping[str, Any]]:
+        """Return a deferred event pair for normal successful phase output."""
+
+        event_type = getattr(event_type, "value", event_type)
+        if event_type not in BACKTEST_EVENT_VERSIONS:
+            raise DomainValidationError(
+                f"event_type {event_type!r} is not registered"
+            )
         return (event_type, dict(payload))
 
     # ------------------------------------------------------------------
@@ -6092,9 +6245,19 @@ class DeterministicBacktestRunner:
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
         # Creating the view already fetched and validated the session's raw
-        # quotes; observation itself produces no business fact.
+        # quotes; retain an explicit event so the audit stream records the
+        # boundary at which market data became visible to the engine.
         self._require_engine_view(context)
-        return []
+        return [
+            self._emit_pair(
+                BacktestEventType.MARKET_OBSERVED,
+                {
+                    "session_date": context.session_date.isoformat(),
+                    "observed_at": context.decision_time,
+                    "data_cutoff_at": context.decision_time,
+                },
+            )
+        ]
 
     def _phase_match(
         self, context: PhaseContext
@@ -6110,6 +6273,24 @@ class DeterministicBacktestRunner:
         if not active:
             self._pending_fills = ()
             return []
+        emitted: list[tuple[str, Mapping[str, Any]]] = [
+            self._emit_pair(
+                BacktestEventType.ORDER_ADVANCED,
+                {
+                    "order_id": str(order.order_id),
+                    "intent_id": str(order.intent_id),
+                    "instrument_id": str(order.instrument_id),
+                    "decision_id": (
+                        str(order.decision_id)
+                        if order.decision_id is not None
+                        else None
+                    ),
+                    "from_status": order.status.value,
+                    "phase": context.phase_key,
+                },
+            )
+            for order in sorted(active, key=lambda item: (item.submission_sequence or 0, str(item.order_id)))
+        ]
         policy_by_instrument: dict[UUID, Any] = {}
         policy_rejections: list[tuple[UUID, str]] = []
         if self._rule_snapshot_bundle is not None:
@@ -6252,13 +6433,14 @@ class DeterministicBacktestRunner:
                 for item in legacy_result.skipped_orders
             )
             unsubmitted_ids = set()
-        emitted: list[tuple[str, Mapping[str, Any]]] = [
+        emitted.extend(
             self._emit_pair(
                 BacktestEventType.FILL_CREATED,
                 {
                     "fill_id": str(fill.fill_id),
                     "order_id": str(fill.order_id),
                     "instrument_id": str(fill.instrument_id),
+                    "decision_id": self._decision_id_for_order(fill.order_id),
                     "side": fill.side.value,
                     "reference_price": fill.reference_price,
                     "execution_price": fill.price,
@@ -6308,21 +6490,21 @@ class DeterministicBacktestRunner:
                 },
             )
             for fill in fills
-        ]
+        )
         emitted.extend(
             self._emit_pair(
                 BacktestEventType.ORDER_EXPIRED,
-                {"order_id": str(order_id), "reason": reason},
+                self._order_event_payload(order_id, reason=reason),
             )
             for order_id, reason in skipped
         )
         emitted.extend(
             self._emit_pair(
                 BacktestEventType.ORDER_EXPIRED,
-                {
-                    "order_id": str(order_id),
-                    "reason": reason or "cash_allocation_zero",
-                },
+                self._order_event_payload(
+                    order_id,
+                    reason=reason or "cash_allocation_zero",
+                ),
             )
             for order_id, reason in (
                 (order.order_id, order.status_reason)
@@ -6333,7 +6515,7 @@ class DeterministicBacktestRunner:
         emitted.extend(
             self._emit_pair(
                 BacktestEventType.ORDER_EXPIRED,
-                {"order_id": str(order_id), "reason": reason},
+                self._order_event_payload(order_id, reason=reason),
             )
             for order_id, reason in policy_rejections
         )
@@ -6347,16 +6529,37 @@ class DeterministicBacktestRunner:
                 emitted.append(
                     self._emit_pair(
                         BacktestEventType.ORDER_EXPIRED,
-                        {"order_id": str(order.order_id), "reason": "not_matched_at_open"},
+                        self._order_event_payload(
+                            order.order_id, reason="not_matched_at_open"
+                        ),
                     )
                 )
         for order in submitted_before_match:
             previous_status = statuses_before_match[order.order_id]
             if order.status.value != previous_status:
-                self._record_order_update(
+                update = self._record_order_update(
                     order,
                     old_status=previous_status,
                     updated_at=context.decision_time,
+                )
+                emitted.append(
+                    self._emit_pair(
+                        BacktestEventType.ORDER_UPDATED,
+                        {
+                            "order_id": str(order.order_id),
+                            "intent_id": str(order.intent_id),
+                            "instrument_id": str(order.instrument_id),
+                            "decision_id": (
+                                str(order.decision_id)
+                                if order.decision_id is not None
+                                else None
+                            ),
+                            "update_sequence": update.update_sequence,
+                            "old_status": update.old_status,
+                            "new_status": update.new_status,
+                            "reason": update.reason,
+                        },
+                    )
                 )
         self._pending_fills = fills
         return emitted
@@ -6424,6 +6627,7 @@ class DeterministicBacktestRunner:
                         "fill_id": str(fill.fill_id),
                         "order_id": str(fill.order_id),
                         "instrument_id": str(fill.instrument_id),
+                        "decision_id": self._decision_id_for_order(fill.order_id),
                         "applied": True,
                         "cash_delta": application.cash_delta,
                         "realized_pnl_delta": application.realized_pnl_delta,
@@ -6440,6 +6644,20 @@ class DeterministicBacktestRunner:
                             is not None
                             else None
                         ),
+                    },
+                )
+            )
+            emitted.append(
+                self._emit_pair(
+                    BacktestEventType.PORTFOLIO_UPDATED,
+                    {
+                        "reason": "fill_applied",
+                        "fill_id": str(fill.fill_id),
+                        "order_id": str(fill.order_id),
+                        "instrument_id": str(fill.instrument_id),
+                        "decision_id": self._decision_id_for_order(fill.order_id),
+                        "cash_delta": application.cash_delta,
+                        "realized_pnl_delta": application.realized_pnl_delta,
                     },
                 )
             )
@@ -6588,6 +6806,17 @@ class DeterministicBacktestRunner:
                         "derivation_rule_key": event.derivation_rule_key,
                         "derivation_rule_version": event.derivation_rule_version,
                         "quantity": application.quantity,
+                        "cash_delta": application.cash_delta,
+                    },
+                )
+            )
+            emitted.append(
+                self._emit_pair(
+                    BacktestEventType.PORTFOLIO_UPDATED,
+                    {
+                        "reason": "cash_dividend_applied",
+                        "dividend_event_id": str(event.event_id),
+                        "instrument_id": str(event.instrument_id),
                         "cash_delta": application.cash_delta,
                     },
                 )
@@ -6834,6 +7063,85 @@ class DeterministicBacktestRunner:
             analyzer(snapshot)
         return []
 
+    @staticmethod
+    def _decision_duration_ms(started_ns: int) -> Decimal:
+        """Measure strategy wall time without introducing binary-float output."""
+
+        return Decimal(perf_counter_ns() - started_ns) / Decimal("1000000")
+
+    @staticmethod
+    def _decision_error_issue(error: BaseException) -> Mapping[str, Any]:
+        """Keep a bounded structured reason alongside the error summary."""
+
+        # Result JSON deliberately rejects binary floats.  The concise type
+        # and message are sufficient for the decision row; phase-level
+        # structured details remain on ``PhaseExecutionError``.
+        return {
+            "error_type": type(error).__name__,
+            "message": str(error),
+        }
+
+    def _record_failed_decision(
+        self,
+        *,
+        context: PhaseContext,
+        decision_id: UUID,
+        started_ns: int,
+        error: BaseException,
+    ) -> None:
+        """Persist a rejected strategy call even when no decision object exists."""
+
+        from app.strategy_protocol.decisions import StrategyDecision
+
+        self._decisions.append(
+            StrategyDecision(
+                step_sequence=context.step_sequence,
+                decision_time=context.decision_time,
+                mode="unknown",
+                targets={},
+                decision_id=decision_id,
+                validation_status="rejected",
+                validation_issues=(self._decision_error_issue(error),),
+                duration_ms=self._decision_duration_ms(started_ns),
+                error=str(error),
+            )
+        )
+
+    def _update_decision_audit(
+        self,
+        decision_id: UUID,
+        *,
+        validation_status: str,
+        validation_issues: Sequence[Any] = (),
+        error: str | None = None,
+    ) -> None:
+        """Update the immutable in-memory decision row after interpretation."""
+
+        for index, decision in enumerate(self._decisions):
+            if getattr(decision, "decision_id", None) != decision_id:
+                continue
+            self._decisions[index] = replace(
+                decision,
+                validation_status=validation_status,
+                validation_issues=tuple(validation_issues),
+                error=error,
+            )
+            return
+
+    @staticmethod
+    def _interpretation_issues(result: Any) -> tuple[Any, ...]:
+        """Convert structured interpreter reasons to persisted JSON values."""
+
+        issues: list[Any] = []
+        for reason in tuple(getattr(result, "issues", ()) or ()):
+            as_dict = getattr(reason, "as_dict", None)
+            issues.append(as_dict() if callable(as_dict) else str(reason))
+        protocol_reason = getattr(result, "protocol_reason", None)
+        if protocol_reason is not None:
+            as_dict = getattr(protocol_reason, "as_dict", None)
+            issues.append(as_dict() if callable(as_dict) else str(protocol_reason))
+        return tuple(issues)
+
     def _phase_decide(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
@@ -6894,18 +7202,62 @@ class DeterministicBacktestRunner:
         decision_context = self._build_decision_context(
             context, bound_universe=bound_universe
         )
-        decision = self._strategy.on_step(decision_context)
-        # The provider may expose filter counts through a chunk-backed query
-        # facade; capture them after strategy filters have run as well as at
-        # snapshot construction time.
-        self._capture_universe_filter_evidence(bound_universe.source)
         decision_id = self._derived_id(f"decision:{context.step_sequence}")
-        decision = replace(decision, decision_id=decision_id)
+        started_ns = perf_counter_ns()
+        # Append before invoking user code: a strategy failure must leave an
+        # auditable call boundary in the same durable prefix as its error.
+        self._append_context_event(
+            context,
+            BacktestEventType.STRATEGY_CALLED,
+            {
+                "decision_id": str(decision_id),
+                "step_sequence": context.step_sequence,
+                "decision_time": context.decision_time,
+            },
+        )
+        try:
+            from app.strategy_protocol.decisions import StrategyDecision
+
+            decision = self._strategy.on_step(decision_context)
+            if not isinstance(decision, StrategyDecision):
+                raise DomainValidationError(
+                    "strategy.on_step must return a StrategyDecision"
+                )
+            # The provider may expose filter counts through a chunk-backed
+            # query facade; capture them after strategy filters have run as
+            # well as at snapshot construction time.
+            self._capture_universe_filter_evidence(bound_universe.source)
+            decision = replace(
+                decision,
+                decision_id=decision_id,
+                validation_status="accepted",
+                validation_issues=(),
+                duration_ms=self._decision_duration_ms(started_ns),
+                error=None,
+            )
+        except Exception as exc:
+            self._record_failed_decision(
+                context=context,
+                decision_id=decision_id,
+                started_ns=started_ns,
+                error=exc,
+            )
+            self._append_context_event(
+                context,
+                BacktestEventType.DECISION_CREATED,
+                {
+                    "decision_id": str(decision_id),
+                    "validation_status": "rejected",
+                    "validation_issues": [type(exc).__name__],
+                    "error": str(exc),
+                },
+            )
+            raise
         self._pending_decision = decision
         self._decisions.append(decision)
         return [
             self._emit_pair(
-                BacktestEventType.STRATEGY_DECISION_CREATED,
+                BacktestEventType.DECISION_CREATED,
                 {
                     "decision_id": str(decision.decision_id),
                     "mode": decision.mode,
@@ -6914,6 +7266,8 @@ class DeterministicBacktestRunner:
                         for key, value in decision.targets.items()
                     },
                     "reason": decision.reason,
+                    "contract_version": getattr(decision, "contract_version", None),
+                    "validation_status": decision.validation_status,
                     "universe_scope_snapshot_hash": self._universe_scope_snapshot_hash,
                     "universe_candidate_count": len(
                         self._step_candidates.get(context.step_sequence, ())
@@ -6942,15 +7296,31 @@ class DeterministicBacktestRunner:
                 for key in dict(decision.targets or {})
             }
         except (TypeError, ValueError) as exc:
-            raise DomainValidationError(
+            error = DomainValidationError(
                 f"decision targets contain an invalid instrument id: {exc}"
-            ) from exc
+            )
+            self._update_decision_audit(
+                decision.decision_id,
+                validation_status="rejected",
+                validation_issues=(self._decision_error_issue(error),),
+                error=str(error),
+            )
+            raise error from exc
         # FINAL-* is deliberately before both interpretation/sizing and order
         # construction.  All selected targets are checked first, so one bad
         # target can never leave an earlier target's order in ``_orders``.
-        self._final_validate_targets(
-            tuple(target_ids), context=context, decision=decision
-        )
+        try:
+            self._final_validate_targets(
+                tuple(target_ids), context=context, decision=decision
+            )
+        except Exception as exc:
+            self._update_decision_audit(
+                decision.decision_id,
+                validation_status="rejected",
+                validation_issues=(self._decision_error_issue(exc),),
+                error=str(exc),
+            )
+            raise
         self._handoff_dynamic_rule_segments(
             tuple(target_ids), context=context, decision=decision
         )
@@ -7001,49 +7371,74 @@ class DeterministicBacktestRunner:
                     board_lot=policy.lot_size,
                     contract_multiplier=policy.contract_multiplier,
                 )
-        if getattr(self._interpreter, "interpreter_key", None) == (
-            "long_only_target_weights"
-        ):
-            from app.strategy_protocol.interpretation import (
-                CorporateActionCashStatus,
-                CorporateActionSnapshot,
-                PortfolioDecisionSnapshot,
-            )
+        try:
+            interpretation = None
+            if getattr(self._interpreter, "interpreter_key", None) == (
+                "long_only_target_weights"
+            ):
+                from app.strategy_protocol.interpretation import (
+                    CorporateActionCashStatus,
+                    CorporateActionSnapshot,
+                    PortfolioDecisionSnapshot,
+                )
 
-            decision_snapshot = PortfolioDecisionSnapshot(
-                decision_snapshot_at=context.decision_time,
-                cash=self._portfolio.account.cash_balances[self._currency],
-                equity=self._portfolio.account.equity,
-                valuation_status=self._portfolio.valuation_status.value,
-                corporate_action_snapshot=CorporateActionSnapshot(
-                    CorporateActionCashStatus.CREDITED
-                ),
-                positions={
-                    instrument_id: position.quantity
-                    for instrument_id, position in self._portfolio.positions.items()
-                },
+                decision_snapshot = PortfolioDecisionSnapshot(
+                    decision_snapshot_at=context.decision_time,
+                    cash=self._portfolio.account.cash_balances[self._currency],
+                    equity=self._portfolio.account.equity,
+                    valuation_status=self._portfolio.valuation_status.value,
+                    corporate_action_snapshot=CorporateActionSnapshot(
+                        CorporateActionCashStatus.CREDITED
+                    ),
+                    positions={
+                        instrument_id: position.quantity
+                        for instrument_id, position in self._portfolio.positions.items()
+                    },
+                )
+                interpretation = self._interpreter.interpret(
+                    decision,
+                    snapshot=decision_snapshot,
+                    facts={
+                        instrument_id: self._interpretation_facts_for_policy(
+                            policies[instrument_id]
+                        )
+                        for instrument_id in instrument_ids
+                    },
+                    unadjusted_market_closes=self._last_marks,
+                    allowed_instrument_ids=set(instrument_ids),
+                )
+                intents = interpretation.order_intents
+            else:
+                intents = self._interpreter.interpret(
+                    decision,
+                    portfolio=self._portfolio,
+                    equity=self._portfolio.account.equity,
+                    reference_prices=self._last_marks,
+                    facts=facts,
+                )
+        except Exception as exc:
+            self._update_decision_audit(
+                decision.decision_id,
+                validation_status="rejected",
+                validation_issues=(self._decision_error_issue(exc),),
+                error=str(exc),
             )
-            interpretation = self._interpreter.interpret(
-                decision,
-                snapshot=decision_snapshot,
-                facts={
-                    instrument_id: self._interpretation_facts_for_policy(
-                        policies[instrument_id]
-                    )
-                    for instrument_id in instrument_ids
-                },
-                unadjusted_market_closes=self._last_marks,
-                allowed_instrument_ids=set(instrument_ids),
+            raise
+        if interpretation is not None:
+            interpretation_status = getattr(
+                interpretation.decision_status, "value", interpretation.decision_status
             )
-            intents = interpretation.order_intents
-        else:
-            intents = self._interpreter.interpret(
-                decision,
-                portfolio=self._portfolio,
-                equity=self._portfolio.account.equity,
-                reference_prices=self._last_marks,
-                facts=facts,
-            )
+            if interpretation_status == "rejected":
+                self._update_decision_audit(
+                    decision.decision_id,
+                    validation_status="rejected",
+                    validation_issues=self._interpretation_issues(interpretation),
+                    error=(
+                        "decision interpretation rejected"
+                        if not self._interpretation_issues(interpretation)
+                        else None
+                    ),
+                )
         effective_from = context.effective_from
         if effective_from is None:
             raise DomainValidationError(
@@ -7110,10 +7505,23 @@ class DeterministicBacktestRunner:
         self._orders.extend(staged_orders)
         self._step_order_records.extend(staged_order_records)
         for order in staged_orders:
-            self._record_order_update(
+            update = self._record_order_update(
                 order,
                 old_status=None,
                 updated_at=context.decision_time,
+            )
+            emitted.append(
+                self._emit_pair(
+                    BacktestEventType.ORDER_UPDATED,
+                    {
+                        "order_id": str(order.order_id),
+                        "decision_id": str(decision.decision_id),
+                        "update_sequence": update.update_sequence,
+                        "old_status": update.old_status,
+                        "new_status": update.new_status,
+                        "reason": update.reason,
+                    },
+                )
             )
         hook = getattr(self._strategy, "on_order_update", None)
         if callable(hook):
@@ -7216,13 +7624,39 @@ class DeterministicBacktestRunner:
             positions=tuple(positions),
         )
 
+    def _decision_id_for_order(self, order_id: UUID) -> str | None:
+        """Resolve the stable strategy decision linked to one order."""
+
+        for order in self._orders:
+            if order.order_id == order_id and order.decision_id is not None:
+                return str(order.decision_id)
+        return None
+
+    def _order_event_payload(
+        self, order_id: UUID, *, reason: str | None
+    ) -> Mapping[str, Any]:
+        """Build the common order identity payload for terminal events."""
+
+        order = next(
+            (item for item in self._orders if item.order_id == order_id), None
+        )
+        return {
+            "order_id": str(order_id),
+            "intent_id": str(order.intent_id) if order is not None else None,
+            "instrument_id": (
+                str(order.instrument_id) if order is not None else None
+            ),
+            "decision_id": self._decision_id_for_order(order_id),
+            "reason": reason,
+        }
+
     def _record_order_update(
         self,
         order: Order,
         *,
         old_status: str | None,
         updated_at: datetime,
-    ) -> None:
+    ) -> OrderUpdateAuditRecord:
         """Capture each runtime order transition exactly once in sequence."""
 
         sequence = self._order_update_sequences.get(order.order_id, 0)
@@ -7237,6 +7671,7 @@ class DeterministicBacktestRunner:
             )
         )
         self._order_update_sequences[order.order_id] = sequence + 1
+        return self._order_updates[-1]
 
     def _complete_step(self, step: TimeStep) -> None:
         """Freeze the finished step's order/fill digest for the next decide."""

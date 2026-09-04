@@ -179,7 +179,7 @@ class WriteContractTestCase(ResultRepositoryTestCase):
             step_sequence=0,
             phase_sequence=1,
             phase_key="observe",
-            event_type="quote_observed",
+            event_type="market_observed",
             event_time=ts(9),
             payload={"price": "3.85"},
         )
@@ -197,6 +197,7 @@ class WriteContractTestCase(ResultRepositoryTestCase):
         page = self.repo.read_page("events", run_id=self.run_id)
         self.assertEqual([row.event_sequence for row in page.items], [0, 1])
         self.assertEqual(page.items[0].payload["price"], "3.85")
+        self.assertEqual(page.items[0].event_version, 1)
 
     def test_round_trips_orders_and_preserves_display_fields(self) -> None:
         order_id = self.seed_orders(1)[0]

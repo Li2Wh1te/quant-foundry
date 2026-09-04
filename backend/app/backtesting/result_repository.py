@@ -683,6 +683,7 @@ def _event_record(dto: BacktestEventDto) -> dict[str, Any]:
         "event_type": dto.event_type,
         "event_time": dto.event_time,
         "payload": _thaw_json(dict(dto.payload)),
+        "event_version": dto.event_version,
     }
 
 
@@ -706,6 +707,7 @@ def _order_record(dto: BacktestOrderDto) -> dict[str, Any]:
         "run_id": dto.run_id,
         "order_id": dto.order_id,
         "intent_id": dto.intent_id,
+        "decision_id": dto.decision_id,
         "instrument_id": dto.instrument_id,
         "event_trading_code": dto.display.event_trading_code,
         "event_name": dto.display.event_name,

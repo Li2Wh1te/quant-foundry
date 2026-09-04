@@ -530,6 +530,10 @@ class BacktestEventRecord:
     event_type: str
     event_time: datetime
     payload: Mapping[str, Any] = field(default_factory=dict)
+    # Event semantics are versioned independently from the run result schema.
+    # This prevents a later payload change from silently changing old audit
+    # records while keeping the event stream a single append-only table.
+    event_version: int = 1
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
@@ -545,11 +549,21 @@ class BacktestEventRecord:
         object.__setattr__(self, "phase_key", _required_text(self.phase_key, "phase_key"))
         object.__setattr__(self, "event_type", _required_text(self.event_type, "event_type"))
         object.__setattr__(self, "event_time", _aware_datetime(self.event_time, "event_time"))
+        if (
+            isinstance(self.event_version, bool)
+            or not isinstance(self.event_version, int)
+            or self.event_version < 1
+        ):
+            raise DomainValidationError(
+                "event_version must be a positive integer"
+            )
         object.__setattr__(self, "payload", _json_payload(self.payload, "payload"))
 
     @property
     def cursor_sort_key(self) -> tuple[int]:
         return (self.event_sequence,)
+
+
 @dataclass(frozen=True, slots=True)
 class BacktestDecisionRecord:
     """One strategy decision (logical ``backtest_decisions`` row)."""
@@ -640,6 +654,9 @@ class BacktestOrderRecord:
     status: ResultOrderStatus
     submitted_at: datetime
     intent_id: UUID | None = None
+    # Direct decision linkage makes the persisted order chain queryable
+    # without reconstructing it through event payloads or intent UUIDs.
+    decision_id: UUID | None = None
     price: Decimal | int | str | None = None
     filled_quantity: Decimal | int | str = ZERO
     status_reason: str | None = None
@@ -667,6 +684,7 @@ class BacktestOrderRecord:
             self, "submitted_at", _aware_datetime(self.submitted_at, "submitted_at")
         )
         object.__setattr__(self, "intent_id", _optional_uuid(self.intent_id, "intent_id"))
+        object.__setattr__(self, "decision_id", _optional_uuid(self.decision_id, "decision_id"))
         object.__setattr__(self, "price", _optional_price(self.price, "price"))
         object.__setattr__(
             self, "filled_quantity", _non_negative(self.filled_quantity, "filled_quantity")

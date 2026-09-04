@@ -35,22 +35,41 @@ BUY_ALL = {0: {str(INSTRUMENT_ID): "1"}}
 # 103 with a final valuation.
 EXPECTED_EVENT_TYPES = [
     # step0
+    "step_started",
+    "market_observed",
     "portfolio_valued",
-    "strategy_decision_created",
+    "strategy_called",
+    "decision_created",
     "order_submitted",
+    "order_updated",
+    "step_finished",
     # step1
+    "step_started",
+    "market_observed",
+    "order_advanced",
     "fill_created",
+    "order_updated",
     "fill_applied",
+    "portfolio_updated",
     "portfolio_valued",
-    "strategy_decision_created",
+    "strategy_called",
+    "decision_created",
     # The sell is submitted while availability is still zero; matching
     # happens only after the next settlement restore.
     "order_submitted",
+    "order_updated",
+    "step_finished",
     # step2: settlement restore, then the sell fills at the open.
+    "step_started",
     "settlement_restored",
+    "market_observed",
+    "order_advanced",
     "fill_created",
+    "order_updated",
     "fill_applied",
+    "portfolio_updated",
     "portfolio_valued",
+    "step_finished",
 ]
 
 
@@ -102,10 +121,11 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
             [event.event_type for event in result.events],
             EXPECTED_EVENT_TYPES,
         )
-        # Every envelope carries the phase coordinates of its origin.
+        # Every envelope carries the phase coordinates and version of its origin.
         for event in result.events:
             self.assertTrue(event.phase_key)
             self.assertGreaterEqual(event.event_sequence, 1)
+            self.assertEqual(event.event_version, 1)
 
     def test_sequences_are_monotonic_across_the_whole_run(self) -> None:
         runner, _ = scenario_runner()
@@ -118,13 +138,13 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
             previous_event = event.event_sequence
             self.assertGreaterEqual(event.step_sequence, previous_step)
             previous_step = event.step_sequence
-        # Phase sequences stay inside one step's phase range and never go
-        # backwards; events only exist for phases that emit business facts.
+        # Boundary events use phase 0/10; phase events remain in the timing
+        # policy's 1..9 range and the full sequence never moves backwards.
         by_step: dict[int, list[int]] = {}
         for event in result.events:
             by_step.setdefault(event.step_sequence, []).append(event.phase_sequence)
         for phase_sequences in by_step.values():
-            self.assertTrue(all(1 <= p <= 9 for p in phase_sequences))
+            self.assertTrue(all(0 <= p <= 10 for p in phase_sequences))
             self.assertEqual(phase_sequences, sorted(phase_sequences))
 
     def test_decide_and_submit_are_absent_on_the_final_step(self) -> None:
@@ -134,7 +154,7 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
         final_types = [
             event.event_type for event in result.events if event.step_sequence == 2
         ]
-        self.assertNotIn("strategy_decision_created", final_types)
+        self.assertNotIn("decision_created", final_types)
         self.assertNotIn("order_submitted", final_types)
         self.assertIn("portfolio_valued", final_types)
         self.assertEqual(len(result.equity_curve), 3)
@@ -205,6 +225,54 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
         self.assertEqual(context.exception.step_sequence, 0)
         self.assertEqual(context.exception.phase_key, "decide")
         self.assertEqual(context.exception.error_type, "ValueError")
+
+    def test_failed_strategy_decision_is_retained_for_audit(self) -> None:
+        class ExplodingStrategy(ScriptedStrategy):
+            def on_step(self, context):
+                raise ValueError("decision boom")
+
+        runner = build_runner(
+            run_id="run-decision-failure",
+            axis=build_axis([D0, D1]),
+            market_data=DictMarketData(
+                {
+                    D0: {INSTRUMENT_ID: ("1.00", "1.00")},
+                    D1: {INSTRUMENT_ID: ("1.00", "1.00")},
+                }
+            ),
+            strategy_view=CountingStrategyView({D0: "1.00", D1: "1.00"}),
+            strategy=ExplodingStrategy({}),
+        )
+
+        with self.assertRaises(PhaseExecutionError):
+            runner.run()
+
+        result = runner._build_result()
+        self.assertEqual(len(result.decisions), 1)
+        decision = result.decisions[0]
+        self.assertEqual(decision.validation_status, "rejected")
+        self.assertEqual(decision.error, "decision boom")
+        self.assertIsNotNone(decision.duration_ms)
+        self.assertEqual(
+            [event.event_type for event in result.events][-2:],
+            ["strategy_called", "decision_created"],
+        )
+        self.assertEqual(
+            result.events[-1].payload["validation_status"], "rejected"
+        )
+
+    def test_orders_and_fills_keep_their_originating_decision_id(self) -> None:
+        runner, _ = scenario_runner()
+        result = runner.run()
+        submitted = next(
+            event for event in result.events if event.event_type == "order_submitted"
+        )
+        decision_id = submitted.payload["decision_id"]
+        self.assertEqual(str(result.order_outcomes[0].decision_id), decision_id)
+        for event in result.events:
+            if event.event_type in {"fill_created", "fill_applied", "order_updated"}:
+                if event.payload.get("order_id") == submitted.payload["order_id"]:
+                    self.assertEqual(event.payload["decision_id"], decision_id)
 
     def test_run_result_records_component_versions(self) -> None:
         runner, _ = scenario_runner(component_parameters={"board_lot": 100})

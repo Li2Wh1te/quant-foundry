@@ -40,6 +40,7 @@ from app.backtesting.result_schemas import (
     BacktestDataChunkItem,
     BacktestDataPreflightItem,
     BacktestDecisionItem,
+    BacktestEventItem,
     BacktestEquityCurveItem,
     BacktestFillItem,
     BacktestMetricItem,
@@ -254,6 +255,34 @@ def _read_page(
         # Covers the page-size policy and non-timezone-aware boundaries.
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _page_or_error(page)
+
+
+@router.get("/events", response_model=ResultCursorPage[BacktestEventItem])
+def list_events(
+    run_id: Annotated[UUID, Path()],
+    signing_key: CursorSigningKey,
+    limit: Annotated[int, Query(ge=1, le=500)] = DEFAULT_PAGE_SIZE,
+    cursor: Annotated[str | None, Query(min_length=1)] = None,
+    event_type: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+    start_time: Annotated[datetime | None, Query()] = None,
+    end_time: Annotated[datetime | None, Query()] = None,
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+) -> dict[str, object]:
+    """List the immutable event stream in run-global sequence order."""
+
+    return _read_page(
+        "events",
+        run_id=run_id,
+        limit=limit,
+        cursor=cursor,
+        session=session,
+        signing_key=signing_key,
+        request=request,
+        event_type=event_type,
+        start_time=start_time,
+        end_time=end_time,
+    )
 
 
 @router.get("/steps", response_model=ResultCursorPage[BacktestStepItem])
@@ -888,6 +917,7 @@ def list_data_chunks(
 # canonical preflight resource remains under ``backtest-runs/.../results``.
 # These aliases delegate to the same guarded handlers and do not create a
 # second persistence/query implementation.
+formal_result_alias_router.add_api_route("/events", list_events, methods=["GET"], include_in_schema=True)
 formal_result_alias_router.add_api_route("/steps", list_steps, methods=["GET"], include_in_schema=True)
 formal_result_alias_router.add_api_route("/decisions", list_decisions, methods=["GET"], include_in_schema=True)
 formal_result_alias_router.add_api_route("/orders", list_orders, methods=["GET"], include_in_schema=True)
