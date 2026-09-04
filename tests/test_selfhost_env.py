@@ -164,7 +164,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
         self.assertIn("compose ps postgres backend runner frontend", selfhost)
         self.assertIn("compose stop runner", selfhost)
 
-    def test_replaces_weak_secrets_and_removes_legacy_url(self) -> None:
+    def test_replaces_weak_secrets_removes_legacy_url_and_preserves_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             template = root / ".env.example"
@@ -197,7 +197,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             self.assertIn(f"QF_DATABASE_PASSWORD={'b' * 64}", content)
             self.assertIn(f"QF_API_TOKEN={'c' * 64}", content)
             self.assertIn(f"QF_CURSOR_SIGNING_KEY={'d' * 64}", content)
-            self.assertIn("QF_SERVER_HOST=0.0.0.0", content)
+            self.assertIn("QF_SERVER_HOST=127.0.0.1", content)
             self.assertIn("QF_SERVER_PORT=19000", content)
             self.assertIn("QF_WEB_HOST=0.0.0.0", content)
             self.assertIn("QF_WEB_PORT=9090", content)

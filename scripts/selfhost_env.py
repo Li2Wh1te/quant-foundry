@@ -21,8 +21,6 @@ DEPLOYMENT_DEFAULTS = {
     "QF_WEB_HOST": "127.0.0.1",
     "QF_WEB_PORT": "8080",
 }
-SERVER_HOST_KEY = "QF_SERVER_HOST"
-LEGACY_SERVER_HOST = "127.0.0.1"
 DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
 BACKTEST_INTERNAL_TOKEN_KEY = "QF_BACKTEST_INTERNAL_TOKEN"
@@ -48,10 +46,6 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
     lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
     values = _read_values(lines)
     template_values = _read_values(template_path.read_text(encoding="utf-8").splitlines())
-    # Migrate the old local-only default so a previously initialized .env can
-    # still be used by the containerized backend over the Compose network.
-    if values.get(SERVER_HOST_KEY) == LEGACY_SERVER_HOST:
-        values[SERVER_HOST_KEY] = DEPLOYMENT_DEFAULTS[SERVER_HOST_KEY]
     generated_keys: set[str] = set()
     database_password = _ensure_secret(
         values,
