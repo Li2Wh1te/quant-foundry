@@ -6,11 +6,14 @@ from uuid import uuid4
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 from starlette.requests import Request
 
 from app.backtesting.run_admission import AdmissionResult
 from app.core.auth import AuthenticatedPrincipal
 from app.backtesting.run_router import (
+    _build_spec,
+    _request_fingerprint,
     _response,
     _runs,
     cancel,
@@ -27,7 +30,7 @@ from app.backtesting.run_schemas import InternalRunCreateRequest, RunCreateReque
 def _payload(*, internal: bool = False, key: str | None = None):
     cls = InternalRunCreateRequest if internal else RunCreateRequest
     return cls(
-        spec={
+        backtest_config={
             "start_date": "2026-01-01",
             "end_date": "2026-01-02",
             "initial_cash": "10000",
@@ -38,11 +41,68 @@ def _payload(*, internal: bool = False, key: str | None = None):
 
 
 def test_formal_request_cannot_control_run_kind_or_profile():
-    payload = _payload()
-    payload.spec["run_kind"] = "backtest_run"
-    with pytest.raises(HTTPException) as raised:
-        create_formal(payload)
-    assert raised.value.status_code == 422
+    with pytest.raises(ValidationError):
+        RunCreateRequest(
+            strategy_revision_id=uuid4(),
+            idempotency_key=str(uuid4()),
+            backtest_config={
+                "start_date": "2026-01-01",
+                "end_date": "2026-01-02",
+                "initial_cash": "10000",
+                "run_kind": "backtest_run",
+            },
+        )
+
+
+def test_legacy_and_canonical_run_inputs_normalize_to_the_same_spec():
+    revision_id = uuid4()
+    account_id = uuid4()
+    canonical = RunCreateRequest(
+        strategy_revision_id=revision_id,
+        parameters={"window": 20},
+        account_profile_id=account_id,
+        slippage_model={
+            "key": "bps",
+            "version": 1,
+            "parameters": {"slippage_bps": "10", "price_tick": "0.01"},
+        },
+        backtest_config={
+            "start_date": "2026-01-01",
+            "end_date": "2026-01-02",
+            "initial_cash": "10000",
+            "dynamic_universe": True,
+            "instrument_ids": [uuid4()],
+            "exchanges": ["SSE"],
+            "strategy_price_bases": ["raw"],
+        },
+        idempotency_key="same-request",
+    )
+    legacy = RunCreateRequest(
+        strategy_revision_id=revision_id,
+        account_profile_id=account_id,
+        spec={
+            **canonical.backtest_config.model_dump(mode="json"),
+            "parameters": {"window": 20},
+            "slippage_model_key": "bps",
+            "slippage_model_version": 1,
+            "slippage_model_parameters": {
+                "slippage_bps": "10",
+                "price_tick": "0.01",
+            },
+        },
+        idempotency_key="same-request",
+    )
+
+    spec = _build_spec(canonical)
+    assert spec.strategy_revision_id == revision_id
+    assert spec.strategy_parameters == {"window": 20}
+    assert spec.account_profile_id == account_id
+    assert spec.exchanges == ("SSE",)
+    assert spec.strategy_price_bases == ("raw",)
+    assert spec.slippage_model.key == "bps"
+    assert _request_fingerprint(canonical, "backtest_run") == _request_fingerprint(
+        legacy, "backtest_run"
+    )
 
 
 def test_standard_idempotency_header_is_accepted():
@@ -52,7 +112,7 @@ def test_standard_idempotency_header_is_accepted():
         return_value=AdmissionResult(True),
     ):
         payload = RunCreateRequest(
-            spec={
+            backtest_config={
                 "start_date": "2026-01-01",
                 "end_date": "2026-01-02",
                 "initial_cash": "10000",
@@ -91,7 +151,7 @@ def test_formal_create_is_idempotent_and_cancel_only_records_request():
         first = create_formal(_payload(key=key))
         retry = create_formal(
             RunCreateRequest(
-                spec={
+                backtest_config={
                     "start_date": "2026-01-01",
                     "end_date": "2026-01-02",
                     "initial_cash": "10000",

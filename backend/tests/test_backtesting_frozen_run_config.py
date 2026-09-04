@@ -28,8 +28,9 @@ from app.backtesting.production_runtime import (
     default_components,
     serialize_data_request,
 )
+from app.backtesting.registry import UnknownComponentError
 from app.backtesting.run_binding import RunBindingBuilder
-from app.backtesting.spec import BacktestSpec
+from app.backtesting.spec import BacktestSpec, ComponentSelection
 
 
 def _data_request() -> DataRequest:
@@ -81,20 +82,28 @@ def test_migration_installs_snapshot_identity_and_database_guard() -> None:
 
 
 def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
+    revision_id = uuid4()
+    account_id = uuid4()
+    data_request = _data_request()
+    components = default_components()
     spec = BacktestSpec(
         date(2026, 1, 1),
         date(2026, 1, 2),
         "100000",
         [],
+        instrument_ids=data_request.static_instrument_ids,
+        exchanges=("SSE",),
+        strategy_price_bases=("raw",),
+        strategy_revision_id=revision_id,
+        strategy_parameters={"window": 20},
+        account_profile_id=account_id,
         currency="CNY",
         timezone="Asia/Shanghai",
         warmup_sessions=12,
     )
-    data_request = _data_request()
-    components = default_components()
     strategy = {
         "strategy_id": str(uuid4()),
-        "revision_id": str(uuid4()),
+        "revision_id": str(revision_id),
         "revision_number": 3,
         "source_hash": "d" * 64,
         "contract_version": 1,
@@ -103,7 +112,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
         "published": True,
     }
     account = {
-        "profile_id": str(uuid4()),
+        "profile_id": str(account_id),
         "version": 2,
         "fee_schedule_key": "etf-cny",
         "fee_schedule_version": 4,
@@ -121,8 +130,14 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
     )
 
     snapshot = _json_value(binding.config)
-    assert snapshot["schema_version"] == 1
+    assert snapshot["schema_version"] == 2
     assert snapshot["spec"]["warmup_sessions"] == 12
+    assert snapshot["spec"]["strategy_revision_id"] == str(revision_id)
+    assert snapshot["spec"]["strategy_parameters"] == {"window": 20}
+    assert snapshot["spec"]["account_profile_id"] == str(account_id)
+    assert snapshot["spec"]["instrument_ids"] == [
+        str(data_request.static_instrument_ids[0])
+    ]
     assert snapshot["strategy"]["parameters"] == {"window": 20}
     assert snapshot["account"]["fee_schedule_version"] == 4
     assert snapshot["components"]["decision_interpreter"]["key"] == "long_only_target_weights"
@@ -137,9 +152,31 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
     assert _json_value(binding.config)["components"]["slippage_model"]["parameters"]["price_tick"] == "0.01"
 
 
+def test_slippage_selection_is_resolved_and_frozen_from_the_registry() -> None:
+    components = default_components(
+        ComponentSelection(
+            "bps",
+            1,
+            {"slippage_bps": "10", "price_tick": "0.01"},
+        )
+    )
+
+    assert components["slippage_model"]["key"] == "bps"
+    assert components["slippage_model"]["version"] == 1
+    assert components["slippage_model"]["parameters"]["slippage_bps"] == "10"
+    with pytest.raises(UnknownComponentError):
+        default_components(ComponentSelection("arbitrary_python_class", 1))
+
+
 def test_worker_binding_rehydrates_components_from_snapshot_not_defaults() -> None:
     binding = RunBindingBuilder().build(
-        BacktestSpec(date(2026, 1, 1), date(2026, 1, 2), 100, []),
+        BacktestSpec(
+            date(2026, 1, 1),
+            date(2026, 1, 2),
+            100,
+            [],
+            slippage_model=ComponentSelection("snapshot_slippage", 10),
+        ),
         run_kind="internal_link_acceptance",
         strategy={"revision_id": str(uuid4()), "source_hash": "e" * 64, "published": True},
         components={

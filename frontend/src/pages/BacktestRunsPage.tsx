@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
   cancelBacktestRun,
-  createBacktestRun,
   FOREGROUND_POLL_INTERVAL_MS,
   FOREGROUND_POLLING_PROTOCOL,
   getBacktestRun,
@@ -66,7 +65,6 @@ function evidence(run: BacktestRun): Record<string, unknown> {
 export function BacktestRunsPage() {
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selected, setSelected] = useState<BacktestRun | null>(null);
-  const [strategy, setStrategy] = useState("");
   const [message, setMessage] = useState("");
 
   // Refs keep the polling loop stable while allowing it to observe the latest
@@ -77,7 +75,6 @@ export function BacktestRunsPage() {
   const mountedRef = useRef(true);
   const pollAbortRef = useRef<AbortController | null>(null);
   const pollGenerationRef = useRef(0);
-  const startPollingRef = useRef<(() => void) | null>(null);
   const listInFlightRef = useRef(false);
   const detailInFlightRef = useRef(false);
   const listRequestGenerationRef = useRef(0);
@@ -204,8 +201,6 @@ export function BacktestRunsPage() {
       timer = window.setInterval(() => void tick(), FOREGROUND_POLL_INTERVAL_MS);
     };
 
-    startPollingRef.current = start;
-
     const onVisibilityChange = () => {
       stop();
       if (document.visibilityState === "visible") start();
@@ -215,37 +210,10 @@ export function BacktestRunsPage() {
     document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       mountedRef.current = false;
-      startPollingRef.current = null;
       stop();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [poll]);
-
-  const create = () => {
-    if (!strategy.trim()) {
-      setMessage("请填写策略版本");
-      return;
-    }
-    setMessage("正在预检…");
-    void createBacktestRun({
-      strategy_revision_id: strategy.trim(),
-      idempotency_key: crypto.randomUUID(),
-      spec: {
-        start_date: new Date().toISOString().slice(0, 10),
-        end_date: new Date().toISOString().slice(0, 10),
-        initial_cash: "0",
-        initial_positions: []
-      }
-    }).then(async () => {
-      setMessage("已创建");
-      const items = await refresh();
-      if (items.some((run) => !isTerminalBacktestStatus(run.status))) {
-        startPollingRef.current?.();
-      }
-    }).catch((error: unknown) => {
-      setMessage(error instanceof Error ? error.message : "创建失败。");
-    });
-  };
 
   const openDetail = (run: BacktestRun) => {
     selectedRef.current = run;
@@ -256,10 +224,7 @@ export function BacktestRunsPage() {
   return (
     <section data-polling-protocol={FOREGROUND_POLLING_PROTOCOL}>
       <h1>回测运行</h1>
-      <label>
-        策略版本 <input value={strategy} onChange={(event) => setStrategy(event.target.value)} placeholder="strategy-revision" />
-      </label>
-      <button type="button" onClick={create}>预检并创建回测</button>
+      <p>新运行请从对应策略的回测工作台创建，以完整选择账户、数据范围和执行配置。</p>
       {message && <p role="status">{message}</p>}
 
       {runs.map((run) => (

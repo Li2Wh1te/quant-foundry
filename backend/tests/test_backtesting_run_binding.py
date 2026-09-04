@@ -12,7 +12,7 @@ from app.backtesting.run_binding import (
     RunBindingBuilder,
     RunCreationService,
 )
-from app.backtesting.spec import BacktestSpec
+from app.backtesting.spec import BacktestSpec, ComponentSelection
 
 
 def _binding(**kwargs):
@@ -24,6 +24,29 @@ def test_hash_is_stable_and_kind_profile_are_server_bound():
     a, b = _binding(strategy={"revision": "r1"}), _binding(strategy={"revision": "r1"})
     assert a.config_hash == b.config_hash
     assert a.profile == "formal@1"
+
+
+def test_builder_rejects_a_resolved_component_that_differs_from_the_spec():
+    spec = BacktestSpec(
+        date(2024, 1, 1),
+        date(2024, 1, 2),
+        100,
+        [],
+        slippage_model=ComponentSelection(
+            "bps", 1, {"slippage_bps": "10", "price_tick": "0.01"}
+        ),
+    )
+    with pytest.raises(ValueError, match="slippage model"):
+        RunBindingBuilder().build(
+            spec,
+            components={
+                "slippage_model": {
+                    "key": "none",
+                    "version": 1,
+                    "parameters": {"price_tick": "0.01"},
+                }
+            },
+        )
 
 
 def test_idempotency_rejects_changed_payload():

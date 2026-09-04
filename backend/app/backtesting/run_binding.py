@@ -98,7 +98,7 @@ class RunBinding:
             # Bump this only when the serialized meaning of a run input
             # changes.  The value is part of config_hash, so an old run can
             # never be mistaken for a new snapshot shape.
-            "schema_version": 1,
+            "schema_version": 2,
             "spec": {
                 "start_date": self.spec.start_date,
                 "end_date": self.spec.end_date,
@@ -114,6 +114,22 @@ class RunBinding:
                     for p in self.spec.initial_positions
                 ],
                 "dynamic_universe": self.spec.dynamic_universe,
+                "instrument_ids": list(self.spec.instrument_ids),
+                "exchanges": list(self.spec.exchanges),
+                "strategy_price_bases": list(self.spec.strategy_price_bases),
+                "strategy_revision_id": self.spec.strategy_revision_id,
+                "strategy_parameters": (
+                    None
+                    if self.spec.strategy_parameters is None
+                    else _safe_mapping(self.spec.strategy_parameters)
+                ),
+                "account_profile_id": self.spec.account_profile_id,
+                "slippage_model": {
+                    "key": self.spec.slippage_model.key,
+                    "version": self.spec.slippage_model.version,
+                    "parameters": _safe_mapping(self.spec.slippage_model.parameters),
+                },
+                "random_seed": self.spec.random_seed,
             },
             "run_kind": self.run_kind, "profile": self.profile,
             "strategy": _safe_mapping(self.strategy), "components": _safe_mapping(self.components),
@@ -147,6 +163,34 @@ class RunBindingBuilder:
             except Exception as exc:
                 raise ValueError("account resolution dependency unavailable") from exc
         profile = "formal@1" if run_kind == "backtest_run" else "internal_link_acceptance@1"
+        strategy = strategy or {}
+        components = components or {}
+        account = account or {}
+        if spec.strategy_revision_id is not None and str(
+            strategy.get("revision_id")
+        ) != str(spec.strategy_revision_id):
+            raise ValueError("resolved strategy revision does not match run spec")
+        if spec.strategy_parameters is not None and _plain(
+            strategy.get("parameters", {})
+        ) != _plain(spec.strategy_parameters):
+            raise ValueError("resolved strategy parameters do not match run spec")
+        if spec.account_profile_id is not None and str(
+            account.get("profile_id", account.get("account_profile_id"))
+        ) != str(spec.account_profile_id):
+            raise ValueError("resolved account profile does not match run spec")
+        if components:
+            slippage = components.get("slippage_model")
+            if not isinstance(slippage, Mapping) or (
+                slippage.get("key"), slippage.get("version")
+            ) != (spec.slippage_model.key, spec.slippage_model.version):
+                raise ValueError("resolved slippage model does not match run spec")
+            if _plain(slippage.get("parameters", {})) != _plain(
+                spec.slippage_model.parameters
+            ):
+                raise ValueError("resolved slippage parameters do not match run spec")
+        if random_seed is not None and spec.random_seed not in (None, random_seed):
+            raise ValueError("resolved random seed does not match run spec")
+        random_seed = spec.random_seed if random_seed is None else random_seed
         if run_kind == "backtest_run" and account:
             fee_key = account.get("fee_schedule_key")
             schedule = account.get("fee_schedule")
@@ -158,10 +202,10 @@ class RunBindingBuilder:
             spec,
             run_kind,
             profile,
-            strategy or {},
-            components or {},
+            strategy,
+            components,
             data_request or {},
-            account or {},
+            account,
             metadata or {},
             random_seed,
         )

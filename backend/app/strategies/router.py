@@ -23,6 +23,7 @@ from app.strategies.schemas import (
     StrategyValidationIssueResponse,
     StrategyBacktestWorkspaceResponse,
 )
+from app.backtesting.registry import SLIPPAGE_MODEL_KIND, build_default_component_registry
 from app.backtesting.run_repository import DatabaseRunRepository, FORMAL_KIND
 from app.backtesting.run_router import _owner_scope, _response as _run_response
 from app.backtesting.pagination import CursorError
@@ -104,6 +105,12 @@ def strategy_backtest_workspace(
             "parameter_schema": r.parameter_schema, "default_parameters": r.default_parameters,
             "runtime_manifest": r.runtime_manifest, "published_at": r.published_at,
         } for r in revisions],
+        slippage_models=[
+            entry.describe()
+            for entry in build_default_component_registry().entries(
+                component_kind=SLIPPAGE_MODEL_KIND
+            )
+        ],
         formal_gate=formal_gate,
         runs={"items": [_run_response(r) for r in rows],
               "next_cursor": page.next_cursor,

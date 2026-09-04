@@ -26,7 +26,7 @@ from app.strategies.repository import StrategyRepository
 from app.db.session import get_db_session
 
 from .domain import PositionSide
-from .spec import BacktestSpec, InitialPositionInput
+from .spec import BacktestSpec, ComponentSelection, InitialPositionInput
 from .run_admission import RunAdmissionService
 from .run_binding import (
     BacktestRun,
@@ -43,10 +43,7 @@ from .run_repository import (
     TERMINAL_STATUSES,
 )
 from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse
-from .production_runtime import (
-    DEFAULT_RULE_PACKAGE,
-    build_formal_binding,
-)
+from .production_runtime import build_formal_binding, default_components
 from app.instruments.rule_snapshots_repository import RunRuleSnapshotRepository
 from .data.reports import canonical_hash
 
@@ -120,7 +117,9 @@ def _request_fingerprint(payload: RunCreateRequest, kind: str) -> str:
                 else None
             ),
             "random_seed": payload.random_seed,
-            "spec": payload.spec,
+            "parameters": payload.parameters,
+            "backtest_config": payload.backtest_config.model_dump(mode="json"),
+            "slippage_model": payload.slippage_model.model_dump(mode="json"),
             "degraded": payload.degraded,
             "confirmed_admission_report_hash": payload.confirmed_admission_report_hash,
         }
@@ -197,89 +196,84 @@ def _db_repository(session: object, request: Request | None) -> DatabaseRunRepos
     )
 
 
-def _validate_spec(raw: Mapping[str, Any], expected_kind: str) -> None:
-    """Reject client-controlled routing/profile and credential-bearing fields."""
+def _build_spec(
+    payload: RunCreateRequest, *, internal: bool = False
+) -> BacktestSpec:
+    """Create the one immutable domain input used by preflight and binding."""
 
-    # Kind/profile are trusted-entry concerns, not request data.  Even a value
-    # equal to the expected kind is rejected so clients cannot accidentally
-    # make these fields part of a future canonical identity.
-    allowed = {
-        "start_date",
-        "end_date",
-        "initial_cash",
-        "initial_positions",
-        "dynamic_universe",
-        "parameters",
-        "exchanges",
-        "instrument_ids",
-        "currency",
-        "timezone",
-        "frequency",
-        "warmup_sessions",
-    }
-    unknown = set(raw) - allowed
-    if unknown:
-        raise ValueError(f"unsupported spec fields: {', '.join(sorted(unknown))}")
-    forbidden = {
-        "fixture",
-        "raw_fixture",
-        "secret",
-        "password",
-        "credential",
-        "access_token",
-        "token",
-        "source",
-        "code",
-    }
-    if any(any(part in str(key).lower() for part in forbidden) for key in raw):
-        raise ValueError("credential, source, or raw fixture fields are forbidden")
-    if expected_kind not in {FORMAL_KIND, INTERNAL_KIND}:
-        raise ValueError("unsupported trusted run kind")
-
-
-def _build_spec(raw: Mapping[str, Any], *, internal: bool = False) -> BacktestSpec:
+    config = payload.backtest_config
     positions: list[InitialPositionInput] = []
     if not internal:
         positions = [
             InitialPositionInput(
-                instrument_id=UUID(str(item["instrument_id"])),
-                side=PositionSide(item["side"]),
-                quantity=item["quantity"],
-                available_quantity=item.get("available_quantity", item["quantity"]),
-                average_price=item.get("average_price"),
+                instrument_id=item.instrument_id,
+                side=PositionSide(item.side),
+                quantity=item.quantity,
+                available_quantity=(
+                    item.quantity
+                    if item.available_quantity is None
+                    else item.available_quantity
+                ),
+                average_price=item.average_price,
             )
-            for item in raw.get("initial_positions", [])
+            for item in config.initial_positions
         ]
     return BacktestSpec(
-        start_date=date.fromisoformat(str(raw["start_date"])),
-        end_date=date.fromisoformat(str(raw["end_date"])),
-        initial_cash=raw.get("initial_cash", 0),
+        start_date=config.start_date,
+        end_date=config.end_date,
+        initial_cash=config.initial_cash,
         initial_positions=positions,
-        dynamic_universe=bool(raw.get("dynamic_universe", False)),
-        currency=str(raw.get("currency", "CNY")),
-        timezone=str(raw.get("timezone", "Asia/Shanghai")),
-        frequency=str(raw.get("frequency", "1d")),
-        warmup_sessions=int(raw.get("warmup_sessions", 0)),
+        dynamic_universe=config.dynamic_universe,
+        instrument_ids=config.instrument_ids,
+        exchanges=config.exchanges,
+        strategy_price_bases=config.strategy_price_bases,
+        strategy_revision_id=payload.strategy_revision_id,
+        strategy_parameters=payload.parameters,
+        account_profile_id=payload.account_profile_id,
+        slippage_model=ComponentSelection(
+            payload.slippage_model.key,
+            payload.slippage_model.version,
+            payload.slippage_model.parameters,
+        ),
+        random_seed=payload.random_seed,
+        currency=config.currency,
+        timezone=config.timezone,
+        frequency=config.frequency,
+        warmup_sessions=config.warmup_sessions,
     )
 
 
 def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
-    raw = payload.spec
-    _validate_spec(raw, kind)
-    spec = _build_spec(raw, internal=kind == INTERNAL_KIND)
-    # Strategy/account/data resolution belongs to task 08.  This API receives
-    # only the already trusted revision identity and never evaluates source.
+    if kind not in {FORMAL_KIND, INTERNAL_KIND}:
+        raise ValueError("unsupported trusted run kind")
+    spec = _build_spec(payload, internal=kind == INTERNAL_KIND)
+    components = default_components(spec.slippage_model)
+    resolved_slippage = components["slippage_model"]
+    spec = replace(
+        spec,
+        slippage_model=ComponentSelection(
+            str(resolved_slippage["key"]),
+            int(resolved_slippage["version"]),
+            dict(resolved_slippage["parameters"]),
+        ),
+    )
+    # Direct-call compatibility still freezes the same input shape as the DB
+    # path; only storage-backed resolution is unavailable in this branch.
     return RunBindingBuilder().build(
         spec,
         run_kind=kind,
-        strategy={"revision_id": str(payload.strategy_revision_id), "published": True},
+        strategy={
+            "revision_id": str(payload.strategy_revision_id),
+            "published": True,
+            "parameters": dict(payload.parameters or {}),
+        },
+        components=components,
         data_request={},
         account=(
             {"profile_id": str(payload.account_profile_id)}
             if payload.account_profile_id is not None
             else {}
         ),
-        random_seed=payload.random_seed,
     )
 
 
@@ -621,14 +615,11 @@ def _create(
         if revision is None:
             raise ValueError("published strategy revision is required")
         binding_result = build_formal_binding(
-            spec=_build_spec(payload.spec),
+            spec=_build_spec(payload),
             revision=revision,
-            raw_spec=payload.spec,
             session=session,
             degraded=payload.degraded,
             confirmed_report_hash=payload.confirmed_admission_report_hash,
-            account_profile_id=payload.account_profile_id,
-            random_seed=payload.random_seed,
         )
         binding = binding_result.binding
         rule_snapshot_bundle = binding_result.rule_snapshot_bundle
@@ -810,14 +801,11 @@ def preflight(
         if revision is None:
             raise ValueError("published strategy revision is required")
         binding_result = build_formal_binding(
-            spec=_build_spec(payload.spec),
+            spec=_build_spec(payload),
             revision=revision,
-            raw_spec=payload.spec,
             session=session,
             degraded=payload.degraded,
             confirmed_report_hash=payload.confirmed_admission_report_hash,
-            account_profile_id=payload.account_profile_id,
-            random_seed=payload.random_seed,
         )
         binding = binding_result.binding
         evidence = binding.metadata.get("data_evidence", {})

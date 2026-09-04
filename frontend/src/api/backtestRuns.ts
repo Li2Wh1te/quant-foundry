@@ -22,7 +22,6 @@ export type BacktestRun = {
   fee_schedule_key?: string | null;
   fee_schedule_version?: string | null;
   random_seed?: number | null;
-  spec?: Record<string, unknown>;
   completion_marker?: Record<string, unknown> | null;
   child_pid?: number | null;
   child_process_group_id?: number | null;
@@ -57,8 +56,66 @@ export type BacktestRun = {
   failure_evidence?: Record<string, unknown> | null;
 };
 
+export interface BacktestInitialPositionInput {
+  instrument_id: string;
+  side: "long" | "short" | "net";
+  quantity: string | number;
+  available_quantity: string | number;
+  average_price?: string | number | null;
+}
+
+export interface BacktestConfigInput {
+  start_date: string;
+  end_date: string;
+  initial_cash: string | number;
+  initial_positions: BacktestInitialPositionInput[];
+  dynamic_universe: boolean;
+  instrument_ids: string[];
+  exchanges: string[];
+  strategy_price_bases: Array<"raw" | "qfq" | "hfq">;
+  currency: string;
+  timezone: string;
+  frequency: "1d";
+  warmup_sessions: number;
+}
+
+export interface ComponentSelectionInput {
+  key: string;
+  version: number;
+  parameters: Record<string, unknown>;
+}
+
+export interface BacktestRunCreateInput {
+  strategy_revision_id: string;
+  parameters?: Record<string, unknown> | null;
+  backtest_config: BacktestConfigInput;
+  account_profile_id?: string | null;
+  slippage_model: ComponentSelectionInput;
+  random_seed?: number | null;
+  idempotency_key?: string;
+  degraded?: boolean;
+  confirmed_admission_report_hash?: string | null;
+}
+
+export interface ComponentDescriptor {
+  component_kind: string;
+  key: string;
+  version: number;
+  name_zh: string;
+  name_en: string;
+  display_name: string;
+  parameter_schema: Record<string, unknown>;
+  capabilities: Record<string, unknown>;
+}
+
 export type BacktestRunListResponse = { items: BacktestRun[] };
-export type StrategyBacktestWorkspace = { strategy: Record<string, unknown>; published_revisions: Array<Record<string, unknown>>; formal_gate: Record<string, unknown>; runs: BacktestRunListResponse & { next_cursor?: string | null; has_more?: boolean } };
+export type StrategyBacktestWorkspace = {
+  strategy: Record<string, unknown>;
+  published_revisions: Array<Record<string, unknown>>;
+  slippage_models: ComponentDescriptor[];
+  formal_gate: Record<string, unknown>;
+  runs: BacktestRunListResponse & { next_cursor?: string | null; has_more?: boolean };
+};
 
 export type BacktestResultPage<T = Record<string, unknown>> = {
   items: T[];
@@ -113,9 +170,9 @@ export const listBacktestRuns = (signal?: AbortSignal, strategyId?: string): Pro
   request(strategyId ? `/api/admin/backtest-runs/strategies/${encodeURIComponent(strategyId)}/backtests` : "/api/admin/backtest-runs", {}, signal) as Promise<BacktestRunListResponse>;
 export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal): Promise<StrategyBacktestWorkspace> =>
   request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests`, {}, signal) as Promise<StrategyBacktestWorkspace>;
-export const createBacktestRun=(payload:unknown, idempotencyKey?: string)=>{
-  const body = payload && typeof payload === "object" ? {...payload as Record<string, unknown>, ...(idempotencyKey ? {idempotency_key: idempotencyKey} : {})} : payload;
-  return request("/api/admin/backtest-runs",{method:"POST",headers:idempotencyKey ? {"Idempotency-Key": idempotencyKey} : undefined,body:JSON.stringify(body)});
+export const createBacktestRun=(payload:BacktestRunCreateInput, idempotencyKey?: string)=>{
+  const body = {...payload, ...(idempotencyKey ? {idempotency_key: idempotencyKey} : {})};
+  return request("/api/admin/backtests",{method:"POST",headers:idempotencyKey ? {"Idempotency-Key": idempotencyKey} : undefined,body:JSON.stringify(body)});
 };
 export const getBacktestRun=(id:string, signal?: AbortSignal)=>request(`/api/admin/backtest-runs/${id}`, {}, signal) as Promise<BacktestRun>;
 export const cancelBacktestRun=(id:string)=>request(`/api/admin/backtest-runs/${id}/cancel`,{method:"POST"});
@@ -127,4 +184,8 @@ export async function fetchBacktestResult<T = Record<string, unknown>>(runId: st
   return request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/${kind}?${params}`, {}, signal) as Promise<BacktestResultPage<T>>;
 }
 
-export const rerunBacktest = (run: BacktestRun, idempotencyKey = crypto.randomUUID()) => createBacktestRun({ strategy_revision_id: (run as BacktestRun & { strategy_revision_id?: string }).strategy_revision_id, spec: (run as BacktestRun & { spec?: unknown }).spec }, idempotencyKey);
+export const rerunBacktest = (run: BacktestRun, idempotencyKey = crypto.randomUUID()) =>
+  request(`/api/admin/backtests/${encodeURIComponent(run.run_id)}/rerun`, {
+    method: "POST",
+    headers: { "Idempotency-Key": idempotencyKey }
+  }) as Promise<BacktestRun>;

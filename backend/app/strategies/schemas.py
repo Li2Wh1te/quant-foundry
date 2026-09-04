@@ -140,6 +140,7 @@ class StrategyBacktestWorkspaceResponse(BaseModel):
 
     strategy: dict[str, Any]
     published_revisions: list[dict[str, Any]]
+    slippage_models: list[dict[str, Any]]
     formal_gate: dict[str, Any]
     runs: dict[str, Any]
 

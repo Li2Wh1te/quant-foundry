@@ -1,17 +1,83 @@
 """Strict HTTP contracts for formal and internal run endpoints."""
 
 from datetime import date, datetime
-from pydantic import BaseModel, ConfigDict, Field
-from typing import Any
+from decimal import Decimal
+from typing import Any, Literal
 from uuid import UUID
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+DecimalInput = Decimal | int | str
+
+
+class InitialPositionRequest(BaseModel):
+    """HTTP shape for one opening position in the immutable run config."""
+
+    model_config = ConfigDict(extra="forbid")
+    instrument_id: UUID
+    side: Literal["long", "short", "net"] = "long"
+    quantity: DecimalInput
+    available_quantity: DecimalInput | None = None
+    average_price: DecimalInput | None = None
+
+    @field_validator("quantity", "available_quantity", "average_price", mode="before")
+    @classmethod
+    def reject_binary_floats(cls, value: Any) -> Any:
+        if isinstance(value, (bool, float)):
+            raise ValueError("decimal inputs must be integers or decimal strings")
+        return value
+
+
+class BacktestConfigRequest(BaseModel):
+    """Typed single-run configuration accepted by both preflight and create."""
+
+    model_config = ConfigDict(extra="forbid")
+    start_date: date
+    end_date: date
+    initial_cash: DecimalInput = "0"
+    initial_positions: list[InitialPositionRequest] = Field(default_factory=list)
+    dynamic_universe: bool = False
+    instrument_ids: list[UUID] = Field(default_factory=list)
+    exchanges: list[str] = Field(default_factory=lambda: ["SSE", "SZSE"])
+    strategy_price_bases: list[Literal["raw", "qfq", "hfq"]] = Field(
+        default_factory=lambda: ["raw"]
+    )
+    currency: str = "CNY"
+    timezone: str = "Asia/Shanghai"
+    frequency: Literal["1d"] = "1d"
+    warmup_sessions: int = Field(default=0, ge=0, le=512)
+
+    @field_validator("initial_cash", mode="before")
+    @classmethod
+    def reject_binary_float_cash(cls, value: Any) -> Any:
+        if isinstance(value, (bool, float)):
+            raise ValueError("initial_cash must be an integer or decimal string")
+        return value
+
+
+class ComponentSelectionRequest(BaseModel):
+    """Exact platform component selected by stable key and version."""
+
+    model_config = ConfigDict(extra="forbid")
+    key: str = Field(min_length=1, max_length=100)
+    version: int = Field(ge=1)
+    parameters: dict[str, Any] = Field(default_factory=dict)
+
 
 class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    spec: dict[str, Any]
     strategy_revision_id: UUID
-    # Account selection belongs to a run, not to the strategy.  The server
+    parameters: dict[str, Any] | None = None
+    backtest_config: BacktestConfigRequest
+    # Account selection belongs to a run, not to the strategy. The server
     # resolves this profile once and freezes its complete configuration.
     account_profile_id: UUID | None = None
+    slippage_model: ComponentSelectionRequest = Field(
+        default_factory=lambda: ComponentSelectionRequest(
+            key="none", version=1, parameters={"price_tick": "0.01"}
+        )
+    )
     random_seed: int | None = None
     # Body form remains supported for existing clients; the canonical API
     # also accepts the standard Idempotency-Key header.
@@ -19,6 +85,38 @@ class RunCreateRequest(BaseModel):
     client_request_id: str | None = Field(default=None, min_length=1, max_length=200)
     degraded: bool = False
     confirmed_admission_report_hash: str | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_spec(cls, value: Any) -> Any:
+        """Accept the old ``spec`` envelope while emitting one canonical model."""
+
+        if not isinstance(value, dict) or "spec" not in value:
+            return value
+        normalized = dict(value)
+        if "backtest_config" in normalized:
+            raise ValueError("use backtest_config, not both backtest_config and spec")
+        raw_spec = normalized.pop("spec")
+        if not isinstance(raw_spec, dict):
+            raise ValueError("spec must be an object")
+        config = dict(raw_spec)
+        if "parameters" in config:
+            if "parameters" in normalized:
+                raise ValueError("parameters must be provided only once")
+            normalized["parameters"] = config.pop("parameters")
+        key = config.pop("slippage_model_key", None)
+        version = config.pop("slippage_model_version", None)
+        if key is not None or version is not None:
+            if "slippage_model" in normalized:
+                raise ValueError("slippage_model must be provided only once")
+            normalized["slippage_model"] = {
+                "key": key,
+                "version": version,
+                "parameters": config.pop("slippage_model_parameters", {}),
+            }
+        normalized["backtest_config"] = config
+        return normalized
+
 
 class InternalRunCreateRequest(RunCreateRequest):
     pass

@@ -42,7 +42,8 @@ from app.backtesting.data.reports import (
 from app.backtesting.domain import PositionSide, PositionState, PortfolioState
 from app.backtesting.registry import (
     ANALYZER_COMPONENT_KIND, DECISION_INTERPRETER_KIND, EXECUTION_MODEL_KIND,
-    SLIPPAGE_MODEL_KIND, TIMING_POLICY_KIND, build_default_component_registry,
+    RegistryError, SLIPPAGE_MODEL_KIND, TIMING_POLICY_KIND,
+    build_default_component_registry,
 )
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
@@ -51,7 +52,7 @@ from app.backtesting.run_binding import Gate
 from app.backtesting.runner_failure import build_failure_evidence
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
-from app.backtesting.spec import BacktestSpec, InitialPositionInput
+from app.backtesting.spec import BacktestSpec, ComponentSelection, InitialPositionInput
 from app.backtesting.time_axis import TradingDayAxis
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.models.trading_calendar import TradingStatusFact
@@ -571,14 +572,14 @@ class RuntimeBundle:
     writer: Any
 
 
-def default_components() -> dict[str, Any]:
-    """Return the complete versioned component snapshot for a v1 run.
+def default_components(
+    slippage_model: ComponentSelection | None = None,
+) -> dict[str, Any]:
+    """Return the complete v1 snapshot with the selected registered slippage."""
 
-    The registry is the source of display names, schemas, and capabilities;
-    this function copies those values into the run binding so a later registry
-    default or label change cannot alter an existing run's explanation.
-    """
-
+    selected_slippage = slippage_model or ComponentSelection(
+        "none", 1, {"price_tick": "0.01"}
+    )
     selections = {
         TIMING_POLICY_KIND: (
             "after_close_to_next_open",
@@ -600,12 +601,47 @@ def default_components() -> dict[str, Any]:
             1,
             {"weight_sum_tolerance": "0"},
         ),
-        SLIPPAGE_MODEL_KIND: ("none", 1, {"price_tick": "0.01"}),
+        SLIPPAGE_MODEL_KIND: (
+            selected_slippage.key,
+            selected_slippage.version,
+            dict(selected_slippage.parameters),
+        ),
     }
     registry = build_default_component_registry()
     snapshot: dict[str, Any] = {}
-    for kind, (key, version, parameters) in selections.items():
+    for kind, (key, version, requested_parameters) in selections.items():
         entry = registry.resolve(key, version)
+        if entry.component_kind != kind:
+            raise RegistryError(f"component {key}@{version} is not a {kind}")
+        parameters = dict(requested_parameters)
+        properties = entry.parameter_schema.get("properties", {})
+        if isinstance(properties, Mapping):
+            unknown = set(parameters) - set(properties)
+            if unknown:
+                raise RegistryError(
+                    f"component {key}@{version} has unsupported parameters: "
+                    f"{', '.join(sorted(unknown))}"
+                )
+            for name, definition in properties.items():
+                if (
+                    name not in parameters
+                    and isinstance(definition, Mapping)
+                    and "default" in definition
+                ):
+                    parameters[name] = definition["default"]
+        missing = [
+            name
+            for name in entry.parameter_schema.get("required", ())
+            if name not in parameters
+        ]
+        if missing:
+            raise RegistryError(
+                f"component {key}@{version} is missing parameters: "
+                f"{', '.join(sorted(missing))}"
+            )
+        # Construction validates values after schema defaults are materialized;
+        # the instance is discarded because workers rebuild from the snapshot.
+        entry.construct(parameters)
         snapshot[kind] = {
             "key": entry.key,
             "version": entry.version,
@@ -763,7 +799,7 @@ def binding_from_row(row, *, session: Session | None = None):
     """Rehydrate a binding exclusively from its persisted configuration."""
 
     config = row.backtest_config if isinstance(row.backtest_config, Mapping) else None
-    if not config or config.get("schema_version") != 1:
+    if not config or config.get("schema_version") not in {1, 2}:
         raise ValueError("persisted run has no supported frozen configuration snapshot")
     if canonical_hash(config) != row.config_hash:
         raise ValueError("persisted run configuration snapshot hash mismatch")
@@ -791,6 +827,15 @@ def binding_from_row(row, *, session: Session | None = None):
         )
         for item in spec_payload.get("initial_positions", [])
     )
+    slippage_payload = spec_payload.get("slippage_model")
+    if not isinstance(slippage_payload, Mapping):
+        slippage_payload = components.get(SLIPPAGE_MODEL_KIND, {})
+    strategy_revision_id = spec_payload.get("strategy_revision_id") or strategy.get(
+        "revision_id"
+    )
+    account_profile_id = spec_payload.get("account_profile_id") or account.get(
+        "profile_id"
+    )
     spec = BacktestSpec(
         start_date=date.fromisoformat(str(spec_payload["start_date"])),
         end_date=date.fromisoformat(str(spec_payload["end_date"])),
@@ -803,6 +848,34 @@ def binding_from_row(row, *, session: Session | None = None):
         initial_cash=spec_payload["initial_cash"],
         initial_positions=positions,
         dynamic_universe=bool(spec_payload.get("dynamic_universe", False)),
+        instrument_ids=tuple(
+            UUID(str(value))
+            for value in spec_payload.get("instrument_ids", request.static_instrument_ids)
+        ),
+        exchanges=tuple(
+            spec_payload.get("exchanges", request.market_scope.exchanges)
+        ),
+        strategy_price_bases=tuple(
+            spec_payload.get(
+                "strategy_price_bases",
+                (basis.value for basis in request.strategy_price_bases),
+            )
+        ),
+        strategy_revision_id=(
+            UUID(str(strategy_revision_id)) if strategy_revision_id else None
+        ),
+        strategy_parameters=spec_payload.get(
+            "strategy_parameters", strategy.get("parameters", {})
+        ),
+        account_profile_id=(
+            UUID(str(account_profile_id)) if account_profile_id else None
+        ),
+        slippage_model=ComponentSelection(
+            str(slippage_payload.get("key", "none")),
+            int(slippage_payload.get("version", 1)),
+            dict(slippage_payload.get("parameters", {})),
+        ),
+        random_seed=config.get("random_seed"),
     )
     rule_snapshot_bundle = None
     if session is not None and row.run_kind == "backtest_run":
@@ -1046,22 +1119,21 @@ class FormalBindingResult:
 
 def build_formal_binding(
     *,
-    spec,
+    spec: BacktestSpec,
     revision: StrategyRevision,
-    raw_spec,
-    session,
-    degraded=False,
-    confirmed_report_hash=None,
-    account_profile_id: UUID | None = None,
-    random_seed: int | None = None,
-):
+    session: Session,
+    degraded: bool = False,
+    confirmed_report_hash: str | None = None,
+) -> FormalBindingResult:
     """Resolve every mutable dependency once and return its frozen binding."""
 
+    if spec.strategy_revision_id != revision.id:
+        raise ValueError("strategy revision does not match the immutable run spec")
     provider = SqlBacktestProvider(session)
     ids = tuple(
         sorted(
             {
-                *(UUID(str(value)) for value in raw_spec.get("instrument_ids", ())),
+                *spec.instrument_ids,
                 *(item.instrument_id for item in spec.initial_positions),
             },
             key=str,
@@ -1074,7 +1146,7 @@ def build_formal_binding(
         frequency=spec.frequency,
         rule_package=DEFAULT_RULE_PACKAGE,
         market_scope=MarketScope(
-            exchanges=tuple(raw_spec.get("exchanges", DEFAULT_CALENDARS)),
+            exchanges=tuple(spec.exchanges),
             asset_classes=("etf",),
             currencies=(spec.currency,),
         ),
@@ -1084,8 +1156,23 @@ def build_formal_binding(
             if spec.dynamic_universe
             else InstrumentScopeMode.FIXED
         ),
-        required_capabilities=(DataCapability.BARS,),
-        strategy_price_bases=(PriceBasis.RAW,),
+        required_capabilities=tuple(
+            dict.fromkeys(
+                (
+                    DataCapability.BARS,
+                    *(
+                        (DataCapability.ADJUSTED_SERIES,)
+                        if any(
+                            basis != "raw" for basis in spec.strategy_price_bases
+                        )
+                        else ()
+                    ),
+                )
+            )
+        ),
+        strategy_price_bases=tuple(
+            PriceBasis(value) for value in spec.strategy_price_bases
+        ),
         consistency_mode=ConsistencyMode.CHUNKED_LOGICAL_TOKEN,
         consistency_token_contract=DATA_TOKEN_CONTRACT,
         query_boundary=QueryBoundary(cutoff, include_cutoff_day=True),
@@ -1155,8 +1242,11 @@ def build_formal_binding(
     strategy_binding = StrategyStorageService(session).bind_published_revision(
         revision.strategy_id,
         revision.id,
-        parameters=raw_spec.get("parameters"),
+        parameters=spec.strategy_parameters,
     )
+    # Defaults resolved from the immutable revision become explicit run input;
+    # workers never re-read revision defaults after this point.
+    spec = replace(spec, strategy_parameters=dict(strategy_binding.parameters))
     strategy = RunBindingBuilder().build_strategy(
         {
             "strategy_id": str(strategy_binding.strategy_id),
@@ -1171,8 +1261,17 @@ def build_formal_binding(
             "is_draft": False,
         }
     )
-    account = _account_snapshot(session, account_profile_id)
-    components = default_components()
+    account = _account_snapshot(session, spec.account_profile_id)
+    components = default_components(spec.slippage_model)
+    resolved_slippage = components[SLIPPAGE_MODEL_KIND]
+    spec = replace(
+        spec,
+        slippage_model=ComponentSelection(
+            str(resolved_slippage["key"]),
+            int(resolved_slippage["version"]),
+            dict(resolved_slippage["parameters"]),
+        ),
+    )
     gate_checks = _formal_gate_checks(
         outcome.outcome.report,
         preflight_allowed=outcome.allowed,
@@ -1213,7 +1312,6 @@ def build_formal_binding(
         data_request=serialize_data_request(frozen),
         account=account,
         metadata=metadata,
-        random_seed=random_seed,
     )
     return FormalBindingResult(
         binding,
