@@ -8,7 +8,8 @@ unqualified accounting fact.
 """
 
 from collections.abc import Callable, Mapping
-from datetime import date, timedelta
+from datetime import UTC, date, datetime, timedelta
+import hashlib
 from uuid import UUID, uuid4
 
 from app.data_ingestion.clients.tushare import TushareClient
@@ -170,6 +171,7 @@ def sync_fund_div(
     checkpoint_version=None,
     instrument_map=None,
     calendar_resolver: CashEffectiveCalendarResolver | None = None,
+    accepted_at: datetime | None = None,
     **kwargs,
 ):
     """Fetch and optionally persist one atomic synchronization unit.
@@ -179,6 +181,10 @@ def sync_fund_div(
     Invalid status, identity, dates, calendar evidence, and derivation are
     returned as failures and prevent checkpoint advancement.
     """
+    accepted = accepted_at or datetime.now(UTC)
+    if accepted.tzinfo is None or accepted.utcoffset() is None:
+        raise ValueError("accepted_at must be timezone-aware")
+    accepted = accepted.astimezone(UTC)
     rows = fetch_fund_div(client, **kwargs)
     raw_rows = (
         rows.to_dict("records") if hasattr(rows, "to_dict") else [dict(row) for row in rows]
@@ -220,6 +226,8 @@ def sync_fund_div(
                     ann_date=None,
                     payload={"rows": raw_rows},
                     source_hash=source_hash,
+                    source_revision=source_hash,
+                    observed_at=accepted,
                 )
             )
     items = normalize_fund_div(raw_rows)
@@ -295,9 +303,17 @@ def sync_fund_div(
                     cash_date_rule=FUND_DIV_CASH_DATE_VERSION,
                     timing_rule=FUND_DIV_TIMING_VERSION,
                     source="tushare",
+                    source_revision=item.source_hash,
+                    valid_from=item.ex_date,
+                    valid_to=(item.ex_date + timedelta(days=1)) if item.ex_date else None,
+                    known_at=accepted,
+                    observed_at=accepted,
                     quality="complete",
                     evidence={
                         "source_hash": item.source_hash,
+                        "source_revision": item.source_hash,
+                        "known_at": accepted.isoformat(),
+                        "observed_at": accepted.isoformat(),
                         "status_rule": FUND_DIV_STATUS_VERSION,
                         "raw": item.raw,
                         **derivation_evidence,
@@ -340,6 +356,7 @@ def sync_fund_div_full(
     instrument_map=None,
     checkpoint_version=None,
     calendar_resolver: CashEffectiveCalendarResolver | None = None,
+    accepted_at: datetime | None = None,
     **kwargs,
 ):
     """Scan every resolved ETF source code and commit only after all succeed.
@@ -348,6 +365,10 @@ def sync_fund_div_full(
     truncated; callers must paginate or report failure instead of claiming
     complete coverage.  A checkpoint is advanced once for the aggregate batch.
     """
+    accepted = accepted_at or datetime.now(UTC)
+    if accepted.tzinfo is None or accepted.utcoffset() is None:
+        raise ValueError("accepted_at must be timezone-aware")
+    accepted = accepted.astimezone(UTC)
     aggregate = {
         "items": [],
         "fetched": 0,
@@ -365,6 +386,7 @@ def sync_fund_div_full(
             session=session,
             instrument_map=instrument_map,
             calendar_resolver=calendar_resolver,
+            accepted_at=accepted,
             checkpoint_repo=None,
             sync_key=None,
             ts_code=code,
@@ -376,6 +398,18 @@ def sync_fund_div_full(
             aggregate[key] += int(result.get(key, 0) or 0)
     if session is not None and aggregate["failed"] == 0 and instrument_map:
         from app.data_ingestion.models.corporate_action import CorporateActionCoverageFact
+
+        def coverage_date(value, fallback):
+            if value in (None, ""):
+                return fallback
+            return value if isinstance(value, date) else date.fromisoformat(str(value))
+
+        revisions = sorted(
+            item.source_hash
+            for item in aggregate["items"]
+            if getattr(item, "source_hash", None)
+        )
+        coverage_revision = hashlib.sha256("|".join(revisions).encode()).hexdigest()
         by_instrument = {}
         for item in aggregate["items"]:
             iid = instrument_map.get(item.ts_code)
@@ -384,10 +418,14 @@ def sync_fund_div_full(
         for iid in set(instrument_map.values()):
             session.add(CorporateActionCoverageFact(
                 id=uuid4(), instrument_id=iid, action_type="cash_dividend",
-                start_date=kwargs.get("start_date") or date.min,
-                end_date=kwargs.get("end_date") or date.today(),
+                start_date=coverage_date(kwargs.get("start_date"), date.min),
+                end_date=coverage_date(kwargs.get("end_date"), date.today()),
                 status="complete", event_count=by_instrument.get(iid, 0),
-                evidence={"query_kind": "ts_code", "source": "tushare", "ts_codes": list(ts_codes)},
+                source="tushare",
+                source_revision=coverage_revision,
+                known_at=accepted,
+                observed_at=accepted,
+                evidence={"query_kind": "ts_code", "source": "tushare", "ts_codes": list(ts_codes), "source_revision": coverage_revision},
                 validation_rule="tushare_fund_div_coverage@1", summary={"full_scan": True},
             ))
     if checkpoint_repo is not None and sync_key and aggregate["failed"] == 0:

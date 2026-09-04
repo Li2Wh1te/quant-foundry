@@ -37,8 +37,9 @@ excludes.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+import inspect
 import re
 from typing import Callable, Mapping, Protocol, Sequence
 from uuid import UUID
@@ -60,7 +61,14 @@ from app.backtesting.data.adjustment_policy import (
     AdjustmentSeriesPolicy,
     INACTIVE_ADJUSTMENT_POLICY,
 )
-from app.backtesting.data.facts import AdjustedSeriesPoint, Bar, FactEvidence, CorporateAction, DataCoverageFact
+from app.backtesting.data.facts import (
+    AdjustedSeriesPoint,
+    Bar,
+    FactEvidence,
+    CorporateAction,
+    DataCoverageFact,
+    TradingStatus,
+)
 from app.backtesting.data.etf_adjustment import (
     build_research_price_series,
     cutoff_local_date,
@@ -88,6 +96,7 @@ from app.backtesting.data.requests import (
     PriceBasis,
     QualityStatus,
     QueryBoundary,
+    TradingStatusQuery,
     CoverageQualificationRequest,
     ContractRef,
     InternalFixture,
@@ -274,6 +283,34 @@ class TradingDaysPort(Protocol):
         ...
 
 
+class TradingStatusFactsPort(Protocol):
+    """Reads PIT-filtered normalized trading-status rows."""
+
+    def __call__(
+        self,
+        instrument_ids: Sequence[UUID],
+        start_date: date,
+        end_date: date,
+        data_cutoff: datetime,
+        knowledge_as_of: datetime | None = None,
+    ) -> Sequence[object]:
+        ...
+
+
+class TradingStatusCoveragePort(Protocol):
+    """Reads PIT-filtered status coverage proofs."""
+
+    def __call__(
+        self,
+        instrument_ids: Sequence[UUID],
+        start_date: date,
+        end_date: date,
+        data_cutoff: datetime,
+        knowledge_as_of: datetime | None = None,
+    ) -> Sequence[object]:
+        ...
+
+
 # ---------------------------------------------------------------------------
 # Source row shapes (structural; real ORM rows satisfy these)
 # ---------------------------------------------------------------------------
@@ -301,6 +338,22 @@ class AdjustmentFactorRow(Protocol):
     trade_date: date
     adj_factor: Decimal
     updated_at: datetime
+
+
+class TradingStatusRow(Protocol):
+    """Structural view of one normalized status fact."""
+
+    ts_code: str
+    trade_date: date
+    status: str
+    dimension: str
+    valid_from: date | None
+    valid_to: date | None
+    source: str
+    source_revision: str | None
+    quality_status: str
+    known_at: datetime | None
+    observed_at: datetime
 
 
 def _decimal_or_none(value: object) -> Decimal | None:
@@ -463,6 +516,8 @@ class EtfFactsAdapter:
     fixtures: tuple[InternalFixture, ...] = ()
     internal_fixtures: tuple[InternalFixture, ...] = ()
     corporate_action_repository: object | None = None
+    trading_status_facts: TradingStatusFactsPort | None = None
+    trading_status_coverage: TradingStatusCoveragePort | None = None
 
     def __post_init__(self) -> None:
         if self.calendar_id_resolver is not None and not callable(self.calendar_id_resolver):
@@ -483,6 +538,10 @@ class EtfFactsAdapter:
                 )
         if self.corporate_action_repository is not None and not callable(getattr(self.corporate_action_repository, "list_facts", None)):
             raise InvalidDataRequestError("corporate_action_repository must expose list_facts")
+        for name in ("trading_status_facts", "trading_status_coverage"):
+            value = getattr(self, name)
+            if value is not None and not callable(value):
+                raise InvalidDataRequestError(f"{name} must be callable when provided")
         if not isinstance(self.market_timezone, str) or not self.market_timezone.strip():
             raise InvalidDataRequestError("market_timezone must be non-blank text")
         object.__setattr__(self, "market_timezone", self.market_timezone.strip())
@@ -1105,6 +1164,200 @@ class EtfFactsAdapter:
             )
         return self.qualify_instrument(request)
 
+    def trading_status(self, query: TradingStatusQuery) -> tuple[TradingStatus, ...]:
+        """Project PIT-filtered status rows into generic status facts.
+
+        A missing row is not converted to ``tradable`` here.  The separate
+        coverage proof is the only authority for a complete no-event window;
+        this method returns only source-provided status observations.
+        """
+
+        if self.trading_status_facts is None:
+            raise UnsupportedCapabilityError("trading status facts are unavailable")
+        status_reader = self.trading_status_facts
+        try:
+            parameters = inspect.signature(status_reader).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        status_kwargs = (
+            {"knowledge_as_of": query.boundary.knowledge_as_of}
+            if "knowledge_as_of" in parameters
+            else {}
+        )
+        rows = status_reader(
+            query.instrument_ids,
+            query.window.start_date,
+            query.window.end_date,
+            query.boundary.data_cutoff,
+            **status_kwargs,
+        )
+        result: list[TradingStatus] = []
+        for row in rows:
+            instrument_id = getattr(row, "instrument_id", None)
+            if not isinstance(instrument_id, UUID) or instrument_id not in query.instrument_ids:
+                raise ProviderContractViolationError(
+                    "trading status row has an invalid instrument identity"
+                )
+            valid_from = getattr(row, "valid_from", None) or getattr(row, "trade_date", None)
+            if not isinstance(valid_from, date) or isinstance(valid_from, datetime):
+                raise ProviderContractViolationError(
+                    "trading status row has no valid effective date"
+                )
+            valid_to = getattr(row, "valid_to", None) or (valid_from + timedelta(days=1))
+            if valid_to <= query.window.start_date or valid_from > query.window.end_date:
+                raise ProviderContractViolationError(
+                    "trading status row is outside the requested window"
+                )
+            try:
+                quality = QualityStatus(str(getattr(row, "quality_status", "unavailable")))
+            except ValueError as exc:
+                raise ProviderContractViolationError(
+                    "trading status row has an unsupported quality status"
+                ) from exc
+            observed = getattr(row, "observed_at", None)
+            if not isinstance(observed, datetime):
+                raise ProviderContractViolationError(
+                    "trading status row has no observed_at timestamp"
+                )
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            known_at = getattr(row, "known_at", None)
+            if known_at is not None and (
+                known_at.tzinfo is None or known_at.utcoffset() is None
+            ):
+                known_at = known_at.replace(tzinfo=timezone.utc)
+            if observed > query.boundary.data_cutoff or (
+                known_at is not None and known_at > query.boundary.data_cutoff
+            ) or (
+                query.boundary.knowledge_as_of is not None
+                and (
+                    known_at is None
+                    or known_at > query.boundary.knowledge_as_of
+                )
+            ):
+                raise ProviderContractViolationError(
+                    "trading status row is not visible at the requested PIT cutoff"
+                )
+            result.append(
+                TradingStatus(
+                    instrument_id=instrument_id,
+                    status=str(getattr(row, "status", "")).strip(),
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    evidence=FactEvidence(
+                        source=str(getattr(row, "source", self.source)),
+                        observed_at=observed,
+                        known_at=known_at,
+                        quality_status=quality,
+                        source_revision=getattr(row, "source_revision", None),
+                    ),
+                    attributes={
+                        "source_code": getattr(row, "ts_code", None),
+                        "dimension": getattr(row, "dimension", "suspension"),
+                        "fact_version": getattr(row, "fact_version", None),
+                    },
+                )
+            )
+        return tuple(
+            sorted(
+                result,
+                key=lambda item: (
+                    item.valid_from,
+                    str(item.instrument_id),
+                    item.attributes.get("dimension", ""),
+                ),
+            )
+        )
+
+    def trading_status_coverage_facts(
+        self,
+        instrument_ids: Sequence[UUID],
+        start_date: date,
+        end_date: date,
+        data_cutoff: datetime,
+        knowledge_as_of: datetime | None = None,
+    ) -> tuple[DataCoverageFact, ...]:
+        """Project persisted status coverage proofs into generic coverage facts."""
+
+        if self.trading_status_coverage is None:
+            raise UnsupportedCapabilityError("trading status coverage is unavailable")
+        coverage_reader = self.trading_status_coverage
+        try:
+            parameters = inspect.signature(coverage_reader).parameters
+        except (TypeError, ValueError):
+            parameters = {}
+        coverage_kwargs = (
+            {"knowledge_as_of": knowledge_as_of}
+            if "knowledge_as_of" in parameters
+            else {}
+        )
+        rows = coverage_reader(
+            instrument_ids, start_date, end_date, data_cutoff, **coverage_kwargs
+        )
+        facts: list[DataCoverageFact] = []
+        for row in rows:
+            if getattr(row, "instrument_id", None) not in instrument_ids:
+                raise ProviderContractViolationError(
+                    "trading status coverage row has an invalid instrument identity"
+                )
+            try:
+                quality = QualityStatus(str(getattr(row, "status", "unavailable")))
+            except ValueError as exc:
+                raise ProviderContractViolationError(
+                    "trading status coverage has an unsupported quality status"
+                ) from exc
+            observed = getattr(row, "observed_at", None) or getattr(row, "computed_at", None)
+            if not isinstance(observed, datetime):
+                raise ProviderContractViolationError(
+                    "trading status coverage has no observed_at timestamp"
+                )
+            if observed.tzinfo is None or observed.utcoffset() is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            known_at = getattr(row, "known_at", None)
+            if known_at is not None and (
+                known_at.tzinfo is None or known_at.utcoffset() is None
+            ):
+                known_at = known_at.replace(tzinfo=timezone.utc)
+            if observed > data_cutoff or (
+                known_at is not None and known_at > data_cutoff
+            ) or (
+                knowledge_as_of is not None
+                and (known_at is None or known_at > knowledge_as_of)
+            ) or (
+                not isinstance(start_date, date)
+                or not isinstance(end_date, date)
+                or row.start_date > start_date
+                or row.end_date < end_date
+            ):
+                raise ProviderContractViolationError(
+                    "trading status coverage is not visible or does not cover the requested window"
+                )
+            facts.append(
+                DataCoverageFact(
+                    instrument_id=row.instrument_id,
+                    session_date=row.start_date,
+                    capability=DataCapability.STATUS,
+                    field=str(getattr(row, "dimension", "suspension")),
+                    validation_rule=getattr(row, "validation_rule", None),
+                    quality_status=quality,
+                    evidence=FactEvidence(
+                        source=str(getattr(row, "source", self.source)),
+                        observed_at=observed,
+                        known_at=known_at,
+                        quality_status=quality,
+                        source_revision=getattr(row, "source_revision", None),
+                    ),
+                    details={
+                        "start_date": row.start_date.isoformat(),
+                        "end_date": row.end_date.isoformat(),
+                        "event_count": getattr(row, "event_count", None),
+                        "summary": getattr(row, "summary", {}) or {},
+                        "evidence": getattr(row, "evidence", {}) or {},
+                    },
+                )
+            )
+        return tuple(facts)
+
     def corporate_actions(self, query):
         """Read normalized actions through the injected repository only."""
         if self.corporate_action_repository is None:
@@ -1114,6 +1367,7 @@ class EtfFactsAdapter:
             query.window.start_date,
             query.window.end_date,
             cutoff=query.boundary.data_cutoff,
+            knowledge_as_of=query.boundary.knowledge_as_of,
             action_types=query.action_types,
         )
         result = []
@@ -1180,7 +1434,14 @@ class EtfFactsAdapter:
                         "reason_code": "corporate_action_cash_date_unresolved",
                     },
                 )
-            quality = row.quality or "complete"
+            raw_quality = getattr(row, "quality", None)
+            if raw_quality is None:
+                raw_quality = getattr(
+                    getattr(row, "evidence", None),
+                    "quality_status",
+                    "unavailable",
+                )
+            quality = raw_quality
             try:
                 quality_status = QualityStatus(quality)
             except ValueError as exc:
@@ -1188,17 +1449,64 @@ class EtfFactsAdapter:
                     "corporate action quality status is unsupported",
                     details={"event_id": str(row.event_id), "quality": quality},
                 ) from exc
-            observed = row.created_at or datetime.now(timezone.utc)
+            if quality_status is not QualityStatus.COMPLETE:
+                raise ProviderContractViolationError(
+                    "corporate action is not complete enough for runtime use",
+                    details={
+                        "event_id": str(row.event_id),
+                        "quality_status": quality_status.value,
+                        "reason_code": "corporate_action_quality_incomplete",
+                    },
+                )
+            observed = (
+                getattr(row, "observed_at", None)
+                or getattr(row, "created_at", None)
+                or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            )
+            if observed.tzinfo is None:
+                observed = observed.replace(tzinfo=timezone.utc)
+            known_at = getattr(row, "known_at", None)
+            if known_at is not None and known_at.tzinfo is None:
+                known_at = known_at.replace(tzinfo=timezone.utc)
+            source_revision = (
+                getattr(row, "source_revision", None)
+                or evidence_payload.get("source_revision")
+                or str(row.fact_version)
+            )
+            if observed > query.boundary.data_cutoff or (
+                known_at is not None and known_at > query.boundary.data_cutoff
+            ) or (
+                query.boundary.knowledge_as_of is not None
+                and (
+                    known_at is None
+                    or known_at > query.boundary.knowledge_as_of
+                )
+            ):
+                raise ProviderContractViolationError(
+                    "corporate action is not visible at the requested PIT cutoff",
+                    details={"event_id": str(row.event_id)},
+                )
             result.append(
                 CorporateAction(
                     instrument_id=row.instrument_id,
                     action_type=action_type,
                     ex_date=ex_date,
+                    valid_from=getattr(row, "valid_from", None),
+                    valid_to=getattr(row, "valid_to", None),
+                    effective_time=getattr(row, "effective_time", None),
+                    record_date=getattr(row, "record_date", None),
+                    source_payment_date=getattr(row, "source_payment_date", None),
+                    source_arrival_date=getattr(row, "source_arrival_date", None),
+                    cash_effective_date=getattr(row, "cash_effective_date", None),
+                    cash_effective_phase=getattr(row, "cash_effective_phase", None),
+                    cash_amount_per_unit=getattr(row, "cash_amount_per_unit", None),
+                    currency=getattr(row, "currency", None),
                     evidence=FactEvidence(
                         source=row.source,
                         observed_at=observed,
+                        known_at=known_at,
                         quality_status=quality_status,
-                        source_revision=str(row.fact_version),
+                        source_revision=str(source_revision),
                     ),
                     attributes={
                         "event_id": str(row.event_id),
@@ -1212,6 +1520,24 @@ class EtfFactsAdapter:
                         "entitlement_rule": row.entitlement_rule,
                         "cash_date_rule": row.cash_date_rule,
                         "timing_rule": row.timing_rule,
+                        "valid_from": (
+                            getattr(row, "valid_from", None).isoformat()
+                            if isinstance(getattr(row, "valid_from", None), date)
+                            else None
+                        ),
+                        "valid_to": (
+                            getattr(row, "valid_to", None).isoformat()
+                            if isinstance(getattr(row, "valid_to", None), date)
+                            else None
+                        ),
+                        "effective_time": (
+                            getattr(row, "effective_time", None).isoformat()
+                            if isinstance(getattr(row, "effective_time", None), datetime)
+                            else None
+                        ),
+                        "known_at": known_at.isoformat() if known_at else None,
+                        "observed_at": observed.isoformat(),
+                        "source_revision": source_revision,
                         **evidence_payload,
                     },
                 )
@@ -1219,15 +1545,48 @@ class EtfFactsAdapter:
         result.sort(key=lambda x: (x.ex_date, str(x.instrument_id), x.action_type))
         return tuple(result)
 
-    def corporate_action_coverage(self, instrument_ids, start_date: date, end_date: date):
+    def corporate_action_coverage(
+        self,
+        instrument_ids,
+        start_date: date,
+        end_date: date,
+        *,
+        cutoff: datetime | None = None,
+        knowledge_as_of: datetime | None = None,
+        action_types=(),
+    ):
         """Return persisted domain coverage facts for 16A projection."""
         if self.corporate_action_repository is None or not callable(getattr(self.corporate_action_repository, "coverage", None)):
             raise UnsupportedCapabilityError("corporate action coverage is unavailable")
-        return self.corporate_action_repository.coverage(instrument_ids, start_date, end_date)
+        coverage = self.corporate_action_repository.coverage
+        return coverage(
+            instrument_ids,
+            start_date,
+            end_date,
+            cutoff=cutoff,
+            knowledge_as_of=knowledge_as_of,
+            action_types=action_types,
+        )
 
-    def corporate_action_coverage_facts(self, instrument_ids, start_date: date, end_date: date):
+    def corporate_action_coverage_facts(
+        self,
+        instrument_ids,
+        start_date: date,
+        end_date: date,
+        *,
+        cutoff: datetime | None = None,
+        knowledge_as_of: datetime | None = None,
+        action_types=(),
+    ):
         """Project persisted coverage rows into immutable 16A facts."""
-        rows = self.corporate_action_coverage(instrument_ids, start_date, end_date)
+        rows = self.corporate_action_coverage(
+            instrument_ids,
+            start_date,
+            end_date,
+            cutoff=cutoff,
+            knowledge_as_of=knowledge_as_of,
+            action_types=action_types,
+        )
         facts = []
         for row in rows:
             try:
@@ -1238,10 +1597,36 @@ class EtfFactsAdapter:
                     details={"status": row.status},
                 ) from exc
             evidence_data = row.evidence or {}
-            observed = row.computed_at or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            observed = (
+                getattr(row, "observed_at", None)
+                or getattr(row, "computed_at", None)
+                or datetime(1970, 1, 1, tzinfo=timezone.utc)
+            )
             if observed.tzinfo is None:
                 observed = observed.replace(tzinfo=timezone.utc)
-            evidence = FactEvidence(source="corporate_action_repository", observed_at=observed, quality_status=status)
+            known_at = getattr(row, "known_at", None)
+            if known_at is not None and known_at.tzinfo is None:
+                known_at = known_at.replace(tzinfo=timezone.utc)
+            if cutoff is not None and (
+                observed > cutoff
+                or (known_at is not None and known_at > cutoff)
+            ):
+                raise ProviderContractViolationError(
+                    "corporate action coverage is not visible at the requested PIT cutoff"
+                )
+            if knowledge_as_of is not None and (
+                known_at is None or known_at > knowledge_as_of
+            ):
+                raise ProviderContractViolationError(
+                    "corporate action coverage lacks strict PIT evidence"
+                )
+            evidence = FactEvidence(
+                source=getattr(row, "source", None) or "corporate_action_repository",
+                observed_at=observed,
+                known_at=known_at,
+                quality_status=status,
+                source_revision=getattr(row, "source_revision", None),
+            )
             count = row.event_count
             details = {"event_count": count, "summary": row.summary or {}, **evidence_data}
             facts.append(DataCoverageFact(
@@ -1984,6 +2369,26 @@ class EtfFactsAdapter:
             "daily_bars": "non_strict",
             "adjustment_factors": f"{ADJUSTMENT_SERIES_POLICY[0]}"
             f"@{ADJUSTMENT_SERIES_POLICY[1]}:effective_date_cutoff",
+            # Ingestion acceptance time is persisted as known_at for these
+            # normalized facts; unlike raw daily bars, they can therefore be
+            # selected strictly at a PIT cutoff when the production ports are
+            # actually wired.
+            "trading_status": (
+                "strict"
+                if self.trading_status_facts is not None
+                and self.trading_status_coverage is not None
+                else "unavailable"
+            ),
+            "corporate_actions": (
+                "strict"
+                if self.corporate_action_repository is not None
+                else "unavailable"
+            ),
+            "corporate_action_coverage": (
+                "strict"
+                if self.corporate_action_repository is not None
+                else "unavailable"
+            ),
             "trading_calendar": "non_strict",
         }
 
@@ -1995,6 +2400,79 @@ class EtfFactsAdapter:
 
         stamps = [row.updated_at for row in rows if row.updated_at is not None]
         return max(stamps).isoformat() if stamps else None
+
+    @staticmethod
+    def _fact_revision_summary(rows: Sequence[object]) -> dict[str, object]:
+        """Summarize source revisions, knowledge time, and valid time."""
+
+        ordered = tuple(
+            sorted(
+                rows,
+                key=lambda row: (
+                    getattr(row, "valid_from", getattr(row, "trade_date", date.min))
+                    or date.min,
+                    str(getattr(row, "source_revision", "")),
+                ),
+            )
+        )
+        revisions = sorted(
+            {
+                str(value)
+                for row in ordered
+                if (value := getattr(row, "source_revision", None))
+            }
+        )
+        known = [
+            value
+            for row in ordered
+            if isinstance(value := getattr(row, "known_at", None), datetime)
+        ]
+        observed = [
+            value
+            for row in ordered
+            if isinstance(value := getattr(row, "observed_at", None), datetime)
+        ]
+        valid_dates = [
+            value
+            for row in ordered
+            for value in (
+                getattr(row, "valid_from", None),
+                getattr(row, "valid_to", None),
+            )
+            if isinstance(value, date) and not isinstance(value, datetime)
+        ]
+        vector = [
+            {
+                "instrument_id": str(getattr(row, "instrument_id", "")),
+                "source_code": str(getattr(row, "ts_code", "")),
+                "dimension": getattr(row, "dimension", None),
+                "action_type": getattr(row, "action_type", None),
+                "valid_from": getattr(row, "valid_from", getattr(row, "trade_date", None)),
+                "valid_to": getattr(row, "valid_to", None),
+                "known_at": getattr(row, "known_at", None),
+                "observed_at": getattr(row, "observed_at", None),
+                "source_revision": getattr(row, "source_revision", None),
+            }
+            for row in ordered
+        ]
+        return {
+            "fact_count": len(ordered),
+            "source_revisions": revisions,
+            "revision_vector_hash": canonical_hash(vector),
+            "valid_time_range": {
+                "start": min(valid_dates).isoformat() if valid_dates else None,
+                "end": max(valid_dates).isoformat() if valid_dates else None,
+            },
+            "known_at_range": {
+                "min": min(known).isoformat() if known else None,
+                "max": max(known).isoformat() if known else None,
+            },
+            "observed_at_range": {
+                "min": min(observed).isoformat() if observed else None,
+                "max": max(observed).isoformat() if observed else None,
+            },
+            "pit_status": "strict" if ordered and len(known) == len(ordered) else "non_strict",
+        }
 
     @staticmethod
     def _data_revision_summary(rows: Sequence[DailyBarRow]) -> dict[str, object]:
@@ -2108,6 +2586,10 @@ class EtfFactsAdapter:
         | None = None,
         daily_rows: Sequence[DailyBarRow] = (),
         factor_rows: Sequence[AdjustmentFactorRow] = (),
+        trading_status_rows: Sequence[object] = (),
+        trading_status_coverage: Mapping[str, object] | None = None,
+        corporate_action_rows: Sequence[object] = (),
+        corporate_action_coverage: Mapping[str, object] | None = None,
         blocking_issues: Sequence[Mapping[str, object]] = (),
         requested_range: Mapping[str, object] | None = None,
         lookback_sessions: int | None = None,
@@ -2470,6 +2952,8 @@ class EtfFactsAdapter:
                 "source": self.source,
                 "latest_observed_at": self.revision_stamp(factor_rows),
             },
+            "trading_status": self._fact_revision_summary(trading_status_rows),
+            "corporate_actions": self._fact_revision_summary(corporate_action_rows),
             "__data_revision_summary__": revision_summary.get(
                 "__data_revision_summary__", {}
             ),
@@ -2503,6 +2987,37 @@ class EtfFactsAdapter:
                     "reason": "no approved quantity-action source or coverage proof is configured",
                 }
             )
+        pit_status = self.pit_status()
+        if trading_status_rows:
+            pit_status["trading_status"] = source_revisions["trading_status"]["pit_status"]
+        elif trading_status_coverage:
+            coverage_values = [
+                item
+                for values in trading_status_coverage.values()
+                if isinstance(values, Sequence)
+                for item in values
+                if isinstance(item, Mapping)
+            ]
+            pit_status["trading_status"] = (
+                "strict"
+                if coverage_values and all(item.get("known_at") is not None for item in coverage_values)
+                else "non_strict"
+            )
+        if corporate_action_rows:
+            pit_status["corporate_actions"] = source_revisions["corporate_actions"]["pit_status"]
+        elif corporate_action_coverage:
+            coverage_values = [
+                item
+                for values in corporate_action_coverage.values()
+                if isinstance(values, Sequence)
+                for item in values
+                if isinstance(item, Mapping)
+            ]
+            pit_status["corporate_actions"] = (
+                "strict"
+                if coverage_values and all(item.get("known_at") is not None for item in coverage_values)
+                else "non_strict"
+            )
         summary: dict[str, object] = {
             "provider_key": ETF_PROVIDER_KEY,
             "adapter_key": ETF_ADAPTER_KEY,
@@ -2524,6 +3039,8 @@ class EtfFactsAdapter:
             "trading_status": build_trading_status_summary(
                 ContractRef(key=ETF_RULE_PACKAGE[0], version=ETF_RULE_PACKAGE[1]),
                 capability_declarations=trading_status_applicability,
+                coverage=trading_status_coverage,
+                source_revisions=source_revisions.get("trading_status"),
                 **(
                     {"limitation": trading_status_limitation}
                     if trading_status_limitation is not None
@@ -2575,7 +3092,7 @@ class EtfFactsAdapter:
                 "verification_evidence_hash": self.adjustment_policy.verification_evidence_hash,
                 "factor_cutoff_rule": self.adjustment_policy.cutoff_rule,
             },
-            "pit_status": self.pit_status(),
+            "pit_status": pit_status,
             "instrument_mapping_summary": mapping_summary,
             "coverage": {
                 "daily_bars": {
@@ -2592,6 +3109,16 @@ class EtfFactsAdapter:
                 **(
                     {"research_prices": {"coverage": research_price_coverage}}
                     if research_price_coverage
+                    else {}
+                ),
+                **(
+                    {"trading_status": trading_status_coverage}
+                    if trading_status_coverage is not None
+                    else {}
+                ),
+                **(
+                    {"corporate_actions": corporate_action_coverage}
+                    if corporate_action_coverage is not None
                     else {}
                 ),
             },

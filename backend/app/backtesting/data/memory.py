@@ -845,6 +845,17 @@ class MemoryDataProvider:
             consistency_token_contracts=(CHUNK_TOKEN_CONTRACT,),
             supported_chunk_policies=(CHUNK_POLICY,),
             capabilities=served,
+            instrument_rule_fact_contracts=(
+                ContractRef("instrument_rule_facts", 1),
+            ),
+            adjustment_series_policies=(
+                {
+                    "key": "tushare_adj_factor_native",
+                    "version": 1,
+                    "status": "inactive",
+                    "cutoff_rule": "effective_date <= data_cutoff",
+                },
+            ),
             capability_sources={
                 **{
                     capability: CapabilitySource.FIXTURE for capability in served
@@ -3338,6 +3349,70 @@ class MemoryDataProvider:
         ]
         return min(floors) if floors else None
 
+    def _fact_coverage_signature(
+        self, fact_types: Sequence[DataCapability]
+    ) -> str:
+        """Hash the bounded fact inventory used by a token scope.
+
+        The digest is intentionally the only value that leaves this provider;
+        the token evidence records coverage identity without exposing fixture
+        rows or source payloads.
+        """
+
+        requested = set(fact_types)
+        payload: dict[str, object] = {}
+        if requested & {DataCapability.BARS, DataCapability.COVERAGE}:
+            payload["bars"] = [
+                {
+                    "instrument_id": str(bar.instrument_id),
+                    "frequency": bar.frequency,
+                    "price_basis": bar.price_basis.value,
+                    "trade_date": bar.trade_date,
+                    "open": bar.open,
+                    "high": bar.high,
+                    "low": bar.low,
+                    "close": bar.close,
+                    "volume": bar.volume,
+                    "amount": bar.amount,
+                    "quality_status": bar.evidence.quality_status.value,
+                    "known_at": bar.evidence.known_at,
+                    "observed_at": bar.evidence.observed_at,
+                    "source": bar.evidence.source,
+                    "source_revision": bar.evidence.source_revision,
+                }
+                for bar in self._dataset.bars
+            ]
+        if requested & {DataCapability.STATUS, DataCapability.ACTIONS}:
+            payload["fixtures"] = [
+                fixture.machine_content()
+                for fixture in self._fixtures
+                if (
+                    DataCapability.STATUS in requested
+                    and fixture.capability
+                    == InternalFixtureCapability.TRADING_STATUS.value
+                )
+                or (
+                    DataCapability.ACTIONS in requested
+                    and fixture.capability
+                    == InternalFixtureCapability.QUANTITY_ACTION_COVERAGE.value
+                )
+            ]
+        if requested & {DataCapability.CALENDARS, DataCapability.UNIVERSE}:
+            payload["calendars"] = [
+                {
+                    "calendar_id": fact.calendar_id,
+                    "session_date": fact.session_date,
+                    "is_open": fact.is_open,
+                    "fact_id": str(fact.fact_id) if fact.fact_id else None,
+                    "fact_version": fact.fact_version,
+                    "source_revision": fact.source_revision,
+                    "known_at": fact.known_at,
+                    "observed_at": fact.observed_at,
+                }
+                for fact in self._dataset.calendar_facts
+            ]
+        return canonical_hash(payload)
+
     def _revision_snapshot(self) -> tuple[object, ...]:
         """The current repeatable-read revision vector as one comparable tuple.
 
@@ -3374,6 +3449,17 @@ class MemoryDataProvider:
             return True
         if capability is DataCapability.UNIVERSE:
             return self._universe_supported
+        if capability is DataCapability.STATUS:
+            return any(
+                fixture.capability == InternalFixtureCapability.TRADING_STATUS.value
+                for fixture in self._fixtures
+            )
+        if capability is DataCapability.ACTIONS:
+            return any(
+                fixture.capability
+                == InternalFixtureCapability.QUANTITY_ACTION_COVERAGE.value
+                for fixture in self._fixtures
+            )
         return False
 
     def _token_digest(
@@ -3388,6 +3474,11 @@ class MemoryDataProvider:
         max_lookback_sessions: int = MAX_LOOKBACK_SESSIONS,
         data_cutoff: datetime | None = None,
         knowledge_as_of: datetime | None = None,
+        dependency_fact_types: Sequence[DataCapability] = (),
+        axis_session_signature: str | None = None,
+        warmup_session_signature: str | None = None,
+        history_envelope_signature: str | None = None,
+        fact_coverage_signature: str | None = None,
     ) -> str:
         """Deterministic logical-token digest over the revision vector.
 
@@ -3406,7 +3497,14 @@ class MemoryDataProvider:
             "coverage_envelope": {
                 "earliest_provable_date": envelope.isoformat() if envelope else None,
                 "max_lookback_sessions": max_lookback_sessions,
+                "axis_session_signature": axis_session_signature,
+                "warmup_session_signature": warmup_session_signature,
+                "history_envelope_signature": history_envelope_signature,
+                "fact_coverage_signature": fact_coverage_signature,
             },
+            "dependency_fact_types": [
+                capability.value for capability in dependency_fact_types
+            ],
             "query_boundary": {
                 "data_cutoff": data_cutoff,
                 "knowledge_as_of": knowledge_as_of,
@@ -3907,6 +4005,28 @@ class MemoryDataSession:
             )
         chunk_sessions = self._resolved_sessions[start:end]
         warmup = self._warmup_sessions or ()
+        axis_signature = canonical_hash(
+            [point.session_id for point in self._resolved_sessions]
+        )
+        warmup_signature = canonical_hash(
+            [point.session_id for point in warmup]
+        )
+        history_signature = canonical_hash(
+            {
+                "formal": [point.session_id for point in self._resolved_sessions],
+                "warmup": [point.session_id for point in warmup],
+                "max_lookback_sessions": self._request.max_lookback_sessions,
+            }
+        )
+        dependency_fact_types = tuple(
+            sorted(
+                set(self._request.required_capabilities) | set(query.fact_types),
+                key=lambda capability: capability.value,
+            )
+        )
+        fact_signature = self._provider._fact_coverage_signature(
+            dependency_fact_types
+        )
         envelope = CoverageEnvelope(
             chunk_first_session_date=chunk_sessions[0].session_date,
             chunk_last_session_date=chunk_sessions[-1].session_date,
@@ -3916,6 +4036,15 @@ class MemoryDataSession:
             ),
             warmup_session_count=len(warmup),
             lookback_envelope_sessions=self._request.max_lookback_sessions,
+            axis_session_signature=axis_signature,
+            warmup_session_signature=warmup_signature,
+            history_envelope_signature=history_signature,
+            fact_coverage_signature=fact_signature,
+            covered_chunk_start=query.chunk_index,
+            covered_chunk_end=query.chunk_index + 1,
+            dependency_fact_types=dependency_fact_types,
+            data_cutoff=self._request.query_boundary.data_cutoff,
+            knowledge_as_of=self._request.query_boundary.knowledge_as_of,
         )
         digest_spec = {
             "formal_session_ids": [point.session_id for point in self._resolved_sessions],
@@ -3924,8 +4053,13 @@ class MemoryDataSession:
             "first_session_id": expected_first,
             "last_session_id": expected_last,
             "fact_types": query.fact_types,
+            "dependency_fact_types": dependency_fact_types,
             "max_lookback_sessions": self._request.max_lookback_sessions,
             "data_cutoff": self._request.query_boundary.data_cutoff,
+            "axis_session_signature": axis_signature,
+            "warmup_session_signature": warmup_signature,
+            "history_envelope_signature": history_signature,
+            "fact_coverage_signature": fact_signature,
             "knowledge_as_of": self._request.query_boundary.knowledge_as_of,
         }
         mode = self._request.consistency_mode
@@ -4250,7 +4384,7 @@ class MemoryDataChunkSession:
             # gap, never an empty result set.
             uncovered = [
                 capability
-                for capability in self._fact_types
+                for capability in self._coverage_envelope.dependency_fact_types
                 if not self._provider._covers_fact_type(capability)
             ]
             if uncovered:

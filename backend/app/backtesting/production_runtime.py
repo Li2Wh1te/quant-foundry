@@ -16,7 +16,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import UUID
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.backtesting.accounting import AccountState, AccountingPolicy, SettlementPolicy
@@ -24,13 +24,19 @@ from app.backtesting.analysis_finalization import AnalysisFinalizationCoordinato
 from app.backtesting.fees import FeeCalculator, FeeRule, FeeSchedule
 from app.backtesting.data.adapters.etf import ETF_PROVIDER_KEY, EtfFactsAdapter
 from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
+from app.backtesting.calendar_models import CalendarResolutionHeadRecord
 from app.backtesting.data.errors import ProviderContractViolationError, UnsupportedCapabilityError
-from app.backtesting.data.protocols import ConsistencyTokenStatus, DataConsistencyEvidence
+from app.backtesting.data.protocols import (
+    ConsistencyTokenStatus,
+    DataCapabilityManifest,
+    DataConsistencyEvidence,
+)
 from app.backtesting.data.requests import (
-    BarQuery, CHUNK_POLICY, ConsistencyMode, ConsistencyValidation, ContractRef,
+    BarQuery, CHUNK_POLICY, CapabilitySource, ConsistencyMode, ConsistencyValidation, ContractRef,
     CorporateActionQuery, DataCapability, DataChunkQuery, DataPreflightRequest, DataRequest, DateRange,
+    TradingStatusQuery,
     InstrumentScopeMode, IssueSeverity, LookbackWindow, MarketScope, PriceBasis,
-    PreflightStatus, QueryBoundary, UniverseQuery as DataUniverseQuery,
+    PitSupport, PreflightStatus, QueryBoundary, UniverseQuery as DataUniverseQuery,
     UniverseQueryPolicy,
 )
 from app.backtesting.data.reports import (
@@ -54,11 +60,23 @@ from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapsh
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
 from app.backtesting.spec import BacktestSpec, ComponentSelection, InitialPositionInput
 from app.backtesting.time_axis import TradingDayAxis
+from app.data_ingestion.models.corporate_action import (
+    CorporateActionCoverageFact,
+    CorporateActionFact,
+)
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
-from app.data_ingestion.models.trading_calendar import TradingStatusFact
+from app.data_ingestion.models.etf_daily import EtfDailyBar
+from app.data_ingestion.models.trading_calendar import (
+    TradingStatusCoverageFact,
+    TradingStatusFact,
+    TradingStatusFactRevisionAudit,
+    TradingCalendarDay,
+)
 from app.data_ingestion.repositories.corporate_action import CorporateActionRepository
 from app.data_ingestion.repositories.etf_daily import EtfDailyBarRepository
 from app.instruments.domain import InstrumentSpec, VersionedReference
+from app.instruments.models import InstrumentCodeMappingRecord
+from app.instruments.rule_facts_models import InstrumentRuleFactRecord
 from app.instruments.identity_repository import InstrumentIdentityRepository
 from app.instruments.repository import InstrumentCodeMappingRepository
 from app.instruments.rule_exceptions_repository import RuleExceptionSetsRepository
@@ -201,7 +219,16 @@ class SqlBacktestProvider:
         self.rule_registry = RulePackageRegistry()
         register_china_listed_etf_rules(self.rule_registry)
         self.spec_provider = InstrumentSpecProvider(identity_repository=self.identity_repository, mapping_repository=self.mapping_repository, rule_fact_repository=self.rule_facts_repository, exception_repository=self.exception_repository, rule_registry=self.rule_registry)
-        self.adapter = EtfFactsAdapter(code_mappings=self._code_mappings, daily_bars=self._daily_bars, adjustment_factors=self._adjustment_factors, trading_days=self._trading_days, spec_provider=self.spec_provider, corporate_action_repository=self.corporate_action_repository)
+        self.adapter = EtfFactsAdapter(
+            code_mappings=self._code_mappings,
+            daily_bars=self._daily_bars,
+            adjustment_factors=self._adjustment_factors,
+            trading_days=self._trading_days,
+            trading_status_facts=self._trading_status,
+            trading_status_coverage=self._trading_status_coverage,
+            spec_provider=self.spec_provider,
+            corporate_action_repository=self.corporate_action_repository,
+        )
         self.calendar_provider = SqlCalendarAxisDataProvider(session)
 
     def _code_mappings(self, instrument_id, *, source, start_date, end_date, data_cutoff):
@@ -217,20 +244,444 @@ class SqlBacktestProvider:
         from app.data_ingestion.repositories.trading_calendar import TradingCalendarRepository
         return TradingCalendarRepository(self.session).list_open_dates(exchange=exchange, start_date=start_date, end_date=end_date)
 
+    def capability_manifest(self) -> DataCapabilityManifest:
+        """Declare the production fact families and their PIT contracts."""
+
+        return DataCapabilityManifest(
+            provider_key=self.provider_key,
+            manifest_version=1,
+            data_contract_version=1,
+            supported_calendars=(),
+            supported_calendar_axis_policies=(ContractRef("strict_compatible", 1),),
+            rule_packages=(DEFAULT_RULE_PACKAGE,),
+            rule_exception_sets=(),
+            supported_asset_classes=("etf",),
+            supported_frequencies=("1d",),
+            supported_price_bases=(PriceBasis.RAW,),
+            pit_support_by_capability={
+                DataCapability.BARS: PitSupport.NON_STRICT,
+                DataCapability.MAPPINGS: PitSupport.STRICT,
+                DataCapability.RULES: PitSupport.STRICT,
+                DataCapability.STATUS: PitSupport.STRICT,
+                DataCapability.ACTIONS: PitSupport.STRICT,
+                DataCapability.COVERAGE: PitSupport.STRICT,
+                DataCapability.CALENDARS: PitSupport.STRICT,
+            },
+            consistency_modes=(ConsistencyMode.CHUNKED_LOGICAL_TOKEN,),
+            consistency_token_contracts=(DATA_TOKEN_CONTRACT,),
+            supported_chunk_policies=(CHUNK_POLICY,),
+            capabilities=(
+                DataCapability.BARS,
+                DataCapability.MAPPINGS,
+                DataCapability.RULES,
+                DataCapability.STATUS,
+                DataCapability.ACTIONS,
+                DataCapability.COVERAGE,
+                DataCapability.CALENDARS,
+            ),
+            instrument_rule_fact_contracts=(ContractRef("instrument_rule_facts", 1),),
+            adjustment_series_policies=(
+                {
+                    "key": "tushare_adj_factor_native",
+                    "version": 1,
+                    "status": "inactive",
+                    "cutoff_rule": "effective_date <= data_cutoff",
+                },
+            ),
+            capability_sources={
+                capability: CapabilitySource.PRODUCTION
+                for capability in (
+                    DataCapability.BARS,
+                    DataCapability.MAPPINGS,
+                    DataCapability.RULES,
+                    DataCapability.STATUS,
+                    DataCapability.ACTIONS,
+                    DataCapability.COVERAGE,
+                    DataCapability.CALENDARS,
+                )
+            },
+        )
+
     def list_rule_facts(self, instrument_id, package_reference, *, start_date, end_date, data_cutoff):
         return self.rule_facts_repository.list_facts(instrument_id, package_reference, start_date=start_date, end_date=end_date, data_cutoff=data_cutoff)
 
     def resolve_exception_set(self, set_reference, *, data_cutoff):
         return self.exception_repository.load_exception_set(set_reference, data_cutoff=data_cutoff)
 
-    def check_required_trading_status_facts(self, instrument_id, dimensions, *, start_date, end_date, data_cutoff):
+    def _database_revision_vector(self) -> Mapping[str, object]:
+        """Return a bounded revision vector for all run fact dependencies.
+
+        The vector contains only aggregate counts and source/timestamp
+        watermarks.  It is intentionally global rather than row data: a
+        mutation can expire a run safely without copying prices, payloads, or
+        credentials into the consistency evidence.
+        """
+
+        # ponytail: global aggregate vector, replace with per-scope revision
+        # watermarks if fact-table scans become measurable at production scale.
+        def table_vector(model, *fields: str) -> Mapping[str, object]:
+            expressions = [func.count().label("row_count")]
+            names = []
+            for field in fields:
+                column = getattr(model, field, None)
+                if column is not None:
+                    expressions.append(func.max(column).label(field))
+                    names.append(field)
+            row = self.session.execute(select(*expressions)).one()
+            return {
+                "row_count": row[0],
+                **{
+                    field: _json_value(row[index + 1])
+                    for index, field in enumerate(names)
+                },
+            }
+
+        return {
+            "mappings": table_vector(
+                InstrumentCodeMappingRecord,
+                "known_at", "observed_at", "source_revision",
+            ),
+            "bars": table_vector(EtfDailyBar, "updated_at", "source_revision"),
+            "adjustments": table_vector(EtfAdjustmentFactor, "updated_at"),
+            "trading_status": table_vector(
+                TradingStatusFact,
+                "known_at", "observed_at", "source_revision",
+            ),
+            "trading_status_audits": table_vector(
+                TradingStatusFactRevisionAudit,
+                "accepted_at", "source_revision",
+            ),
+            "trading_status_coverage": table_vector(
+                TradingStatusCoverageFact,
+                "known_at", "observed_at", "source_revision",
+            ),
+            "corporate_actions": table_vector(
+                CorporateActionFact,
+                "known_at", "observed_at", "created_at", "source_revision",
+            ),
+            "corporate_action_coverage": table_vector(
+                CorporateActionCoverageFact,
+                "known_at", "observed_at", "computed_at", "source_revision",
+            ),
+            "rules": table_vector(
+                InstrumentRuleFactRecord,
+                "known_at", "observed_at", "created_at", "source_revision",
+            ),
+            "calendar_days": table_vector(TradingCalendarDay, "updated_at"),
+            "calendar_heads": table_vector(
+                CalendarResolutionHeadRecord,
+                "updated_at", "revision_digest",
+            ),
+        }
+
+    def _consistency_digest(
+        self,
+        request: DataRequest,
+        report: DataPreflightReport,
+        *,
+        revision_vector: Mapping[str, object],
+        chunk_index: int,
+        first_session_id: str,
+        last_session_id: str,
+        fact_types: Sequence[DataCapability],
+    ) -> str:
+        """Hash the complete SQL consistency scope without exposing row data."""
+
+        dependencies = tuple(
+            sorted(
+                set(request.required_capabilities) | set(fact_types),
+                key=lambda item: item.value,
+            )
+        )
+        return canonical_hash(
+            {
+                "contract": {
+                    "key": DATA_TOKEN_CONTRACT.key,
+                    "version": DATA_TOKEN_CONTRACT.version,
+                },
+                "preflight_report_hash": report.report_hash,
+                "revision_vector": revision_vector,
+                "query_boundary": {
+                    "data_cutoff": request.query_boundary.data_cutoff,
+                    "knowledge_as_of": request.query_boundary.knowledge_as_of,
+                    "include_cutoff_day": request.query_boundary.include_cutoff_day,
+                },
+                "formal_sessions": [
+                    point.session_id for point in report.resolved_sessions
+                ],
+                "warmup_sessions": [
+                    point.session_id for point in report.warmup_sessions
+                ],
+                "history_envelope": {
+                    "requested_window": request.requested_window,
+                    "max_lookback_sessions": request.max_lookback_sessions,
+                },
+                "dependencies": [item.value for item in dependencies],
+                "chunk": {
+                    "index": chunk_index,
+                    "first_session_id": first_session_id,
+                    "last_session_id": last_session_id,
+                    "fact_types": [item.value for item in fact_types],
+                },
+            }
+        )
+
+    def _trading_status_applicability(self, request, effective_date):
+        """Fold PIT rule declarations into one explicit status requirement map."""
+
+        declarations = {
+            "suspension": "not_applicable",
+            "opening_availability": "not_applicable",
+            "price_limit_tradability": "not_applicable",
+        }
+        for instrument_id in request.fixed_instrument_ids:
+            try:
+                spec = self.spec_provider.resolve_spec(
+                    instrument_id,
+                    effective_at=datetime.combine(effective_date, time(15), tzinfo=UTC),
+                    data_cutoff=request.query_boundary.data_cutoff,
+                    rule_package_reference=request.rule_package,
+                    exception_set_reference=request.rule_exception_set,
+                )
+            except Exception:
+                continue
+            policy = getattr(spec, "trading_status_policy", {}) if spec is not None else {}
+            for dimension, requirement in getattr(policy, "items", lambda: ())():
+                value = getattr(requirement, "value", requirement)
+                if value == "required":
+                    declarations[str(dimension)] = "required"
+        return declarations
+
+    def _trading_status(
+        self,
+        instrument_ids,
+        start_date,
+        end_date,
+        data_cutoff,
+        knowledge_as_of=None,
+    ):
+        """Read the latest status revision visible at both PIT boundaries."""
+
+        ids = tuple(instrument_ids)
+        if not ids:
+            return ()
+        rows = self.session.scalars(
+            select(TradingStatusFact)
+            .where(
+                TradingStatusFact.instrument_id.in_(ids),
+                or_(
+                    and_(
+                        TradingStatusFact.valid_from <= end_date,
+                        or_(
+                            TradingStatusFact.valid_to.is_(None),
+                            TradingStatusFact.valid_to > start_date,
+                        ),
+                    ),
+                    and_(
+                        TradingStatusFact.valid_from.is_(None),
+                        TradingStatusFact.trade_date >= start_date,
+                        TradingStatusFact.trade_date <= end_date,
+                    ),
+                ),
+                TradingStatusFact.observed_at <= data_cutoff,
+                (
+                    and_(
+                        TradingStatusFact.known_at.is_not(None),
+                        TradingStatusFact.known_at <= knowledge_as_of,
+                    )
+                    if knowledge_as_of is not None
+                    else or_(
+                        TradingStatusFact.known_at.is_(None),
+                        TradingStatusFact.known_at <= data_cutoff,
+                    )
+                ),
+            )
+            .order_by(TradingStatusFact.trade_date, TradingStatusFact.ts_code)
+        ).all()
+        candidates = []
+        for row in rows:
+            resolved_id = row.instrument_id
+            values = {
+                name: getattr(row, name, None)
+                for name in (
+                    "ts_code", "trade_date", "status", "dimension", "valid_from",
+                    "valid_to", "source", "source_revision", "quality_status",
+                    "known_at", "observed_at", "fact_version",
+                )
+            }
+            values["instrument_id"] = resolved_id
+            candidates.append(SimpleNamespace(**values))
+
+        # Corrections are recorded as immutable superseded snapshots.  They
+        # must remain queryable when the replacement was learned after the
+        # requested cutoff, otherwise an old PIT run would silently lose the
+        # prior status fact.
+        audit_rows = self.session.scalars(
+            select(TradingStatusFactRevisionAudit).where(
+                TradingStatusFactRevisionAudit.previous_instrument_id.in_(ids),
+                or_(
+                    and_(
+                        TradingStatusFactRevisionAudit.previous_valid_from <= end_date,
+                        or_(
+                            TradingStatusFactRevisionAudit.previous_valid_to.is_(None),
+                            TradingStatusFactRevisionAudit.previous_valid_to > start_date,
+                        ),
+                    ),
+                    and_(
+                        TradingStatusFactRevisionAudit.previous_valid_from.is_(None),
+                        TradingStatusFactRevisionAudit.trade_date >= start_date,
+                        TradingStatusFactRevisionAudit.trade_date <= end_date,
+                    ),
+                ),
+                TradingStatusFactRevisionAudit.previous_observed_at <= data_cutoff,
+                (
+                    and_(
+                        TradingStatusFactRevisionAudit.previous_known_at.is_not(None),
+                        TradingStatusFactRevisionAudit.previous_known_at <= knowledge_as_of,
+                    )
+                    if knowledge_as_of is not None
+                    else or_(
+                        TradingStatusFactRevisionAudit.previous_known_at.is_(None),
+                        TradingStatusFactRevisionAudit.previous_known_at <= data_cutoff,
+                    )
+                ),
+            )
+        ).all()
+        candidates.extend(
+            SimpleNamespace(
+                instrument_id=row.previous_instrument_id,
+                ts_code=row.ts_code,
+                trade_date=row.trade_date,
+                status=row.previous_status,
+                dimension=row.previous_dimension,
+                valid_from=row.previous_valid_from,
+                valid_to=row.previous_valid_to,
+                source=row.previous_source,
+                source_revision=row.previous_source_revision,
+                quality_status=row.previous_quality_status,
+                known_at=row.previous_known_at,
+                observed_at=row.previous_observed_at,
+                fact_version=None,
+            )
+            for row in audit_rows
+        )
+
+        def aware_rank(value):
+            if not isinstance(value, datetime):
+                return datetime.min.replace(tzinfo=UTC)
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+        selected = {}
+        for row in candidates:
+            key = (row.instrument_id, row.dimension, row.trade_date)
+            rank = (
+                aware_rank(row.known_at),
+                aware_rank(row.observed_at),
+            )
+            previous = selected.get(key)
+            previous_rank = (
+                (aware_rank(previous.known_at), aware_rank(previous.observed_at))
+                if previous is not None
+                else None
+            )
+            if previous is None or rank > previous_rank:
+                selected[key] = row
+        return tuple(
+            sorted(
+                selected.values(),
+                key=lambda row: (row.trade_date, str(row.instrument_id), row.dimension),
+            )
+        )
+
+    def _trading_status_coverage(
+        self,
+        instrument_ids,
+        start_date,
+        end_date,
+        data_cutoff,
+        knowledge_as_of=None,
+    ):
+        """Read the latest status-window proof visible at both PIT boundaries."""
+
+        rows = self.session.scalars(
+            select(TradingStatusCoverageFact)
+            .where(
+                TradingStatusCoverageFact.instrument_id.in_(tuple(instrument_ids)),
+                TradingStatusCoverageFact.start_date <= start_date,
+                TradingStatusCoverageFact.end_date >= end_date,
+                TradingStatusCoverageFact.observed_at <= data_cutoff,
+                (
+                    and_(
+                        TradingStatusCoverageFact.known_at.is_not(None),
+                        TradingStatusCoverageFact.known_at <= knowledge_as_of,
+                    )
+                    if knowledge_as_of is not None
+                    else or_(
+                        TradingStatusCoverageFact.known_at.is_(None),
+                        TradingStatusCoverageFact.known_at <= data_cutoff,
+                    )
+                ),
+            )
+            .order_by(
+                TradingStatusCoverageFact.instrument_id,
+                TradingStatusCoverageFact.dimension,
+                TradingStatusCoverageFact.observed_at.desc(),
+            )
+        ).all()
+        def aware(value):
+            if not isinstance(value, datetime):
+                return datetime.min.replace(tzinfo=UTC)
+            return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+        selected = {}
+        for row in rows:
+            key = (
+                row.instrument_id,
+                row.dimension,
+                row.start_date,
+                row.end_date,
+            )
+            rank = (aware(row.known_at), aware(row.observed_at))
+            if key not in selected or rank > selected[key][0]:
+                selected[key] = (rank, row)
+        return tuple(
+            row
+            for _, row in sorted(
+                selected.values(),
+                key=lambda item: (
+                    str(item[1].instrument_id),
+                    item[1].dimension,
+                    item[1].start_date,
+                    item[1].end_date,
+                ),
+            )
+        )
+
+    def check_required_trading_status_facts(
+        self,
+        instrument_id,
+        dimensions,
+        *,
+        start_date,
+        end_date,
+        data_cutoff,
+        knowledge_as_of=None,
+    ):
         if not dimensions:
             return ()
-        mappings = self.mapping_repository.resolve_code_mappings(instrument_id, source="tushare", start_date=start_date, end_date=end_date, data_cutoff=data_cutoff)
-        if len(mappings) != 1:
-            return tuple(sorted(set(dimensions)))
-        rows = self.session.scalars(select(TradingStatusFact).where(TradingStatusFact.ts_code == mappings[0].source_code, TradingStatusFact.trade_date >= start_date, TradingStatusFact.trade_date <= end_date)).all()
-        return () if len({row.trade_date for row in rows}) >= (end_date - start_date).days + 1 else tuple(sorted(set(dimensions)))
+        required = tuple(sorted(set(dimensions)))
+        coverage = self._trading_status_coverage(
+            (instrument_id,), start_date, end_date, data_cutoff, knowledge_as_of
+        )
+        proven = {
+            row.dimension
+            for row in coverage
+            if row.status == "complete"
+        }
+        # Row-level observations cannot prove that an absent status means
+        # tradable.  Only a complete, PIT-visible coverage assertion can close
+        # that negative-space gap.
+        return tuple(dimension for dimension in required if dimension not in proven)
 
     def _calendar_ids(self, request):
         ids = request.fixed_instrument_ids
@@ -251,6 +702,13 @@ class SqlBacktestProvider:
         calendar_report = AuthoritativeDataSession(request=bootstrap, calendar_provider=self.calendar_provider).preflight()
         expected = tuple(point.session_date for point in calendar_report.resolved_sessions)
         coverage_reports, issues, bars_by_instrument, mappings_by_instrument, source_rows = [], [], {}, {}, []
+        trading_status_rows = []
+        corporate_action_rows = []
+        trading_status_coverage: dict[str, object] = {}
+        trading_status_applicability = self._trading_status_applicability(
+            request, expected[0] if expected else request.requested_window.start_date
+        )
+        corporate_action_coverage: dict[str, object] = {}
         for instrument_id in request.fixed_instrument_ids:
             try:
                 resolution = self.adapter.resolve(instrument_id, sessions=expected, data_cutoff=request.query_boundary.data_cutoff)
@@ -263,15 +721,137 @@ class SqlBacktestProvider:
                 coverage_reports.append(self.adapter.project_coverage_report(instrument_id, expected, summary, SimpleNamespace(formal_envelope=request.requested_window, history_envelope=request.requested_window)))
             except Exception as exc:
                 issues.append(PreflightIssue(code="coverage_incomplete", severity=__import__("app.backtesting.data.requests", fromlist=["IssueSeverity"]).IssueSeverity.ERROR, scope="formal", message="ETF 行情覆盖预检失败，已阻断回测。", field="coverage.bars", instrument_id=instrument_id, details={"error_type": type(exc).__name__}))
+
+        if expected and any(
+            value == "required" for value in trading_status_applicability.values()
+        ):
+            for instrument_id in request.fixed_instrument_ids:
+                rows = self._trading_status(
+                    (instrument_id,), expected[0], expected[-1],
+                    request.query_boundary.data_cutoff,
+                    request.query_boundary.knowledge_as_of,
+                )
+                trading_status_rows.extend(rows)
+                proofs = self._trading_status_coverage(
+                    (instrument_id,), request.requested_window.start_date,
+                    request.requested_window.end_date,
+                    request.query_boundary.data_cutoff,
+                    request.query_boundary.knowledge_as_of,
+                )
+                trading_status_coverage[str(instrument_id)] = [
+                    {
+                        "dimension": row.dimension,
+                        "start_date": row.start_date,
+                        "end_date": row.end_date,
+                        "status": row.status,
+                        "event_count": row.event_count,
+                        "source": row.source,
+                        "source_revision": row.source_revision,
+                        "known_at": row.known_at,
+                        "observed_at": row.observed_at,
+                        "evidence": row.evidence,
+                    }
+                    for row in proofs
+                ]
+                missing_status = self.check_required_trading_status_facts(
+                    instrument_id,
+                    tuple(
+                        dimension
+                        for dimension, value in trading_status_applicability.items()
+                        if value == "required"
+                    ),
+                    start_date=request.requested_window.start_date,
+                    end_date=request.requested_window.end_date,
+                    data_cutoff=request.query_boundary.data_cutoff,
+                    knowledge_as_of=request.query_boundary.knowledge_as_of,
+                )
+                for dimension in missing_status:
+                    issues.append(
+                        PreflightIssue(
+                            code="trading_status_coverage_incomplete",
+                            severity=IssueSeverity.ERROR,
+                            scope="formal",
+                            message="规则声明适用的交易状态事实或覆盖证明不完整，已阻断回测。",
+                            field=f"trading_status.{dimension}",
+                            instrument_id=instrument_id,
+                            details={
+                                "dimension": dimension,
+                                "start_date": request.requested_window.start_date.isoformat(),
+                                "end_date": request.requested_window.end_date.isoformat(),
+                            },
+                        )
+                    )
+
+        if DataCapability.ACTIONS in request.required_capabilities:
+            corporate_action_rows = list(
+                self.corporate_action_repository.list_facts(
+                    request.fixed_instrument_ids,
+                    request.requested_window.start_date,
+                    request.requested_window.end_date,
+                    cutoff=request.query_boundary.data_cutoff,
+                    knowledge_as_of=request.query_boundary.knowledge_as_of,
+                )
+            )
+            proofs = self.corporate_action_repository.coverage(
+                request.fixed_instrument_ids,
+                request.requested_window.start_date,
+                request.requested_window.end_date,
+                cutoff=request.query_boundary.data_cutoff,
+                knowledge_as_of=request.query_boundary.knowledge_as_of,
+            )
+            corporate_action_coverage = {
+                str(instrument_id): [
+                    {
+                        "action_type": row.action_type,
+                        "start_date": row.start_date,
+                        "end_date": row.end_date,
+                        "status": row.status,
+                        "event_count": row.event_count,
+                        "source": row.source,
+                        "source_revision": row.source_revision,
+                        "known_at": row.known_at,
+                        "observed_at": row.observed_at,
+                        "evidence": row.evidence,
+                        "summary": row.summary,
+                    }
+                    for row in proofs
+                    if row.instrument_id == instrument_id
+                ]
+                for instrument_id in request.fixed_instrument_ids
+            }
+            for instrument_id in request.fixed_instrument_ids:
+                if not any(
+                    row.instrument_id == instrument_id and row.status == "complete"
+                    for row in proofs
+                ):
+                    issues.append(
+                        PreflightIssue(
+                            code="corporate_action_coverage_incomplete",
+                            severity=IssueSeverity.ERROR,
+                            scope="formal",
+                            message="公司行动覆盖证明未完整覆盖请求范围，已阻断回测。",
+                            field="coverage.corporate_actions",
+                            instrument_id=instrument_id,
+                            details={
+                                "start_date": request.requested_window.start_date.isoformat(),
+                                "end_date": request.requested_window.end_date.isoformat(),
+                            },
+                        )
+                    )
         summary = self.adapter.preflight_summary(
             instrument_ids=request.fixed_instrument_ids,
             expected_sessions=expected,
             bars_by_instrument=bars_by_instrument,
             mappings_by_instrument=mappings_by_instrument,
             daily_rows=source_rows,
+            trading_status_rows=trading_status_rows,
+            trading_status_coverage=trading_status_coverage or None,
+            corporate_action_rows=corporate_action_rows,
+            corporate_action_coverage=corporate_action_coverage or None,
             data_cutoff=request.query_boundary.data_cutoff,
             required_capabilities=request.required_capabilities,
             strategy_price_bases=request.strategy_price_bases,
+            trading_status_applicability=trading_status_applicability,
             preflight_profile="formal@1",
             run_kind="backtest_run",
         )
@@ -304,11 +884,23 @@ class SqlBacktestProvider:
                 )
             )
         pit_status = summary.get("pit_status")
-        non_strict_capabilities = (
-            (DataCapability.BARS,)
-            if isinstance(pit_status, Mapping)
-            and pit_status.get("daily_bars") == "non_strict"
-            else ()
+        pit_capability_map = {
+            "daily_bars": DataCapability.BARS,
+            "trading_status": DataCapability.STATUS,
+            "corporate_actions": DataCapability.ACTIONS,
+            "corporate_action_coverage": DataCapability.ACTIONS,
+        }
+        non_strict_capabilities = tuple(
+            sorted(
+                {
+                    capability
+                    for family, capability in pit_capability_map.items()
+                    if isinstance(pit_status, Mapping)
+                    and pit_status.get(family) == "non_strict"
+                    and capability in request.required_capabilities
+                },
+                key=lambda item: item.value,
+            )
         )
         return __import__("dataclasses").replace(
             calendar_report,
@@ -334,6 +926,11 @@ class SqlBacktestProvider:
                 if isinstance(summary.get("quantity_action_integrity"), Mapping)
                 else None
             ),
+            trading_status=(
+                summary.get("trading_status")
+                if isinstance(summary.get("trading_status"), Mapping)
+                else None
+            ),
             run_kind="backtest_run",
             preflight_profile_key="formal",
             preflight_profile_version=1,
@@ -343,6 +940,8 @@ class SqlBacktestProvider:
                     "provider_key": self.provider_key,
                 },
                 "pit_status": pit_status,
+                "coverage": summary.get("coverage"),
+                "source_revisions": summary.get("source_revisions"),
                 "adapter_preflight_status": summary.get("status"),
             },
             issues=tuple((*calendar_report.issues, *provider_issues)),
@@ -425,6 +1024,7 @@ class SqlBacktestSession:
     def __init__(self, provider, request):
         self.provider, self.request = provider, request
         self._state, self._report, self._resolved_sessions, self._warmup_sessions = "created", None, (), ()
+        self._revision_vector = None
     def __enter__(self): return self
     def __exit__(self, *_): self._state = "closed"
     def close(self): self._state = "closed"
@@ -435,11 +1035,36 @@ class SqlBacktestSession:
     @property
     def report(self): return self._report
     def preflight(self, _request=None):
-        self._report = self.provider.preflight(self.provider.intent_from_data_request(self.request)); self._resolved_sessions = self._report.resolved_sessions; self._warmup_sessions = self._report.warmup_sessions; self._state = "ready" if self._report.status is PreflightStatus.READY else "blocked"; return self._report
+        self._report = self.provider.preflight(
+            self.provider.intent_from_data_request(self.request)
+        )
+        self._resolved_sessions = self._report.resolved_sessions
+        self._warmup_sessions = self._report.warmup_sessions
+        ready = self._report.status is PreflightStatus.READY
+        self._revision_vector = (
+            self.provider._database_revision_vector() if ready else None
+        )
+        self._state = "ready" if ready else "blocked"
+        return self._report
     def open_chunk(self, query):
+        if self._state != "ready":
+            raise ProviderContractViolationError(
+                "a blocked SQL data session exposes no official chunks"
+            )
+        if not isinstance(query, DataChunkQuery):
+            raise ProviderContractViolationError("chunk query has an invalid type")
         size = self.request.data_chunk_size_sessions
         start = query.chunk_index * size
         end = min(start + size, len(self._resolved_sessions))
+        if start < 0 or start >= end:
+            raise ProviderContractViolationError("chunk index is outside frozen sessions")
+        if (
+            query.first_session_id != self._resolved_sessions[start].session_id
+            or query.last_session_id != self._resolved_sessions[end - 1].session_id
+        ):
+            raise ProviderContractViolationError(
+                "chunk boundaries do not match the frozen SQL sessions"
+            )
         return SqlBacktestChunkSession(
             self.provider,
             self,
@@ -456,8 +1081,22 @@ class SqlBacktestChunkSession:
         self.validated = False
         self.closed = False
         self.current_date = sessions[-1].session_date
-        from app.backtesting.data.reports import canonical_hash
-        self._digest = canonical_hash({"run": str(session.request.requested_window), "chunk": index})
+        dependencies = tuple(
+            sorted(
+                set(session.request.required_capabilities) | set(self._fact_types),
+                key=lambda item: item.value,
+            )
+        )
+        self._revision_vector = session._revision_vector
+        self._digest = provider._consistency_digest(
+            session.request,
+            session.report,
+            revision_vector=self._revision_vector,
+            chunk_index=index,
+            first_session_id=sessions[0].session_id,
+            last_session_id=sessions[-1].session_id,
+            fact_types=self._fact_types,
+        )
         self._evidence = DataConsistencyEvidence(
             chunk_index=index,
             first_session_id=sessions[0].session_id,
@@ -465,8 +1104,34 @@ class SqlBacktestChunkSession:
             mode=session.request.consistency_mode,
             validation_status=ConsistencyValidation.NOT_VALIDATED,
             fact_types=self._fact_types,
-            coverage_summary={"chunk_session_count": len(sessions)},
-            token_digest=self._digest,
+            coverage_summary={
+                "chunk_session_count": len(sessions),
+                "formal_session_ids": [
+                    point.session_id for point in session.resolved_sessions
+                ],
+                "warmup_session_ids": [
+                    point.session_id for point in session.warmup_sessions
+                ],
+                "dependency_fact_types": [item.value for item in dependencies],
+                "data_cutoff": session.request.query_boundary.data_cutoff.isoformat(),
+                "knowledge_as_of": (
+                    session.request.query_boundary.knowledge_as_of.isoformat()
+                    if session.request.query_boundary.knowledge_as_of is not None
+                    else None
+                ),
+                "requested_window": {
+                    "start_date": session.request.requested_window.start_date.isoformat(),
+                    "end_date": session.request.requested_window.end_date.isoformat(),
+                },
+                "max_lookback_sessions": session.request.max_lookback_sessions,
+                "fact_coverage_signature": canonical_hash(self._revision_vector),
+            },
+            token_digest=(
+                self._digest
+                if session.request.consistency_mode
+                is ConsistencyMode.CHUNKED_LOGICAL_TOKEN
+                else None
+            ),
             failure_reason="consistency validation has not run yet",
         )
     def __enter__(self): return self
@@ -479,9 +1144,58 @@ class SqlBacktestChunkSession:
     def authorize_step_candidates(self, *_args, **_kwargs): pass
     bind_step_candidates = authorize_step_candidates
     def validate_consistency(self):
-        self.validated = True; now = datetime.now(UTC); self._evidence = __import__("dataclasses").replace(self._evidence, validation_status=ConsistencyValidation.VALID, validated_at=now, failure_reason=None); return ConsistencyTokenStatus(status=ConsistencyValidation.VALID, validated_at=now, covered_chunk=self.index, covered_fact_types=self._evidence.fact_types, covered_chunk_start=0, covered_chunk_end=len(self.sessions))
+        if self.closed:
+            raise ProviderContractViolationError("data chunk is closed")
+        now = datetime.now(UTC)
+        current = self.provider._database_revision_vector()
+        if current != self._revision_vector:
+            reason = "database fact revisions changed after preflight"
+            self._evidence = replace(
+                self._evidence,
+                validation_status=ConsistencyValidation.INVALID,
+                validated_at=now,
+                failure_reason=reason,
+            )
+            return ConsistencyTokenStatus(
+                status=ConsistencyValidation.INVALID,
+                validated_at=now,
+                covered_chunk=self.index,
+                covered_fact_types=self._evidence.fact_types,
+                failure_reason=reason,
+                covered_chunk_start=self.index,
+                covered_chunk_end=self.index + 1,
+            )
+        self.validated = True
+        self._evidence = replace(
+            self._evidence,
+            validation_status=ConsistencyValidation.VALID,
+            validated_at=now,
+            failure_reason=None,
+        )
+        return ConsistencyTokenStatus(
+            status=ConsistencyValidation.VALID,
+            validated_at=now,
+            covered_chunk=self.index,
+            covered_fact_types=self._evidence.fact_types,
+            covered_chunk_start=self.index,
+            covered_chunk_end=self.index + 1,
+        )
+
     def _require(self):
-        if self.closed or not self.validated: raise ProviderContractViolationError("data chunk must pass consistency validation before reads")
+        if self.closed or not self.validated:
+            raise ProviderContractViolationError(
+                "data chunk must pass consistency validation before reads"
+            )
+        if self.provider._database_revision_vector() != self._revision_vector:
+            self.validated = False
+            self._evidence = replace(
+                self._evidence,
+                validation_status=ConsistencyValidation.EXPIRED,
+                failure_reason="database fact revisions changed during the chunk",
+            )
+            raise ProviderContractViolationError(
+                "database fact revisions changed during the chunk"
+            )
     def _dates(self, window):
         dates = tuple(x.session_date for x in (*self.session.warmup_sessions, *self.session.resolved_sessions))
         if isinstance(window, DateRange): return tuple(x for x in dates if window.start_date <= x <= window.end_date)
@@ -498,17 +1212,46 @@ class SqlBacktestChunkSession:
             if isinstance(spec, InstrumentSpec): result.append(spec)
         return tuple(result)
     def instrument_facts(self, instrument_ids, session_date=None):
-        self._require(); day = session_date or self.current_date; result = {}
+        self._require()
+        day = session_date or self.current_date
+        result = {}
+        status_by_instrument: dict[UUID, dict[str, str]] = {}
+        if DataCapability.STATUS in self._fact_types:
+            status_query = TradingStatusQuery(
+                instrument_ids=tuple(instrument_ids),
+                window=DateRange(day, day),
+                boundary=self.session.request.query_boundary,
+            )
+            for fact in self.trading_status(status_query):
+                dimension = str(fact.attributes.get("dimension", "suspension"))
+                status_by_instrument.setdefault(fact.instrument_id, {})[dimension] = fact.status
         for instrument_id in instrument_ids:
-            spec = self.provider.spec_provider.resolve_spec(instrument_id, effective_at=datetime.combine(day, time(15), tzinfo=ZoneInfo(self.session.request.resolved_timezone)), data_cutoff=self.session.request.query_boundary.data_cutoff, rule_package_reference=self.session.request.rule_package, exception_set_reference=self.session.request.rule_exception_set)
-            if spec is None: raise ProviderContractViolationError(f"instrument spec is unavailable for {instrument_id}")
+            spec = self.provider.spec_provider.resolve_spec(
+                instrument_id,
+                effective_at=datetime.combine(
+                    day, time(15), tzinfo=ZoneInfo(self.session.request.resolved_timezone)
+                ),
+                data_cutoff=self.session.request.query_boundary.data_cutoff,
+                rule_package_reference=self.session.request.rule_package,
+                exception_set_reference=self.session.request.rule_exception_set,
+            )
+            if spec is None:
+                raise ProviderContractViolationError(
+                    f"instrument spec is unavailable for {instrument_id}"
+                )
+            statuses = status_by_instrument.get(instrument_id, {})
+            suspended = statuses.get("suspension") == "suspended"
+            buy_allowed = statuses.get(
+                "opening_availability", "available"
+            ) not in {"unavailable", "closed", "blocked"}
+            sell_allowed = buy_allowed
             result[instrument_id] = InstrumentFacts(
                 instrument_id=instrument_id,
                 price_tick=Decimal(str(spec.price_tick)),
                 calendar_id=spec.calendar_id,
-                suspended=False,
-                buy_allowed=True,
-                sell_allowed=True,
+                suspended=suspended,
+                buy_allowed=buy_allowed,
+                sell_allowed=sell_allowed,
                 board_lot=Decimal(str(spec.lot_size)),
                 contract_multiplier=Decimal(str(spec.contract_multiplier)),
                 fee_applicability_context={
@@ -520,7 +1263,17 @@ class SqlBacktestChunkSession:
         return result
     def adjusted_series(self, _query): raise UnsupportedCapabilityError("formal v1 does not enable adjusted series")
     def trading_rules(self, _query): return ()
-    def trading_status(self, _query): return ()
+    def trading_status(self, query):
+        self._require()
+        if DataCapability.STATUS not in self._fact_types:
+            raise ProviderContractViolationError(
+                "trading-status reads were not declared for this chunk"
+            )
+        if not isinstance(query, TradingStatusQuery):
+            raise ProviderContractViolationError(
+                "trading-status query has an invalid type"
+            )
+        return self.provider.adapter.trading_status(query)
     def corporate_actions(self, query):
         self._require()
         if DataCapability.ACTIONS not in self._fact_types:
@@ -1067,7 +1820,14 @@ def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, 
             result = run_data_session(
                 data_session,
                 bundle.runner,
-                fact_types=(DataCapability.BARS, DataCapability.UNIVERSE),
+                # Status is an engine dependency even when a decision does not
+                # explicitly query it; a complete coverage proof makes the N/A path
+                # explicit instead of treating missing rows as tradable.
+                fact_types=(
+                    DataCapability.BARS,
+                    DataCapability.UNIVERSE,
+                    DataCapability.STATUS,
+                ),
                 view_factory=bundle.runner._view_factory,
                 analysis_coordinator=AnalysisFinalizationCoordinator(),
                 analysis_session_factory=lambda: Session(bind=session.get_bind()),

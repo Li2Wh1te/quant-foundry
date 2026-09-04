@@ -1083,7 +1083,7 @@ class AdjustedSeriesPoint:
 
 @dataclass(frozen=True, slots=True)
 class CorporateAction:
-    """One corporate-action fact with its ex-date and typed action kind."""
+    """One corporate-action fact with effective-time and validity evidence."""
 
     instrument_id: UUID
     action_type: str
@@ -1091,6 +1091,16 @@ class CorporateAction:
     evidence: FactEvidence
     schema: ContractRef | None = None
     attributes: Mapping[str, object] = MappingProxyType({})
+    valid_from: date | None = None
+    valid_to: date | None = None
+    effective_time: datetime | None = None
+    record_date: date | None = None
+    source_payment_date: date | None = None
+    source_arrival_date: date | None = None
+    cash_effective_date: date | None = None
+    cash_effective_phase: str | None = None
+    cash_amount_per_unit: Decimal | int | str | None = None
+    currency: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1101,6 +1111,45 @@ class CorporateAction:
         )
         day = _plain_date(self.ex_date, "ex_date")
         object.__setattr__(self, "ex_date", day)
+        if self.valid_from is not None:
+            valid_from = _plain_date(self.valid_from, "valid_from")
+            object.__setattr__(self, "valid_from", valid_from)
+        if self.valid_to is not None:
+            valid_to = _plain_date(self.valid_to, "valid_to")
+            if self.valid_from is None or valid_to <= self.valid_from:
+                raise ProviderContractViolationError(
+                    "valid_to requires a later valid_from"
+                )
+            object.__setattr__(self, "valid_to", valid_to)
+        if self.effective_time is not None:
+            object.__setattr__(
+                self,
+                "effective_time",
+                _aware_datetime(self.effective_time, "effective_time"),
+            )
+        for field_name in (
+            "record_date",
+            "source_payment_date",
+            "source_arrival_date",
+            "cash_effective_date",
+        ):
+            value = getattr(self, field_name)
+            if value is not None:
+                object.__setattr__(self, field_name, _plain_date(value, field_name))
+        if self.cash_effective_phase is not None:
+            object.__setattr__(
+                self,
+                "cash_effective_phase",
+                _non_blank_text(self.cash_effective_phase, "cash_effective_phase"),
+            )
+        if self.cash_amount_per_unit is not None:
+            object.__setattr__(
+                self,
+                "cash_amount_per_unit",
+                _positive_decimal(self.cash_amount_per_unit, "cash_amount_per_unit"),
+            )
+        if self.currency is not None:
+            object.__setattr__(self, "currency", _non_blank_text(self.currency, "currency").upper())
         if not isinstance(self.evidence, FactEvidence):
             raise ProviderContractViolationError("evidence must be a FactEvidence")
         object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))

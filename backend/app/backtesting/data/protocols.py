@@ -383,6 +383,11 @@ class DataCapabilityManifest:
     # production capability.  The mapping is optional for legacy manifests;
     # omitted entries are intentionally ``unavailable`` rather than inferred.
     capability_sources: Mapping[DataCapability, CapabilitySource | str] = MappingProxyType({})
+    # These two declarations are part of the provider contract rather than
+    # hidden in a run-specific report.  Mappings are used for adjustment
+    # policies because activation and verification evidence are structured.
+    instrument_rule_fact_contracts: tuple[ContractRef, ...] = ()
+    adjustment_series_policies: tuple[Mapping[str, object], ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -547,6 +552,31 @@ class DataCapabilityManifest:
                 dict(sorted(normalized_sources.items(), key=lambda item: item[0].value))
             ),
         )
+        object.__setattr__(
+            self,
+            "instrument_rule_fact_contracts",
+            _sorted_unique_refs(
+                self.instrument_rule_fact_contracts,
+                "instrument_rule_fact_contracts",
+            ),
+        )
+        policies: list[Mapping[str, object]] = []
+        for policy in self.adjustment_series_policies:
+            if not isinstance(policy, Mapping):
+                raise InvalidDataRequestError(
+                    "adjustment_series_policies entries must be mappings"
+                )
+            frozen = freeze_json(dict(policy), "adjustment_series_policies")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError(
+                    "adjustment_series_policies entries must be JSON mappings"
+                )
+            policies.append(frozen)
+        object.__setattr__(
+            self,
+            "adjustment_series_policies",
+            tuple(sorted(policies, key=canonical_json)),
+        )
 
     def capability_source(self, capability: DataCapability) -> CapabilitySource:
         """Return explicit provenance, defaulting to unavailable."""
@@ -597,6 +627,7 @@ class CoverageEnvelope:
     axis_session_signature: str | None = None
     warmup_session_signature: str | None = None
     history_envelope_signature: str | None = None
+    fact_coverage_signature: str | None = None
     covered_chunk_start: int = 0
     covered_chunk_end: int = 1
     dependency_fact_types: tuple[DataCapability, ...] = ()
@@ -661,7 +692,12 @@ class CoverageEnvelope:
                 self.fact_types, DataCapability, "fact_types", allow_empty=True
             ),
         )
-        for name in ("axis_session_signature", "warmup_session_signature", "history_envelope_signature"):
+        for name in (
+            "axis_session_signature",
+            "warmup_session_signature",
+            "history_envelope_signature",
+            "fact_coverage_signature",
+        ):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, _non_blank_text(value, name))
@@ -676,6 +712,14 @@ class CoverageEnvelope:
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, _aware_datetime(value, name))
+        if (
+            self.data_cutoff is not None
+            and self.knowledge_as_of is not None
+            and self.knowledge_as_of > self.data_cutoff
+        ):
+            raise InvalidDataRequestError(
+                "knowledge_as_of must not be later than data_cutoff"
+            )
 
     def to_summary(self) -> Mapping[str, object]:
         """Deep-frozen JSON summary safe for results, logs, and evidence."""
@@ -698,6 +742,7 @@ class CoverageEnvelope:
                 "axis_session_signature": self.axis_session_signature,
                 "warmup_session_signature": self.warmup_session_signature,
                 "history_envelope_signature": self.history_envelope_signature,
+                "fact_coverage_signature": self.fact_coverage_signature,
                 "covered_chunk_start": self.covered_chunk_start,
                 "covered_chunk_end": self.covered_chunk_end,
                 "data_cutoff": self.data_cutoff.isoformat() if self.data_cutoff else None,

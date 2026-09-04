@@ -5,7 +5,9 @@ from typing import Any
 
 import structlog
 from pydantic import BaseModel, ConfigDict
+from sqlalchemy import select
 
+from app.data_ingestion.models.etf import EtfCode
 from app.data_ingestion.services.trading_status import sync_suspend_d
 from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
@@ -20,6 +22,10 @@ class TradingStatusSyncParameters(BaseModel):
 
     start_date: date | None = None
     end_date: date | None = None
+    # A source response never proves that absent events mean no suspension;
+    # operators must opt in only when the query was independently confirmed
+    # complete for the requested interval.
+    coverage_confirmed: bool = False
 
 
 def _require_context(context: TaskContext) -> tuple[Any, Any, Any]:
@@ -30,6 +36,20 @@ def _require_context(context: TaskContext) -> tuple[Any, Any, Any]:
     if not context.sync_key:
         raise RuntimeError("ingestion task requires a checkpoint sync key")
     return context.client, context.session, context.checkpoint_repo
+
+
+def _instrument_map(session: Any) -> dict[str, Any]:
+    """Resolve source codes to stable identities for status coverage facts."""
+
+    execute = getattr(session, "execute", None)
+    if not callable(execute):
+        return {}
+    rows = execute(
+        select(EtfCode.ts_code, EtfCode.etf_id).where(
+            EtfCode.source == "tushare"
+        )
+    ).all()
+    return {ts_code: instrument_id for ts_code, instrument_id in rows}
 
 
 def _resolve_window(
@@ -51,6 +71,7 @@ def _handler(context: TaskContext, parameters: TradingStatusSyncParameters) -> d
 
     client, session, checkpoint_repo = _require_context(context)
     checkpoint = checkpoint_repo.get(context.sync_key, "trading_status")
+    instrument_map = _instrument_map(session)
     start_date, end_date = _resolve_window(parameters, checkpoint)
     start_text, end_text = start_date.isoformat(), end_date.isoformat()
     common = {
@@ -97,6 +118,8 @@ def _handler(context: TaskContext, parameters: TradingStatusSyncParameters) -> d
                 sync_key=context.sync_key,
                 checkpoint_cursor={"synced_through_date": end_text},
                 checkpoint_version=checkpoint.version if checkpoint else None,
+                instrument_map=instrument_map or None,
+                coverage_confirmed=parameters.coverage_confirmed,
             )
     except Exception as exc:
         logger.error(

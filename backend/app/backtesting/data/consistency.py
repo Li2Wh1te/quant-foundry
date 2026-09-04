@@ -170,7 +170,19 @@ def build_consistency_scope(*, request: DataRequest, resolved_sessions: Sequence
     dependencies = tuple(dict.fromkeys(dependency_fact_types))
     axis_sig = canonical_hash([item.session_id for item in formal])
     warm_sig = canonical_hash([item.session_id for item in warmup])
-    history_sig = canonical_hash({"lookback_sessions": request.max_lookback_sessions, "warmup": [item.session_id for item in warmup]})
+    history_sig = canonical_hash(
+        {
+            "lookback_sessions": request.max_lookback_sessions,
+            "formal": [item.session_id for item in formal],
+            "warmup": [item.session_id for item in warmup],
+        }
+    )
+    fact_sig = canonical_hash(
+        {
+            "fact_types": [item.value for item in capabilities],
+            "dependency_fact_types": [item.value for item in dependencies],
+        }
+    )
     envelope = CoverageEnvelope(
         chunk_first_session_date=chunk_sessions[0].session_date,
         chunk_last_session_date=chunk_sessions[-1].session_date,
@@ -181,6 +193,7 @@ def build_consistency_scope(*, request: DataRequest, resolved_sessions: Sequence
         axis_session_signature=axis_sig,
         warmup_session_signature=warm_sig,
         history_envelope_signature=history_sig,
+        fact_coverage_signature=fact_sig,
         covered_chunk_start=start,
         covered_chunk_end=end,
         dependency_fact_types=dependencies,

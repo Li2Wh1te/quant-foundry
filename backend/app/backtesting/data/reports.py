@@ -159,6 +159,8 @@ def build_trading_status_summary(
     *,
     capability_declarations: Mapping[str, str] | None = None,
     limitation: str = TRADING_STATUS_LIMITATION,
+    coverage: Mapping[str, object] | None = None,
+    source_revisions: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     """Build the shared report/runtime shape for trading-status capability.
 
@@ -195,7 +197,7 @@ def build_trading_status_summary(
         for dimension in _TRADING_STATUS_DIMENSIONS
         if declarations[dimension] == "not_applicable"
     )
-    return {
+    result = {
         "model": "requires_facts" if required else "not_modeled",
         "rule_package": {"key": rule_package.key, "version": rule_package.version},
         "required_dimensions": required,
@@ -204,6 +206,11 @@ def build_trading_status_summary(
         "coverage_required": bool(required),
         "limitation": limitation,
     }
+    if coverage is not None:
+        result["coverage"] = dict(coverage)
+    if source_revisions is not None:
+        result["source_revisions"] = dict(source_revisions)
+    return result
 
 
 def _normalize_trading_status_summary(
@@ -247,13 +254,22 @@ def _normalize_trading_status_summary(
             dimension: "required" if dimension in required else "not_applicable"
             for dimension in _TRADING_STATUS_DIMENSIONS
         }
-    return MappingProxyType(
-        build_trading_status_summary(
-            rule_package,
-            capability_declarations=normalized_declarations,
-            limitation=value.get("limitation", TRADING_STATUS_LIMITATION),
-        )
+    result = build_trading_status_summary(
+        rule_package,
+        capability_declarations=normalized_declarations,
+        limitation=value.get("limitation", TRADING_STATUS_LIMITATION),
+        coverage=value.get("coverage") if isinstance(value.get("coverage"), Mapping) else None,
+        source_revisions=value.get("source_revisions") if isinstance(value.get("source_revisions"), Mapping) else None,
     )
+    for key in ("coverage", "source_revisions"):
+        if isinstance(result.get(key), Mapping):
+            frozen = _freeze_domain_json(result[key], f"trading_status.{key}")
+            if not isinstance(frozen, MappingProxyType):
+                raise InvalidDataRequestError(
+                    f"trading_status.{key} must be a JSON mapping"
+                )
+            result[key] = frozen
+    return MappingProxyType(result)
 
 
 def _trading_status_machine_content(
@@ -261,7 +277,7 @@ def _trading_status_machine_content(
 ) -> dict[str, object]:
     """Return only machine semantics; presentation limitation is excluded."""
 
-    return {
+    result = {
         key: value[key]
         for key in (
             "model",
@@ -272,6 +288,10 @@ def _trading_status_machine_content(
             "coverage_required",
         )
     }
+    for key in ("coverage", "source_revisions"):
+        if key in value:
+            result[key] = value[key]
+    return result
 
 
 def _freeze_domain_json(value: object, field_name: str) -> object:
