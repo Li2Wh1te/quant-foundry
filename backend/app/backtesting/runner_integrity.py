@@ -30,6 +30,7 @@ from .runner_protocol import (
 
 TABLE_TO_COUNT_KEY = {
     "backtest_steps": "steps",
+    "backtest_events": "events",
     "backtest_decisions": "decisions",
     "backtest_orders": "orders",
     "backtest_order_updates": "order_updates",
@@ -41,6 +42,7 @@ TABLE_TO_COUNT_KEY = {
 _TABLE_ALIASES = {
     **{name: name for name in COVERED_RESULT_TABLES},
     "steps": "backtest_steps",
+    "events": "backtest_events",
     "decisions": "backtest_decisions",
     "orders": "backtest_orders",
     "order_updates": "backtest_order_updates",
@@ -66,6 +68,7 @@ _AUXILIARY_TABLES = frozenset(
 # query order or an input mapping insertion order cannot change the digest.
 _TABLE_SORT_COLUMNS = {
     "backtest_steps": ("step_sequence",),
+    "backtest_events": ("event_sequence",),
     "backtest_decisions": ("step_sequence", "decision_time", "decision_id"),
     "backtest_orders": ("submitted_at", "order_id"),
     "backtest_order_updates": ("updated_at", "order_id", "update_sequence"),
@@ -76,6 +79,7 @@ _TABLE_SORT_COLUMNS = {
 }
 _TABLE_REQUIRED_IDENTITY_COLUMNS = {
     "backtest_steps": ("step_sequence",),
+    "backtest_events": ("event_sequence",),
     "backtest_decisions": ("decision_id",),
     "backtest_orders": ("order_id",),
     "backtest_order_updates": ("order_id", "update_sequence"),
@@ -88,6 +92,10 @@ _TABLE_INTEGRITY_COLUMNS = {
     "backtest_steps": (
         "run_id", "step_sequence", "time_start", "time_end", "data_cutoff_at",
         "phase", "data_quality",
+    ),
+    "backtest_events": (
+        "run_id", "event_sequence", "step_sequence", "phase_sequence",
+        "phase_key", "event_type", "event_time", "payload",
     ),
     "backtest_decisions": (
         "run_id", "decision_id", "step_sequence", "decision_time", "mode",
@@ -438,7 +446,7 @@ def normalize_result_rows(
     *,
     require_all_tables: bool = False,
 ) -> dict[str, list[dict[str, Any]]]:
-    """Normalize aliases and sort all eight result tables deterministically."""
+    """Normalize aliases and sort all nine result tables deterministically."""
 
     if not isinstance(rows_by_table, Mapping):
         raise ResultIntegrityError("rows_by_table must be a mapping")
@@ -450,12 +458,12 @@ def normalize_result_rows(
     for raw_name, rows in rows_by_table.items():
         if str(raw_name) in _AUXILIARY_TABLES:
             # These rows are useful execution evidence but deliberately sit
-            # outside the canonical eight-table result scope.
+            # outside the canonical nine-table result scope.
             continue
         table = _TABLE_ALIASES.get(str(raw_name))
         if table is None:
             # Data preflight/chunk/analysis rows intentionally sit outside the
-            # canonical eight-table result scope and must not silently affect
+            # canonical nine-table result scope and must not silently affect
             # a result digest.
             raise ResultIntegrityError(f"unsupported result integrity table: {raw_name}")
         present_tables.add(table)
@@ -487,7 +495,15 @@ def normalize_result_rows(
     for table in COVERED_RESULT_TABLES:
         normalized[table].sort(key=lambda row, table=table: _stable_row_key(table, row))
     if require_all_tables:
-        missing = [table for table in COVERED_RESULT_TABLES if table not in present_tables]
+        # Pre-event integrity callers may omit the newly introduced audit
+        # stream; treat that legacy shape as an empty stream. Repository
+        # reads always include the key, so a current run cannot accidentally
+        # hide event rows behind this compatibility branch.
+        missing = [
+            table
+            for table in COVERED_RESULT_TABLES
+            if table not in present_tables and table != "backtest_events"
+        ]
         if missing:
             raise ResultIntegrityError(
                 "result integrity rows are incomplete; missing tables: "
@@ -543,7 +559,7 @@ def compute_result_integrity(
     *,
     config_hash: str,
 ) -> IntegrityEvidence:
-    """Recompute the canonical digest and all eight result counters."""
+    """Recompute the canonical digest and all nine result counters."""
 
     try:
         payload = canonical_result_payload(rows_by_table, config_hash=config_hash)

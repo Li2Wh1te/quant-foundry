@@ -519,6 +519,38 @@ class BacktestStepRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class BacktestEventRecord:
+    """One immutable domain event in the run audit stream."""
+
+    run_id: UUID
+    event_sequence: int
+    step_sequence: int
+    phase_sequence: int
+    phase_key: str
+    event_type: str
+    event_time: datetime
+    payload: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "run_id", _uuid(self.run_id, "run_id"))
+        object.__setattr__(
+            self, "event_sequence", _sequence(self.event_sequence, "event_sequence")
+        )
+        object.__setattr__(
+            self, "step_sequence", _sequence(self.step_sequence, "step_sequence")
+        )
+        object.__setattr__(
+            self, "phase_sequence", _sequence(self.phase_sequence, "phase_sequence")
+        )
+        object.__setattr__(self, "phase_key", _required_text(self.phase_key, "phase_key"))
+        object.__setattr__(self, "event_type", _required_text(self.event_type, "event_type"))
+        object.__setattr__(self, "event_time", _aware_datetime(self.event_time, "event_time"))
+        object.__setattr__(self, "payload", _json_payload(self.payload, "payload"))
+
+    @property
+    def cursor_sort_key(self) -> tuple[int]:
+        return (self.event_sequence,)
+@dataclass(frozen=True, slots=True)
 class BacktestDecisionRecord:
     """One strategy decision (logical ``backtest_decisions`` row)."""
 
@@ -1576,6 +1608,7 @@ __all__ = [
     "DataQualityStatus",
     "DecisionValidationStatus",
     "BacktestDataChunkRecord",
+    "BacktestEventRecord",
     "BacktestDecisionRecord",
     "AnalysisSummaryStatus",
     "AnalyzerState",

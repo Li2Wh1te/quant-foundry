@@ -45,6 +45,7 @@ from app.backtesting.result_models import (
     BacktestDataChunkRecord as BacktestDataChunkDto,
     BacktestDataPreflightRecord as BacktestDataPreflightDto,
     BacktestDecisionRecord as BacktestDecisionDto,
+    BacktestEventRecord as BacktestEventDto,
     BacktestEquityCurveRecord as BacktestEquityCurveDto,
     BacktestFillRecord as BacktestFillDto,
     BacktestMetricRecord as BacktestMetricDto,
@@ -58,6 +59,7 @@ from app.backtesting.result_records import (
     BacktestDataChunkRecord,
     BacktestDataPreflightResultRecord,
     BacktestDecisionRecord,
+    BacktestEventResultRecord,
     BacktestEquityCurveRecord,
     BacktestFillResultRecord,
     BacktestMetricRecord,
@@ -669,6 +671,21 @@ def _step_record(dto: BacktestStepDto) -> dict[str, Any]:
     }
 
 
+def _event_record(dto: BacktestEventDto) -> dict[str, Any]:
+    """Project one immutable domain event into its JSON-safe row shape."""
+
+    return {
+        "run_id": dto.run_id,
+        "event_sequence": dto.event_sequence,
+        "step_sequence": dto.step_sequence,
+        "phase_sequence": dto.phase_sequence,
+        "phase_key": dto.phase_key,
+        "event_type": dto.event_type,
+        "event_time": dto.event_time,
+        "payload": _thaw_json(dict(dto.payload)),
+    }
+
+
 def _decision_record(dto: BacktestDecisionDto) -> dict[str, Any]:
     return {
         "run_id": dto.run_id,
@@ -1131,6 +1148,17 @@ _RESULT_KINDS: dict[str, ResultKindSpec] = {
             allowed_filters=frozenset({"phase"}),
         ),
         ResultKindSpec(
+            kind="events",
+            dto_cls=BacktestEventDto,
+            record_cls=BacktestEventResultRecord,
+            to_record=_event_record,
+            sort_columns=("event_sequence",),
+            key_kinds=("int",),
+            identity_fields=("event_sequence",),
+            allowed_filters=frozenset({"event_type", "start_time", "end_time"}),
+            time_column="event_time",
+        ),
+        ResultKindSpec(
             kind="decisions",
             dto_cls=BacktestDecisionDto,
             record_cls=BacktestDecisionRecord,
@@ -1457,7 +1485,7 @@ class BacktestResultRepository:
         include_internal: bool = False,
         owner_scope: str | None = None,
     ) -> dict[str, list[Any]]:
-        """Read the fixed eight result tables for one run in one transaction.
+        """Read the fixed nine result tables for one run in one transaction.
 
         The repository remains the owner of result-table schema and query
         visibility.  The protocol layer receives ORM rows through this narrow
@@ -1476,6 +1504,7 @@ class BacktestResultRepository:
         )
         table_records: tuple[tuple[str, type], ...] = (
             ("backtest_steps", BacktestStepRecord),
+            ("backtest_events", BacktestEventResultRecord),
             ("backtest_decisions", BacktestDecisionRecord),
             ("backtest_orders", BacktestOrderResultRecord),
             ("backtest_order_updates", BacktestOrderUpdateRecord),
@@ -1499,7 +1528,7 @@ class BacktestResultRepository:
         *,
         include_internal: bool = False,
     ) -> dict[str, int]:
-        """Compute all eight protocol counters from committed result rows."""
+        """Compute all nine protocol counters from committed result rows."""
 
         from .runner_integrity import result_counts
 
@@ -1681,6 +1710,22 @@ class BacktestResultRepository:
         """Append an order transition and update its projection atomically."""
         if not isinstance(dto, BacktestOrderUpdateDto):
             raise ResultRepositoryError("order update DTO is required")
+        existing = self.session.scalars(
+            select(BacktestOrderUpdateRecord).where(
+                BacktestOrderUpdateRecord.run_id == dto.run_id,
+                BacktestOrderUpdateRecord.order_id == dto.order_id,
+                BacktestOrderUpdateRecord.update_sequence == dto.update_sequence,
+            )
+        ).first()
+        if existing is not None:
+            payload = _order_update_record(dto)
+            if all(
+                getattr(existing, key) == value
+                for key, value in payload.items()
+                if key != "run_id"
+            ):
+                return 0
+            raise ResultRecordConflictError("order update identity conflict")
         order = self.session.scalars(select(BacktestOrderResultRecord).where(
             BacktestOrderResultRecord.run_id == dto.run_id,
             BacktestOrderResultRecord.order_id == dto.order_id,

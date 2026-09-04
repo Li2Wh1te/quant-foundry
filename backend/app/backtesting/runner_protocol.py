@@ -29,6 +29,7 @@ RESULT_INTEGRITY_SCOPE = "backtest_result_rows@1"
 # completion evidence impossible to reproduce.
 COVERED_RESULT_TABLES = (
     "backtest_steps",
+    "backtest_events",
     "backtest_decisions",
     "backtest_orders",
     "backtest_order_updates",
@@ -39,6 +40,7 @@ COVERED_RESULT_TABLES = (
 )
 RESULT_COUNT_KEYS = (
     "steps",
+    "events",
     "decisions",
     "orders",
     "order_updates",
@@ -491,7 +493,7 @@ def validate_completion_marker(
         covered = integrity.get("covered_tables")
         normalized_covered = tuple(covered) if isinstance(covered, list) else None
         if normalized_covered != COVERED_RESULT_TABLES:
-            errors.append("result_integrity.covered_tables must match the eight fixed tables")
+            errors.append("result_integrity.covered_tables must match the nine fixed tables")
         _validate_digest(integrity.get("digest"), "result_integrity.digest", errors)
 
     counts = marker.get("result_counts")
@@ -499,7 +501,7 @@ def validate_completion_marker(
         errors.append("result_counts must be an object")
     else:
         if set(counts) != set(RESULT_COUNT_KEYS):
-            errors.append("result_counts must contain exactly the eight fixed counters")
+            errors.append("result_counts must contain exactly the nine fixed counters")
         for key in RESULT_COUNT_KEYS:
             value = counts.get(key)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -583,7 +585,7 @@ def build_completion_marker(
 
     if not isinstance(result_counts, Mapping) or set(result_counts) != set(RESULT_COUNT_KEYS):
         raise CompletionMarkerValidationError(
-            "result_counts must contain exactly the eight fixed counters"
+            "result_counts must contain exactly the nine fixed counters"
         )
     for key in RESULT_COUNT_KEYS:
         value = result_counts[key]

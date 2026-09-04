@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.backtesting.accounting import AccountState, AccountingPolicy, SettlementPolicy
+from app.backtesting.analysis_finalization import AnalysisFinalizationCoordinator
 from app.backtesting.fees import FeeCalculator, FeeRule, FeeSchedule
 from app.backtesting.data.adapters.etf import ETF_PROVIDER_KEY, EtfFactsAdapter
 from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
@@ -921,7 +922,14 @@ def _initial_portfolio(binding):
 def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
     bundle = build_runtime(binding, session=session, launch_id=launch_id, strategy_module=strategy_module, worker_id=worker_id, progress_reporter=progress_reporter)
     with bundle.data_session as data_session:
-        result = run_data_session(data_session, bundle.runner, fact_types=(DataCapability.BARS, DataCapability.UNIVERSE), view_factory=bundle.runner._view_factory)
+        result = run_data_session(
+            data_session,
+            bundle.runner,
+            fact_types=(DataCapability.BARS, DataCapability.UNIVERSE),
+            view_factory=bundle.runner._view_factory,
+            analysis_coordinator=AnalysisFinalizationCoordinator(),
+            analysis_session_factory=lambda: Session(bind=session.get_bind()),
+        )
     session.commit(); rows = BacktestResultRepository(session).read_integrity_rows(UUID(str(binding.run_id))); from app.backtesting.runner_integrity import compute_result_integrity
     return {"category": "succeeded", "integrity": compute_result_integrity(rows, config_hash=binding.config_hash).as_dict(), "result": result}
 

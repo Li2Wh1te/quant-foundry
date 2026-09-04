@@ -3,14 +3,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 import logging
 
-from sqlalchemy import select, update
+from sqlalchemy import update
 
 from .models import BacktestRunRecord
-from .result_repository import BacktestResultRepository, ResultRecordConflictError
+from .result_repository import BacktestResultRepository
 
 logger = logging.getLogger("backtesting.result_writer")
 
@@ -18,6 +19,61 @@ _TERMINAL_STATUSES = frozenset(
     {"succeeded", "failed", "cancelled", "timed_out", "indeterminate", "terminal"}
 )
 _ACTIVE_STATUSES = frozenset({"starting", "running", "cancel_requested"})
+
+
+def _json_value(value: Any) -> Any:
+    """Convert immutable runtime values to exact JSON-safe primitives."""
+
+    if isinstance(value, (datetime, date, UUID)):
+        return value.isoformat() if not isinstance(value, UUID) else str(value)
+    if isinstance(value, Decimal):
+        return str(value)
+    enum_value = getattr(value, "value", None)
+    if enum_value is not None and enum_value is not value:
+        return _json_value(enum_value)
+    if isinstance(value, Mapping):
+        return {str(key): _json_value(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_value(item) for item in value]
+    return value
+
+
+def _display_for(result: Any, instrument_id: UUID):
+    """Return the last frozen event display for one instrument, if present."""
+
+    from app.backtesting.result_models import InstrumentDisplaySnapshot
+
+    for event in reversed(tuple(getattr(result, "events", ()) or ())):
+        snapshot = getattr(event, "display_snapshot", None)
+        if snapshot is not None and snapshot.instrument_id == instrument_id:
+            return snapshot
+        snapshots = getattr(event, "display_snapshots", {}) or {}
+        snapshot = snapshots.get(instrument_id)
+        if snapshot is not None:
+            return snapshot
+    return InstrumentDisplaySnapshot(instrument_id=instrument_id)
+
+
+def _result_summary(result: Any) -> dict[str, Any]:
+    """Build a compact run summary from already frozen runtime projections."""
+
+    samples = tuple(getattr(result, "equity_curve", ()) or ())
+    last = samples[-1] if samples else None
+    return _json_value({
+        "schema_version": "result-v1",
+        "analysis_status": getattr(result, "analysis_status", None),
+        "event_count": len(tuple(getattr(result, "events", ()) or ())),
+        "components": getattr(result, "components", {}),
+        "rule_snapshot_hash": getattr(result, "rule_snapshot_hash", None),
+        "final_valuation": None if last is None else {
+            "as_of": last.as_of,
+            "valuation_status": last.valuation_status,
+            "equity": last.equity,
+            "cumulative_fees": last.cumulative_fees,
+        },
+        "universe": getattr(result, "universe_eligibility_summary", {}),
+    })
+
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,6 +117,8 @@ class ResultBatch:
     current_step: int | None = None
     current_date: str | None = None
     checkpoint: Mapping[str, Any] | None = None
+    result_summary: Mapping[str, Any] | None = None
+    events: Sequence[Any] = field(default_factory=tuple)
 
 
 class BacktestResultPersistenceService:
@@ -89,12 +147,14 @@ class BacktestResultPersistenceService:
             raise ValueError("result root is not in an active launch state")
         return root
 
-    def persist_result_batch(self, batch: ResultBatch) -> int:
-        """Persist one bounded batch inside a short savepoint transaction."""
+    def persist_result_batch(self, batch: ResultBatch, *, commit: bool = False) -> int:
+        """Persist one bounded batch and optionally make it durable immediately."""
         transaction = self.session.begin_nested()
         try:
             total = self._persist_result_batch(batch)
             transaction.commit()
+            if commit:
+                self.session.commit()
             return total
         except Exception:
             transaction.rollback()
@@ -104,7 +164,7 @@ class BacktestResultPersistenceService:
         root = self._root()
         total = 0
         counts = dict(root.result_counts or {})
-        for kind, values in (("steps", batch.steps), ("decisions", batch.decisions), ("orders", batch.orders), ("order_updates", batch.order_updates), ("fills", batch.fills), ("positions", batch.positions), ("equity_curve", batch.equity_curve), ("data_chunks", batch.data_chunks)):
+        for kind, values in (("events", batch.events), ("steps", batch.steps), ("decisions", batch.decisions), ("orders", batch.orders), ("order_updates", batch.order_updates), ("fills", batch.fills), ("positions", batch.positions), ("equity_curve", batch.equity_curve), ("data_chunks", batch.data_chunks)):
             if values:
                 if kind == "order_updates":
                     added = sum(self.repository.append_order_update_transaction(dto) for dto in values)
@@ -122,66 +182,152 @@ class BacktestResultPersistenceService:
                 root.first_result_at = now
             root.last_result_at = now
             root.result_counts = counts
+        if batch.result_summary is not None:
+            root.result_summary = _json_value(batch.result_summary)
         if batch.progress is not None:
             self.record_progress(batch.progress, current_step=batch.current_step, current_date=batch.current_date, checkpoint=batch.checkpoint)
         self.session.flush()
         logger.info(f"回测结果块已提交，运行 {self.context.run_id}，写入 {total} 条事实，checkpoint 已处理。", extra={"event": "backtest_result_chunk_committed", "run_id": str(self.context.run_id), "run_kind": self.context.run_kind, "result_count": total})
         return total
 
-    def persist_runtime_result(self, result: Any) -> int:
-        """Adapt a completed runtime projection into a persistence batch.
+    def persist_runtime_result(self, result: Any, *, commit: bool = True) -> int:
+        """Persist every result projection from one immutable runtime snapshot."""
 
-        Runtime DTO conversion is intentionally explicit: only already
-        validated result-record DTOs are forwarded, while unsupported event
-        shapes are left to the caller's adapter instead of being guessed.
-        """
         from app.backtesting.result_models import (
-            BacktestDecisionRecord, BacktestEquityCurveRecord,
-            BacktestFillRecord, BacktestOrderRecord, BacktestPositionRecord,
-            BacktestStepRecord, DataQualityStatus, DecisionValidationStatus,
-            ResultOrderStatus, StepPhase, ValuationStatus, InstrumentDisplaySnapshot,
+            BacktestDecisionRecord,
+            BacktestEventRecord,
+            BacktestEquityCurveRecord,
+            BacktestFillRecord,
+            BacktestOrderRecord,
+            BacktestOrderUpdateRecord,
+            BacktestPositionRecord,
+            BacktestStepRecord,
+            DataQualityStatus,
+            DecisionValidationStatus,
+            StepPhase,
+            ValuationStatus,
         )
+
         run_id = self.context.run_id
-        steps = []
-        for sample in getattr(result, "equity_curve", ()):
-            steps.append(BacktestStepRecord(run_id=run_id, step_sequence=sample.step_sequence,
-                time_start=sample.as_of, time_end=sample.as_of, data_cutoff_at=sample.as_of,
-                phase=StepPhase.VALUATION, data_quality=DataQualityStatus.BLOCKED if sample.equity is None else DataQualityStatus.OK))
-        decisions = []
-        for decision in getattr(result, "decisions", ()):
-            decisions.append(BacktestDecisionRecord(run_id=run_id, decision_id=decision.decision_id,
-                step_sequence=decision.step_sequence, decision_time=decision.decision_time,
-                mode=decision.mode, validation_status=DecisionValidationStatus.ACCEPTED,
+        events = tuple(
+            BacktestEventRecord(
+                run_id=run_id,
+                event_sequence=event.event_sequence,
+                step_sequence=event.step_sequence,
+                phase_sequence=event.phase_sequence,
+                phase_key=event.phase_key,
+                event_type=event.event_type,
+                event_time=event.event_time,
+                payload=_json_value(event.payload),
+            )
+            for event in getattr(result, "events", ())
+        )
+        steps = tuple(
+            BacktestStepRecord(
+                run_id=run_id,
+                step_sequence=sample.step_sequence,
+                time_start=sample.time_start or sample.as_of,
+                time_end=sample.time_end or sample.as_of,
+                data_cutoff_at=sample.data_cutoff_at or sample.as_of,
+                phase=StepPhase.VALUATION,
+                data_quality=(
+                    DataQualityStatus.BLOCKED
+                    if sample.equity is None
+                    else DataQualityStatus.OK
+                ),
+            )
+            for sample in getattr(result, "equity_curve", ())
+        )
+        decisions = tuple(
+            BacktestDecisionRecord(
+                run_id=run_id,
+                decision_id=decision.decision_id,
+                step_sequence=decision.step_sequence,
+                decision_time=decision.decision_time,
+                mode=decision.mode,
+                validation_status=getattr(
+                    decision, "validation_status", DecisionValidationStatus.ACCEPTED
+                ),
                 targets={str(k): str(v) for k, v in (decision.targets or {}).items()},
-                validation_issues=(), error=None))
-        orders = []
-        for order in getattr(result, "order_outcomes", ()):
-            orders.append(BacktestOrderRecord(run_id=run_id, order_id=order.order_id,
-                instrument_id=order.instrument_id, display=InstrumentDisplaySnapshot(instrument_id=order.instrument_id),
-                side=order.side, order_type="market", quantity=order.quantity,
-                status=order.status, submitted_at=order.submitted_at, intent_id=order.intent_id,
+                validation_issues=getattr(decision, "validation_issues", ()),
+                duration_ms=getattr(decision, "duration_ms", None),
+                error=getattr(decision, "error", None),
+            )
+            for decision in getattr(result, "decisions", ())
+        )
+        orders = tuple(
+            BacktestOrderRecord(
+                run_id=run_id,
+                order_id=order.order_id,
+                instrument_id=order.instrument_id,
+                display=_display_for(result, order.instrument_id),
+                side=order.side,
+                order_type=order.order_type.value,
+                quantity=order.quantity,
+                status=order.status,
+                submitted_at=order.submitted_at,
+                intent_id=order.intent_id,
                 filled_quantity=order.filled_quantity,
-                status_reason=order.status_reason))
+                status_reason=order.status_reason,
+            )
+            for order in getattr(result, "order_outcomes", ())
+        )
+        order_updates = tuple(
+            BacktestOrderUpdateRecord(
+                run_id=run_id,
+                order_id=update_record.order_id,
+                update_sequence=update_record.update_sequence,
+                old_status=update_record.old_status,
+                new_status=update_record.new_status,
+                updated_at=update_record.updated_at,
+                reason=update_record.reason,
+            )
+            for update_record in getattr(result, "order_updates", ())
+        )
         fills = []
-        for sequence, event in enumerate((e for e in getattr(result, "events", ()) if getattr(e, "event_type", "") == "fill_created"), start=1):
+        for sequence, event in enumerate(
+            (
+                event
+                for event in getattr(result, "events", ())
+                if getattr(event, "event_type", "") == "fill_created"
+            ),
+            start=1,
+        ):
             payload = dict(event.payload)
             try:
-                fills.append(BacktestFillRecord(run_id=run_id, fill_id=UUID(str(payload["fill_id"])),
-                    order_id=UUID(str(payload["order_id"])), instrument_id=UUID(str(payload["instrument_id"])),
-                    display=event.display_snapshot or InstrumentDisplaySnapshot(instrument_id=UUID(str(payload["instrument_id"]))),
-                    side=payload["side"], timestamp=event.event_time, fill_sequence=sequence,
-                    reference_price=payload.get("reference_price"), price=payload.get("execution_price"),
-                    quantity=payload.get("quantity"), fees=payload.get("fees", 0),
-                    slippage_bps=payload.get("slippage_bps"),
-                    slippage_amount=payload.get("slippage_amount"),
-                    slippage_model_key=payload.get("slippage_model_key"),
-                    slippage_model_version=payload.get("slippage_model_version"),
-                    currency=payload.get("currency", "CNY"),
-                    contract_multiplier=payload.get("contract_multiplier", "1"),
-                    gross_notional=payload.get(
-                        "gross_notional", payload.get("notional")
-                    ),
-                    fee_breakdown=payload.get("fee_breakdown")))
+                instrument_id = UUID(str(payload["instrument_id"]))
+                fills.append(
+                    BacktestFillRecord(
+                        run_id=run_id,
+                        fill_id=UUID(str(payload["fill_id"])),
+                        order_id=UUID(str(payload["order_id"])),
+                        instrument_id=instrument_id,
+                        display=getattr(event, "display_snapshot", None)
+                        or _display_for(result, instrument_id),
+                        side=payload["side"],
+                        timestamp=event.event_time,
+                        fill_sequence=sequence,
+                        reference_price=payload.get("reference_price"),
+                        price=payload["execution_price"],
+                        quantity=payload["quantity"],
+                        fees=payload.get("fees", 0),
+                        slippage_bps=payload.get("slippage_bps"),
+                        slippage_amount=payload.get("slippage_amount"),
+                        slippage_model_key=payload.get("slippage_model_key"),
+                        slippage_model_version=payload.get("slippage_model_version"),
+                        currency=payload.get("currency", "CNY"),
+                        contract_multiplier=payload.get("contract_multiplier", "1"),
+                        gross_notional=payload.get(
+                            "gross_notional", payload.get("notional")
+                        ),
+                        fee_breakdown=payload.get("fee_breakdown"),
+                        settlement_lot_id=(
+                            UUID(str(payload["settlement_lot_id"]))
+                            if payload.get("settlement_lot_id") is not None
+                            else None
+                        ),
+                    )
+                )
             except (KeyError, TypeError, ValueError) as exc:
                 from app.backtesting.domain import DomainValidationError
 
@@ -189,28 +335,125 @@ class BacktestResultPersistenceService:
                     f"invalid fill result for event {sequence}: {exc}"
                 ) from exc
         equities = []
-        for sample in getattr(result, "equity_curve", ()):
-            status = ValuationStatus.BLOCKED if sample.equity is None else ValuationStatus.COMPLETE
-            cash = result.final_snapshot.account.cash_balances.get("CNY", 0)
-            equities.append(BacktestEquityCurveRecord(run_id=run_id, sequence=sample.step_sequence,
-                as_of=sample.as_of, valuation_status=status, cash=cash,
-                market_value=None if sample.equity is None else sample.equity-cash,
-                equity=sample.equity, period_return=None if sample.equity is None else 0,
-                total_pnl=None if sample.equity is None else 0,
-                cumulative_return=None if sample.equity is None else 0,
-                drawdown=None if sample.equity is None else 0,
-                valuation_reason="runtime valuation blocked" if sample.equity is None else None))
         positions = []
-        if getattr(result, "equity_curve", ()):
-            last_as_of = result.equity_curve[-1].as_of
-            for position in getattr(result.final_snapshot, "positions", ()):
-                positions.append(BacktestPositionRecord(run_id=run_id, as_of=last_as_of,
-                    instrument_id=position.instrument_id, display=InstrumentDisplaySnapshot(instrument_id=position.instrument_id),
-                    side=position.side, quantity=position.quantity, available_quantity=position.available_quantity,
-                    average_price=position.average_price, mark_price=position.mark_price,
-                    realized_pnl=position.realized_pnl, unrealized_pnl=position.unrealized_pnl))
-        metrics = tuple(getattr(result, "analysis_metrics", ()) or ())
-        return self.persist_result_batch(ResultBatch(steps=tuple(steps), decisions=tuple(decisions), orders=tuple(orders), fills=tuple(fills), positions=tuple(positions), equity_curve=tuple(equities), metrics=metrics))
+        for sample in getattr(result, "equity_curve", ()):
+            status = (
+                ValuationStatus.BLOCKED
+                if sample.equity is None
+                else ValuationStatus.COMPLETE
+            )
+            if sample.cash is None:
+                raise ValueError(
+                    f"valuation sample {sample.step_sequence} has no point-in-time cash"
+                )
+            equities.append(
+                BacktestEquityCurveRecord(
+                    run_id=run_id,
+                    sequence=sample.step_sequence,
+                    as_of=sample.as_of,
+                    valuation_status=status,
+                    cash=sample.cash,
+                    market_value=sample.market_value,
+                    equity=sample.equity,
+                    period_return=sample.period_return,
+                    total_pnl=sample.total_pnl,
+                    cumulative_return=sample.cumulative_return,
+                    drawdown=sample.drawdown,
+                    cumulative_fees=sample.cumulative_fees,
+                    valuation_reason=(
+                        "runtime valuation blocked" if sample.equity is None else None
+                    ),
+                )
+            )
+            if sample.portfolio_snapshot is not None:
+                positions.extend(
+                    BacktestPositionRecord(
+                        run_id=run_id,
+                        as_of=sample.as_of,
+                        instrument_id=position.instrument_id,
+                        display=_display_for(result, position.instrument_id),
+                        side=position.side,
+                        quantity=position.quantity,
+                        available_quantity=position.available_quantity,
+                        average_price=position.average_price,
+                        mark_price=position.mark_price,
+                        realized_pnl=position.realized_pnl,
+                        unrealized_pnl=position.unrealized_pnl,
+                    )
+                    for position in sample.portfolio_snapshot.positions
+                )
+        # Analyzer metrics are finalized by AnalysisFinalizer, which first
+        # persists the terminal summary required by append_metrics. Passing
+        # raw MetricResult objects here used to fail the default result sink.
+        batch = ResultBatch(
+            events=events,
+            steps=steps,
+            decisions=decisions,
+            orders=orders,
+            order_updates=order_updates,
+            fills=tuple(fills),
+            positions=tuple(positions),
+            equity_curve=tuple(equities),
+            result_summary=_result_summary(result),
+        )
+        return self.persist_result_batch(batch, commit=commit)
+
+    def persist_runtime_failure(self, result: Any) -> int:
+        """Commit already-determined rows before Supervisor handles failure."""
+
+        return self.persist_runtime_result(result, commit=True)
+
+    def persist_data_chunk_evidence(
+        self,
+        evidence: Any,
+        *,
+        time_start: datetime,
+        time_end: datetime,
+        started_at: datetime | None = None,
+    ) -> int:
+        """Persist one consistency result before executing its time chunk."""
+
+        from app.backtesting.result_models import (
+            BacktestDataChunkRecord,
+            ChunkValidationStatus,
+            ConsistencyMode,
+            DataPhase,
+        )
+
+        validation_status = (
+            ChunkValidationStatus.PASSED
+            if evidence.validation_status.value == "valid"
+            else ChunkValidationStatus.FAILED
+        )
+        finished_at = evidence.validated_at or datetime.now().astimezone()
+        dto = BacktestDataChunkRecord(
+            run_id=self.context.run_id,
+            phase=DataPhase.SESSION,
+            chunk_sequence=evidence.chunk_index,
+            time_start=time_start,
+            time_end=time_end,
+            chunk_strategy_version="fixed_trading_sessions@1",
+            token_digest=evidence.token_digest,
+            consistency_mode=ConsistencyMode(evidence.mode.value),
+            coverage_summary=_json_value(evidence.coverage_summary),
+            failure_phase=(
+                None
+                if validation_status is ChunkValidationStatus.PASSED
+                else str(evidence.coverage_summary.get("failure_phase", "data_consistency"))
+            ),
+            validation_status=validation_status,
+            started_at=started_at or finished_at,
+            finished_at=finished_at,
+            failure_reason=(
+                None
+                if validation_status is ChunkValidationStatus.PASSED
+                else evidence.failure_reason or "consistency validation failed"
+            ),
+        )
+        return self.persist_result_batch(
+            ResultBatch(data_chunks=(dto,)),
+            commit=True,
+        )
 
     def record_progress(self, progress: float, *, current_step: int | None = None, current_date: str | None = None, checkpoint: Mapping[str, Any] | None = None) -> None:
         if not 0 <= progress <= 1:

@@ -46,6 +46,7 @@ JsonType = JSONB().with_variant(JSON(), "sqlite")
 # create only these tables from the shared declarative metadata.
 RESULT_TABLE_NAMES = [
     "backtest_steps",
+    "backtest_events",
     "backtest_decisions",
     "backtest_orders",
     "backtest_order_updates",
@@ -142,6 +143,63 @@ class BacktestStepRecord(_RunBoundRecord):
         String(16),
         nullable=False,
         comment="Input data quality outcome for the step.",
+    )
+
+
+
+
+class BacktestEventResultRecord(_RunBoundRecord):
+    """One immutable domain event retained for run-level audit."""
+
+    __tablename__ = "backtest_events"
+    __table_args__ = (
+        Index(
+            "uq_backtest_events_run_sequence",
+            "run_id",
+            "event_sequence",
+            unique=True,
+        ),
+        Index(
+            "ix_backtest_events_run_sort_key",
+            "run_id",
+            "event_sequence",
+        ),
+    )
+
+    event_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Run-global monotonic domain-event sequence.",
+    )
+    step_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Official time-step sequence that emitted the event.",
+    )
+    phase_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Phase sequence inside the step that emitted the event.",
+    )
+    phase_key: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="Timing phase identity attached to the event.",
+    )
+    event_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="Stable domain-event type.",
+    )
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Event timestamp in the frozen run timezone.",
+    )
+    payload: Mapped[dict] = mapped_column(
+        JsonType,
+        nullable=False,
+        comment="JSON-safe immutable event payload.",
     )
 
 
@@ -1099,6 +1157,7 @@ __all__ = [
     "BacktestAnalysisSummaryRecord",
     "BacktestDataChunkRecord",
     "BacktestDataPreflightResultRecord",
+    "BacktestEventResultRecord",
     "BacktestDecisionRecord",
     "BacktestEquityCurveRecord",
     "BacktestFillResultRecord",

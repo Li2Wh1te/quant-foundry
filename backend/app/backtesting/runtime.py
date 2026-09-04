@@ -123,6 +123,7 @@ __all__ = [
     "EventEnvelope",
     "InstrumentFacts",
     "OrderOutcomeRecord",
+    "OrderUpdateAuditRecord",
     "PhaseContext",
     "PhaseExecutionError",
     "ProgressSink",
@@ -443,6 +444,8 @@ class PhaseContext:
     data_cutoff: datetime | None
     effective_from: datetime | None
     phase_view: Any | None
+    step_start_time: datetime | None = None
+    step_end_time: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -1478,13 +1481,40 @@ _INTERPRETER_NAMESPACE = uuid5(NAMESPACE_URL, "quant-foundry:decision-interprete
 
 @dataclass(frozen=True, slots=True)
 class EquitySample:
-    """One close-time valuation sample of the run."""
+    """One close-time valuation sample of the run.
+
+    The snapshot and derived accounting fields are captured at valuation time;
+    the result writer must never reconstruct them from the final portfolio.
+    """
 
     step_sequence: int
     session_date: date
     as_of: datetime
     equity: Decimal | None
     valuation_status: str
+    cash: Decimal | None = None
+    market_value: Decimal | None = None
+    period_return: Decimal | None = None
+    total_pnl: Decimal | None = None
+    cumulative_return: Decimal | None = None
+    drawdown: Decimal | None = None
+    cumulative_fees: Decimal = Decimal("0")
+    portfolio_snapshot: PortfolioSnapshot | None = None
+    time_start: datetime | None = None
+    time_end: datetime | None = None
+    data_cutoff_at: datetime | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class OrderUpdateAuditRecord:
+    """One durable order transition captured by the runtime."""
+
+    order_id: UUID
+    update_sequence: int
+    old_status: str | None
+    new_status: str
+    updated_at: datetime
+    reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -1537,6 +1567,7 @@ class BacktestRunResult:
     universe_scope_snapshot_hash: str | None = None
     universe_eligibility_summary: Mapping[str, Any] = MappingProxyType({})
     final_qualification_results: tuple[Mapping[str, Any], ...] = ()
+    order_updates: tuple[OrderUpdateAuditRecord, ...] = ()
 
     def __post_init__(self) -> None:
         if self.universe_scope_snapshot_hash is not None:
@@ -1633,6 +1664,8 @@ def run_data_session(
     evidence_sink: Callable[[Any], None] | None = None,
     fact_types: Sequence[Any] = (DataCapability.BARS,),
     view_factory: Any | None = None,
+    analysis_coordinator: Any | None = None,
+    analysis_session_factory: Callable[[], Any] | None = None,
 ) -> BacktestRunResult:
     """Drive an existing runner from a preflighted ``DataSession``.
 
@@ -1684,6 +1717,7 @@ def run_data_session(
             fact_types=tuple(fact_types),
         )
         chunk = session.open_chunk(query)
+        chunk_started_at = datetime.now().astimezone()
         # DataChunkSession is explicitly a context manager.  Entering it is
         # part of the consistency boundary (providers may acquire a cursor or
         # transaction there), and guarantees release even when validation or
@@ -1692,8 +1726,25 @@ def run_data_session(
             try:
                 status = chunk.validate_consistency()
                 evidence = chunk.consistency_evidence
+                chunk_steps = tuple(
+                    step
+                    for point in chunk_sessions
+                    for step in by_date.get(point.session_date, ())
+                )
                 if evidence_sink is not None:
                     evidence_sink(evidence)
+                persist_chunk = getattr(
+                    getattr(runner, "_result_sink", None),
+                    "persist_data_chunk_evidence",
+                    None,
+                )
+                if callable(persist_chunk) and chunk_steps:
+                    persist_chunk(
+                        evidence,
+                        time_start=min(step.start_time for step in chunk_steps),
+                        time_end=max(step.end_time for step in chunk_steps),
+                        started_at=chunk_started_at,
+                    )
                 if status.status is not ConsistencyValidation.VALID:
                     raise PhaseExecutionError(
                         run_id=str(getattr(runner, "_run_id", "")),
@@ -1718,7 +1769,17 @@ def run_data_session(
                     )
                 steps.sort(key=lambda item: item.sequence)
                 next_step = axis.at(steps[-1].sequence + 1) if steps[-1].sequence + 1 < len(axis) else None
-                result = runner.run_steps(tuple(steps), next_after_last=next_step)
+                if analysis_coordinator is None:
+                    result = runner.run_steps(
+                        tuple(steps), next_after_last=next_step
+                    )
+                else:
+                    result = analysis_coordinator.execute_steps(
+                        runner,
+                        tuple(steps),
+                        next_after_last=next_step,
+                        session_factory=analysis_session_factory,
+                    )
             finally:
                 if view_factory is not None:
                     unbinder = getattr(view_factory, "unbind_chunk", None)
@@ -2238,6 +2299,14 @@ class DeterministicBacktestRunner:
         # observations and cumulative-fee metrics read this total instead
         # of recomputing fees from fills.
         self._applied_fees_total = Decimal("0")
+        # These baselines are maintained only for immutable result samples.
+        # They keep period return and drawdown tied to the exact valuation
+        # snapshots instead of recomputing them from the final portfolio.
+        self._result_initial_equity = initial_portfolio.account.equity
+        self._result_last_valid_equity: Decimal | None = None
+        self._result_peak_equity: Decimal | None = None
+        self._order_updates: list[OrderUpdateAuditRecord] = []
+        self._order_update_sequences: dict[UUID, int] = {}
         # Cash-dividend state: declarations come from the source with the
         # entitlement still open; the runner freezes each entitlement in
         # its record-date session and credits it in the derived
@@ -4749,6 +4818,67 @@ class DeterministicBacktestRunner:
     # Public API
     # ------------------------------------------------------------------
 
+    def _build_result(
+        self,
+        *,
+        analysis_status: str | None = None,
+        analysis_metrics: Sequence[Any] = (),
+        chunk_sequence: int | None = None,
+        analysis_chunk_token: str | None = None,
+        completed_through_step_sequence: int | None = None,
+    ) -> BacktestRunResult:
+        """Freeze every result projection from the current runtime state."""
+
+        return BacktestRunResult(
+            run_id=self._run_id,
+            events=tuple(self._events),
+            equity_curve=tuple(self._equity_curve),
+            decisions=tuple(self._decisions),
+            order_outcomes=tuple(
+                OrderOutcomeRecord(
+                    order_id=order.order_id,
+                    intent_id=order.intent_id,
+                    instrument_id=order.instrument_id,
+                    side=order.side.value,
+                    quantity=Decimal(str(order.quantity)),
+                    filled_quantity=Decimal(str(order.filled_quantity)),
+                    status=order.status.value,
+                    status_reason=order.status_reason,
+                    submitted_at=order.submitted_at,
+                    valid_from=order.valid_from,
+                    valid_until=order.valid_until,
+                )
+                for order in self._orders
+            ),
+            final_snapshot=self._portfolio.snapshot(),
+            order_updates=tuple(self._order_updates),
+            components=self._component_snapshot(),
+            analysis_status=analysis_status,
+            chunk_sequence=chunk_sequence,
+            analysis_chunk_token=analysis_chunk_token,
+            completed_through_step_sequence=completed_through_step_sequence,
+            analysis_metrics=tuple(analysis_metrics),
+            rule_snapshot_hash=self.rule_snapshot_hash,
+            universe_scope_snapshot_hash=self._universe_scope_snapshot_hash,
+            universe_eligibility_summary=self._universe_audit_summary(),
+            final_qualification_results=tuple(self._final_qualification_results),
+        )
+
+    def _persist_failed_result(self) -> None:
+        """Durably flush the state already determined before a phase failed."""
+
+        if self._result_sink is None:
+            return
+        persist = getattr(self._result_sink, "persist_runtime_failure", None)
+        if not callable(persist):
+            return
+        completed = self._next_expected_step - 1
+        persist(
+            self._build_result(
+                completed_through_step_sequence=completed if completed >= 0 else None,
+            )
+        )
+
     def run(self) -> BacktestRunResult:
         """Run the complete official axis and return the frozen result."""
 
@@ -4878,10 +5008,11 @@ class DeterministicBacktestRunner:
                 self._strategy_started = True
             self._execute_slice(ordered, next_after_last=next_after_last)
         except Exception:
-            # Events already emitted stay on the stream for audit, but the
-            # runner is dead: partial state must never be extended by a
-            # retry that would duplicate decisions, orders, or cash moves.
+            # Events and valuation snapshots already emitted stay queryable;
+            # flush them before re-raising so Supervisor can reconcile a
+            # failed run without losing the completed prefix.
             self._failed = True
+            self._persist_failed_result()
             raise
         self._next_expected_step = ordered[-1].sequence + 1
         if self._next_expected_step >= len(self._axis):
@@ -4897,6 +5028,7 @@ class DeterministicBacktestRunner:
                     ))
             except Exception:
                 self._failed = True
+                self._persist_failed_result()
                 raise
             self._finished = True
         current_chunk_sequence = self._analysis_chunk_sequence
@@ -4950,30 +5082,9 @@ class DeterministicBacktestRunner:
                 if isinstance(session_text, str)
                 else None
             )
-        result = BacktestRunResult(
-            run_id=self._run_id,
-            events=tuple(self._events),
-            equity_curve=tuple(self._equity_curve),
-            decisions=tuple(self._decisions),
-            order_outcomes=tuple(
-                OrderOutcomeRecord(
-                    order_id=order.order_id,
-                    intent_id=order.intent_id,
-                    instrument_id=order.instrument_id,
-                    side=order.side.value,
-                    quantity=Decimal(str(order.quantity)),
-                    filled_quantity=Decimal(str(order.filled_quantity)),
-                    status=order.status.value,
-                    status_reason=order.status_reason,
-                    submitted_at=order.submitted_at,
-                    valid_from=order.valid_from,
-                    valid_until=order.valid_until,
-                )
-                for order in self._orders
-            ),
-            final_snapshot=self._portfolio.snapshot(),
-            components=self._component_snapshot(),
+        result = self._build_result(
             analysis_status=analysis_status,
+            analysis_metrics=analysis_metrics,
             chunk_sequence=(
                 current_chunk_sequence
                 if self._analysis_engine is not None
@@ -4981,13 +5092,6 @@ class DeterministicBacktestRunner:
             ),
             analysis_chunk_token=analysis_chunk_token,
             completed_through_step_sequence=ordered[-1].sequence,
-            analysis_metrics=analysis_metrics,
-            rule_snapshot_hash=self.rule_snapshot_hash,
-            universe_scope_snapshot_hash=self._universe_scope_snapshot_hash,
-            universe_eligibility_summary=self._universe_audit_summary(),
-            final_qualification_results=tuple(
-                self._final_qualification_results
-            ),
         )
         if self._result_sink is not None:
             persist = getattr(self._result_sink, "persist_runtime_result", None)
@@ -5625,6 +5729,8 @@ class DeterministicBacktestRunner:
                 ),
                 effective_from=instruction.effective_from,
                 phase_view=phase_view,
+                step_start_time=step.start_time,
+                step_end_time=step.end_time,
             )
             handler = handlers.get(instruction.phase)
             if handler is None:
@@ -5957,6 +6063,10 @@ class DeterministicBacktestRunner:
         active = [
             order for order in self._orders if order.status is OrderStatus.SUBMITTED
         ]
+        submitted_before_match = tuple(active)
+        statuses_before_match = {
+            order.order_id: order.status.value for order in submitted_before_match
+        }
         if not active:
             self._pending_fills = ()
             return []
@@ -6077,13 +6187,18 @@ class DeterministicBacktestRunner:
                 for item in formal_result.skipped_or_rejected_orders
             )
             unsubmitted_ids = set(formal_result.unsubmitted_order_ids)
-            # A zero-budget buy never became an executable order. Remove it
-            # immediately so the next session cannot match it again.
-            if unsubmitted_ids:
-                self._orders = [
-                    order for order in self._orders
-                    if order.order_id not in unsubmitted_ids
-                ]
+            # A zero-budget buy is a determined rejected order, not a missing
+            # row. Keep it in the final order projection and preserve the
+            # allocation reason in the status transition audit.
+            allocation_reasons = {
+                item.intent_id: getattr(item.allocation_reason_code, "code", None)
+                for item in formal_result.buy_allocation_results
+                if item.unsubmitted_quantity > ZERO
+            }
+            for order in active:
+                if order.order_id in unsubmitted_ids:
+                    order.status = OrderStatus.REJECTED
+                    order.status_reason = allocation_reasons.get(order.intent_id)
         else:
             match_context = MatchContext.from_portfolio(
                 self._portfolio, currency=self._currency
@@ -6164,6 +6279,20 @@ class DeterministicBacktestRunner:
         emitted.extend(
             self._emit_pair(
                 BacktestEventType.ORDER_EXPIRED,
+                {
+                    "order_id": str(order_id),
+                    "reason": reason or "cash_allocation_zero",
+                },
+            )
+            for order_id, reason in (
+                (order.order_id, order.status_reason)
+                for order in submitted_before_match
+                if order.order_id in unsubmitted_ids
+            )
+        )
+        emitted.extend(
+            self._emit_pair(
+                BacktestEventType.ORDER_EXPIRED,
                 {"order_id": str(order_id), "reason": reason},
             )
             for order_id, reason in policy_rejections
@@ -6180,6 +6309,14 @@ class DeterministicBacktestRunner:
                         BacktestEventType.ORDER_EXPIRED,
                         {"order_id": str(order.order_id), "reason": "not_matched_at_open"},
                     )
+                )
+        for order in submitted_before_match:
+            previous_status = statuses_before_match[order.order_id]
+            if order.status.value != previous_status:
+                self._record_order_update(
+                    order,
+                    old_status=previous_status,
+                    updated_at=context.decision_time,
                 )
         self._pending_fills = fills
         return emitted
@@ -6522,6 +6659,9 @@ class DeterministicBacktestRunner:
         # blocked valuation must still hand its fact (with reason, no
         # equity) to the engine so the aborted finalization can report
         # exactly what was determined.
+        # Keep the exact PIT cutoff with the valuation sample even when the
+        # optional analysis engine is disabled.
+        data_cutoff_at = context.data_cutoff or context.decision_time
         if self._analysis_engine is not None:
             from app.backtesting.analysis_inputs import evidence_digest
             from app.backtesting.analyzers import analyzer_decimal_context
@@ -6566,17 +6706,56 @@ class DeterministicBacktestRunner:
             )
             self._analysis_engine.observe_equity(observation)
             self._last_equity_observation = observation
+        current_equity = (
+            snapshot.account.equity
+            if self._portfolio.valuation_status is ValuationStatus.COMPLETE
+            else None
+        )
+        cash = snapshot.account.cash_balances.get(self._currency)
+        period_return = None
+        total_pnl = None
+        cumulative_return = None
+        drawdown = None
+        if current_equity is not None:
+            baseline = (
+                self._result_last_valid_equity
+                if self._result_last_valid_equity is not None
+                else self._result_initial_equity
+            )
+            # A non-positive baseline cannot produce a meaningful return or
+            # drawdown denominator.  Normal admitted runs have positive E0;
+            # keep the raw equity rather than inventing zero metrics for a
+            # malformed legacy fixture.
+            if self._result_initial_equity > ZERO and baseline > ZERO:
+                period_return = current_equity / baseline - Decimal("1")
+                cumulative_return = current_equity / self._result_initial_equity - Decimal("1")
+                total_pnl = current_equity - self._result_initial_equity
+                peak = (
+                    current_equity
+                    if self._result_peak_equity is None
+                    else max(self._result_peak_equity, current_equity)
+                )
+                drawdown = current_equity / peak - Decimal("1")
+                self._result_peak_equity = peak
+            self._result_last_valid_equity = current_equity
         self._equity_curve.append(
             EquitySample(
                 step_sequence=context.step_sequence,
                 session_date=context.session_date,
                 as_of=context.decision_time,
-                equity=(
-                    snapshot.account.equity
-                    if self._portfolio.valuation_status is ValuationStatus.COMPLETE
-                    else None
-                ),
+                equity=current_equity,
                 valuation_status=self._portfolio.valuation_status.value,
+                cash=cash,
+                market_value=valuation.market_value,
+                period_return=period_return,
+                total_pnl=total_pnl,
+                cumulative_return=cumulative_return,
+                drawdown=drawdown,
+                cumulative_fees=self._applied_fees_total,
+                portfolio_snapshot=snapshot,
+                time_start=context.step_start_time,
+                time_end=context.step_end_time,
+                data_cutoff_at=data_cutoff_at,
             )
         )
         if self._portfolio.valuation_status is not ValuationStatus.COMPLETE:
@@ -6890,6 +7069,12 @@ class DeterministicBacktestRunner:
             self._submission_sequences.next_sequence()
         self._orders.extend(staged_orders)
         self._step_order_records.extend(staged_order_records)
+        for order in staged_orders:
+            self._record_order_update(
+                order,
+                old_status=None,
+                updated_at=context.decision_time,
+            )
         hook = getattr(self._strategy, "on_order_update", None)
         if callable(hook):
             # Pass immutable summaries after all orders from this decision
@@ -6990,6 +7175,28 @@ class DeterministicBacktestRunner:
             equity=account.equity,
             positions=tuple(positions),
         )
+
+    def _record_order_update(
+        self,
+        order: Order,
+        *,
+        old_status: str | None,
+        updated_at: datetime,
+    ) -> None:
+        """Capture each runtime order transition exactly once in sequence."""
+
+        sequence = self._order_update_sequences.get(order.order_id, 0)
+        self._order_updates.append(
+            OrderUpdateAuditRecord(
+                order_id=order.order_id,
+                update_sequence=sequence,
+                old_status=old_status,
+                new_status=order.status.value,
+                updated_at=updated_at,
+                reason=order.status_reason,
+            )
+        )
+        self._order_update_sequences[order.order_id] = sequence + 1
 
     def _complete_step(self, step: TimeStep) -> None:
         """Freeze the finished step's order/fill digest for the next decide."""

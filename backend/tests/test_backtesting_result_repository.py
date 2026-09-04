@@ -23,6 +23,7 @@ from app.backtesting.pagination import (
 from app.backtesting.result_models import (
     BacktestDataChunkRecord,
     BacktestDataPreflightRecord,
+    BacktestEventRecord,
     BacktestEquityCurveRecord,
     BacktestFillRecord,
     BacktestMetricRecord,
@@ -81,6 +82,7 @@ def make_order(
 
 RESULT_TABLE_NAMES = [
     "backtest_steps",
+    "backtest_events",
     "backtest_decisions",
     "backtest_orders",
     "backtest_order_updates",
@@ -170,6 +172,32 @@ class ResultRepositoryTestCase(unittest.TestCase):
 
 
 class WriteContractTestCase(ResultRepositoryTestCase):
+    def test_round_trips_events_in_sequence_order(self) -> None:
+        first = BacktestEventRecord(
+            run_id=self.run_id,
+            event_sequence=0,
+            step_sequence=0,
+            phase_sequence=1,
+            phase_key="observe",
+            event_type="quote_observed",
+            event_time=ts(9),
+            payload={"price": "3.85"},
+        )
+        second = BacktestEventRecord(
+            run_id=self.run_id,
+            event_sequence=1,
+            step_sequence=0,
+            phase_sequence=2,
+            phase_key="match",
+            event_type="fill_created",
+            event_time=ts(9, 1),
+            payload={"fill_id": str(uuid4())},
+        )
+        self.repo.append("events", second, first)
+        page = self.repo.read_page("events", run_id=self.run_id)
+        self.assertEqual([row.event_sequence for row in page.items], [0, 1])
+        self.assertEqual(page.items[0].payload["price"], "3.85")
+
     def test_round_trips_orders_and_preserves_display_fields(self) -> None:
         order_id = self.seed_orders(1)[0]
         page = self.repo.read_page("orders", run_id=self.run_id)
