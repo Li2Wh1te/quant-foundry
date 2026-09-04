@@ -4,7 +4,7 @@ root-test:
 	@python3 -m unittest discover -s tests -v
 
 backend-test:
-	@cd backend && uv run python -m unittest discover -v
+	@cd backend && uv run python -m pytest -q tests
 
 frontend-build:
 	@cd frontend && pnpm build

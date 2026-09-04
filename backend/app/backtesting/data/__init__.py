@@ -122,7 +122,7 @@ _SUBMODULE_EXPORTS: dict[str, str] = {
     "calendar_snapshot_fingerprint": "reports",
     "data_preflight_hash_v2": "reports",
     # provider-neutral consistency scope and bounded resource helpers
-    "ConsistencyScope": "consistency",
+    "ConsistencyTokenScope": "consistency",
     "build_consistency_scope": "consistency",
     "short_read_context": "consistency",
     "BoundedChunkCache": "consistency",
@@ -638,6 +638,7 @@ __all__ = [
     "DataConsistencyContext",
     "DataConsistencyEvidence",
     "ConsistencyTokenStatus",
+    "ConsistencyTokenScope",
     "CoverageEnvelope",
     "DataProvider",
     "DataSession",

@@ -29,6 +29,7 @@ _ENTRY_POINTS = (
     # Whole packages.
     "import app.backtesting",
     "import app.backtesting.data",
+    "from app.backtesting.data import ConsistencyTokenScope",
 )
 
 
@@ -59,6 +60,7 @@ class TestImportOrderIndependence(unittest.TestCase):
                     "assert d.DATA_CONTRACT_VERSION == 1; "
                     "assert d.MAX_LOOKBACK_SESSIONS == 512; "
                     "assert 'CoverageEnvelope' in dir(d); "
+                    "assert d.ConsistencyTokenScope.__name__ == 'ConsistencyTokenScope'; "
                     "print('ok')"
                 ),
             ],

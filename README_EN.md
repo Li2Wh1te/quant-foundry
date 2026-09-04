@@ -283,7 +283,7 @@ Vite proxies API requests to `http://127.0.0.1:8000`. Run Backend tests and the 
 build with:
 
 ```bash
-cd backend && uv run python -m unittest discover -v
+cd backend && uv run python -m pytest -q tests
 cd frontend && pnpm build
 ```
 

@@ -269,7 +269,7 @@ pnpm dev
 Vite 会将 API 请求代理到 `http://127.0.0.1:8000`。运行后端测试和前端生产构建：
 
 ```bash
-cd backend && uv run python -m unittest discover -v
+cd backend && uv run python -m pytest -q tests
 cd frontend && pnpm build
 ```
 

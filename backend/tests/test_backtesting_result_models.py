@@ -305,6 +305,9 @@ class GeneralityContractTestCase(unittest.TestCase):
         from sqlalchemy.dialects import postgresql
         from sqlalchemy.schema import CreateTable
 
+        # Register the run root before compiling the result table's foreign key;
+        # this test must not depend on another test's import order.
+        import app.models  # noqa: F401
         from app.backtesting.result_records import BacktestEquityCurveRecord
 
         ddl = str(
