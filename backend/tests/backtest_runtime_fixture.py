@@ -438,17 +438,26 @@ def build_runner(
             },
             analyzer_engine=analysis_engine,
         )
+    if interpreter is None:
+        if rule_snapshot_bundle is not None:
+            # Formal snapshot-backed runs must exercise the production-selected
+            # interpreter instead of silently falling back to the legacy test
+            # interpreter with a different call contract and validation rules.
+            from app.strategy_protocol.interpretation import (
+                LongOnlyTargetWeightsInterpreter,
+            )
+
+            interpreter = LongOnlyTargetWeightsInterpreter()
+        else:
+            interpreter = TargetWeightsInterpreter(board_lot=100)
+
     return DeterministicBacktestRunner(
         run_id=run_id,
         axis=axis,
         timing_policy=_timing_policy(),
         view_factory=view_factory,
         strategy=strategy,
-        interpreter=(
-            interpreter
-            if interpreter is not None
-            else TargetWeightsInterpreter(board_lot=100)
-        ),
+        interpreter=interpreter,
         execution_model=execution_model,
         accounting=accounting,
         initial_portfolio=portfolio,

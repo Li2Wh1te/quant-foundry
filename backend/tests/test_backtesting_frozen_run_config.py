@@ -125,6 +125,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
     assert snapshot["spec"]["warmup_sessions"] == 12
     assert snapshot["strategy"]["parameters"] == {"window": 20}
     assert snapshot["account"]["fee_schedule_version"] == 4
+    assert snapshot["components"]["decision_interpreter"]["key"] == "long_only_target_weights"
     assert snapshot["components"]["slippage_model"]["key"] == "none"
     assert canonical_hash(snapshot) == binding.config_hash
 

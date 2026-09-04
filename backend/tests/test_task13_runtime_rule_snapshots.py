@@ -276,6 +276,35 @@ class RuntimeSnapshotAcceptanceTests(unittest.TestCase):
         fills = [event for event in result.events if event.event_type == "fill_created"]
         self.assertEqual(fills[0].payload["execution_price"], Decimal("100.05"))
 
+    def test_formal_runtime_executes_the_selected_long_only_interpreter(self) -> None:
+        days = [date(2026, 8, 3), date(2026, 8, 4)]
+        runner = build_runner(
+            run_id="runtime-selected-interpreter",
+            axis=build_axis(days),
+            market_data=DictMarketData(
+                {day: {INSTRUMENT_ID: ("100.00", "100.00")} for day in days}
+            ),
+            strategy_view=CountingStrategyView(
+                {day: "100.00" for day in days}
+            ),
+            # The legacy interpreter would size this leveraged target. The
+            # selected v1 formal interpreter must reject it as a whole.
+            strategy=ScriptedStrategy({0: {str(INSTRUMENT_ID): "2"}}),
+            initial_cash="50000",
+            rule_snapshot_bundle=_bundle(run_id=None),
+        )
+
+        result = runner.run()
+
+        self.assertEqual(
+            result.components["decision_interpreter"]["key"],
+            "long_only_target_weights",
+        )
+        self.assertEqual(result.order_outcomes, ())
+        self.assertFalse(
+            any(event.event_type == "order_submitted" for event in result.events)
+        )
+
     def test_formal_runtime_uses_multiplier_for_sizing_matching_and_valuation(self) -> None:
         days = [date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)]
         runner = build_runner(
