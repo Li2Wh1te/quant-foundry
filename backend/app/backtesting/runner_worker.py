@@ -18,6 +18,7 @@ from types import ModuleType
 from typing import Any, Callable, Mapping
 from uuid import UUID
 
+from .runner_failure import build_failure_evidence
 from .runner_integrity import IntegrityEvidence
 from .runner_process import (
     HANDSHAKE_PROTOCOL,
@@ -64,6 +65,7 @@ class WorkerExecutionResult:
     failure_phase: str | None = None
     failure_type: str | None = None
     exit_code: int | None = None
+    failure_evidence: Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if self.category not in DETERMINATE_CATEGORIES:
@@ -313,12 +315,19 @@ def _production_callbacks(run_id: UUID, launch_id: UUID, expected_config_hash: s
     def write_resource_evidence(payload: Mapping[str, Any]):
         from sqlalchemy import update
         with Session(engine) as session:
-            session.execute(
+            changed = session.execute(
                 update(BacktestRunRecord)
-                .where(BacktestRunRecord.id == run_id, BacktestRunRecord.launch_id == launch_id)
+                .where(
+                    BacktestRunRecord.id == run_id,
+                    BacktestRunRecord.launch_id == launch_id,
+                    BacktestRunRecord.status.in_(
+                        ("starting", "running", "cancel_requested")
+                    ),
+                )
                 .values(resource_limit_evidence=dict(payload))
-            )
+            ).rowcount
             session.commit()
+            return bool(changed)
 
     def execute_one(binding, *, context, progress_reporter=None, signal_state=None):
         del signal_state
@@ -351,11 +360,56 @@ def _production_callbacks(run_id: UUID, launch_id: UUID, expected_config_hash: s
                 launch_id=launch_id,
             )
             writer = BacktestResultPersistenceService(session, context)
-            writer.record_completion_marker(payload, exit_code=0)
+            marker_category = str(payload.get("declared_category", "failed"))
+            exit_code = CATEGORY_TO_EXIT_CODE.get(marker_category)
+            if exit_code is None:
+                return False
+            writer.record_completion_marker(payload, exit_code=exit_code)
             session.commit()
             return True
 
-    return load_binding, execute_one, write_handshake, persist_results, write_marker, write_resource_evidence
+    def write_failure_evidence(payload: Mapping[str, Any]):
+        """Persist diagnostics only; terminal status remains Supervisor-owned."""
+
+        from sqlalchemy import update
+
+        with Session(engine) as session:
+            row = session.get(BacktestRunRecord, run_id)
+            if row is None or row.launch_id != launch_id:
+                return False
+            existing = row.failure_evidence
+            normalized = dict(payload)
+            if existing is not None and existing != normalized:
+                return False
+            changed = session.execute(
+                update(BacktestRunRecord)
+                .where(
+                    BacktestRunRecord.id == run_id,
+                    BacktestRunRecord.launch_id == launch_id,
+                    BacktestRunRecord.status.in_(
+                        ("starting", "running", "cancel_requested")
+                    ),
+                    BacktestRunRecord.failure_evidence.is_(None),
+                )
+                .values(
+                    failure_evidence=normalized,
+                    failure_phase=normalized.get("failure_phase"),
+                    failure_type=normalized.get("error_type"),
+                    error_message=normalized.get("message"),
+                )
+            ).rowcount
+            session.commit()
+            return bool(changed) or existing == normalized
+
+    return (
+        load_binding,
+        execute_one,
+        write_handshake,
+        persist_results,
+        write_marker,
+        write_resource_evidence,
+        write_failure_evidence,
+    )
 
 
 def run_worker(
@@ -373,6 +427,7 @@ def run_worker(
     progress_reporter: Any = None,
     signal_state: WorkerSignalState | None = None,
     write_resource_evidence: Callable[[Mapping[str, Any]], Any] | None = None,
+    write_failure_evidence: Callable[[Mapping[str, Any]], Any] | None = None,
 ) -> int:
     """Execute one injected frozen binding and emit only worker-owned evidence.
 
@@ -386,7 +441,40 @@ def run_worker(
         parsed_launch_id = UUID(str(launch_id))
     except (TypeError, ValueError) as exc:
         raise WorkerHandshakeError("run_id and launch_id must be UUIDs") from exc
+    def record_failure(
+        exc: BaseException, *, phase: str = "runner_worker"
+    ) -> Mapping[str, Any] | None:
+        payload = build_failure_evidence(exc, default_phase=phase)
+        if write_failure_evidence is None:
+            return payload
+        try:
+            written = write_failure_evidence(payload)
+            if written is False:
+                logger.warning(
+                    "回测 worker 失败证据未写入，Supervisor 将保留不确定终态。",
+                    extra={
+                        "event": "backtest_worker_failure_evidence_unavailable",
+                        "run_id": str(parsed_run_id),
+                        "launch_id": str(parsed_launch_id),
+                        "failure_evidence": payload,
+                    },
+                )
+        except Exception as write_exc:
+            logger.error(
+                "回测 worker 失败证据写入异常，Supervisor 将保留不确定终态。",
+                extra={
+                    "event": "backtest_worker_failure_evidence_write_failed",
+                    "run_id": str(parsed_run_id),
+                    "launch_id": str(parsed_launch_id),
+                    "failure_type": type(write_exc).__name__,
+                    "failure_evidence": payload,
+                },
+            )
+        return payload
+
     if load_binding is None or execute is None or persist_results is None or write_marker is None:
+        error = WorkerDependencyUnavailable("worker dependencies are not configured")
+        failure_payload = record_failure(error, phase="worker_bootstrap")
         logger.error(
             "回测 worker 依赖未配置，运行已安全拒绝且未写入伪造完成标记。",
             extra={
@@ -394,61 +482,88 @@ def run_worker(
                 "run_id": str(parsed_run_id),
                 "launch_id": str(parsed_launch_id),
                 "exit_code": CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value],
+                "failure_evidence": failure_payload,
             },
         )
         return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
 
-    binding = load_binding(parsed_run_id)
-    binding_run_id = _identity_value(binding, "run_id", _identity_value(binding, "id"))
-    if binding_run_id is not None and str(binding_run_id) != str(parsed_run_id):
-        raise WorkerDependencyUnavailable("frozen binding run_id does not match launch")
-    binding_launch_id = _identity_value(binding, "launch_id")
-    if binding_launch_id is not None and str(binding_launch_id) != str(parsed_launch_id):
-        raise WorkerDependencyUnavailable("frozen binding launch_id does not match launch")
-    binding_status = _identity_value(binding, "status")
-    if binding_status is not None and binding_status not in {
-        "starting",
-        "running",
-        "cancel_requested",
-    }:
-        raise WorkerDependencyUnavailable("worker launch is not in an executable state")
-    config_hash = _identity_value(binding, "config_hash")
-    if not isinstance(config_hash, str) or len(config_hash) != 64:
-        raise WorkerDependencyUnavailable("frozen binding config_hash is missing")
-    if expected_config_hash is not None and config_hash != expected_config_hash:
-        raise WorkerDependencyUnavailable("frozen binding config_hash does not match launch evidence")
+    try:
+        binding = load_binding(parsed_run_id)
+        binding_run_id = _identity_value(binding, "run_id", _identity_value(binding, "id"))
+        if binding_run_id is not None and str(binding_run_id) != str(parsed_run_id):
+            raise WorkerDependencyUnavailable("frozen binding run_id does not match launch")
+        binding_launch_id = _identity_value(binding, "launch_id")
+        if binding_launch_id is not None and str(binding_launch_id) != str(parsed_launch_id):
+            raise WorkerDependencyUnavailable("frozen binding launch_id does not match launch")
+        binding_status = _identity_value(binding, "status")
+        if binding_status is not None and binding_status not in {
+            "starting",
+            "running",
+            "cancel_requested",
+        }:
+            raise WorkerDependencyUnavailable("worker launch is not in an executable state")
+        config_hash = _identity_value(binding, "config_hash")
+        if not isinstance(config_hash, str) or len(config_hash) != 64:
+            raise WorkerDependencyUnavailable("frozen binding config_hash is missing")
+        if expected_config_hash is not None and config_hash != expected_config_hash:
+            raise WorkerDependencyUnavailable("frozen binding config_hash does not match launch evidence")
 
-    # Apply resource limits in this process only; the launcher records the
-    # platform evidence separately.  ``RLIMIT_AS`` is best effort and never a
-    # reason to claim a limit was applied when the platform lacks it.
-    resource_evidence = apply_memory_limit(memory_limit_mib)
-    logger.info(
-        "回测 worker 资源限制已记录，平台能力按实际结果保留。",
-        extra={
-            "event": "backtest_worker_resource_limit",
-            "run_id": str(parsed_run_id),
-            "resource_limit_evidence": resource_evidence.as_dict(),
-        },
-    )
-    if write_resource_evidence is not None:
-        write_resource_evidence(resource_evidence.as_dict())
+        # Apply resource limits in this process only; the launcher records the
+        # platform evidence separately.  ``RLIMIT_AS`` is never reported as
+        # applied until this call returns an applied evidence object.
+        resource_evidence = apply_memory_limit(memory_limit_mib)
+        logger.info(
+            "回测 worker 资源限制已记录，平台能力按实际结果保留。",
+            extra={
+                "event": "backtest_worker_resource_limit",
+                "run_id": str(parsed_run_id),
+                "resource_limit_evidence": resource_evidence.as_dict(),
+            },
+        )
+        if write_resource_evidence is not None:
+            written = write_resource_evidence(resource_evidence.as_dict())
+            if written is False:
+                raise WorkerDependencyUnavailable(
+                    "worker resource-limit evidence was not persisted"
+                )
+        if (
+            memory_limit_mib is not None
+            and resource_evidence.supported
+            and not resource_evidence.applied
+        ):
+            raise WorkerDependencyUnavailable(
+                "configured address-space limit was not applied"
+            )
 
-    state = install_signal_handlers(signal_state)
-    handshake = build_handshake(
-        run_id=parsed_run_id,
-        launch_id=parsed_launch_id,
-        worker_id=worker_id or f"backtest-worker:{parsed_run_id}",
-        observed_at=datetime.now(UTC),
-    )
-    write_worker_handshake(write_handshake, handshake)
-    context = WorkerContext(
-        parsed_run_id,
-        parsed_launch_id,
-        config_hash,
-        worker_id or f"backtest-worker:{parsed_run_id}",
-        handshake,
-        resource_evidence,
-    )
+        state = install_signal_handlers(signal_state)
+        handshake = build_handshake(
+            run_id=parsed_run_id,
+            launch_id=parsed_launch_id,
+            worker_id=worker_id or f"backtest-worker:{parsed_run_id}",
+            observed_at=datetime.now(UTC),
+        )
+        write_worker_handshake(write_handshake, handshake)
+        context = WorkerContext(
+            parsed_run_id,
+            parsed_launch_id,
+            config_hash,
+            worker_id or f"backtest-worker:{parsed_run_id}",
+            handshake,
+            resource_evidence,
+        )
+    except Exception as exc:
+        failure_payload = record_failure(exc, phase="worker_bootstrap")
+        logger.error(
+            "回测 worker 启动阶段失败，未直接写入 Supervisor 终态。",
+            extra={
+                "event": "backtest_worker_failed",
+                "run_id": str(parsed_run_id),
+                "launch_id": str(parsed_launch_id),
+                "failure_type": type(exc).__name__,
+                "failure_evidence": failure_payload,
+            },
+        )
+        return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
 
     reporter_started = False
     try:
@@ -478,11 +593,38 @@ def run_worker(
                 raw_result.get("failure_phase"),
                 raw_result.get("failure_type"),
                 raw_result.get("exit_code"),
+                raw_result.get("failure_evidence"),
             )
         else:
             raise WorkerDependencyUnavailable("worker runtime returned no protocol result")
         if state.cancellation_requested and result.category == ExitCategory.SUCCEEDED.value:
-            raise WorkerDependencyUnavailable("worker received cancellation before successful completion")
+            # Cooperative cancellation is a determinate protocol outcome once
+            # the already-produced result transaction is committed; the
+            # Supervisor still owns the final root-state write.
+            result = WorkerExecutionResult(
+                ExitCategory.CANCELLED.value,
+                result.integrity,
+                "worker_signal",
+                "CancellationRequested",
+                CATEGORY_TO_EXIT_CODE[ExitCategory.CANCELLED.value],
+            )
+        if result.category != ExitCategory.SUCCEEDED.value and result.category != ExitCategory.CANCELLED.value and write_failure_evidence is not None:
+            failure_payload = dict(
+                result.failure_evidence
+                or {
+                    "failure_phase": result.failure_phase,
+                    "failure_step": None,
+                    "error_type": result.failure_type,
+                    "message": result.failure_type or "worker execution failed",
+                    "source_line": None,
+                    "technical_detail": None,
+                    "desensitized": True,
+                }
+            )
+            if write_failure_evidence(failure_payload) is False:
+                raise WorkerDependencyUnavailable(
+                    "worker failure evidence was not persisted"
+                )
         # ``False`` is an explicit transaction-failed signal.  ``None`` is
         # retained as a compatible success value for existing repository
         # adapters whose commit method has no return value.
@@ -541,23 +683,28 @@ def run_worker(
         if reporter_started:
             try:
                 _stop_progress_reporter(progress_reporter)
-            except Exception:
-                logger.warning(
+            except Exception as shutdown_exc:
+                logger.error(
                     "回测 worker 关闭进度报告器失败，继续保留未知终态证据。",
-                    exc_info=True,
                     extra={
                         "event": "backtest_worker_progress_shutdown_failed",
                         "run_id": str(parsed_run_id),
                         "launch_id": str(parsed_launch_id),
+                        "failure_type": type(shutdown_exc).__name__,
+                        "failure_evidence": build_failure_evidence(
+                            shutdown_exc, default_phase="worker_shutdown"
+                        ),
                     },
                 )
-        logger.exception(
+        failure_payload = record_failure(exc, phase="backtest_execution")
+        logger.error(
             "回测 worker 执行失败，未直接写入 Supervisor 终态。",
             extra={
                 "event": "backtest_worker_failed",
                 "run_id": str(parsed_run_id),
                 "launch_id": str(parsed_launch_id),
                 "failure_type": type(exc).__name__,
+                "failure_evidence": failure_payload,
             },
         )
         return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
@@ -601,6 +748,7 @@ def main(argv: list[str] | None = None) -> int:
             return CATEGORY_TO_EXIT_CODE[ExitCategory.FAILED.value]
         expected_hash = row.config_hash
 
+    callbacks = _production_callbacks(run_id, launch_id, expected_hash)
     (
         load_binding,
         execute,
@@ -608,7 +756,9 @@ def main(argv: list[str] | None = None) -> int:
         persist_results,
         write_marker,
         write_resource_evidence,
-    ) = _production_callbacks(run_id, launch_id, expected_hash)
+        *optional_callbacks,
+    ) = callbacks
+    write_failure_evidence = optional_callbacks[0] if optional_callbacks else None
     settings = get_settings()
     progress_persistence = DatabaseProgressPersistence(lambda: Session(engine))
     reporter = ProgressReporter(
@@ -634,6 +784,7 @@ def main(argv: list[str] | None = None) -> int:
         memory_limit_mib=settings.backtest_memory_limit_mib,
         progress_reporter=reporter,
         write_resource_evidence=write_resource_evidence,
+        write_failure_evidence=write_failure_evidence,
     )
 
 

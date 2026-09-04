@@ -89,6 +89,48 @@ def test_worker_stops_reporter_after_result_commit_before_marker() -> None:
     ]
 
 
+def test_worker_failure_persists_locatable_evidence_without_writing_terminal_status() -> None:
+    run_id = uuid4()
+    launch_id = uuid4()
+    config_hash = "a" * 64
+    failures = []
+
+    def execute(_binding, **_kwargs):
+        raise ValueError("token=secret-value")
+
+    with patch(
+        "app.backtesting.runner_worker.build_handshake",
+        return_value=WorkerHandshake(
+            str(run_id), str(launch_id), 1, "start", 1,
+            "runner_handshake@1", "worker", datetime.now(UTC),
+        ),
+    ):
+        code = run_worker(
+            run_id,
+            launch_id,
+            load_binding=lambda key: {
+                "run_id": key,
+                "launch_id": launch_id,
+                "status": "running",
+                "config_hash": config_hash,
+            },
+            execute=execute,
+            write_handshake=lambda _value: None,
+            persist_results=lambda _result: True,
+            write_marker=lambda _marker: (_ for _ in ()).throw(
+                AssertionError("a raised runtime must not write a marker")
+            ),
+            write_failure_evidence=lambda evidence: failures.append(evidence) or True,
+            memory_limit_mib=None,
+        )
+
+    assert code == 10
+    assert len(failures) == 1
+    assert failures[0]["error_type"] == "ValueError"
+    assert failures[0]["desensitized"] is True
+    assert "secret-value" not in failures[0]["technical_detail"]
+
+
 def test_worker_marker_write_failure_does_not_report_success_or_write_status() -> None:
     """A failed marker CAS must leave final-state ownership with Supervisor."""
 

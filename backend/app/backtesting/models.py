@@ -255,6 +255,7 @@ class BacktestRunRecord(Base):
     cancel_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     termination_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     termination_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    forced_termination: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
     completion_marker: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     runner_exit_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
     runner_exit_code_protocol: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -266,6 +267,10 @@ class BacktestRunRecord(Base):
     stdout_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
     stdout_digest: Mapped[str | None] = mapped_column(String(128), nullable=True)
     stdout_truncated: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # Keep the bounded excerpt and cap metadata separate from the compact
+    # columns above; operators need the original diagnostic evidence without
+    # turning the run root into an unbounded log sink.
+    stdout_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     resource_limit_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     runner_config_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     completion_marker_protocol: Mapped[str | None] = mapped_column(String(64), nullable=True)
@@ -275,6 +280,9 @@ class BacktestRunRecord(Base):
     failure_phase: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_type: Mapped[str | None] = mapped_column(String(128), nullable=True)
     error_message: Mapped[str | None] = mapped_column(String(2000), nullable=True)
+    # Bounded, desensitized failure location and traceback evidence produced
+    # by the isolated Worker; terminal status remains Supervisor-owned.
+    failure_evidence: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     recovery_action: Mapped[str | None] = mapped_column(String(128), nullable=True)
     recovery_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     recovery_process_state: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

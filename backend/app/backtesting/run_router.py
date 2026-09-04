@@ -382,6 +382,9 @@ def _response(run: BacktestRun | object) -> RunResponse:
         config = dict(binding.config)
     data_request = getattr(run, "data_request", None) or {}
     behavior_versions = getattr(run, "behavior_versions", None) or {}
+    failure_evidence = getattr(run, "failure_evidence", None)
+    if not isinstance(failure_evidence, Mapping):
+        failure_evidence = {}
     raw_current_step = getattr(run, "current_step", None)
     values = {
         "run_id": _uuid_or_none(run_id),
@@ -441,6 +444,7 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "cancel_requested": bool(getattr(run, "cancel_requested", False)),
         "termination_requested_at": getattr(run, "termination_requested_at", None),
         "termination_reason": getattr(run, "termination_reason", None),
+        "forced_termination": bool(getattr(run, "forced_termination", False)),
         "recovery_observed_at": getattr(run, "recovery_observed_at", None),
         "recovery_action": getattr(run, "recovery_action", None),
         "recovery_process_state": getattr(run, "recovery_process_state", None),
@@ -462,12 +466,20 @@ def _response(run: BacktestRun | object) -> RunResponse:
         ),
         "result_integrity_status": getattr(run, "result_integrity_status", None),
         "terminal_decision_reason": getattr(run, "terminal_decision_reason", None),
-        "failure_phase": getattr(run, "failure_phase", None),
-        "failure_type": getattr(run, "failure_type", None),
-        "error_message": getattr(run, "error_message", None),
+        "failure_phase": getattr(run, "failure_phase", None)
+        or failure_evidence.get("failure_phase"),
+        "failure_step": failure_evidence.get("failure_step"),
+        "failure_type": getattr(run, "failure_type", None)
+        or failure_evidence.get("error_type"),
+        "source_line": failure_evidence.get("source_line"),
+        "technical_detail": failure_evidence.get("technical_detail"),
+        "error_message": getattr(run, "error_message", None)
+        or failure_evidence.get("message"),
+        "failure_evidence": getattr(run, "failure_evidence", None),
         "stdout_bytes": getattr(run, "stdout_bytes", None),
         "stdout_digest": getattr(run, "stdout_digest", None),
         "stdout_truncated": getattr(run, "stdout_truncated", None),
+        "stdout_evidence": getattr(run, "stdout_evidence", None),
         "resource_limit_evidence": getattr(run, "resource_limit_evidence", None),
         "runner_config_evidence": getattr(run, "runner_config_evidence", None),
         "completion_marker": getattr(run, "completion_marker", None),

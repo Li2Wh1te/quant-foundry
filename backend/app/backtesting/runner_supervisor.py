@@ -18,6 +18,7 @@ from typing import Any, Callable, Iterable, Mapping
 from uuid import UUID, uuid4
 
 from . import runner_process as process_api
+from .runner_failure import build_failure_evidence
 from .runner_integrity import ResultIntegrityChecker
 from .runner_process import LaunchIdentity, StdoutCapture, WorkerProcessLauncher
 from .runner_progress import is_lost_heartbeat
@@ -82,6 +83,27 @@ def _call_repository(repository: Any, names: tuple[str, ...], *args: Any, **kwar
         if callable(method):
             return method(*args, **kwargs)
     return None
+
+
+def _stored_forced_termination(row: Any) -> bool:
+    """Recover force-kill evidence after the previous Supervisor disappeared."""
+
+    if bool(_row_value(row, "forced_termination", False)):
+        return True
+    for field in ("runner_exit_report", "recovery_process_state"):
+        value = _row_value(row, field)
+        if isinstance(value, Mapping) and bool(
+            value.get("forced_termination")
+            or value.get("force_kill_sent")
+            or value.get("forced")
+        ):
+            return True
+    return _row_value(row, "termination_reason") in {
+        "cancel_grace_expired",
+        "wall_clock_timeout_grace_expired",
+        "runner_lost_heartbeat_grace_expired",
+        "recovery_orphan_terminated",
+    }
 
 
 @dataclass(frozen=True, slots=True)
@@ -714,29 +736,32 @@ class RunnerSupervisor:
         launch_id = uuid4()
         self._mark_starting(row, launch_id)
         _set_row_value(row, "runner_config_evidence", self.settings.as_dict())
+        launch_resource_evidence: Mapping[str, Any] | None = None
         evidence_factory = getattr(self.launcher, "resource_limit_evidence", None)
         if callable(evidence_factory):
             try:
                 resource_evidence = evidence_factory()
-                _set_row_value(
-                    row,
-                    "resource_limit_evidence",
+                launch_resource_evidence = (
                     resource_evidence.as_dict()
                     if hasattr(resource_evidence, "as_dict")
-                    else resource_evidence,
+                    else dict(resource_evidence)
+                    if isinstance(resource_evidence, Mapping)
+                    else None
                 )
-            except Exception as exc:
                 _set_row_value(
                     row,
                     "resource_limit_evidence",
-                    {
-                        "resource": "address_space_mib",
-                        "requested": self.settings.memory_limit_mib,
-                        "supported": False,
-                        "applied": False,
-                        "error": f"{type(exc).__name__}: {str(exc)[:240]}",
-                    },
+                    launch_resource_evidence,
                 )
+            except Exception as exc:
+                launch_resource_evidence = {
+                    "resource": "address_space_mib",
+                    "requested": self.settings.memory_limit_mib,
+                    "supported": False,
+                    "applied": False,
+                    "error": f"{type(exc).__name__}: {str(exc)[:240]}",
+                }
+                _set_row_value(row, "resource_limit_evidence", launch_resource_evidence)
         self._commit()
         try:
             process = self.launcher.start(run_id, launch_id)
@@ -746,6 +771,16 @@ class RunnerSupervisor:
                     process, run_id=run_id, launch_id=launch_id
                 )
         except Exception as exc:
+            failed_resource_evidence = (
+                dict(launch_resource_evidence)
+                if launch_resource_evidence is not None
+                else None
+            )
+            if failed_resource_evidence is not None:
+                failed_resource_evidence["applied"] = False
+                failed_resource_evidence["error"] = (
+                    f"worker_launch_failed: {type(exc).__name__}: {str(exc)[:200]}"
+                )
             self._write_terminal(
                 run_id,
                 status="indeterminate",
@@ -757,6 +792,10 @@ class RunnerSupervisor:
                 failure_type=type(exc).__name__,
                 forced=False,
                 recovery_action=None,
+                failure_evidence=build_failure_evidence(
+                    exc, default_phase="runner_supervisor_startup"
+                ),
+                resource_limit_evidence=failed_resource_evidence,
             )
             self._log(
                 logging.ERROR,
@@ -875,6 +914,8 @@ class RunnerSupervisor:
             if _row_value(row, "termination_requested_at") is None:
                 _set_row_value(row, "termination_requested_at", self.clock())
             _set_row_value(row, "termination_reason", handle.termination_reason)
+            if force:
+                _set_row_value(row, "forced_termination", True)
             self._commit()
         self._record_termination_request(handle, reason)
         if force:
@@ -892,6 +933,8 @@ class RunnerSupervisor:
                 "回测 worker 已收到终止请求。",
                 run_id=str(handle.run_id),
                 launch_id=str(handle.launch_id),
+                child_pid=handle.identity.pid,
+                process_group_id=handle.identity.process_group_id,
                 termination_reason=reason,
                 forced=force,
             )
@@ -1058,6 +1101,34 @@ class RunnerSupervisor:
             return ResultIntegrityChecker(provider, config_hash=config_hash).verify(marker)
         return None
 
+    def _log_worker_exited(
+        self,
+        run_id: UUID | str,
+        *,
+        launch_id: UUID | str | None,
+        exit_code: int | None,
+        child_pid: int | None,
+        process_group_id: int | None,
+        recovery: bool = False,
+    ) -> None:
+        """Emit one operator-visible event for every observed child exit."""
+
+        classification = map_runner_exit_code(exit_code)
+        self._log(
+            logging.INFO if classification.mapped else logging.WARNING,
+            "backtest_worker_exited",
+            "回测 worker 子进程已退出，Supervisor 正在核对退出码和完成证据。",
+            run_id=str(run_id),
+            launch_id=str(launch_id) if launch_id is not None else None,
+            child_pid=child_pid,
+            process_group_id=process_group_id,
+            raw_exit_code=exit_code,
+            signal_number=classification.signal_number,
+            exit_category=classification.category,
+            exit_code_protocol=classification.protocol_version,
+            recovery=recovery,
+        )
+
     def _reconcile_handle(self, handle: ChildHandle) -> str | None:
         self._require_lock()
         self._observe_output(handle)
@@ -1066,6 +1137,13 @@ class RunnerSupervisor:
         if exit_code is None:
             return None
         row = self._get(handle.run_id)
+        self._log_worker_exited(
+            handle.run_id,
+            launch_id=handle.launch_id,
+            exit_code=exit_code,
+            child_pid=handle.identity.pid,
+            process_group_id=handle.identity.process_group_id,
+        )
         marker = _row_value(row, "completion_marker") if row is not None else None
         marker_validation = validate_completion_marker(
             marker,
@@ -1172,6 +1250,9 @@ class RunnerSupervisor:
             reason=reason,
             failure_phase=handle.failure_phase,
             failure_type=("RunnerLostHeartbeat" if handle.failure_phase == "runner_lost_heartbeat" else None),
+            failure_evidence=(
+                _row_value(row, "failure_evidence") if row is not None else None
+            ),
             forced=handle.forced,
             recovery_action="terminate_no_restart" if handle.failure_phase else None,
             stdout_evidence=handle.capture.evidence(),
@@ -1230,7 +1311,9 @@ class RunnerSupervisor:
         forced: bool,
         recovery_action: str | None,
         failure_type: str | None = None,
+        failure_evidence: Mapping[str, Any] | None = None,
         stdout_evidence: Mapping[str, Any] | None = None,
+        resource_limit_evidence: Mapping[str, Any] | None = None,
         completion_marker_validation: Mapping[str, Any] | None = None,
         recovery_observed_at: datetime | None = None,
         recovery_process_state: Mapping[str, Any] | None = None,
@@ -1255,6 +1338,47 @@ class RunnerSupervisor:
                 config_hash=_row_value(row, "config_hash") if row is not None else None,
             )
             validation_dict = {"valid": validation.valid, "errors": list(validation.errors)}
+        stored_failure_evidence = _row_value(row, "failure_evidence") if row is not None else None
+        failure_payload = dict(
+            failure_evidence
+            or stored_failure_evidence
+            or {}
+        )
+        if not failure_payload and isinstance(marker, Mapping):
+            marker_phase = marker.get("failure_phase")
+            marker_type = marker.get("failure_type")
+            if marker_phase is not None or marker_type is not None:
+                failure_payload = {
+                    "failure_phase": marker_phase,
+                    "failure_step": None,
+                    "error_type": marker_type,
+                    "message": reason,
+                    "source_line": None,
+                    "technical_detail": None,
+                    "desensitized": True,
+                }
+        if not failure_payload and (failure_phase is not None or failure_type is not None):
+            failure_payload = {
+                "failure_phase": failure_phase,
+                "failure_step": None,
+                "error_type": failure_type,
+                "message": reason,
+                "source_line": None,
+                "technical_detail": None,
+                "desensitized": True,
+            }
+        failure_phase = failure_phase or failure_payload.get("failure_phase")
+        failure_type = failure_type or failure_payload.get("error_type")
+        stored_stdout_evidence = _row_value(row, "stdout_evidence") if row is not None else None
+        stdout_payload = dict(stdout_evidence or stored_stdout_evidence or {})
+        stored_resource_evidence = _row_value(row, "resource_limit_evidence") if row is not None else None
+        resource_payload = dict(resource_limit_evidence or stored_resource_evidence or {})
+        if (
+            resource_payload.get("supported")
+            and not resource_payload.get("applied")
+            and resource_payload.get("error") == "awaiting_worker_confirmation"
+        ):
+            resource_payload["error"] = "worker_resource_evidence_unavailable"
         exit_evidence = (
             map_runner_exit_code(
                 exit_code,
@@ -1263,6 +1387,15 @@ class RunnerSupervisor:
             if exit_code is not None
             else None
         )
+        exit_report = exit_evidence.as_dict() if exit_evidence is not None else {
+            "protocol_version": EXIT_CODE_PROTOCOL,
+            "raw_exit_code": None,
+            "signal_number": None,
+            "category": None,
+            "mapped": False,
+            "reason": "missing_exit_code",
+        }
+        exit_report["forced_termination"] = forced
         exit_classification = exit_evidence.category if exit_evidence is not None else None
         detail_errors: list[str] = list(validation_dict.get("errors", ()))
         if integrity_dict is not None:
@@ -1277,7 +1410,8 @@ class RunnerSupervisor:
             "runner_exit_code": exit_code,
             "runner_exit_code_protocol": EXIT_CODE_PROTOCOL if exit_code is not None else None,
             "runner_exit_category": exit_classification,
-            "runner_exit_report": exit_evidence.as_dict() if exit_evidence is not None else None,
+            "runner_exit_report": exit_report,
+            "forced_termination": forced,
             "completion_marker_protocol": marker.get("protocol_version") if isinstance(marker, Mapping) else None,
             "completion_marker_validation": validation_dict or None,
             "result_integrity_evidence": integrity_dict,
@@ -1287,10 +1421,17 @@ class RunnerSupervisor:
             "terminal_decision_reason": reason,
             "failure_phase": failure_phase,
             "failure_type": failure_type,
+            "failure_evidence": failure_payload or None,
             "recovery_action": recovery_action,
             "recovery_observed_at": recovery_observed_at,
             "finished_at": self.clock(),
-            "error_message": ("；".join(detail_errors)[:1_800] if detail_errors else None),
+            "error_message": (
+                str(failure_payload.get("message"))[:1_800]
+                if failure_payload.get("message")
+                else "；".join(detail_errors)[:1_800]
+                if detail_errors
+                else None
+            ),
         }
         if recovery_observed_at is not None:
             evidence["recovery_observed_at"] = recovery_observed_at
@@ -1300,14 +1441,17 @@ class RunnerSupervisor:
             counts = integrity_dict.get("counts", integrity_dict.get("actual_counts"))
             if isinstance(counts, Mapping):
                 evidence["result_counts"] = dict(counts)
-        if stdout_evidence is not None:
+        if stdout_payload:
             evidence.update(
                 {
-                    "stdout_bytes": stdout_evidence.get("stdout_bytes", stdout_evidence.get("bytes")),
-                    "stdout_digest": stdout_evidence.get("stdout_digest", stdout_evidence.get("digest")),
-                    "stdout_truncated": stdout_evidence.get("stdout_truncated", stdout_evidence.get("truncated")),
+                    "stdout_evidence": stdout_payload,
+                    "stdout_bytes": stdout_payload.get("stdout_bytes", stdout_payload.get("bytes")),
+                    "stdout_digest": stdout_payload.get("stdout_digest", stdout_payload.get("digest")),
+                    "stdout_truncated": stdout_payload.get("stdout_truncated", stdout_payload.get("truncated")),
                 }
             )
+        if resource_payload:
+            evidence["resource_limit_evidence"] = resource_payload
         callback = getattr(self.repository, "write_terminal", None)
         if callable(callback):
             try:
@@ -1366,7 +1510,7 @@ class RunnerSupervisor:
         marker: Mapping[str, Any] | None,
         exit_code: int | None,
         integrity: Any = None,
-        forced: bool = False,
+        forced: bool | None = None,
         reason: str | None = None,
         failure_phase: str | None = None,
         recovery_observed_at: datetime | None = None,
@@ -1376,6 +1520,11 @@ class RunnerSupervisor:
 
         self._require_lock()
         row = self._get(run_id)
+        effective_forced = (
+            _stored_forced_termination(row)
+            if forced is None and row is not None
+            else bool(forced)
+        )
         evaluation = reconcile_terminal_evidence(
             run_id=run_id,
             raw_exit_code=exit_code,
@@ -1385,7 +1534,7 @@ class RunnerSupervisor:
                 _row_value(row, "config_hash") if row is not None else None
             ),
             termination_evidence={
-                "forced": forced,
+                "forced": effective_forced,
                 "failure_phase": failure_phase,
             },
         )
@@ -1397,8 +1546,17 @@ class RunnerSupervisor:
             integrity=integrity,
             reason=reason or evaluation.reason,
             failure_phase=failure_phase,
-            forced=forced,
+            forced=effective_forced,
             recovery_action="terminate_no_restart" if failure_phase else None,
+            failure_evidence=(
+                _row_value(row, "failure_evidence") if row is not None else None
+            ),
+            stdout_evidence=(
+                _row_value(row, "stdout_evidence") if row is not None else None
+            ),
+            resource_limit_evidence=(
+                _row_value(row, "resource_limit_evidence") if row is not None else None
+            ),
             recovery_observed_at=recovery_observed_at,
             recovery_process_state=recovery_process_state,
         )
@@ -1473,8 +1631,46 @@ class RunnerSupervisor:
             if alive and same:
                 # The prior Supervisor's child is an orphan from this process;
                 # terminate it, but do not reattach pipes or adopt execution.
-                process_api.send_graceful_termination(identity)
-                process_api.send_force_kill(identity)
+                graceful_sent = False
+                force_sent = False
+                wait_confirmed = False
+                wait_error: str | None = None
+                try:
+                    graceful_sent = process_api.send_graceful_termination(identity)
+                    force_sent = process_api.send_force_kill(identity)
+                    wait_confirmed = process_api.wait_for_group_exit(
+                        identity,
+                        timeout_seconds=self.settings.cancel_grace_seconds,
+                    )
+                except Exception as exc:
+                    wait_error = f"{type(exc).__name__}: {str(exc)[:240]}"
+                recovery_process_state = {
+                    "identity_present": True,
+                    "pid_alive": True,
+                    "identity_matches": True,
+                    "graceful_termination_sent": graceful_sent,
+                    "force_kill_sent": force_sent,
+                    "group_exit_confirmed": wait_confirmed,
+                    "group_exit_wait_seconds": self.settings.cancel_grace_seconds,
+                }
+                if wait_error is not None:
+                    recovery_process_state["group_exit_wait_error"] = wait_error
+                self._log(
+                    logging.INFO if wait_confirmed else logging.WARNING,
+                    "backtest_worker_recovery_termination",
+                    (
+                        "回测孤儿 worker 已终止并确认进程组回收。"
+                        if wait_confirmed
+                        else "回测孤儿 worker 已请求终止，但进程组回收尚未确认。"
+                    ),
+                    run_id=str(run_id),
+                    launch_id=str(identity.launch_id),
+                    child_pid=identity.pid,
+                    process_group_id=identity.process_group_id,
+                    graceful_termination_sent=graceful_sent,
+                    force_kill_sent=force_sent,
+                    group_exit_confirmed=wait_confirmed,
+                )
                 self._write_terminal(
                     run_id,
                     status="indeterminate",
@@ -1487,18 +1683,28 @@ class RunnerSupervisor:
                     forced=True,
                     recovery_action="terminate_orphan_no_adopt",
                     recovery_observed_at=recovery_observed_at,
-                    recovery_process_state={"identity_present": True, "pid_alive": True, "identity_matches": True},
+                    recovery_process_state=recovery_process_state,
+                    failure_evidence=_row_value(row, "failure_evidence"),
+                    stdout_evidence=_row_value(row, "stdout_evidence"),
                 )
                 outcomes.append(str(run_id))
                 continue
             # The child already exited.  Only durable exit/marker/integrity
             # evidence may determine the result; no run is launched again.
+            self._log_worker_exited(
+                run_id,
+                launch_id=identity.launch_id,
+                exit_code=_row_value(row, "runner_exit_code"),
+                child_pid=identity.pid,
+                process_group_id=identity.process_group_id,
+                recovery=True,
+            )
             outcome = self.reconcile_run(
                 run_id,
                 marker=_row_value(row, "completion_marker"),
                 exit_code=_row_value(row, "runner_exit_code"),
                 integrity=_row_value(row, "result_integrity_evidence"),
-                forced=False,
+                forced=_stored_forced_termination(row),
                 reason="recovery_child_already_exited",
                 failure_phase="runner_supervisor_recovery",
                 recovery_observed_at=recovery_observed_at,

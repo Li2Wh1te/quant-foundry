@@ -13,6 +13,7 @@ from app.backtesting.runner_process import (
     memory_limit_evidence,
     WorkerProcessLauncher,
     validate_handshake,
+    drain_output,
 )
 
 
@@ -78,14 +79,32 @@ class RunnerProcessTestCase(unittest.TestCase):
         with self.assertRaises(ValueError):
             build_worker_command("not-a-uuid", "also-not-a-uuid")
 
-    def test_launcher_reports_applied_memory_evidence_on_supported_platform(self) -> None:
+    def test_launcher_waits_for_worker_confirmation_of_memory_evidence(self) -> None:
         launcher = WorkerProcessLauncher(memory_limit_mib=64)
         evidence = launcher.resource_limit_evidence()
         if evidence.supported:
-            self.assertTrue(evidence.applied)
+            self.assertFalse(evidence.applied)
+            self.assertEqual(evidence.error, "awaiting_worker_confirmation")
             self.assertEqual(evidence.requested, 64)
         else:
             self.assertFalse(evidence.applied)
+
+    def test_drain_output_stops_at_the_configured_cap(self) -> None:
+        class Stream:
+            def __init__(self):
+                self.requests = []
+
+            def read(self, size):
+                self.requests.append(size)
+                return b"x" * size
+
+        stream = Stream()
+        process = type("Process", (), {"stdout": stream})()
+        capture = StdoutCapture(max_bytes=4)
+
+        self.assertTrue(drain_output(process, capture, chunk_size=64))
+        self.assertEqual(capture.bytes, 4)
+        self.assertEqual(stream.requests, [4])
 
 
 if __name__ == "__main__":

@@ -30,6 +30,7 @@ export type BacktestRun = {
   cancel_requested?: boolean;
   termination_requested_at?: string | null;
   termination_reason?: string | null;
+  forced_termination?: boolean;
   child_exit_code?: number | null;
   child_exit_code_protocol?: string | null;
   runner_exit_category?: string | null;
@@ -42,12 +43,17 @@ export type BacktestRun = {
   stdout_bytes?: number | null;
   stdout_digest?: string | null;
   stdout_truncated?: boolean | null;
+  stdout_evidence?: Record<string, unknown> | null;
   resource_limit_evidence?: Record<string, unknown> | null;
   recovery_observed_at?: string | null;
   recovery_action?: string | null;
   recovery_process_state?: Record<string, unknown> | null;
   failure_phase?: string | null;
+  failure_step?: number | null;
   failure_type?: string | null;
+  source_line?: number | null;
+  technical_detail?: string | null;
+  failure_evidence?: Record<string, unknown> | null;
 };
 
 export type BacktestRunListResponse = { items: BacktestRun[] };

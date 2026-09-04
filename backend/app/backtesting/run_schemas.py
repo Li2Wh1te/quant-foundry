@@ -64,6 +64,7 @@ class RunResponse(BaseModel):
     cancel_requested: bool = False
     termination_requested_at: datetime | None = None
     termination_reason: str | None = None
+    forced_termination: bool = False
     recovery_observed_at: datetime | None = None
     recovery_action: str | None = None
     recovery_process_state: dict[str, Any] | None = None
@@ -75,11 +76,16 @@ class RunResponse(BaseModel):
     result_integrity_status: str | None = None
     terminal_decision_reason: str | None = None
     failure_phase: str | None = None
+    failure_step: int | None = None
     failure_type: str | None = None
+    source_line: int | None = None
+    technical_detail: str | None = None
     error_message: str | None = None
+    failure_evidence: dict[str, Any] | None = None
     stdout_bytes: int | None = None
     stdout_digest: str | None = None
     stdout_truncated: bool | None = None
+    stdout_evidence: dict[str, Any] | None = None
     resource_limit_evidence: dict[str, Any] | None = None
     runner_config_evidence: dict[str, Any] | None = None
     completion_marker: dict[str, Any] | None = None

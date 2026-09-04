@@ -256,10 +256,13 @@ def _memory_limit_preexec(memory_limit_mib: int | None):
 
             limit = memory_limit_mib * 1024 * 1024
             resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
-        except (ImportError, AttributeError, OSError, ValueError):
-            # Unsupported capability is recorded by the parent launcher; a
-            # pre-exec failure naturally makes the worker fail closed.
-            return
+        except (ImportError, AttributeError, OSError, ValueError) as exc:
+            # A configured POSIX limit that cannot be installed must fail the
+            # child launch.  Returning here would let the Supervisor persist
+            # a successful-looking launch while the worker ran unrestricted.
+            raise RuntimeError(
+                f"address-space limit could not be applied: {type(exc).__name__}: {exc}"
+            ) from exc
 
     return apply
 
@@ -352,11 +355,11 @@ class WorkerProcessLauncher:
         )
 
     def resource_limit_evidence(self) -> ResourceLimitEvidence:
-        """Describe the child limit configured by this launcher.
+        """Describe launch configuration until the child confirms application.
 
-        ``start`` installs the limit in the child ``preexec_fn``.  Therefore a
-        supported POSIX ``RLIMIT_AS`` is recorded as applied at launch time;
-        the worker independently emits the post-application evidence.
+        The parent can inspect platform capability but cannot prove that the
+        child ``preexec_fn`` completed.  Only the worker's post-application
+        evidence may set ``applied=True``.
         """
 
         base = memory_limit_evidence(self.memory_limit_mib)
@@ -365,15 +368,20 @@ class WorkerProcessLauncher:
                 base.resource,
                 base.requested,
                 base.supported,
-                True,
-                None,
+                False,
+                "awaiting_worker_confirmation",
             )
         return base
 
     def start(self, run_id: UUID | str, launch_id: UUID | str) -> subprocess.Popen[bytes]:
         """Start with ``shell=False`` and a dedicated POSIX process group."""
 
-        preexec = _memory_limit_preexec(self.memory_limit_mib) if os.name == "posix" else None
+        limit_evidence = memory_limit_evidence(self.memory_limit_mib)
+        preexec = (
+            _memory_limit_preexec(self.memory_limit_mib)
+            if os.name == "posix" and limit_evidence.supported
+            else None
+        )
         environment = None
         if self.environment is not None:
             # A caller-provided overlay must not accidentally remove PATH,
@@ -636,6 +644,24 @@ ProcessManager = WorkerProcessLauncher
 ProcessIdentity = LaunchIdentity
 
 
+def _process_group_exists(process_group_id: int) -> bool:
+    """Check group liveness after the original group leader has exited.
+
+    This is observation only: the caller has already validated and signalled
+    the original identity, and this helper never sends a signal.  It closes
+    the old false-positive path where a dead leader made recovery report the
+    group as collected while a descendant still held the process group.
+    """
+
+    if os.name != "posix" or isinstance(process_group_id, bool) or process_group_id <= 0:
+        return False
+    try:
+        os.killpg(process_group_id, 0)
+    except (OSError, ProcessLookupError, PermissionError):
+        return False
+    return True
+
+
 def wait_for_group_exit(
     identity: LaunchIdentity | Mapping[str, Any] | int,
     timeout_seconds: float | None = None,
@@ -646,7 +672,7 @@ def wait_for_group_exit(
     poll_interval_seconds: float = 0.05,
     clock=time.monotonic,
 ) -> bool:
-    """Wait without ever treating a reused PID as the original child."""
+    """Wait for the verified worker group, not just its leader, to exit."""
 
     if timeout_seconds is None:
         timeout_seconds = grace_seconds
@@ -659,12 +685,23 @@ def wait_for_group_exit(
     )
     if normalized is None:
         return False
+
+    def still_running() -> bool:
+        if process_identity_matches(normalized):
+            return True
+        # A reused PID is not the original worker and therefore is treated as
+        # gone.  Only when the original leader is gone do we inspect the fixed
+        # process group for inherited-descriptor descendants.
+        if is_process_alive(normalized.pid):
+            return False
+        return _process_group_exists(normalized.process_group_id)
+
     deadline = clock() + timeout_seconds
     while clock() <= deadline:
-        if not process_identity_matches(normalized):
+        if not still_running():
             return True
         time.sleep(poll_interval_seconds)
-    return not process_identity_matches(normalized)
+    return not still_running()
 
 
 def drain_output(
@@ -674,21 +711,25 @@ def drain_output(
     timeout_seconds: float = 0,
     chunk_size: int = 64 * 1024,
 ) -> bool:
-    """Drain a PIPE without waiting for process exit, preventing deadlocks."""
+    """Drain only up to the configured cap, then let Supervisor terminate."""
 
     stream = getattr(process, "stdout", None)
-    if stream is None:
+    if stream is None or capture.truncated:
         return capture.truncated
+
+    def read_size() -> int:
+        remaining = capture.max_bytes - capture.bytes
+        return min(chunk_size, remaining)
+
     fileno = getattr(stream, "fileno", None)
     if not callable(fileno):
         read = getattr(stream, "read", None)
         if callable(read):
-            # Test doubles and in-memory streams do not expose a file
-            # descriptor.  Read one bounded chunk per call so a live custom
-            # stream cannot block the Supervisor indefinitely.
-            chunk = read(chunk_size)
-            if chunk:
-                capture.consume(chunk)
+            size = read_size()
+            if size > 0:
+                chunk = read(size)
+                if chunk:
+                    capture.consume(chunk)
         return capture.truncated
     try:
         fd = fileno()
@@ -699,7 +740,10 @@ def drain_output(
     try:
         selector.register(stream, selectors.EVENT_READ)
         deadline = time.monotonic() + max(timeout_seconds, 0)
-        while True:
+        while not capture.truncated:
+            size = read_size()
+            if size <= 0:
+                break
             wait = max(0.0, deadline - time.monotonic()) if timeout_seconds else 0.0
             events = selector.select(wait)
             if not events:
@@ -707,7 +751,7 @@ def drain_output(
             made_progress = False
             for key, _ in events:
                 try:
-                    chunk = os.read(key.fd, chunk_size)
+                    chunk = os.read(key.fd, size)
                 except BlockingIOError:
                     continue
                 except OSError:
@@ -719,11 +763,10 @@ def drain_output(
                         pass
                     continue
                 made_progress = True
-                # Continue draining already-readable bytes even after the
-                # cap is reached.  The capture retains only a bounded excerpt
-                # while this prevents a chatty child from filling its PIPE
-                # and deadlocking before the Supervisor can terminate it.
                 capture.consume(chunk)
+                # Stop in the same supervision tick once the cap is reached;
+                # the next action is a termination request, not more reads.
+                break
             if not made_progress:
                 break
     finally:

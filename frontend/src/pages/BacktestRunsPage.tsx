@@ -48,8 +48,14 @@ function evidence(run: BacktestRun): Record<string, unknown> {
     result_counts: run.result_counts,
     terminal_decision_reason: run.terminal_decision_reason,
     failure_phase: run.failure_phase,
+    failure_step: run.failure_step,
     failure_type: run.failure_type,
+    source_line: run.source_line,
+    technical_detail: run.technical_detail,
     error_message: run.error_message,
+    failure_evidence: run.failure_evidence,
+    stdout_evidence: run.stdout_evidence,
+    forced_termination: run.forced_termination,
     recovery_action: run.recovery_action,
     recovery_process_state: run.recovery_process_state,
     runner_exit_report: run.runner_exit_report,
@@ -277,7 +283,25 @@ export function BacktestRunsPage() {
           <h2>回测详情</h2>
           <p>状态：{formatStatus(selected.status)}；当前交易日：{selected.current_trading_date || "—"}；步骤：{selected.current_step ?? "—"}</p>
           <p>完成比例：{percent(selected.progress_ratio)}%；最后心跳：{selected.last_heartbeat_at || "—"}</p>
-          {selected.error_message && <p role="alert">错误：运行异常，具体原因请查看技术详情。</p>}
+          {selected.error_message && <p role="alert">错误：{selected.error_message}</p>}
+          {selected.failure_evidence && (
+            <details open>
+              <summary>失败诊断</summary>
+              <p>
+                阶段：{String(selected.failure_evidence.failure_phase ?? selected.failure_phase ?? "—")}；
+                步骤：{String(selected.failure_evidence.failure_step ?? selected.failure_step ?? "—")}；
+                错误类型：{String(selected.failure_evidence.error_type ?? selected.failure_type ?? "—")}；
+                源码行：{String(selected.failure_evidence.source_line ?? selected.source_line ?? "—")}
+              </p>
+              <pre>{String(selected.failure_evidence.technical_detail ?? selected.technical_detail ?? "暂无脱敏技术详情")}</pre>
+            </details>
+          )}
+          {selected.stdout_evidence && (
+            <details>
+              <summary>标准输出证据</summary>
+              <pre>{JSON.stringify(selected.stdout_evidence, null, 2)}</pre>
+            </details>
+          )}
           <details>
             <summary>技术详情</summary>
             <pre>{JSON.stringify(evidence(selected), null, 2)}</pre>

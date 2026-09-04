@@ -4865,7 +4865,7 @@ class DeterministicBacktestRunner:
         )
 
     def _persist_failed_result(self) -> None:
-        """Durably flush the state already determined before a phase failed."""
+        """Durably flush the prefix without masking the original failure."""
 
         if self._result_sink is None:
             return
@@ -4873,11 +4873,26 @@ class DeterministicBacktestRunner:
         if not callable(persist):
             return
         completed = self._next_expected_step - 1
-        persist(
-            self._build_result(
-                completed_through_step_sequence=completed if completed >= 0 else None,
+        try:
+            persist(
+                self._build_result(
+                    completed_through_step_sequence=(
+                        completed if completed >= 0 else None
+                    ),
+                )
             )
-        )
+        except Exception as exc:
+            # A persistence outage must not replace the strategy/data error
+            # that caused the run to fail.  Supervisor still records this
+            # secondary failure through the worker's bounded diagnostics.
+            logger.error(
+                "回测失败前缀结果写入失败，原始运行错误将继续上报。",
+                extra={
+                    "event": "backtest_failed_result_persist_failed",
+                    "run_id": self._run_id,
+                    "failure_type": type(exc).__name__,
+                },
+            )
 
     def run(self) -> BacktestRunResult:
         """Run the complete official axis and return the frozen result."""

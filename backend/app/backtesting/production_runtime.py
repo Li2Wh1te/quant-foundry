@@ -46,6 +46,7 @@ from app.backtesting.registry import (
 )
 from app.backtesting.result_repository import BacktestResultRepository
 from app.backtesting.result_writer import BacktestResultContext, BacktestResultPersistenceService
+from app.backtesting.runner_failure import build_failure_evidence
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
 from app.backtesting.spec import BacktestSpec, InitialPositionInput
@@ -920,18 +921,62 @@ def _initial_portfolio(binding):
 
 
 def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
-    bundle = build_runtime(binding, session=session, launch_id=launch_id, strategy_module=strategy_module, worker_id=worker_id, progress_reporter=progress_reporter)
-    with bundle.data_session as data_session:
-        result = run_data_session(
-            data_session,
-            bundle.runner,
-            fact_types=(DataCapability.BARS, DataCapability.UNIVERSE),
-            view_factory=bundle.runner._view_factory,
-            analysis_coordinator=AnalysisFinalizationCoordinator(),
-            analysis_session_factory=lambda: Session(bind=session.get_bind()),
+    """Execute a run and convert runtime failures into auditable worker results."""
+
+    from app.backtesting.runner_integrity import compute_result_integrity
+
+    try:
+        bundle = build_runtime(
+            binding,
+            session=session,
+            launch_id=launch_id,
+            strategy_module=strategy_module,
+            worker_id=worker_id,
+            progress_reporter=progress_reporter,
         )
-    session.commit(); rows = BacktestResultRepository(session).read_integrity_rows(UUID(str(binding.run_id))); from app.backtesting.runner_integrity import compute_result_integrity
-    return {"category": "succeeded", "integrity": compute_result_integrity(rows, config_hash=binding.config_hash).as_dict(), "result": result}
+        with bundle.data_session as data_session:
+            result = run_data_session(
+                data_session,
+                bundle.runner,
+                fact_types=(DataCapability.BARS, DataCapability.UNIVERSE),
+                view_factory=bundle.runner._view_factory,
+                analysis_coordinator=AnalysisFinalizationCoordinator(),
+                analysis_session_factory=lambda: Session(bind=session.get_bind()),
+            )
+        session.commit()
+        rows = BacktestResultRepository(session).read_integrity_rows(
+            UUID(str(binding.run_id))
+        )
+        return {
+            "category": "succeeded",
+            "integrity": compute_result_integrity(
+                rows, config_hash=binding.config_hash
+            ).as_dict(),
+            "result": result,
+        }
+    except Exception as exc:
+        # ``run_steps`` has already flushed any completed prefix through the
+        # result sink.  Re-read that durable prefix and publish a failed
+        # marker so Supervisor can make a determinate failed decision instead
+        # of losing the original exception behind a bare exit code.
+        try:
+            session.rollback()
+        except Exception:
+            pass
+        rows = BacktestResultRepository(session).read_integrity_rows(
+            UUID(str(binding.run_id))
+        )
+        evidence = build_failure_evidence(exc, default_phase="backtest_execution")
+        return {
+            "category": "failed",
+            "integrity": compute_result_integrity(
+                rows, config_hash=binding.config_hash
+            ).as_dict(),
+            "failure_phase": evidence["failure_phase"],
+            "failure_type": evidence["error_type"],
+            "failure_evidence": evidence,
+            "result": None,
+        }
 
 
 @dataclass(frozen=True, slots=True)
