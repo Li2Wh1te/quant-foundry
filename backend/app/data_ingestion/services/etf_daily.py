@@ -602,7 +602,7 @@ def sync_etf_daily(
 def normalize_etf_daily(
     dataframe: "DataFrame", *, expected_trade_date: date
 ) -> list[EtfDailyBarInput]:
-    """Validate one full-market API response before any database write occurs."""
+    """Normalize one full-market response without repairing source market values."""
     rows = dataframe.to_dict(orient="records")
     if len(rows) >= MAX_ETF_DAILY_ROWS:
         raise ValueError(
@@ -737,19 +737,16 @@ def _initialize_full_cycle(
 def _normalize_etf_daily_row(row: object) -> EtfDailyBarInput:
     if not isinstance(row, dict):
         raise ValueError("Tushare ETF daily response row is not an object")
-    open_price = _parse_non_negative_decimal(row.get("open"), "open")
-    high = _parse_non_negative_decimal(row.get("high"), "high")
-    low = _parse_non_negative_decimal(row.get("low"), "low")
-    close = _parse_non_negative_decimal(row.get("close"), "close")
-    if high < low:
-        raise ValueError("Tushare ETF daily record has high below low")
+    # Keep source values exactly as typed facts.  OHLC legality belongs to the
+    # ETF adapter/preflight boundary, where the row can be marked invalid
+    # without losing the evidence needed to explain the rejection.
     return EtfDailyBarInput(
         ts_code=_parse_required_text(row.get("ts_code"), "ts_code"),
         trade_date=_parse_date(row.get("trade_date")),
-        open=open_price,
-        high=high,
-        low=low,
-        close=close,
+        open=_parse_decimal(row.get("open"), "open"),
+        high=_parse_decimal(row.get("high"), "high"),
+        low=_parse_decimal(row.get("low"), "low"),
+        close=_parse_decimal(row.get("close"), "close"),
         vol=_parse_non_negative_decimal(row.get("vol"), "vol"),
         amount=_parse_non_negative_decimal(row.get("amount"), "amount"),
     )
@@ -769,17 +766,28 @@ def _parse_date(value: object) -> date:
         raise ValueError("Tushare ETF daily record has an invalid trade_date") from exc
 
 
-def _parse_non_negative_decimal(value: object, field_name: str) -> Decimal:
+def _parse_decimal(value: object, field_name: str) -> Decimal | None:
+    """Parse a nullable finite source number without applying business rules."""
+    if value is None or str(value).strip().lower() in {"", "nan", "nat", "none"}:
+        return None
     try:
-        parsed = Decimal(_parse_required_text(value, field_name))
-    except InvalidOperation as exc:
+        parsed = Decimal(str(value).strip())
+    except (InvalidOperation, ValueError) as exc:
         raise ValueError(
             f"Tushare ETF daily record has an invalid {field_name}"
         ) from exc
-    if not parsed.is_finite() or parsed < 0:
+    if not parsed.is_finite():
         raise ValueError(
             f"Tushare ETF daily record has an invalid {field_name}"
         )
+    return parsed
+
+
+def _parse_non_negative_decimal(value: object, field_name: str) -> Decimal | None:
+    """Parse optional volume/turnover while retaining missing values."""
+    parsed = _parse_decimal(value, field_name)
+    if parsed is not None and parsed < 0:
+        raise ValueError(f"Tushare ETF daily record has an invalid {field_name}")
     return parsed
 
 

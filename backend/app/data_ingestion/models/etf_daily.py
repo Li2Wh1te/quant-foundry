@@ -23,13 +23,11 @@ class EtfDailyBar(Base):
     __table_args__ = (
         CheckConstraint("length(btrim(source)) > 0", name="source_not_blank"),
         CheckConstraint("length(btrim(ts_code)) > 0", name="ts_code_not_blank"),
-        CheckConstraint("open >= 0", name="open_not_negative"),
-        CheckConstraint("high >= 0", name="high_not_negative"),
-        CheckConstraint("low >= 0", name="low_not_negative"),
-        CheckConstraint("close >= 0", name="close_not_negative"),
+        # OHLC legality deliberately lives at the adapter/preflight boundary:
+        # this table is a raw-fact store and must retain missing values, provider
+        # zeros, negative prices, and incoherent source values for later audit.
         CheckConstraint("vol >= 0", name="volume_not_negative"),
         CheckConstraint("amount >= 0", name="amount_not_negative"),
-        CheckConstraint("high >= low", name="high_not_below_low"),
         CheckConstraint("updated_at >= created_at", name="updated_after_created"),
         Index("ix_etf_daily_bars_trade_date_code", "trade_date", "source", "ts_code"),
     )
@@ -37,12 +35,12 @@ class EtfDailyBar(Base):
     source: Mapped[str] = mapped_column(String(32), primary_key=True)
     ts_code: Mapped[str] = mapped_column(String(16), primary_key=True)
     trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
-    open: Mapped[Decimal] = mapped_column(Numeric(20, 6))
-    high: Mapped[Decimal] = mapped_column(Numeric(20, 6))
-    low: Mapped[Decimal] = mapped_column(Numeric(20, 6))
-    close: Mapped[Decimal] = mapped_column(Numeric(20, 6))
-    vol: Mapped[Decimal] = mapped_column(Numeric(24, 4))
-    amount: Mapped[Decimal] = mapped_column(Numeric(24, 4))
+    open: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    high: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    low: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    vol: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

@@ -96,6 +96,54 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         self.assertEqual(bars, [make_bar()])
 
+    def test_normalizes_source_invalid_ohlc_without_repairing_values(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {
+                "ts_code": "510330.SH",
+                "trade_date": "20260814",
+                "open": -1.25,
+                "high": 3.70,
+                "low": 4.00,
+                "close": 0,
+                "vol": 12345,
+                "amount": 46000.5,
+            }
+        ]
+
+        [bar] = normalize_etf_daily(
+            dataframe, expected_trade_date=date(2026, 8, 14)
+        )
+
+        self.assertEqual(bar.open, Decimal("-1.25"))
+        self.assertEqual(bar.high, Decimal("3.70"))
+        self.assertEqual(bar.low, Decimal("4.00"))
+        self.assertEqual(bar.close, Decimal("0"))
+
+    def test_normalizes_missing_source_values_as_none(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {
+                "ts_code": "510330.SH",
+                "trade_date": "20260814",
+                "open": None,
+                "high": "",
+                "low": "nan",
+                "close": "NaN",
+                "vol": None,
+                "amount": None,
+            }
+        ]
+
+        [bar] = normalize_etf_daily(
+            dataframe, expected_trade_date=date(2026, 8, 14)
+        )
+
+        self.assertEqual(
+            (bar.open, bar.high, bar.low, bar.close, bar.vol, bar.amount),
+            (None, None, None, None, None, None),
+        )
+
     def test_rejects_a_response_at_the_provider_row_limit(self) -> None:
         dataframe = Mock()
         dataframe.to_dict.return_value = [{}] * MAX_ETF_DAILY_ROWS
