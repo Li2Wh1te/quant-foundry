@@ -6,6 +6,7 @@ from uuid import uuid4
 from app.backtesting.result_writer import (
     BacktestResultContext,
     BacktestResultPersistenceService,
+    ResultBatch,
 )
 from app.backtesting.runtime import EquitySample, EventEnvelope
 
@@ -49,7 +50,11 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
         decisions=(),
         order_outcomes=(),
         order_updates=(),
-        components={},
+        components={
+            "time_axis": {"key": "trading_day", "version": 1},
+            "accounting_policy": {"key": "accounting_policy", "version": 1},
+        },
+        random_seed=17,
         analysis_status="partial",
         rule_snapshot_hash=None,
         universe_eligibility_summary={},
@@ -79,3 +84,32 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
     assert batch.equity_curve[0].market_value == Decimal("3.00")
     assert batch.equity_curve[0].period_return == Decimal("0.0125")
     assert batch.equity_curve[0].cumulative_fees == Decimal("0.10")
+    assert batch.component_snapshot["time_axis"]["key"] == "trading_day"
+    assert batch.result_summary["random_seed"] == 17
+
+
+def test_component_snapshot_is_written_to_the_durable_run_summary() -> None:
+    root = SimpleNamespace(result_counts={}, result_summary={"schema_version": "result-v1"})
+    writer = BacktestResultPersistenceService(
+        SimpleNamespace(flush=lambda: None),
+        BacktestResultContext(
+            run_id=uuid4(),
+            run_kind="backtest_run",
+            profile="formal@1",
+            config_hash="b" * 64,
+            launch_id=uuid4(),
+        ),
+    )
+    writer._root = lambda: root
+
+    writer._persist_result_batch(
+        ResultBatch(
+            component_snapshot={
+                "time_axis": {"key": "trading_day", "version": 1},
+                "accounting_policy": {"key": "accounting_policy", "version": 1},
+            }
+        )
+    )
+
+    assert root.result_summary["schema_version"] == "result-v1"
+    assert root.result_summary["components"]["accounting_policy"]["version"] == 1

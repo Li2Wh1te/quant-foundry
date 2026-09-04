@@ -23,6 +23,7 @@ from app.backtesting.data.reports import canonical_hash
 from pathlib import Path
 
 from app.backtesting.production_runtime import (
+    _behavior_versions,
     _json_value,
     binding_from_row,
     default_components,
@@ -100,6 +101,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
         currency="CNY",
         timezone="Asia/Shanghai",
         warmup_sessions=12,
+        random_seed=42,
     )
     strategy = {
         "strategy_id": str(uuid4()),
@@ -126,7 +128,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
         data_request=serialize_data_request(data_request),
         account=account,
         metadata={"behavior_versions": {"engine": {"key": "engine", "version": 1}}},
-        random_seed=None,
+        random_seed=42,
     )
 
     snapshot = _json_value(binding.config)
@@ -140,6 +142,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
     ]
     assert snapshot["strategy"]["parameters"] == {"window": 20}
     assert snapshot["account"]["fee_schedule_version"] == 4
+    assert snapshot["random_seed"] == 42
     assert snapshot["components"]["decision_interpreter"]["key"] == "long_only_target_weights"
     assert snapshot["components"]["slippage_model"]["key"] == "none"
     assert canonical_hash(snapshot) == binding.config_hash
@@ -176,6 +179,7 @@ def test_worker_binding_rehydrates_components_from_snapshot_not_defaults() -> No
             100,
             [],
             slippage_model=ComponentSelection("snapshot_slippage", 10),
+            random_seed=7,
         ),
         run_kind="internal_link_acceptance",
         strategy={"revision_id": str(uuid4()), "source_hash": "e" * 64, "published": True},
@@ -193,7 +197,21 @@ def test_worker_binding_rehydrates_components_from_snapshot_not_defaults() -> No
 
     assert restored.components["timing_policy"]["key"] == "snapshot_timing"
     assert restored.components["timing_policy"]["version"] == 7
-    assert restored.random_seed is None
+    assert restored.random_seed == 7
+
+
+def test_behavior_versions_include_all_runtime_semantic_identities() -> None:
+    versions = _behavior_versions(
+        data_request=_data_request(),
+        components=default_components(),
+        strategy={"contract_version": 1},
+        account={"profile_id": str(uuid4()), "version": 2, "fee_schedule_key": "fees", "fee_schedule_version": 3},
+    )
+
+    assert versions["time_axis"] == {"key": "trading_day", "version": 1}
+    assert versions["decision_interpreter"]["key"] == "long_only_target_weights"
+    assert versions["accounting_policy"] == {"key": "accounting_policy", "version": 1}
+    assert versions["analyzer_specs"] == []
 
 
 def test_worker_binding_rejects_tampered_snapshot() -> None:

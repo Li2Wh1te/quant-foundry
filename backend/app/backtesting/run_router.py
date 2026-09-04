@@ -326,6 +326,7 @@ def _response(run: BacktestRun | object) -> RunResponse:
             "behavior_versions": _wire_value(binding.metadata.get("behavior_versions", {}))
             if isinstance(binding.metadata, Mapping)
             else {},
+            "component_snapshot": _wire_value(binding.components),
             "formal_gates": _wire_value(binding.metadata.get("formal_gates", {}))
             if isinstance(binding.metadata, Mapping)
             else {},
@@ -379,6 +380,14 @@ def _response(run: BacktestRun | object) -> RunResponse:
         config = dict(binding.config)
     data_request = getattr(run, "data_request", None) or {}
     behavior_versions = getattr(run, "behavior_versions", None) or {}
+    result_summary = getattr(run, "result_summary", None) or {}
+    component_snapshot = (
+        result_summary.get("components", {})
+        if isinstance(result_summary, Mapping)
+        else {}
+    )
+    if not component_snapshot and isinstance(config, Mapping):
+        component_snapshot = config.get("components", {}) or {}
     formal_gates = getattr(run, "formal_gate_evidence", None) or getattr(run, "formal_gates", None) or {}
     if not formal_gates:
         data_evidence = getattr(run, "data_evidence", None)
@@ -413,6 +422,7 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "backtest_config": _wire_value(config or {}),
         "data_request": _wire_value(data_request),
         "behavior_versions": _wire_value(behavior_versions),
+        "component_snapshot": _wire_value(component_snapshot),
         "formal_gates": _wire_value(formal_gates),
         "account_profile_id": _uuid_or_none(getattr(run, "account_profile_id", None)),
         "account_profile_version": (

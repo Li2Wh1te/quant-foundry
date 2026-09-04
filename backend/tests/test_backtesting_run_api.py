@@ -165,6 +165,27 @@ def test_formal_create_is_idempotent_and_cancel_only_records_request():
     assert get_run(str(first.run_id)).status == "cancel_requested"
 
 
+def test_persisted_component_snapshot_and_seed_are_exposed():
+    components = {"time_axis": {"key": "trading_day", "version": 1}}
+    row = SimpleNamespace(
+        id=uuid4(),
+        run_kind="backtest_run",
+        profile="formal@1",
+        status="succeeded",
+        config_hash="a" * 64,
+        backtest_config={"components": {"time_axis": {"key": "old", "version": 1}}},
+        result_summary={"components": components},
+        behavior_versions={"time_axis": components["time_axis"]},
+        random_seed=42,
+        data_evidence={},
+    )
+
+    response = _response(row)
+
+    assert response.component_snapshot == components
+    assert response.random_seed == 42
+
+
 def test_persisted_gate_evidence_is_projected_from_immutable_data_evidence():
     gates = {"phase1": {"allowed": True, "status": "ready"}}
     row = SimpleNamespace(

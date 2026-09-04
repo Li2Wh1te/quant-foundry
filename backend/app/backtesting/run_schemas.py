@@ -135,6 +135,9 @@ class RunResponse(BaseModel):
     backtest_config: dict[str, Any] = Field(default_factory=dict)
     data_request: dict[str, Any] = Field(default_factory=dict)
     behavior_versions: dict[str, Any] = Field(default_factory=dict)
+    # Runtime-observed component identities captured by the result writer;
+    # before execution this falls back to the frozen binding selection.
+    component_snapshot: dict[str, Any] = Field(default_factory=dict)
     # Immutable four-level admission evidence captured with the run binding.
     # It is exposed separately so callers do not need to inspect the full
     # configuration snapshot to explain why a formal run was admitted.

@@ -32,12 +32,23 @@ __all__ = [
     "CHUNK_POLICY_KEY_FIXED_TRADING_SESSIONS",
     "CHUNK_POLICY_VERSION_V1",
     "SESSIONS_PER_CHUNK_V1",
+    "TIME_AXIS_KEY_GENERIC",
+    "TIME_AXIS_KEY_TRADING_DAY",
+    "TIME_AXIS_VERSION_V1",
     "FixedTradingSessionsV1",
     "TimeAxis",
     "TimeChunk",
     "TimeStep",
     "TradingDayAxis",
 ]
+
+
+# Stable identities are part of the run audit contract.  Keep the generic
+# base identity available for test and extension axes, while concrete axes
+# override it with their own semantic key.
+TIME_AXIS_KEY_GENERIC = "time_axis"
+TIME_AXIS_KEY_TRADING_DAY = "trading_day"
+TIME_AXIS_VERSION_V1 = 1
 
 
 # ---------------------------------------------------------------------------
@@ -184,6 +195,11 @@ class TimeAxis:
     is admissible is an upstream preflight decision).
     """
 
+    # A stable identity lets the runner reject anonymous axes and persist the
+    # timeline implementation that actually produced each result.
+    time_axis_key = TIME_AXIS_KEY_GENERIC
+    time_axis_version = TIME_AXIS_VERSION_V1
+
     def __init__(self, steps: Sequence[TimeStep]) -> None:
         if isinstance(steps, (str, bytes)):
             raise DomainValidationError("steps must be a sequence of TimeStep")
@@ -246,6 +262,9 @@ class TradingDayAxis(TimeAxis):
     the day has multiple trading windows; the midday break survives only
     as window detail inside frozen metadata.
     """
+
+    time_axis_key = TIME_AXIS_KEY_TRADING_DAY
+    time_axis_version = TIME_AXIS_VERSION_V1
 
     def __init__(self, resolved_sessions: Sequence[SessionPoint]) -> None:
         if isinstance(resolved_sessions, (str, bytes)):

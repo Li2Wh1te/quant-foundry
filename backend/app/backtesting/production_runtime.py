@@ -19,7 +19,13 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
-from app.backtesting.accounting import AccountState, AccountingPolicy, SettlementPolicy
+from app.backtesting.accounting import (
+    ACCOUNTING_POLICY_KEY,
+    ACCOUNTING_POLICY_VERSION_V1,
+    AccountState,
+    AccountingPolicy,
+    SettlementPolicy,
+)
 from app.backtesting.analysis_finalization import AnalysisFinalizationCoordinator
 from app.backtesting.fees import FeeCalculator, FeeRule, FeeSchedule
 from app.backtesting.data.adapters.etf import ETF_PROVIDER_KEY, EtfFactsAdapter
@@ -59,7 +65,11 @@ from app.backtesting.runner_failure import build_failure_evidence
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.runtime import BacktestViewFactory, DeterministicBacktestRunner, EngineDataView, InstrumentFacts, SessionQuote, run_data_session
 from app.backtesting.spec import BacktestSpec, ComponentSelection, InitialPositionInput
-from app.backtesting.time_axis import TradingDayAxis
+from app.backtesting.time_axis import (
+    TIME_AXIS_KEY_TRADING_DAY,
+    TIME_AXIS_VERSION_V1,
+    TradingDayAxis,
+)
 from app.data_ingestion.models.corporate_action import (
     CorporateActionCoverageFact,
     CorporateActionFact,
@@ -1477,11 +1487,21 @@ def _behavior_versions(
         "strategy_contract": strategy.get("contract_version"),
         "data_contract": data_request.data_contract_version,
         "calendar_axis_policy": _json_value(data_request.calendar_axis_policy),
-        "time_axis": {"key": "trading_day", "version": 1},
+        "time_axis": {
+            "key": TIME_AXIS_KEY_TRADING_DAY,
+            "version": TIME_AXIS_VERSION_V1,
+        },
         "timing_policy": ref(TIMING_POLICY_KIND),
+        "decision_interpreter": ref(DECISION_INTERPRETER_KIND),
         "execution_model": ref(EXECUTION_MODEL_KIND),
         "slippage_model": ref(SLIPPAGE_MODEL_KIND),
-        "accounting_policy": {"key": "accounting_policy", "version": 1},
+        "accounting_policy": {
+            "key": ACCOUNTING_POLICY_KEY,
+            "version": ACCOUNTING_POLICY_VERSION_V1,
+        },
+        # Analyzer descriptors are already immutable registry snapshots in
+        # the component binding; retain them in the behavior audit.
+        "analyzer_specs": _json_value(components.get(ANALYZER_COMPONENT_KIND, [])),
         "rule_package": _json_value(data_request.rule_package),
         "account_profile": {
             "id": account.get("profile_id"),
@@ -1761,6 +1781,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
             currency=binding.spec.currency,
             settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
         ),
+        random_seed=binding.random_seed,
         initial_portfolio=_initial_portfolio(binding),
         settlement_calendar=settlement,
         corporate_actions=corporate_actions,

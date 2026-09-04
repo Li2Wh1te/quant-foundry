@@ -64,6 +64,7 @@ def _result_summary(result: Any) -> dict[str, Any]:
         "analysis_status": getattr(result, "analysis_status", None),
         "event_count": len(tuple(getattr(result, "events", ()) or ())),
         "components": getattr(result, "components", {}),
+        "random_seed": getattr(result, "random_seed", None),
         "rule_snapshot_hash": getattr(result, "rule_snapshot_hash", None),
         "final_valuation": None if last is None else {
             "as_of": last.as_of,
@@ -118,6 +119,9 @@ class ResultBatch:
     current_date: str | None = None
     checkpoint: Mapping[str, Any] | None = None
     result_summary: Mapping[str, Any] | None = None
+    # Preserve the runtime-observed component snapshot as a first-class batch
+    # value instead of relying on callers to unpack a generic summary.
+    component_snapshot: Mapping[str, Any] | None = None
     events: Sequence[Any] = field(default_factory=tuple)
 
 
@@ -182,8 +186,13 @@ class BacktestResultPersistenceService:
                 root.first_result_at = now
             root.last_result_at = now
             root.result_counts = counts
-        if batch.result_summary is not None:
-            root.result_summary = _json_value(batch.result_summary)
+        if batch.result_summary is not None or batch.component_snapshot is not None:
+            summary = dict(root.result_summary or {})
+            if batch.result_summary is not None:
+                summary.update(_json_value(batch.result_summary))
+            if batch.component_snapshot is not None:
+                summary["components"] = _json_value(batch.component_snapshot)
+            root.result_summary = summary
         if batch.progress is not None:
             self.record_progress(batch.progress, current_step=batch.current_step, current_date=batch.current_date, checkpoint=batch.checkpoint)
         self.session.flush()
@@ -395,6 +404,7 @@ class BacktestResultPersistenceService:
             positions=tuple(positions),
             equity_curve=tuple(equities),
             result_summary=_result_summary(result),
+            component_snapshot=getattr(result, "components", {}),
         )
         return self.persist_result_batch(batch, commit=commit)
 

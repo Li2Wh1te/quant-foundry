@@ -284,7 +284,12 @@ class ValuationBlockedError(DomainValidationError):
     """
 
 
-_VERSION_ATTRS = ("policy_version", "model_version", "interpreter_version")
+_VERSION_ATTRS = (
+    "time_axis_version",
+    "policy_version",
+    "model_version",
+    "interpreter_version",
+)
 
 
 def _component_version_of(obj: Any) -> int | None:
@@ -330,13 +335,13 @@ def _require_registered_identity(
     version = _component_version_of(obj)
     if not isinstance(key, str) or not key.strip():
         raise DomainValidationError(
-            f"{kind} must carry a stable {key_attr}; construct it through "
-            "the versioned ComponentRegistry"
+            f"{kind} must carry a stable {key_attr}; anonymous implementations "
+            "cannot be audited"
         )
     if version is None:
         raise DomainValidationError(
-            f"{kind} must carry a stable integer version; construct it "
-            "through the versioned ComponentRegistry"
+            f"{kind} must carry a stable integer version; anonymous "
+            "implementations cannot be audited"
         )
 
 
@@ -1552,6 +1557,9 @@ class BacktestRunResult:
     order_outcomes: tuple[OrderOutcomeRecord, ...]
     final_snapshot: PortfolioSnapshot
     components: Mapping[str, Mapping[str, Any]] = MappingProxyType({})
+    # Keep the seed on the runtime result as well as the run root.  This is
+    # important for result persistence paths that only receive the snapshot.
+    random_seed: int | None = None
     analysis_status: str | None = None
     chunk_sequence: int | None = None
     analysis_chunk_token: str | None = None
@@ -1832,6 +1840,7 @@ class DeterministicBacktestRunner:
         corporate_actions: CorporateActionSource | None = None,
         analyzers: Sequence[Callable[[PortfolioSnapshot], None]] = (),
         currency: str = "CNY",
+        random_seed: int | None = None,
         component_parameters: Mapping[str, Any] | None = None,
         analysis_engine: Any | None = None,
         analysis_admission: Any | None = None,
@@ -1899,7 +1908,12 @@ class DeterministicBacktestRunner:
             # this keeps a tampered in-memory or persisted bundle from being
             # consumed by the execution loop.
             selected_rule_snapshot.verify_hash()
+        if random_seed is not None and (
+            isinstance(random_seed, bool) or not isinstance(random_seed, int)
+        ):
+            raise DomainValidationError("random_seed must be an integer or null")
         self._run_id = run_id
+        self._random_seed = random_seed
         # Optional persistence boundary supplied by task 09.  The runner
         # remains storage-agnostic; the sink receives each completed chunk's
         # immutable BacktestRunResult projection.
@@ -2253,14 +2267,20 @@ class DeterministicBacktestRunner:
         require_formal_settlement_policy(
             getattr(self._accounting, "settlement_policy", None)
         )
-        # Replaceable components must carry the stable identity a registry
-        # entry guarantees; ad-hoc instances without key/version cannot be
-        # audited and are rejected at admission.
+        # Every semantic component must carry the stable identity its versioned
+        # contract guarantees; anonymous implementations cannot be audited and
+        # are rejected at admission.
+        _require_registered_identity(
+            "time_axis", axis, "time_axis_key"
+        )
         _require_registered_identity(
             "timing_policy", timing_policy, "policy_key"
         )
         _require_registered_identity(
             "execution_model", execution_model, "model_key"
+        )
+        _require_registered_identity(
+            "accounting_policy", accounting, "policy_key"
         )
         _require_registered_identity(
             "decision_interpreter", interpreter, "interpreter_key"
@@ -4853,6 +4873,7 @@ class DeterministicBacktestRunner:
             final_snapshot=self._portfolio.snapshot(),
             order_updates=tuple(self._order_updates),
             components=self._component_snapshot(),
+            random_seed=self._random_seed,
             analysis_status=analysis_status,
             chunk_sequence=chunk_sequence,
             analysis_chunk_token=analysis_chunk_token,
@@ -5299,6 +5320,7 @@ class DeterministicBacktestRunner:
                     entry["parameters"] = dict(parameters)
                 snapshot[kind] = entry
 
+        record("time_axis", self._axis, "time_axis_key")
         record("timing_policy", self._timing_policy, "policy_key")
         record("execution_model", self._execution_model, "model_key")
         record(
@@ -5354,17 +5376,20 @@ class DeterministicBacktestRunner:
                     for rule in getattr(schedule, "fee_rules", ())
                 ],
             }
-        # Accounting configuration is part of the audit identity even
-        # though the policy itself is not yet registry-constructed.
+        # Accounting configuration is part of the audit identity.  The key
+        # and version come from the actual policy instance rather than a
+        # duplicated literal that could drift from execution semantics.
+        record("accounting_policy", self._accounting, "policy_key")
+        accounting_snapshot = snapshot["accounting_policy"]
         settlement_policy = getattr(self._accounting, "settlement_policy", "")
-        snapshot["accounting_policy"] = {
-            "key": "accounting_policy",
-            "version": 1,
-            "currency": self._currency,
-            "settlement_policy": getattr(
-                settlement_policy, "value", str(settlement_policy)
-            ),
-        }
+        accounting_snapshot.update(
+            {
+                "currency": self._currency,
+                "settlement_policy": getattr(
+                    settlement_policy, "value", str(settlement_policy)
+                ),
+            }
+        )
         if self._component_parameters:
             snapshot["parameters"] = dict(self._component_parameters)
         if self._rule_snapshot_bundle is not None:

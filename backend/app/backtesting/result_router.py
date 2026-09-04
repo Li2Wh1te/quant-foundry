@@ -133,7 +133,19 @@ def compare_runs(
         curves.append({"run_id": str(rid), "points": points})
         drawdowns.append({"run_id": str(rid), "points": [{"as_of": p["as_of"], "drawdown": p["drawdown"], "valuation_status": p["valuation_status"]} for p in points]})
         metrics.append({"run_id": str(rid), "items": [{"metric_key": row.metric_key, "formula_version": row.formula_version, "value": (str(row.value) if row.value is not None else None), "unit": row.unit, "sample_count": row.sample_count, "unavailable_reason": row.unavailable_reason} for row in metrics_by_run[rid]]})
-        summaries.append({"run_id": str(rid), "status": root.status, "terminal_status": root.terminal_status, "config_hash": root.config_hash, "parameters": root.parameters, "backtest_config": root.backtest_config, "data_request": root.data_request, "behavior_versions": root.behavior_versions})
+        result_summary = root.result_summary if isinstance(root.result_summary, dict) else {}
+        summaries.append({
+            "run_id": str(rid),
+            "status": root.status,
+            "terminal_status": root.terminal_status,
+            "config_hash": root.config_hash,
+            "parameters": root.parameters,
+            "backtest_config": root.backtest_config,
+            "data_request": root.data_request,
+            "behavior_versions": root.behavior_versions,
+            "component_snapshot": result_summary.get("components", {}),
+            "random_seed": root.random_seed,
+        })
     # Include a compact, deterministic configuration diff for each run pair;
     # curves/metrics are fetched in batches above, never by invoking runtime.
     baseline = summaries[0].get("backtest_config") or summaries[0].get("parameters") or {}

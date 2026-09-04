@@ -61,6 +61,7 @@ def scenario_runner(
     interpreter=None,
     component_parameters=None,
     accounting_currency: str = "CNY",
+    random_seed: int | None = None,
     execution_model=None,
     settlement_policy=None,
 ):
@@ -85,6 +86,7 @@ def scenario_runner(
         interpreter=interpreter,
         component_parameters=component_parameters,
         accounting_currency=accounting_currency,
+        random_seed=random_seed,
         execution_model=execution_model,
         settlement_policy=settlement_policy,
     )
@@ -209,6 +211,10 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
         result = runner.run()
 
         self.assertEqual(
+            result.components["time_axis"],
+            {"key": "trading_day", "version": 1},
+        )
+        self.assertEqual(
             result.components["timing_policy"],
             {"key": "after_close_to_next_open", "version": 1},
         )
@@ -235,12 +241,25 @@ class PhaseOrderAndEventStreamTests(unittest.TestCase):
             {"key": "runtime_fixture", "version": 1, "fee_rules": ()},
         )
         self.assertEqual(
+            result.components["accounting_policy"]["key"],
+            "accounting_policy",
+        )
+        self.assertEqual(
+            result.components["accounting_policy"]["version"],
+            1,
+        )
+        self.assertEqual(
             result.components["accounting_policy"]["settlement_policy"],
             "t_plus_1_before_open_match",
         )
         self.assertEqual(
             result.components["parameters"], {"board_lot": 100}
         )
+
+    def test_run_result_carries_the_random_seed_identity(self) -> None:
+        runner, _ = scenario_runner(random_seed=42)
+
+        self.assertEqual(runner.run().random_seed, 42)
 
     def test_runner_rejects_anonymous_replaceable_components(self) -> None:
         from app.backtesting.domain import DomainValidationError

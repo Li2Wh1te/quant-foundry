@@ -16,6 +16,7 @@ export type BacktestRun = {
   backtest_config?: Record<string, unknown>;
   data_request?: Record<string, unknown>;
   behavior_versions?: Record<string, unknown>;
+  component_snapshot?: Record<string, unknown>;
   formal_gates?: Record<string, unknown>;
   account_profile_id?: string | null;
   account_profile_version?: string | null;

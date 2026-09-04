@@ -14,7 +14,7 @@ from datetime import date, datetime
 from decimal import Context, Decimal, ROUND_HALF_EVEN, localcontext
 from enum import StrEnum
 from types import MappingProxyType
-from typing import Mapping
+from typing import ClassVar, Mapping
 from uuid import UUID, uuid5
 
 from app.backtesting.domain import (
@@ -67,6 +67,10 @@ class OrderSide(StrEnum):
 
     BUY = "buy"
     SELL = "sell"
+
+
+ACCOUNTING_POLICY_KEY = "accounting_policy"
+ACCOUNTING_POLICY_VERSION_V1 = 1
 
 
 class SettlementPolicy(StrEnum):
@@ -451,6 +455,11 @@ class AccountingPolicy:
     keeping them here now makes duplicate-fill protection and settlement
     semantics explicit without introducing a database table prematurely.
     """
+
+    # Stable identity is persisted with every runtime component snapshot so a
+    # future accounting implementation cannot be mistaken for this policy.
+    policy_key: ClassVar[str] = ACCOUNTING_POLICY_KEY
+    policy_version: ClassVar[int] = ACCOUNTING_POLICY_VERSION_V1
 
     currency: str = "CNY"
     settlement_policy: SettlementPolicy = SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH
