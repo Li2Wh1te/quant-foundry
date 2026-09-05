@@ -12,7 +12,14 @@ from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
 from app.backtesting.router import router as backtesting_router
-from app.backtesting.result_router import router as backtest_result_router
+from app.backtesting.fee_catalog import router as fee_catalog_router
+from app.backtesting.run_router import router as backtest_run_router, formal_alias_router as formal_backtest_alias_router, internal_router as internal_backtest_run_router
+from app.backtesting.result_router import (
+    router as backtest_result_router,
+    legacy_router as backtest_result_legacy_router,
+    compare_router as backtest_compare_router,
+    formal_result_alias_router as formal_backtest_result_alias_router,
+)
 from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session
 from app.logging.router import router as log_router
@@ -62,7 +69,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(data_ingestion_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)
+    protected_router.include_router(fee_catalog_router)
+    protected_router.include_router(backtest_run_router)
+    protected_router.include_router(formal_backtest_alias_router)
+    protected_router.include_router(internal_backtest_run_router)
     protected_router.include_router(backtest_result_router)
+    protected_router.include_router(backtest_result_legacy_router)
+    protected_router.include_router(backtest_compare_router)
+    protected_router.include_router(formal_backtest_result_alias_router)
 
     @protected_router.get(
         "/api/auth/verify",

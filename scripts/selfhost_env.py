@@ -21,15 +21,20 @@ DEPLOYMENT_DEFAULTS = {
     "QF_WEB_HOST": "127.0.0.1",
     "QF_WEB_PORT": "8080",
 }
-SERVER_HOST_KEY = "QF_SERVER_HOST"
-LEGACY_SERVER_HOST = "127.0.0.1"
 DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
+BACKTEST_INTERNAL_TOKEN_KEY = "QF_BACKTEST_INTERNAL_TOKEN"
 CURSOR_SIGNING_KEY = "QF_CURSOR_SIGNING_KEY"
-SECRET_KEYS = (DATABASE_PASSWORD_KEY, API_TOKEN_KEY, CURSOR_SIGNING_KEY)
+SECRET_KEYS = (
+    DATABASE_PASSWORD_KEY,
+    API_TOKEN_KEY,
+    BACKTEST_INTERNAL_TOKEN_KEY,
+    CURSOR_SIGNING_KEY,
+)
 LEGACY_URL_KEY = "QF_DATABASE_URL"
 WEAK_DATABASE_PASSWORDS = {"", "change-me", "postgres"}
 WEAK_API_TOKENS = {"", "change-me"}
+WEAK_BACKTEST_INTERNAL_TOKENS = {"", "change-me"}
 WEAK_CURSOR_SIGNING_KEYS = {"", "change-me"}
 ENV_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
@@ -41,10 +46,6 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
     lines = env_path.read_text(encoding="utf-8").splitlines(keepends=True)
     values = _read_values(lines)
     template_values = _read_values(template_path.read_text(encoding="utf-8").splitlines())
-    # Migrate the old local-only default so a previously initialized .env can
-    # still be used by the containerized backend over the Compose network.
-    if values.get(SERVER_HOST_KEY) == LEGACY_SERVER_HOST:
-        values[SERVER_HOST_KEY] = DEPLOYMENT_DEFAULTS[SERVER_HOST_KEY]
     generated_keys: set[str] = set()
     database_password = _ensure_secret(
         values,
@@ -58,6 +59,21 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         WEAK_API_TOKENS,
         generated_keys,
         minimum_length=32,
+    )
+    internal_token_configured = (
+        BACKTEST_INTERNAL_TOKEN_KEY in values
+        or BACKTEST_INTERNAL_TOKEN_KEY in template_values
+    )
+    backtest_internal_token = (
+        _ensure_secret(
+            values,
+            BACKTEST_INTERNAL_TOKEN_KEY,
+            WEAK_BACKTEST_INTERNAL_TOKENS,
+            generated_keys,
+            minimum_length=32,
+        )
+        if internal_token_configured
+        else None
     )
     cursor_signing_key = _ensure_secret(
         values,
@@ -81,6 +97,11 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         **DATABASE_DEFAULTS,
         DATABASE_PASSWORD_KEY: database_password,
         API_TOKEN_KEY: api_token,
+        **(
+            {BACKTEST_INTERNAL_TOKEN_KEY: backtest_internal_token}
+            if internal_token_configured
+            else {}
+        ),
         CURSOR_SIGNING_KEY: cursor_signing_key,
     }
 
@@ -96,11 +117,16 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         if key == LEGACY_URL_KEY:
             continue
         if key in desired:
-            value = (
-                desired[key]
-                if key in SECRET_KEYS or not values.get(key)
-                else values[key]
-            )
+            # A present non-secret key is operator-owned even when its value
+            # is intentionally empty.  Only a missing key receives the
+            # template default; generated secrets are the explicit exception
+            # because an empty/known-weak secret cannot start the deployment.
+            if key in SECRET_KEYS:
+                value = desired[key]
+            elif key in values:
+                value = values[key]
+            else:
+                value = desired[key]
             updated_lines.append(f"{key}={value}\n")
             written.add(key)
             continue
@@ -170,6 +196,11 @@ def main() -> None:
     secrets_to_report = (
         (DATABASE_PASSWORD_KEY, "PostgreSQL password"),
         (API_TOKEN_KEY, "API token"),
+        *(
+            [(BACKTEST_INTERNAL_TOKEN_KEY, "backtest internal token")]
+            if BACKTEST_INTERNAL_TOKEN_KEY in generated_keys
+            else []
+        ),
         (CURSOR_SIGNING_KEY, "cursor signing key"),
     )
     for key, label in secrets_to_report:

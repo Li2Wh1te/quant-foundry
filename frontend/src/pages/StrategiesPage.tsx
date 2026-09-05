@@ -143,8 +143,12 @@ function issueLocation(issue: StrategyValidationIssue): string {
   return `第 ${issue.line} 行${issue.column ? `，第 ${issue.column} 列` : ""}`;
 }
 
-function stateLabel(state: StrategySummary["state"]): string {
-  return state === "archived" ? "已归档" : "编辑中";
+function stateLabel(detail: StrategyDetail, validation: StrategyValidationResult | null, isDirty: boolean): string {
+  if (detail.state === "archived") return "已归档";
+  if (!isDirty && validation?.draft_version === detail.draft.version && !validation.valid) return "发布检查失败";
+  if (!detail.current_revision_id) return "从未发布";
+  if (isDirty || detail.draft_changed_since_revision) return "草稿有未发布修改";
+  return "已发布";
 }
 
 function isSameEditorDraft(detail: StrategyDetail, draft: EditorDraft): boolean {
@@ -334,13 +338,15 @@ export function StrategiesPage() {
       || canonicalJson(detail.draft.parameter_schema) !== canonicalJson(parameterSchema)
       || canonicalJson(detail.draft.default_parameters) !== canonicalJson(defaultParameters);
     if (draftChanged) {
-      const saved = await saveStrategyDraft(detail.id, {
+      await saveStrategyDraft(detail.id, {
         version: nextDetail.draft.version,
         source_code: draft.sourceCode,
         parameter_schema: parameterSchema,
         default_parameters: defaultParameters
       });
-      nextDetail = { ...nextDetail, draft: saved };
+      // The server compares source and parameter contracts with the published
+      // revision. Refresh that projection after a save, including a revert.
+      nextDetail = await getStrategy(detail.id);
     }
 
     setDetail(nextDetail);
@@ -570,7 +576,7 @@ export function StrategiesPage() {
               : <>
                 <div className="strategy-editor__header">
                   <div className="strategy-editor__title">
-                    <span className={`strategy-state strategy-state--${detail.state}`}><i aria-hidden="true" />{stateLabel(detail.state)}</span>
+                    <span className={`strategy-state strategy-state--${detail.state}`}><i aria-hidden="true" />{stateLabel(detail, validation, isDirty)}</span>
                     <h3>{detail.name}</h3>
                     <p>{detail.current_revision ? `当前发布版本 v${detail.current_revision.revision_number}` : "尚未发布版本"} · 草稿 v{detail.draft.version}</p>
                   </div>
@@ -580,6 +586,11 @@ export function StrategiesPage() {
                     <button className="toolbar-button toolbar-button--validate" type="button" disabled={validating || saving || isArchived} onClick={() => void handleValidate()}><ShieldCheck aria-hidden="true" />{validating ? "校验中" : "校验"}</button>
                     <button className="task-create-button" type="button" disabled={publishing || saving || validating || isArchived} onClick={() => void handlePublish()}><Rocket aria-hidden="true" />{publishing ? "发布中" : "发布版本"}</button>
                   </div>
+                </div>
+                <div className="strategy-editor__run-gate" role="status">
+                  {detail.current_revision
+                    ? <span>回测将绑定已发布版本 v{detail.current_revision.revision_number}（不可变）。{isDirty || detail.draft_changed_since_revision ? "当前草稿有未发布修改，回测不会使用这些修改。" : ""} <Link className="strategy-open-backtest" to={`/admin/strategies/${detail.id}/backtests`}>进入回测工作台</Link></span>
+                    : <span>请先发布策略，未发布草稿不能进入回测。</span>}
                 </div>
 
                 <form className="strategy-editor__form" onSubmit={(event) => void handleSave(event)}>

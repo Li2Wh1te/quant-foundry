@@ -2,7 +2,7 @@ import { readApiToken } from "../auth/tokenStorage";
 
 export type TaskState = "active" | "paused" | "completed" | "archived";
 export type OverlapPolicy = "skip" | "queue";
-export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "skipped" | "interrupted";
+export type RunStatus = "queued" | "running" | "succeeded" | "failed" | "skipped" | "interrupted" | "cancelled" | "timed_out" | "indeterminate";
 
 export type TaskSchedule =
   | { type: "cron"; expression: string; timezone: string }
@@ -47,6 +47,15 @@ export interface TaskRun {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  current_trading_date: string | null;
+  current_step: string | null;
+  progress: number;
+  last_heartbeat_at: string | null;
+  worker_id: string | null;
+  exit_code: number | null;
+  completion_marker: string | null;
+  failure_phase: string | null;
+  cancellation_requested_at: string | null;
 }
 
 export interface TaskType {

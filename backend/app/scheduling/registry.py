@@ -11,6 +11,13 @@ from pydantic import BaseModel
 class TaskContext:
     task_id: UUID
     run_id: UUID
+    task_type: str | None = None
+    # Ingestion tasks receive these resources from the scheduler so their
+    # handler runs inside the same transaction as fact and checkpoint writes.
+    client: Any | None = None
+    session: Any | None = None
+    checkpoint_repo: Any | None = None
+    sync_key: str | None = None
 
 
 class TaskHandler(Protocol):
@@ -25,8 +32,8 @@ class TaskDefinition:
     name: str
     parameters_model: type[BaseModel]
     handler: TaskHandler
+    english_name: str
     parameter_version: int = 1
-    english_name: str | None = None
 
 
 class TaskRegistry:
@@ -34,6 +41,12 @@ class TaskRegistry:
         self._definitions: dict[str, TaskDefinition] = {}
 
     def register(self, definition: TaskDefinition) -> None:
+        # Validate all public identifiers before mutating the registry so an
+        # invalid plugin cannot leak incomplete labels into task selectors.
+        for field in ("key", "name", "english_name"):
+            value = getattr(definition, field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"task type {field} must be non-blank text")
         if definition.key in self._definitions:
             raise ValueError(f"task type already registered: {definition.key}")
         self._definitions[definition.key] = definition
@@ -62,11 +75,15 @@ def _register_application_tasks() -> None:
     )
     from app.data_ingestion.scheduler_tasks.etf_daily import register_tasks as register_etf_daily_tasks
     from app.data_ingestion.scheduler_tasks.trade_calendar import register_tasks
+    from app.data_ingestion.scheduler_tasks.corporate_action import register_tasks as register_corporate_action_tasks
+    from app.data_ingestion.scheduler_tasks.trading_status import register_tasks as register_trading_status_tasks
 
     register_tasks(task_registry)
     register_etf_tasks(task_registry)
     register_etf_adjustment_tasks(task_registry)
     register_etf_daily_tasks(task_registry)
+    register_corporate_action_tasks(task_registry)
+    register_trading_status_tasks(task_registry)
 
 
 _register_application_tasks()

@@ -231,6 +231,32 @@ class FillSummaryDTO:
 
 
 @dataclass(frozen=True, slots=True)
+class StartContext:
+    """Immutable lifecycle snapshot delivered once before the first step."""
+
+    step_sequence: int
+    session_date: date
+    decision_time: datetime
+    timezone: str
+
+
+@dataclass(frozen=True, slots=True)
+class FinishContext:
+    """Immutable lifecycle snapshot delivered once after the final step."""
+
+    step_sequence: int
+    session_date: date
+    decision_time: datetime
+    timezone: str
+
+
+# Lifecycle callbacks receive the same immutable summaries used by
+# ``PreviousStepDTO``; aliases make the public protocol names explicit.
+OrderUpdate = OrderSummaryDTO
+Fill = FillSummaryDTO
+
+
+@dataclass(frozen=True, slots=True)
 class PreviousStepDTO:
     """Read-only digest of the previous step's order and fill outcomes.
 
@@ -293,6 +319,10 @@ class DecisionContext:
                 raise InvalidDecisionPayloadError(
                     f"{field_name} must be timezone-aware"
                 )
+        if self.data_cutoff > self.decision_time:
+            raise InvalidDecisionPayloadError(
+                "data_cutoff must not be later than decision_time"
+            )
         if self.clock.now() != self.decision_time:
             raise InvalidDecisionPayloadError(
                 "clock decision_time must match the context decision_time"

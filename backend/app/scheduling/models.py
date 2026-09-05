@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    Float,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -104,7 +105,7 @@ class TaskRun(Base):
         ),
         CheckConstraint(
             "status IN ('queued', 'running', 'succeeded', 'failed', "
-            "'skipped', 'interrupted')",
+            "'skipped', 'interrupted', 'cancelled', 'timed_out', 'indeterminate')",
             name="status",
         ),
         CheckConstraint(
@@ -116,6 +117,7 @@ class TaskRun(Base):
             name="result_object",
         ),
         CheckConstraint("priority BETWEEN -100 AND 100", name="priority"),
+        CheckConstraint("progress BETWEEN 0 AND 1", name="progress_range"),
         CheckConstraint(
             "started_at IS NULL OR started_at >= created_at",
             name="started_after_created",
@@ -131,7 +133,8 @@ class TaskRun(Base):
         CheckConstraint(
             "(status = 'queued' AND started_at IS NULL AND finished_at IS NULL) OR "
             "(status = 'running' AND started_at IS NOT NULL AND finished_at IS NULL) OR "
-            "(status IN ('succeeded', 'failed') AND started_at IS NOT NULL "
+            "(status IN ('succeeded', 'failed', 'cancelled', 'timed_out', "
+            "'indeterminate') AND started_at IS NOT NULL "
             "AND finished_at IS NOT NULL) OR "
             "(status IN ('skipped', 'interrupted') AND finished_at IS NOT NULL)",
             name="status_timestamps",
@@ -178,3 +181,12 @@ class TaskRun(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    current_trading_date: Mapped[str | None] = mapped_column(String(10))
+    current_step: Mapped[str | None] = mapped_column(String(128))
+    progress: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    worker_id: Mapped[str | None] = mapped_column(String(128))
+    exit_code: Mapped[int | None]
+    completion_marker: Mapped[str | None] = mapped_column(String(128))
+    failure_phase: Mapped[str | None] = mapped_column(String(128))
+    cancellation_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

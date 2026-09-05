@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+def backtest_event_message(action: str, scope: str, outcome: str) -> str:
+    """Build concise operator-facing Chinese summary while retaining structured fields."""
+    return f"{action}（范围：{scope}）{outcome}。"
+
 import atexit
 import copy
 import logging
@@ -18,6 +22,31 @@ from app.core.config import Settings
 
 
 LOG_FILE_NAME = "app.jsonl"
+
+
+def _add_structured_message(
+    logger: logging.Logger,
+    method_name: str,
+    event_dict: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep a dedicated operator message beside the stable event key.
+
+    ``ProcessorFormatter`` exposes the originating ``LogRecord`` as
+    ``_record`` for foreign (stdlib) loggers.  Runner events put their
+    machine-readable key in ``extra.event`` and Chinese prose in ``msg``;
+    without this processor the JSON renderer would retain only the key and
+    silently drop the operator summary.
+    """
+
+    if "message" in event_dict:
+        return event_dict
+    record = event_dict.get("_record")
+    raw_message = getattr(record, "msg", None)
+    if isinstance(raw_message, str) and raw_message:
+        event_dict["message"] = raw_message
+    elif isinstance(event_dict.get("event"), str):
+        event_dict["message"] = event_dict["event"]
+    return event_dict
 
 
 def _add_application_context(
@@ -98,6 +127,11 @@ def configure_logging(settings: Settings) -> LoggingRuntime:
             settings.environment,
         )
         shared_processors = [
+            # Preserve fields supplied through stdlib ``extra`` for runner and
+            # legacy modules.  Without ExtraAdder, operator events lose their
+            # machine key and technical context when rendered by the listener.
+            structlog.stdlib.ExtraAdder(),
+            _add_structured_message,
             structlog.contextvars.merge_contextvars,
             structlog.stdlib.add_log_level,
             timestamp,

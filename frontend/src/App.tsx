@@ -5,6 +5,8 @@ import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
 import { AccountProfilesPage } from "./pages/AccountProfilesPage";
+import { BacktestPreflightPage } from "./pages/BacktestPreflightPage";
+import { BacktestRunsPage } from "./pages/BacktestRunsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
@@ -12,6 +14,7 @@ import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
 import { StrategyDataApiPage } from "./pages/StrategyDataApiPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
+import { StrategyBacktestsPage } from "./pages/StrategyBacktestsPage";
 import { TaskSchedulerPage } from "./pages/TaskSchedulerPage";
 
 function RequireAuth({ children }: { children: React.ReactNode }) {
@@ -87,9 +90,15 @@ export function App() {
         element={<RequireAuth><AdminPage><AccountProfilesPage /></AdminPage></RequireAuth>}
       />
       <Route
+        path="/admin/backtest-preflight"
+        element={<RequireAuth><AdminPage><BacktestPreflightPage /></AdminPage></RequireAuth>}
+      />
+      <Route path="/admin/backtest-runs" element={<RequireAuth><AdminPage><BacktestRunsPage /></AdminPage></RequireAuth>} />
+      <Route
         path="/admin/strategies/:strategyId"
         element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
       />
+      <Route path="/admin/strategies/:strategyId/backtests" element={<RequireAuth><AdminPage><StrategyBacktestsPage /></AdminPage></RequireAuth>} />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>
   );

@@ -1,9 +1,10 @@
 """Authenticated HTTP APIs for private database-backed strategy management."""
 
 from typing import Annotated
+from datetime import datetime
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
@@ -21,7 +22,13 @@ from app.strategies.schemas import (
     StrategyRevisionSummaryResponse,
     StrategySummaryResponse,
     StrategyValidationIssueResponse,
+    StrategyBacktestWorkspaceResponse,
 )
+from app.backtesting.registry import SLIPPAGE_MODEL_KIND, build_default_component_registry
+from app.backtesting.run_repository import DatabaseRunRepository, FORMAL_KIND
+from app.backtesting.run_router import _owner_scope, _response as _run_response
+from app.backtesting.pagination import CursorError
+from app.backtesting.result_router import _cursor_signing_key
 from app.strategies.service import (
     StrategyAlreadyArchivedError,
     StrategyArchivedError,
@@ -38,6 +45,79 @@ from app.strategies.validation import StrategyValidationIssue
 
 
 router = APIRouter(prefix="/api/admin/strategies", tags=["admin-strategies"])
+
+
+@router.get("/{strategy_id}/backtests", response_model=StrategyBacktestWorkspaceResponse)
+def strategy_backtest_workspace(
+    strategy_id: UUID,
+    session: Annotated[Session, Depends(get_db_session)],
+    signing_key: Annotated[str, Depends(_cursor_signing_key)],
+    request: Request = None,  # type: ignore[assignment]
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    cursor: str | None = None,
+    strategy_revision_id: UUID | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
+) -> StrategyBacktestWorkspaceResponse:
+    """Compose strategy metadata, published revisions and formal runs."""
+    strategy = _strategy_or_404(session, strategy_id)
+    repository = StrategyRepository(session)
+    revisions = repository.list_revisions(strategy_id)
+    draft = repository.get_draft(strategy_id)
+    try:
+        page = DatabaseRunRepository(session).list_page(
+            queue_kind=FORMAL_KIND,
+            strategy_id=str(strategy_id),
+            owner_scope=_owner_scope(request),
+            limit=limit,
+            cursor=cursor,
+            signing_key=signing_key,
+            strategy_revision_id=strategy_revision_id, status=status,
+            created_after=created_after, created_before=created_before, config_summary=config_summary,
+        )
+    except CursorError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"code": "invalid_cursor", "message": str(exc)},
+        ) from exc
+    rows = page.items
+    current = next((r for r in revisions if r.id == strategy.current_revision_id), None)
+    formal_gate: dict[str, object] = {
+        "status": "待配置" if current is None else "待预检",
+        "allowed": False,
+        "blocking_issues": [],
+        "metric_decisions": [],
+        "checked_at": None,
+    }
+    from app.backtesting.component_config import resolve_components
+    components = resolve_components()
+    return StrategyBacktestWorkspaceResponse(
+        strategy={
+            "id": strategy.id, "name": strategy.name, "state": strategy.state,
+            "current_revision_id": strategy.current_revision_id,
+            "draft_version": draft.version if draft else None,
+            "draft_changed_since_revision": _draft_changed_since_revision(draft, current),
+        },
+        published_revisions=[{
+            "id": r.id, "revision_number": r.revision_number, "source_hash": r.source_hash,
+            "parameter_schema": r.parameter_schema, "default_parameters": r.default_parameters,
+            "runtime_manifest": r.runtime_manifest, "published_at": r.published_at,
+        } for r in revisions],
+        slippage_models=[
+            entry.describe()
+            for entry in build_default_component_registry().entries(
+                component_kind=SLIPPAGE_MODEL_KIND
+            )
+        ],
+        formal_gate=formal_gate,
+        component_options={kind: [value] for kind, value in components.items() if kind not in ("analyzer", "slippage_model")},
+        runs={"items": [_run_response(r) for r in rows],
+              "next_cursor": page.next_cursor,
+              "has_more": page.has_more,
+              "query_summary": {"strategy_id": str(strategy_id), "run_kind": FORMAL_KIND}},
+    )
 
 
 @router.get("", response_model=list[StrategySummaryResponse])
@@ -173,15 +253,19 @@ def publish_strategy_revision(
     strategy_id: UUID,
     payload: StrategyPublishRequest,
     session: Annotated[Session, Depends(get_db_session)],
+    response: Response,
 ) -> StrategyRevisionResponse:
     """Publish an immutable revision after revalidating the locked draft."""
     try:
-        revision = StrategyStorageService(session).publish_revision(
+        service = StrategyStorageService(session)
+        revision = service.publish_revision(
             strategy_id,
             expected_draft_version=payload.draft_version,
         )
         session.commit()
         session.refresh(revision)
+        if service.last_publish_reused:
+            response.status_code = status.HTTP_200_OK
     except Exception as exc:
         session.rollback()
         raise _http_error(exc) from exc
@@ -246,6 +330,15 @@ def _strategy_or_404(session: Session, strategy_id: UUID) -> Strategy:
     return strategy
 
 
+def _draft_changed_since_revision(draft, revision) -> bool:
+    """Compare all published inputs; saving or reverting source alone is insufficient."""
+    return bool(draft and revision and (
+        draft.source_hash != revision.source_hash
+        or draft.parameter_schema != revision.parameter_schema
+        or draft.default_parameters != revision.default_parameters
+    ))
+
+
 def _strategy_detail_response(
     session: Session, strategy: Strategy
 ) -> StrategyDetailResponse:
@@ -257,6 +350,7 @@ def _strategy_detail_response(
     current_revision = _current_revision_or_conflict(repository, strategy)
     return StrategyDetailResponse(
         **_strategy_summary_response(strategy).model_dump(),
+        draft_changed_since_revision=_draft_changed_since_revision(draft, current_revision),
         draft=StrategyDraftResponse.model_validate(draft),
         current_revision=(
             StrategyRevisionSummaryResponse.model_validate(current_revision)

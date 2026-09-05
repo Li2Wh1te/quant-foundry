@@ -6,7 +6,7 @@ import unittest
 from uuid import uuid4
 
 from app.backtesting.domain import DomainValidationError, PositionSide
-from app.backtesting.spec import BacktestSpec, InitialPositionInput
+from app.backtesting.spec import BacktestSpec, ComponentSelection, InitialPositionInput
 
 
 def position(
@@ -164,6 +164,40 @@ class BacktestSpecTestCase(unittest.TestCase):
     def test_dynamic_universe_flag_defaults_to_false(self) -> None:
         self.assertFalse(self.build().dynamic_universe)
         self.assertTrue(self.build(dynamic_universe=True).dynamic_universe)
+
+    def test_run_scope_and_component_selection_are_frozen(self) -> None:
+        revision_id = uuid4()
+        account_id = uuid4()
+        instrument_ids = [uuid4(), uuid4()]
+        parameters = {"window": 20, "filters": ["liquid"]}
+        spec = self.build(
+            instrument_ids=list(reversed(instrument_ids)),
+            exchanges=["sse", "SZSE", "sse"],
+            strategy_price_bases=["RAW", "qfq"],
+            strategy_revision_id=revision_id,
+            strategy_parameters=parameters,
+            account_profile_id=account_id,
+            slippage_model=ComponentSelection(
+                "bps", 1, {"slippage_bps": "10"}
+            ),
+            random_seed=42,
+        )
+
+        parameters["window"] = 99
+        self.assertEqual(spec.instrument_ids, tuple(sorted(instrument_ids, key=str)))
+        self.assertEqual(spec.exchanges, ("SSE", "SZSE"))
+        self.assertEqual(spec.strategy_price_bases, ("raw", "qfq"))
+        self.assertEqual(spec.strategy_parameters["window"], 20)
+        self.assertEqual(spec.slippage_model.key, "bps")
+        self.assertEqual(spec.random_seed, 42)
+
+    def test_invalid_scope_and_price_basis_are_rejected(self) -> None:
+        with self.assertRaises(DomainValidationError):
+            self.build(exchanges=[])
+        with self.assertRaises(DomainValidationError):
+            self.build(strategy_price_bases=["adjusted"])
+        with self.assertRaises(DomainValidationError):
+            self.build(instrument_ids=["510300.SH"])
 
 
 if __name__ == "__main__":

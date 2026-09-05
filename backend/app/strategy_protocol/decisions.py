@@ -90,6 +90,14 @@ class StrategyDecision:
     reason: str | None = None
     decision_id: UUID = field(default_factory=uuid4)
     contract_version: int = STRATEGY_CONTRACT_VERSION
+    # These fields are populated by the runtime audit boundary.  Keeping them
+    # on the immutable decision value lets failed strategy calls use the same
+    # persistence path as successful decisions without inventing a second
+    # decision object hierarchy.
+    validation_status: str = "accepted"
+    validation_issues: tuple[str | Mapping[str, object], ...] = ()
+    duration_ms: Decimal | None = None
+    error: str | None = None
 
     def __post_init__(self) -> None:
         if self.contract_version != STRATEGY_CONTRACT_VERSION:

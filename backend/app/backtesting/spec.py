@@ -1,18 +1,21 @@
 """Single-run backtest specification and its validation.
 
-The objects here own the per-run inputs that deliberately do NOT live on
-``BacktestAccountProfile``: the inclusive date range, initial cash, and
-initial positions.  Reusing an account profile never changes these values;
-nothing in this module imports or reads account profiles.
+The immutable spec owns every client-selected input for one run: strategy
+revision/parameters, date and data scope, opening portfolio, account reference,
+slippage selection, and optional randomness. Resolved storage snapshots remain
+on ``RunBinding``; this module imports no repository or mutable account state.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import date, datetime
 from decimal import Decimal
-from typing import Sequence
+from types import MappingProxyType
+from typing import Any
 from uuid import UUID
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from app.backtesting.domain import (
     ZERO,
@@ -94,6 +97,45 @@ class InitialPositionInput:
             )
 
 
+def _freeze_json(value: Any) -> Any:
+    """Detach and freeze JSON-like run input before it enters a binding."""
+
+    if isinstance(value, Mapping):
+        return MappingProxyType(
+            {str(key): _freeze_json(item) for key, item in value.items()}
+        )
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze_json(item) for item in value)
+    return value
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentSelection:
+    """Exact registered component identity selected for one run."""
+
+    key: str
+    version: int
+    parameters: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.key, str) or not self.key.strip():
+            raise DomainValidationError("component key must be non-blank text")
+        if (
+            isinstance(self.version, bool)
+            or not isinstance(self.version, int)
+            or self.version <= 0
+        ):
+            raise DomainValidationError("component version must be a positive integer")
+        if not isinstance(self.parameters, Mapping):
+            raise DomainValidationError("component parameters must be an object")
+        object.__setattr__(self, "key", self.key.strip())
+        object.__setattr__(self, "parameters", _freeze_json(self.parameters))
+
+
+def _default_slippage_model() -> ComponentSelection:
+    return ComponentSelection("none", 1, {"price_tick": "0.01"})
+
+
 def _normalize_initial_positions(
     positions: Sequence[InitialPositionInput],
 ) -> tuple[InitialPositionInput, ...]:
@@ -129,9 +171,53 @@ class BacktestSpec:
     initial_cash: Decimal | int | str
     initial_positions: Sequence[InitialPositionInput]
     dynamic_universe: bool = False
+    # Client-selected scope and behavior are kept on the immutable spec. The
+    # binding later adds the resolved strategy, account, data and component
+    # snapshots, preserving both what was requested and what actually ran.
+    instrument_ids: Sequence[UUID] = ()
+    exchanges: Sequence[str] = ("SSE", "SZSE")
+    strategy_price_bases: Sequence[str] = ("raw",)
+    strategy_revision_id: UUID | None = None
+    strategy_parameters: Mapping[str, Any] | None = None
+    account_profile_id: UUID | None = None
+    account_profile_version: int | None = None
+    fee_schedule_selection: ComponentSelection | None = None
+    data_cutoff: datetime | None = None
+    # Exact selections are resolved once, then copied into the run binding.
+    component_selections: Mapping[str, ComponentSelection] = field(default_factory=dict)
+    analyzer_selections: Sequence[ComponentSelection] = ()
+    resolved_data_request: Mapping[str, Any] = field(default_factory=dict)
+    slippage_model: ComponentSelection = field(default_factory=_default_slippage_model)
+    random_seed: int | None = None
+    # These values are part of the run input even though the first engine
+    # implementation currently supports only domestic daily data.  Keeping
+    # them on the immutable spec prevents a future default from changing the
+    # meaning of an already-created run.
+    currency: str = "CNY"
+    timezone: str = "Asia/Shanghai"
+    frequency: str = "1d"
+    warmup_sessions: int = 0
 
     def __post_init__(self) -> None:
         start_date = _plain_date(self.start_date, "start_date")
+        if self.data_cutoff is not None and (
+            not isinstance(self.data_cutoff, datetime)
+            or self.data_cutoff.tzinfo is None or self.data_cutoff.utcoffset() is None
+        ):
+            raise DomainValidationError("data_cutoff must be a timezone-aware datetime")
+        if self.fee_schedule_selection is not None and (
+            not isinstance(self.fee_schedule_selection, ComponentSelection) or self.fee_schedule_selection.parameters
+        ):
+            raise DomainValidationError("fee schedule selection requires an exact key/version without parameters")
+        if self.account_profile_version is not None and (type(self.account_profile_version) is not int or self.account_profile_version < 1):
+            raise DomainValidationError("account_profile_version must be positive")
+        if not isinstance(self.component_selections, Mapping) or any(not isinstance(item, ComponentSelection) for item in self.component_selections.values()):
+            raise DomainValidationError("component_selections must contain ComponentSelection values")
+        if any(not isinstance(item, ComponentSelection) for item in self.analyzer_selections):
+            raise DomainValidationError("analyzer_selections must contain ComponentSelection values")
+        object.__setattr__(self, "component_selections", MappingProxyType(dict(self.component_selections)))
+        object.__setattr__(self, "analyzer_selections", tuple(self.analyzer_selections))
+        object.__setattr__(self, "resolved_data_request", _freeze_json(self.resolved_data_request))
         end_date = _plain_date(self.end_date, "end_date")
         if start_date > end_date:
             raise DomainValidationError("start_date cannot be after end_date")
@@ -144,6 +230,71 @@ class BacktestSpec:
         object.__setattr__(
             self, "initial_positions", _normalize_initial_positions(self.initial_positions)
         )
+        if not isinstance(self.dynamic_universe, bool):
+            raise DomainValidationError("dynamic_universe must be a boolean")
+
+        instrument_ids = tuple(self.instrument_ids)
+        if any(not isinstance(item, UUID) for item in instrument_ids):
+            raise DomainValidationError("instrument_ids must contain stable UUIDs")
+        if len(set(instrument_ids)) != len(instrument_ids):
+            raise DomainValidationError("instrument_ids must not contain duplicates")
+        object.__setattr__(
+            self, "instrument_ids", tuple(sorted(instrument_ids, key=str))
+        )
+
+        if not isinstance(self.exchanges, Sequence) or isinstance(
+            self.exchanges, (str, bytes)
+        ):
+            raise DomainValidationError("exchanges must be a sequence")
+        exchanges = tuple(
+            dict.fromkeys(str(exchange).strip().upper() for exchange in self.exchanges)
+        )
+        if not exchanges or any(not exchange for exchange in exchanges):
+            raise DomainValidationError("exchanges must contain non-blank names")
+        object.__setattr__(self, "exchanges", exchanges)
+
+        price_bases = tuple(
+            dict.fromkeys(str(value).strip().lower() for value in self.strategy_price_bases)
+        )
+        if not price_bases or any(value not in {"raw", "qfq", "hfq"} for value in price_bases):
+            raise DomainValidationError(
+                "strategy_price_bases must contain raw, qfq, or hfq"
+            )
+        object.__setattr__(self, "strategy_price_bases", price_bases)
+
+        for field_name in ("strategy_revision_id", "account_profile_id"):
+            value = getattr(self, field_name)
+            if value is not None and not isinstance(value, UUID):
+                raise DomainValidationError(f"{field_name} must be a UUID or null")
+        if self.strategy_parameters is not None:
+            if not isinstance(self.strategy_parameters, Mapping):
+                raise DomainValidationError("strategy_parameters must be an object or null")
+            object.__setattr__(
+                self, "strategy_parameters", _freeze_json(self.strategy_parameters)
+            )
+        if not isinstance(self.slippage_model, ComponentSelection):
+            raise DomainValidationError("slippage_model must be a ComponentSelection")
+        if self.random_seed is not None and (
+            isinstance(self.random_seed, bool) or not isinstance(self.random_seed, int)
+        ):
+            raise DomainValidationError("random_seed must be an integer or null")
+
+        if not isinstance(self.currency, str) or not self.currency.strip():
+            raise DomainValidationError("currency must be non-blank text")
+        object.__setattr__(self, "currency", self.currency.strip().upper())
+        if self.frequency != "1d":
+            raise DomainValidationError("frequency must be 1d")
+        if (
+            isinstance(self.warmup_sessions, bool)
+            or not isinstance(self.warmup_sessions, int)
+            or self.warmup_sessions < 0
+        ):
+            raise DomainValidationError("warmup_sessions must be a non-negative integer")
+        try:
+            ZoneInfo(self.timezone)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise DomainValidationError("timezone must be an IANA time-zone name") from exc
+        object.__setattr__(self, "timezone", self.timezone)
 
     @property
     def non_zero_initial_positions(self) -> tuple[InitialPositionInput, ...]:

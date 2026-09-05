@@ -99,6 +99,37 @@ class LoggingTestCase(unittest.TestCase):
             },
         )
 
+    def test_runner_event_jsonl_contains_independent_chinese_message(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = Settings(
+                api_token=API_TOKEN,
+                cursor_signing_key="b" * 64,
+                log_dir=Path(temporary_directory),
+                log_queue_size=100,
+                database_password="test-secret",
+                _env_file=None,
+            )
+            with contextlib.redirect_stderr(io.StringIO()):
+                runtime = configure_logging(settings)
+                logging.getLogger("backtesting.runner.supervisor").info(
+                    "回测 worker 已启动，等待身份握手。",
+                    extra={"event": "backtest_worker_started", "run_id": "run-1"},
+                )
+                runtime.stop()
+            records = [
+                json.loads(line)
+                for line in runtime.log_file.read_text(encoding="utf-8").splitlines()
+            ]
+            self.assertTrue(records)
+            self.assertTrue(
+                any(
+                    record.get("event") == "backtest_worker_started"
+                    and "回测 worker" in record.get("message", "")
+                    for record in records
+                )
+            )
+            logging.getLogger().handlers.clear()
+
 
 if __name__ == "__main__":
     unittest.main()

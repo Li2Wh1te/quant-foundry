@@ -79,6 +79,26 @@ services:
     init: true
     stop_grace_period: 30s
 
+  runner:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: quant-foundry-backend:local
+    command: ["python", "-m", "app.runner"]
+    env_file:
+      - .env
+    environment:
+      QF_DATABASE_HOST: postgres
+      QF_DATABASE_PORT: 5432
+    volumes:
+      - server_logs:/app/data/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
 volumes:
   postgres_data:
   server_logs:

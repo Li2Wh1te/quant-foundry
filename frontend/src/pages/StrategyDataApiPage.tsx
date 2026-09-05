@@ -1,21 +1,21 @@
 import { CalendarDays, Database, Landmark, ShieldCheck } from "lucide-react";
 
-const DAILY_BARS_EXAMPLE = `bars = context.market.daily_bars(
-    codes=["510300.SH", "159919.SZ"],
+const DAILY_BARS_EXAMPLE = `bars = context.data.daily_bars(
+    instrument_ids=["uuid-510300", "uuid-159919"],
     fields=["open", "high", "low", "close", "vol", "amount"],
     start_date=date(2024, 8, 16),
 )`;
 
-const FACTORS_EXAMPLE = `factors = context.market.adjustment_factors(
-    codes=["510300.SH"],
+const FACTORS_EXAMPLE = `factors = context.data.adjustment_factors(
+    instrument_ids=["uuid-510300"],
     lookback_sessions=60,
 )`;
 
-const SESSIONS_EXAMPLE = `sessions = context.calendar.sessions(
+const SESSIONS_EXAMPLE = `sessions = context.clock.sessions(
     lookback_sessions=20,
 )`;
 
-const UNIVERSE_EXAMPLE = `candidates = context.universe.eligible_etfs(
+const UNIVERSE_EXAMPLE = `candidates = context.universe.query(
     exchanges=["SSE", "SZSE"],
     min_history_sessions=60,
     require_bar_on_cutoff=True,
@@ -70,15 +70,15 @@ export function StrategyDataApiPage() {
           <p>只读属性，返回当前策略决策所在的交易日。</p>
         </article>
         <article className="strategy-data-docs__method">
-          <div><Database aria-hidden="true" /><code>context.market.daily_bars()</code></div>
+          <div><Database aria-hidden="true" /><code>context.data.daily_bars()</code></div>
           <p>读取指定 ETF 的原始日线 OHLCV 与成交额，结果按日期升序返回。</p>
         </article>
         <article className="strategy-data-docs__method">
-          <div><Database aria-hidden="true" /><code>context.market.adjustment_factors()</code></div>
+          <div><Database aria-hidden="true" /><code>context.data.adjustment_factors()</code></div>
           <p>读取指定 ETF 的复权因子，与日线使用同一可见截止日。</p>
         </article>
         <article className="strategy-data-docs__method">
-          <div><CalendarDays aria-hidden="true" /><code>context.calendar.sessions()</code></div>
+          <div><CalendarDays aria-hidden="true" /><code>context.clock.sessions()</code></div>
           <p>读取已发生的交易日，按日期升序返回。</p>
         </article>
         <article className="strategy-data-docs__method">

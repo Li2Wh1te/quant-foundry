@@ -6,6 +6,7 @@ import unittest
 from uuid import UUID, uuid4
 
 from app.backtesting.domain import PositionSide
+from app.instruments.domain import VersionedReference
 from app.backtesting.preflight import (
     BacktestPreflightGateway,
     CheckStatus,
@@ -116,11 +117,22 @@ class FakeGateway:
     ) -> InstrumentRulesFacts | None:
         if not self.rules_present.get(instrument_id, False):
             return None
+        applicability = (
+            {
+                "suspension": "required",
+                "opening_availability": "required",
+                "price_limit_tradability": "required",
+            }
+            if self.requires_trading_status[instrument_id]
+            else {
+                "suspension": "not_applicable",
+                "opening_availability": "not_applicable",
+                "price_limit_tradability": "not_applicable",
+            }
+        )
         return InstrumentRulesFacts(
-            rule_package_id="cn-etf@1",
-            requires_trading_status_facts=self.requires_trading_status[
-                instrument_id
-            ],
+            rule_package_reference=VersionedReference("china_listed_etf_rules", 1),
+            trading_status_applicability=applicability,
         )
 
     def resolve_settlement_and_sell_rules(
@@ -563,6 +575,94 @@ class FactCompletenessTestCase(PreflightTestCase):
             [issue.code for issue in result.issues],
             [],
         )
+
+    def test_partial_trading_status_declaration_blocks_without_deriving_na(self) -> None:
+        gateway = FakeGateway([self.instrument_a])
+
+        def incomplete_rules(instrument_id: UUID, *, as_of: date):
+            return InstrumentRulesFacts(
+                rule_package_reference=VersionedReference("china_listed_etf_rules", 1),
+                trading_status_applicability={
+                    "suspension": "not_applicable",
+                    "opening_availability": "not_applicable",
+                },
+            )
+
+        gateway.resolve_instrument_rules = incomplete_rules  # type: ignore[method-assign]
+        report = InitialPositionPreflightService(gateway).run(
+            self.make_spec([self.make_position()])
+        )
+
+        self.assertIs(report.status, PreflightStatus.BLOCKED)
+        result = report.checked_positions[0]
+        self.assertIs(result.rules_status, CheckStatus.BLOCKED)
+        self.assertIs(result.trading_status, CheckStatus.BLOCKED)
+        self.assertIn("trading_status_declaration_missing", {
+            issue.code for issue in result.issues
+        })
+
+    def test_missing_rule_package_reference_blocks_without_status_gateway_call(self) -> None:
+        gateway = FakeGateway([self.instrument_a])
+        gateway.requires_trading_status[self.instrument_a] = False
+        status_calls = 0
+        original = gateway.check_required_trading_status
+
+        def unexpected_status_call(*args, **kwargs):
+            nonlocal status_calls
+            status_calls += 1
+            return original(*args, **kwargs)
+
+        gateway.check_required_trading_status = unexpected_status_call  # type: ignore[method-assign]
+
+        def missing_reference(instrument_id: UUID, *, as_of: date):
+            return InstrumentRulesFacts(
+                rule_package_reference=None,
+                trading_status_applicability={
+                    "suspension": "not_applicable",
+                    "opening_availability": "not_applicable",
+                    "price_limit_tradability": "not_applicable",
+                },
+            )
+
+        gateway.resolve_instrument_rules = missing_reference  # type: ignore[method-assign]
+        report = InitialPositionPreflightService(gateway).run(
+            self.make_spec([self.make_position()])
+        )
+
+        self.assertIs(report.status, PreflightStatus.BLOCKED)
+        self.assertEqual(status_calls, 0)
+        result = report.checked_positions[0]
+        self.assertIs(result.rules_status, CheckStatus.BLOCKED)
+        self.assertIs(result.trading_status, CheckStatus.BLOCKED)
+        self.assertIn("rule_package_reference_missing", {
+            issue.code for issue in result.issues
+        })
+
+    def test_invalid_trading_status_value_blocks_without_deriving_na(self) -> None:
+        gateway = FakeGateway([self.instrument_a])
+
+        def invalid_rules(instrument_id: UUID, *, as_of: date):
+            return InstrumentRulesFacts(
+                rule_package_reference=VersionedReference("china_listed_etf_rules", 1),
+                trading_status_applicability={
+                    "suspension": "tradable",
+                    "opening_availability": "not_applicable",
+                    "price_limit_tradability": "not_applicable",
+                },
+            )
+
+        gateway.resolve_instrument_rules = invalid_rules  # type: ignore[method-assign]
+        report = InitialPositionPreflightService(gateway).run(
+            self.make_spec([self.make_position()])
+        )
+
+        result = report.checked_positions[0]
+        self.assertIs(report.status, PreflightStatus.BLOCKED)
+        self.assertIs(result.rules_status, CheckStatus.BLOCKED)
+        self.assertIs(result.trading_status, CheckStatus.BLOCKED)
+        self.assertIn("trading_status_declaration_invalid", {
+            issue.code for issue in result.issues
+        })
 
     def test_dynamic_universe_never_skips_initial_position_checks(self) -> None:
         spec = self.make_spec(

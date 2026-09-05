@@ -131,8 +131,20 @@ class StrategySummaryResponse(BaseModel):
 class StrategyDetailResponse(StrategySummaryResponse):
     """One editor-oriented strategy response with its draft and current revision."""
 
+    draft_changed_since_revision: bool = False
     draft: StrategyDraftResponse
     current_revision: StrategyRevisionSummaryResponse | None
+
+
+class StrategyBacktestWorkspaceResponse(BaseModel):
+    """Strategy-scoped projection consumed by the backtest workbench."""
+
+    strategy: dict[str, Any]
+    published_revisions: list[dict[str, Any]]
+    slippage_models: list[dict[str, Any]]
+    component_options: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
+    formal_gate: dict[str, Any]
+    runs: dict[str, Any]
 
 
 class StrategyValidationIssueResponse(BaseModel):

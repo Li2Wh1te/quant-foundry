@@ -18,7 +18,7 @@ import json
 import os
 import sys
 import traceback
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from uuid import UUID
 
 if os.name == "posix" and os.environ.get("QF_CONTRACT_CHECK_MEM_MB"):
@@ -36,7 +36,7 @@ from app.strategy_protocol.contract import (  # noqa: E402
     STRATEGY_CONTRACT_VERSION,
 )
 from app.strategy_protocol.synthetic import (  # noqa: E402
-    SYNTHETIC_SESSION_OFFSETS,
+    synthetic_session_dates,
     ContractCheckParameters,
     SyntheticIdentityRow,
     build_synthetic_context,
@@ -187,8 +187,7 @@ def perform_contract_check(request: dict) -> dict:
             "mode": decision.mode,
             "target_count": len(decision.targets),
             "session_dates": [
-                (context.session_date - timedelta(days=offset)).isoformat()
-                for offset in SYNTHETIC_SESSION_OFFSETS
+                value.isoformat() for value in synthetic_session_dates(context.session_date)
             ],
             "identity_rows": [
                 _identity_row_to_evidence(row) for row in identity_rows
@@ -231,11 +230,20 @@ def _failure_payload(exc: Exception) -> dict:
     line = getattr(exc, "lineno", None)
     if line is None:
         line = _strategy_line(exc)
+    raw_message = str(exc)
+    # Keep operator-facing text in Chinese while preserving the original
+    # exception details in the bounded technical field below.
+    message = raw_message if any("\u4e00" <= ch <= "\u9fff" for ch in raw_message) else f"策略契约检查失败：{raw_message}"
+    technical_detail = _bounded_traceback(exc)
     return {
         "error_type": type(exc).__name__,
-        "message": str(exc),
+        "message": message,
         "line": line,
-        "traceback": _bounded_traceback(exc),
+        "source_line": line,
+        "failure_step": getattr(exc, "step_sequence", None),
+        "traceback": technical_detail,
+        "technical_detail": technical_detail,
+        "failure_phase": "strategy_contract_check",
         "phase": "strategy_contract_check",
     }
 

@@ -100,12 +100,12 @@ class EtfDailyBarResponse(BaseModel):
 
     ts_code: str
     trade_date: date
-    open: Decimal
-    high: Decimal
-    low: Decimal
-    close: Decimal
-    vol: Decimal
-    amount: Decimal
+    open: Decimal | None
+    high: Decimal | None
+    low: Decimal | None
+    close: Decimal | None
+    vol: Decimal | None
+    amount: Decimal | None
     source: str
     updated_at: datetime
 

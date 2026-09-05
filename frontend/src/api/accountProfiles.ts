@@ -18,6 +18,7 @@ export interface FeeRule {
 
 export interface FeeSchedule {
   key: string;
+  version?: number;
   fee_rules: FeeRule[];
   metadata: Record<string, string>;
 }
@@ -26,6 +27,8 @@ export interface AccountProfile {
   id: string;
   name: string;
   status: AccountProfileStatus;
+  version: number;
+  fee_schedule_version: number;
   fee_schedule: FeeSchedule;
   metadata: Record<string, unknown>;
   created_at: string;
@@ -100,4 +103,9 @@ export function deleteAccountProfile(id: string): Promise<void> {
   return request<void>(`/api/admin/backtest-account-profiles/${encodeURIComponent(id)}`, {
     method: "DELETE",
   });
+}
+
+/** Resolve historical account configuration without silently using latest. */
+export function listAccountProfileVersions(id: string): Promise<AccountProfile[]> {
+  return request(`/api/admin/backtest-account-profiles/${encodeURIComponent(id)}/versions`);
 }

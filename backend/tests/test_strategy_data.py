@@ -13,6 +13,7 @@ from app.data_ingestion.models.etf import EtfCode, EtfEntity
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.models.etf_daily import EtfDailyBar
 from app.data_ingestion.models.trading_calendar import TradingCalendarDay
+from app.instruments.models import Instrument
 from app.strategy_data import (
     DecisionPhase,
     FutureDataAccessError,
@@ -180,7 +181,10 @@ class StrategyDataContextTestCase(unittest.TestCase):
 
     def _create_strategy_data_tables(self) -> None:
         """Create only the PostgreSQL-independent tables used by these tests."""
+        # Instruments must exist first: etf_entities.id carries a foreign
+        # key into instruments.id.
         for model in (
+            Instrument,
             EtfEntity,
             EtfCode,
             EtfDailyBar,
@@ -197,6 +201,7 @@ class StrategyDataContextTestCase(unittest.TestCase):
             EtfDailyBar,
             EtfCode,
             EtfEntity,
+            Instrument,
         ):
             model.__table__.drop(self.engine)
 
@@ -251,6 +256,9 @@ class StrategyDataContextTestCase(unittest.TestCase):
     ) -> None:
         entity_id = uuid4()
         observed_at = datetime(2026, 8, 18, tzinfo=UTC)
+        # The generic instrument identity must exist before the ETF entity
+        # because etf_entities.id references instruments.id.
+        self.session.add(Instrument(id=entity_id, asset_class="etf"))
         self.session.add(EtfEntity(id=entity_id))
         self.session.add(
             EtfCode(

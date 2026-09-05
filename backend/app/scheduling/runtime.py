@@ -14,6 +14,8 @@ from structlog.contextvars import bound_contextvars
 
 from app.core.config import Settings
 from app.db.session import get_engine
+from app.data_ingestion.clients.tushare import TushareClient
+from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
 from app.scheduling.registry import TaskContext, TaskRegistry, task_registry
 from app.scheduling.repository import SchedulerRepository
 from app.scheduling.schemas import (
@@ -30,6 +32,12 @@ from app.scheduling.triggers import build_trigger
 logger = structlog.get_logger(__name__)
 TASK_JOB_PREFIX = "scheduled-task:"
 DISPATCH_JOB_ID = "scheduler:dispatch"
+INGESTION_SYNC_KEYS = {
+    "data.sync_etf_cash_dividend_full": "tushare.fund_div.full",
+    "data.sync_etf_cash_dividend_incremental": "tushare.fund_div.incremental",
+    "data.sync_etf_cash_dividend_reconciliation": "tushare.fund_div.reconciliation",
+    "data.sync_trading_status": "tushare.trading_status",
+}
 
 
 class SchedulerDisabledError(Exception):
@@ -60,7 +68,7 @@ class SchedulerRuntime:
 
     def start(self) -> None:
         if not self.settings.scheduler_enabled:
-            logger.info("scheduler_disabled")
+            logger.info("scheduler_disabled", message="调度器已按配置禁用，本实例不启动任务调度。")
             return
 
         with Session(get_engine()) as session:
@@ -75,7 +83,7 @@ class SchedulerRuntime:
                 self.sync_task(task_id)
             except Exception:
                 # One stale task definition must not prevent the API from starting.
-                logger.exception("task_sync_failed", task_id=str(task_id))
+                logger.exception("task_sync_failed", task_id=str(task_id), message=f"调度任务 {task_id} 同步失败，已跳过该任务并继续启动。")
         self.scheduler.add_job(
             self.dispatch_queued_runs,
             trigger="interval",
@@ -88,6 +96,7 @@ class SchedulerRuntime:
         self.scheduler.resume()
         logger.info(
             "scheduler_started",
+            message=f"调度器已启动，加载 {len(active_task_ids)} 个活动任务并标记 {interrupted} 个遗留运行中断。",
             active_tasks=len(active_task_ids),
             interrupted_runs=interrupted,
             max_workers=self.settings.scheduler_max_workers,
@@ -97,7 +106,7 @@ class SchedulerRuntime:
         if self.running:
             self.scheduler.shutdown(wait=False)
         self.executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("scheduler_stopped")
+        logger.info("scheduler_stopped", message="本实例调度器已停止，待执行任务已取消。")
 
     def sync_task(self, task_id: UUID) -> None:
         if not self.settings.scheduler_enabled:
@@ -172,7 +181,24 @@ class SchedulerRuntime:
             with Session(get_engine()) as session:
                 repository = SchedulerRepository(session)
                 run_ids = repository.claim_queued_runs(slots)
+                run_context = {
+                    run.id: (run.task_id, run.task_type)
+                    for run in (repository.get_run(run_id) for run_id in run_ids)
+                    if run is not None
+                }
                 session.commit()
+
+            for run_id in run_ids:
+                logger.info(
+                    "task_run_claimed",
+                    message="Supervisor 已领取任务运行，准备启动执行器。",
+                    run_id=str(run_id),
+                    task_id=str(run_context.get(run_id, (None, None))[0]) if run_id in run_context else None,
+                    task_type=run_context.get(run_id, (None, None))[1] if run_id in run_context else None,
+                    source="scheduler",
+                    worker_id=None,
+                    started=False,
+                )
 
             for run_id in run_ids:
                 try:
@@ -198,13 +224,14 @@ class SchedulerRuntime:
                     )
                     session.commit()
         except TaskConflictError:
-            logger.info("scheduled_run_ignored", task_id=str(task_id))
+            logger.info("scheduled_run_ignored", task_id=str(task_id), message=f"调度任务 {task_id} 本次触发已忽略，未创建运行。")
         except Exception:
-            logger.exception("scheduled_run_enqueue_failed", task_id=str(task_id))
+            logger.exception("scheduled_run_enqueue_failed", task_id=str(task_id), message=f"调度任务 {task_id} 创建等待运行失败，已记录异常。")
 
     def _execute_run(self, run_id: UUID) -> None:
         task_id: UUID | None = None
         task_type: str | None = None
+        ingestion_session: Session | None = None
         try:
             with Session(get_engine()) as session:
                 repository = SchedulerRepository(session)
@@ -231,8 +258,10 @@ class SchedulerRuntime:
             ):
                 logger.info(
                     "task_run_started",
-                    message="开始执行任务。",
+                    message="Supervisor 已启动任务运行，执行范围按冻结参数开始。",
                     parameter_version=parameter_version,
+                    worker_id=f"task-worker:{run_id}",
+                    source="scheduler", scope="frozen_parameters",
                 )
                 definition = self.registry.require(task_type)
                 if parameter_version != definition.parameter_version:
@@ -241,12 +270,33 @@ class SchedulerRuntime:
                         f"for task type {task_type}"
                     )
                 validated_parameters = definition.parameters_model.model_validate(parameters)
-                result = definition.handler(
-                    TaskContext(task_id=task_id, run_id=run_id),
-                    validated_parameters,
-                )
+
+                if task_type in INGESTION_SYNC_KEYS:
+                    # Keep source facts and their checkpoint in one transaction.
+                    # This prevents a successful-looking cursor from advancing
+                    # when fact persistence fails halfway through the handler.
+                    ingestion_session = Session(get_engine())
+                    context = TaskContext(
+                        task_id=task_id,
+                        run_id=run_id,
+                        task_type=task_type,
+                        client=TushareClient(self.settings),
+                        session=ingestion_session,
+                        checkpoint_repo=DataSyncCheckpointRepository(ingestion_session),
+                        sync_key=INGESTION_SYNC_KEYS[task_type],
+                    )
+                else:
+                    context = TaskContext(
+                        task_id=task_id, run_id=run_id, task_type=task_type
+                    )
+
+                result = definition.handler(context, validated_parameters)
                 if result is not None and not isinstance(result, dict):
                     raise TypeError("task handlers must return a dictionary or None")
+                if ingestion_session is not None:
+                    ingestion_session.commit()
+                    ingestion_session.close()
+                    ingestion_session = None
 
                 with Session(get_engine()) as session:
                     SchedulerRepository(session).finish_run(
@@ -257,16 +307,32 @@ class SchedulerRuntime:
                     session.commit()
                 logger.info(
                     "task_run_succeeded",
-                    message="任务执行成功。",
+                    message=f"任务运行执行成功：范围为task={task_id}, run={run_id}, task_type={task_type}，结果已写入。",
                     has_result=result is not None,
+                    task_id=str(task_id), run_id=str(run_id), task_type=task_type,
+                    source="scheduler", worker_id=f"task-worker:{run_id}", exit_code=0, completion_marker="reported",
+                )
+                logger.info(
+                    "task_run_terminal_written",
+                    message=f"任务运行成功终态已写入：范围为task={task_id}, run={run_id}, task_type={task_type}，退出码0。",
+                    task_id=str(task_id), run_id=str(run_id), task_type=task_type,
+                    source="scheduler", worker_id=f"task-worker:{run_id}", exit_code=0,
+                    completion_marker="reported", error_type=None,
                 )
         except Exception as exc:
+            if ingestion_session is not None:
+                ingestion_session.rollback()
+                ingestion_session.close()
+                ingestion_session = None
             logger.exception(
                 "task_run_failed",
-                message="任务执行失败。",
+                message=f"任务运行执行失败：范围为task={task_id}, run={run_id}, task_type={task_type}，错误为{type(exc).__name__}。",
                 run_id=str(run_id),
                 task_id=str(task_id) if task_id is not None else None,
                 task_type=task_type,
+                source="scheduler", worker_id=f"task-worker:{run_id}", exit_code=None, completion_marker=None,
+                error_type=type(exc).__name__, error_message=str(exc)[:10_000],
+                failure_phase="handler",
             )
             with Session(get_engine()) as session:
                 SchedulerRepository(session).finish_run(
@@ -276,13 +342,41 @@ class SchedulerRuntime:
                     error_message=str(exc)[:10_000],
                 )
                 session.commit()
+            logger.info("task_run_terminal_written", message=f"任务运行失败终态已写入：范围为task={task_id}, run={run_id}, task_type={task_type}，错误为{type(exc).__name__}。", task_id=str(task_id) if task_id else None, run_id=str(run_id), task_type=task_type, source="scheduler", worker_id=f"task-worker:{run_id}", exit_code=None, completion_marker=None, error_type=type(exc).__name__, error_message=str(exc)[:10_000])
 
     def _on_run_future_done(self, future: Future[Any]) -> None:
         with self._futures_lock:
             run_id = self._futures.pop(future, None)
         if run_id is None:
             return
+        # Metadata enrichment is best effort: an unavailable database must not
+        # prevent the callback from compensating a crashed worker's RUNNING row.
+        run_meta = {
+            "task_id": None,
+            "task_type": None,
+            "worker_id": f"task-worker:{run_id}",
+        }
+        try:
+            with Session(get_engine()) as session:
+                observed = SchedulerRepository(session).get_run(run_id)
+                if observed is not None:
+                    run_meta = {
+                        "task_id": str(observed.task_id) if observed.task_id else None,
+                        "task_type": observed.task_type,
+                        "worker_id": observed.worker_id or f"task-worker:{run_id}",
+                    }
+        except Exception as exc:
+            logger.warning(
+                "task_run_metadata_unavailable",
+                message="任务运行日志元数据读取失败，将使用运行标识继续处理终态。",
+                run_id=str(run_id),
+                source="scheduler",
+                **run_meta,
+                error_type=type(exc).__name__,
+            )
         if future.cancelled():
+            logger.warning("task_run_cancel_requested", message="收到任务取消请求，正在结束运行。", run_id=str(run_id), source="scheduler", worker_id=None, exit_code=None, completion_marker=None, error_type="SchedulerStopped")
+            logger.info("task_run_worker_exited", message="任务执行器因调度器停止而退出，运行已取消。", run_id=str(run_id), source="scheduler", **run_meta, exit_code=None, completion_marker="cancelled", error_type="SchedulerStopped")
             self._finish_running_run(
                 run_id,
                 status=RunStatus.INTERRUPTED,
@@ -293,6 +387,7 @@ class SchedulerRuntime:
 
         try:
             future.result()
+            logger.info("task_run_worker_exited", message="任务执行器正常退出，运行结果已处理。", run_id=str(run_id), source="scheduler", **run_meta, exit_code=0, completion_marker="reported", error_type=None)
         except BaseException as exc:
             # _execute_run normally records handler failures itself. This covers
             # failures while recording that result, so a dead worker cannot leave
@@ -301,6 +396,8 @@ class SchedulerRuntime:
                 "task_run_worker_crashed",
                 message="任务执行器异常退出，正在补偿结束运行记录。",
                 run_id=str(run_id),
+                source="scheduler", **run_meta, exit_code=None, completion_marker=None,
+                failure_phase="worker_crash",
             )
             try:
                 self._finish_running_run(
@@ -309,6 +406,13 @@ class SchedulerRuntime:
                     error_type=type(exc).__name__,
                     error_message=str(exc)[:10_000]
                     or "Task worker exited before reporting its result.",
+                )
+                logger.info(
+                    "task_run_terminal_written",
+                    message=f"任务运行失败终态已写入：运行执行器异常退出，run={run_id}，错误为{type(exc).__name__}。",
+                    run_id=str(run_id), source="scheduler", **run_meta,
+                    exit_code=None, completion_marker=None,
+                    error_type=type(exc).__name__, error_message=str(exc)[:10_000],
                 )
             except Exception:
                 logger.exception(
@@ -347,6 +451,14 @@ class SchedulerRuntime:
                 error_message=error_message,
             )
             session.commit()
+        if finished:
+            logger.info(
+                "task_run_terminal_written",
+                message=f"任务运行终态已写入：run={run_id}，状态={status.value}，调度路径已退出。",
+                run_id=str(run_id), source="scheduler", worker_id=f"task-worker:{run_id}",
+                exit_code=None, completion_marker="cancelled" if status is RunStatus.INTERRUPTED else None,
+                error_type=error_type, error_message=error_message,
+            )
         return finished
 
     def _remove_job_if_present(self, job_id: str) -> None:

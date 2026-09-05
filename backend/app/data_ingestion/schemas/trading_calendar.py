@@ -13,6 +13,9 @@ class TradingCalendarDayInput:
     calendar_date: date
     is_open: bool
     previous_trading_date: date | None
+    # Canonical task-11 identity; legacy callers may leave it unset while
+    # the migration boundary derives it from ``exchange``.
+    calendar_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -52,3 +55,6 @@ class TradeCalendarSyncResult:
     changed: int
     unchanged: int
     synced_through_date: date | None
+    start_date: date | None = None
+    end_date: date | None = None
+    calendar_id: str | None = None

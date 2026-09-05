@@ -41,7 +41,7 @@ def schedule(*, complete: bool = True) -> FeeSchedule:
                 "rounding_precision": "0.01",
             }
         )
-    return FeeSchedule(key="etf-cny", fee_rules=(FeeRule(**rule_kwargs),))
+    return FeeSchedule(version=1, key="etf-cny", fee_rules=(FeeRule(**rule_kwargs),))
 
 
 def profile(*, name: str = "ETF 账户", status: AccountProfileStatus = AccountProfileStatus.ACTIVE) -> BacktestAccountProfile:
@@ -93,7 +93,7 @@ class AccountProfileSnapshotTestCase(unittest.TestCase):
         replacement = BacktestAccountProfile(
             profile_id=original.profile_id,
             display_name="Updated account",
-            fee_schedule=FeeSchedule(
+            fee_schedule=FeeSchedule(version=1,
                 key="updated-fees",
                 fee_rules=(
                     FeeRule(
@@ -141,7 +141,7 @@ class AccountProfileSnapshotTestCase(unittest.TestCase):
         with self.assertRaises(FeeError):
             account.snapshot()
 
-    def test_frozen_schedule_can_be_consumed_without_a_schedule_version(self) -> None:
+    def test_frozen_schedule_preserves_its_required_version(self) -> None:
         snapshot = profile().snapshot()
 
         breakdown = FeeCalculator(snapshot.fee_schedule).calculate(
@@ -150,7 +150,7 @@ class AccountProfileSnapshotTestCase(unittest.TestCase):
         )
 
         self.assertEqual(breakdown.schedule_key, "etf-cny")
-        self.assertIsNone(breakdown.schedule_version)
+        self.assertEqual(breakdown.schedule_version, 1)
 
     def test_zero_cost_fixture_cannot_be_attached_to_a_formal_profile(self) -> None:
         with self.assertRaises(AccountProfileError):
@@ -161,7 +161,7 @@ class AccountProfileSnapshotTestCase(unittest.TestCase):
             )
 
         with self.assertRaises(FeeError):
-            FeeSchedule(key="zero_cost", fee_rules=())
+            FeeSchedule(version=1, key="zero_cost", fee_rules=())
 
 
 if __name__ == "__main__":

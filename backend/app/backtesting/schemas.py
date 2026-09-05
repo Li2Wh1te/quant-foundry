@@ -90,6 +90,7 @@ class FeeScheduleResponse(BaseModel):
     """Serialized fee schedule bound to an account profile."""
 
     key: str
+    version: int = Field(ge=1)
     fee_rules: list[FeeRuleResponse]
     metadata: dict[str, str]
 
@@ -102,6 +103,8 @@ class AccountProfileResponse(BaseModel):
     id: UUID
     name: str
     status: AccountProfileStatus
+    version: int
+    fee_schedule_version: int
     fee_schedule: FeeScheduleResponse
     metadata: dict[str, Any]
     created_at: datetime

@@ -49,7 +49,122 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             self.assertIn("QF_WEB_PORT=8080", first_content)
             self.assertEqual(os.stat(env).st_mode & 0o777, 0o600)
 
-    def test_replaces_weak_secrets_and_removes_legacy_url(self) -> None:
+    def test_first_initialization_adds_formal_backtest_defaults_but_not_internal_queue(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            template = root / ".env.example"
+            env = root / ".env"
+            template.write_text(
+                "QF_API_TOKEN=\n"
+                "QF_DATABASE_PASSWORD=\n"
+                "QF_CURSOR_SIGNING_KEY=\n"
+                "QF_BACKTEST_MAX_WORKERS=1\n"
+                "QF_BACKTEST_MAX_QUEUED_RUNS=32\n"
+                "QF_BACKTEST_RUN_TIMEOUT_SECONDS=7200\n"
+                "QF_BACKTEST_CANCEL_GRACE_SECONDS=10\n"
+                "QF_BACKTEST_STDOUT_MAX_BYTES=1048576\n"
+                "QF_BACKTEST_MEMORY_LIMIT_MIB=1024\n"
+                "QF_BACKTEST_HEARTBEAT_MAX_INTERVAL_SECONDS=15\n"
+                "QF_BACKTEST_LOST_HEARTBEAT_SECONDS=60\n"
+                "QF_BACKTEST_PROGRESS_PERSIST_INTERVAL_SECONDS=5\n"
+                "# QF_BACKTEST_INTERNAL_MAX_QUEUED_RUNS=1\n",
+                encoding="utf-8",
+            )
+
+            with patch(
+                "scripts.selfhost_env.secrets.token_hex",
+                side_effect=("a" * 64, "b" * 64, "c" * 64),
+            ):
+                ensure_selfhost_environment(env, template)
+
+            content = env.read_text(encoding="utf-8")
+            for key, value in (
+                ("QF_BACKTEST_MAX_WORKERS", "1"),
+                ("QF_BACKTEST_MAX_QUEUED_RUNS", "32"),
+                ("QF_BACKTEST_RUN_TIMEOUT_SECONDS", "7200"),
+                ("QF_BACKTEST_CANCEL_GRACE_SECONDS", "10"),
+                ("QF_BACKTEST_STDOUT_MAX_BYTES", "1048576"),
+                ("QF_BACKTEST_MEMORY_LIMIT_MIB", "1024"),
+                ("QF_BACKTEST_HEARTBEAT_MAX_INTERVAL_SECONDS", "15"),
+                ("QF_BACKTEST_LOST_HEARTBEAT_SECONDS", "60"),
+                ("QF_BACKTEST_PROGRESS_PERSIST_INTERVAL_SECONDS", "5"),
+            ):
+                self.assertIn(f"{key}={value}\n", content)
+            self.assertNotRegex(
+                content, r"(?m)^QF_BACKTEST_INTERNAL_MAX_QUEUED_RUNS="
+            )
+
+    def test_upgrade_appends_missing_backtest_defaults_and_preserves_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            template = root / ".env.example"
+            env = root / ".env"
+            template.write_text(
+                "QF_BACKTEST_MAX_WORKERS=1\n"
+                "QF_BACKTEST_MAX_QUEUED_RUNS=32\n"
+                "QF_BACKTEST_RUN_TIMEOUT_SECONDS=7200\n"
+                "QF_BACKTEST_CANCEL_GRACE_SECONDS=10\n"
+                "QF_BACKTEST_STDOUT_MAX_BYTES=1048576\n"
+                "QF_BACKTEST_MEMORY_LIMIT_MIB=1024\n"
+                "QF_BACKTEST_HEARTBEAT_MAX_INTERVAL_SECONDS=15\n"
+                "QF_BACKTEST_LOST_HEARTBEAT_SECONDS=60\n"
+                "QF_BACKTEST_PROGRESS_PERSIST_INTERVAL_SECONDS=5\n"
+                "# QF_BACKTEST_INTERNAL_MAX_QUEUED_RUNS=1\n",
+                encoding="utf-8",
+            )
+            env.write_text(
+                "QF_BACKTEST_MAX_WORKERS=3\n"
+                "QF_BACKTEST_MAX_QUEUED_RUNS=7\n"
+                "QF_BACKTEST_STDOUT_MAX_BYTES=\n"
+                "QF_DATABASE_PASSWORD=operator-secret\n"
+                f"QF_API_TOKEN={'d' * 64}\n"
+                f"QF_CURSOR_SIGNING_KEY={'e' * 64}\n",
+                encoding="utf-8",
+            )
+
+            ensure_selfhost_environment(env, template)
+
+            content = env.read_text(encoding="utf-8")
+            self.assertIn("QF_BACKTEST_MAX_WORKERS=3\n", content)
+            self.assertIn("QF_BACKTEST_MAX_QUEUED_RUNS=7\n", content)
+            # An empty non-secret value is still an existing operator value.
+            self.assertIn("QF_BACKTEST_STDOUT_MAX_BYTES=\n", content)
+            self.assertIn("QF_BACKTEST_RUN_TIMEOUT_SECONDS=7200\n", content)
+            self.assertIn("QF_BACKTEST_CANCEL_GRACE_SECONDS=10\n", content)
+            self.assertIn("QF_BACKTEST_MEMORY_LIMIT_MIB=1024\n", content)
+            self.assertIn("QF_BACKTEST_HEARTBEAT_MAX_INTERVAL_SECONDS=15\n", content)
+            self.assertIn("QF_BACKTEST_LOST_HEARTBEAT_SECONDS=60\n", content)
+            self.assertIn("QF_BACKTEST_PROGRESS_PERSIST_INTERVAL_SECONDS=5\n", content)
+            self.assertNotRegex(
+                content, r"(?m)^QF_BACKTEST_INTERNAL_MAX_QUEUED_RUNS="
+            )
+            self.assertIn("QF_DATABASE_PASSWORD=operator-secret\n", content)
+            self.assertIn(f"QF_API_TOKEN={'d' * 64}\n", content)
+            self.assertIn(f"QF_CURSOR_SIGNING_KEY={'e' * 64}\n", content)
+
+    def test_compose_and_selfhost_lifecycle_include_runner(self) -> None:
+        project_root = Path(__file__).resolve().parents[1]
+        compose = (project_root / "compose.yaml").read_text(encoding="utf-8")
+        selfhost = (project_root / "scripts" / "selfhost.sh").read_text(encoding="utf-8")
+
+        self.assertIn("  runner:\n", compose)
+        self.assertIn("image: quant-foundry-backend:local", compose)
+        self.assertIn('command: ["python", "-m", "app.runner"]', compose)
+        self.assertIn("QF_DATABASE_HOST: postgres", compose)
+        self.assertIn("QF_DATABASE_PORT: 5432", compose)
+        self.assertIn("- server_logs:/app/data/logs", compose)
+        self.assertIn("condition: service_healthy", compose)
+        runner_block = compose.split("  runner:\n", 1)[1].split("\nvolumes:\n", 1)[0]
+        self.assertNotIn("ports:", runner_block)
+        self.assertNotIn("expose:", runner_block)
+
+        self.assertIn("compose stop frontend backend runner", selfhost)
+        self.assertIn("backend runner frontend", selfhost)
+        self.assertIn("compose logs --follow postgres backend runner frontend", selfhost)
+        self.assertIn("compose ps postgres backend runner frontend", selfhost)
+        self.assertIn("compose stop runner", selfhost)
+
+    def test_replaces_weak_secrets_removes_legacy_url_and_preserves_config(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             template = root / ".env.example"
@@ -82,7 +197,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
             self.assertIn(f"QF_DATABASE_PASSWORD={'b' * 64}", content)
             self.assertIn(f"QF_API_TOKEN={'c' * 64}", content)
             self.assertIn(f"QF_CURSOR_SIGNING_KEY={'d' * 64}", content)
-            self.assertIn("QF_SERVER_HOST=0.0.0.0", content)
+            self.assertIn("QF_SERVER_HOST=127.0.0.1", content)
             self.assertIn("QF_SERVER_PORT=19000", content)
             self.assertIn("QF_WEB_HOST=0.0.0.0", content)
             self.assertIn("QF_WEB_PORT=9090", content)

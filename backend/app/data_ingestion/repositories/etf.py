@@ -10,6 +10,11 @@ from sqlalchemy.orm import Session
 
 from app.data_ingestion.models.etf import EtfCode, EtfCodeMappingAudit, EtfEntity
 from app.data_ingestion.schemas.etf import EtfBasicUpsertResult, EtfInstrumentInput
+from app.instruments.models import Instrument
+
+# Asset-class label used for every identity created by the ETF sync flow;
+# it partitions the generic instrument identity space.
+ETF_ASSET_CLASS = "etf"
 
 
 class EtfCodeRepository:
@@ -27,10 +32,11 @@ class EtfCodeRepository:
     ) -> EtfBasicUpsertResult:
         """Insert new trading codes and update only changed source fields.
 
-        Each newly observed code receives a new local ETF entity. A code change is
-        never guessed from mutable source fields; a later verified mapping may
-        reassign the code to an existing entity through ``reassign_code_entity``.
-        Missing source rows are never deleted because an upstream omission must not
+        Each newly observed code receives a new local ETF entity together
+        with its generic instrument identity. A code change is never guessed
+        from mutable source fields; a later verified mapping may reassign the
+        code to an existing entity through ``reassign_code_entity``. Missing
+        source rows are never deleted because an upstream omission must not
         erase a delisted ETF or a historical identifier.
         """
         codes = list(records)
@@ -48,9 +54,20 @@ class EtfCodeRepository:
             if code.ts_code not in known_entities
         }
         if new_entities:
+            # The generic identity row must exist before the ETF-specific
+            # entity because etf_entities.id references instruments.id.
+            entity_ids = list(new_entities.values())
+            self.session.execute(
+                insert(Instrument.__table__).values(
+                    [
+                        {"id": entity_id, "asset_class": ETF_ASSET_CLASS}
+                        for entity_id in entity_ids
+                    ]
+                )
+            )
             self.session.execute(
                 insert(EtfEntity.__table__).values(
-                    [{"id": entity_id} for entity_id in new_entities.values()]
+                    [{"id": entity_id} for entity_id in entity_ids]
                 )
             )
         values = [

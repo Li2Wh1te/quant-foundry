@@ -1,0 +1,117 @@
+{
+  "artifact_id": "tushare_adj_factor_native@1/513100.SH/2026-08-30",
+  "artifact_schema_version": 1,
+  "policy": {
+    "key": "tushare_adj_factor_native",
+    "version": 1
+  },
+  "adapter": {
+    "key": "etf_raw_bar_adapter",
+    "version": "etf_raw_bar_adapter@1"
+  },
+  "source": {
+    "name": "tushare",
+    "capture_mode": "real_source",
+    "endpoint": "fund_adj + pro_bar",
+    "batch": "public-documentation-capture-20260830",
+    "documentation_urls": [
+      "https://tushare.pro/document/2?doc_id=199",
+      "https://tushare.pro/document/1?doc_id=109"
+    ],
+    "redaction": "no credentials captured"
+  },
+  "mapping": {
+    "source_code_field": "ts_code",
+    "source_date_field": "trade_date",
+    "factor_field": "adj_factor",
+    "effective_date": "trade_date",
+    "effective_date_normalization": "source YYYYMMDD normalized to ISO-8601 date",
+    "qfq_fields": {
+      "open": "open",
+      "high": "high",
+      "low": "low",
+      "close": "close"
+    },
+    "hfq_fields": {
+      "open": "open",
+      "high": "high",
+      "low": "low",
+      "close": "close"
+    }
+  },
+  "semantics": {
+    "qfq_formula": "tushare.pro_bar.native.qfq",
+    "hfq_formula": "tushare.pro_bar.native.hfq",
+    "qfq_anchor": "native end_date latest visible factor",
+    "hfq_anchor": "native factor at each effective date",
+    "precision": {
+      "price_decimal_places": 3,
+      "factor_decimal_places": 12
+    },
+    "rounding": "source native decimal output; no local rounding",
+    "cutoff_rule": "effective_date <= data_cutoff"
+  },
+  "input": {
+    "boundary_effective_date": "2019-09-25",
+    "factor_rows": [
+      {
+        "ts_code": "513100.SH",
+        "trade_date": "20190924",
+        "adj_factor": "1.000000000000"
+      },
+      {
+        "ts_code": "513100.SH",
+        "trade_date": "20190925",
+        "adj_factor": "1.000000000000"
+      },
+      {
+        "ts_code": "513100.SH",
+        "trade_date": "20190926",
+        "adj_factor": "1.000000000000"
+      }
+    ],
+    "cutoff_cases": [
+      {
+        "name": "before_boundary",
+        "data_cutoff": "2019-09-24T15:00:00+08:00",
+        "visible_effective_dates": [
+          "2019-09-24"
+        ]
+      },
+      {
+        "name": "after_boundary",
+        "data_cutoff": "2019-09-26T15:00:00+08:00",
+        "visible_effective_dates": [
+          "2019-09-24",
+          "2019-09-25",
+          "2019-09-26"
+        ]
+      }
+    ]
+  },
+  "output": {
+    "source_native": {
+      "qfq": [],
+      "hfq": []
+    },
+    "adapter": {
+      "qfq": [],
+      "hfq": []
+    }
+  },
+  "verification": {
+    "status": "failed",
+    "failure_reason": "Tushare public fund_adj documentation exposes factors, but no corresponding ETF source-native qfq/hfq rows were captured; activation remains inactive until both outputs are captured and compared.",
+    "checks": [
+      "source_factor_rows",
+      "effective_date_normalization",
+      "cutoff_before_boundary",
+      "cutoff_after_boundary"
+    ],
+    "hashes": {
+      "input_hash": "4cfacb68f97b459431e0727a10bc01d801fd846dbcf098a08ee90e7751e1cfb1",
+      "output_hash": "ceb294d7e1da989463b42babaca764cf81f99d569e698574d047151ceea7ec6f",
+      "evidence_hash": "952e80c6996618f2d6d55899a2bea1b8514628fb8d668ecbf5e8aee407f92a4b"
+    }
+  }
+}

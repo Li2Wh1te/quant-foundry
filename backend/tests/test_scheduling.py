@@ -23,6 +23,11 @@ from app.scheduling.schemas import (
 )
 from app.scheduling.service import SchedulerService, TaskConflictError
 from app.scheduling.triggers import build_trigger
+from app.data_ingestion.scheduler_tasks.trade_calendar import (
+    TradeCalendarSyncParameters,
+    sync_trade_calendar_task,
+)
+from app.data_ingestion.schemas.trading_calendar import TradeCalendarSyncResult
 
 
 API_TOKEN = "a" * 64
@@ -33,7 +38,7 @@ class TestTaskParameters(BaseModel):
     pass
 
 
-def test_task_handler(
+def noop_task_handler(
     context: TaskContext, parameters: TestTaskParameters
 ) -> dict[str, str]:
     return {"status": "ok"}
@@ -44,9 +49,10 @@ def make_test_registry() -> TaskRegistry:
     registry.register(
         TaskDefinition(
             key=TEST_TASK_TYPE,
-            name="Test noop",
+            name="测试空任务",
+            english_name="Test noop",
             parameters_model=TestTaskParameters,
-            handler=test_task_handler,
+            handler=noop_task_handler,
         )
     )
     return registry
@@ -100,6 +106,57 @@ class SchedulingSchemaTestCase(unittest.TestCase):
         )
 
         self.assertEqual(parameters.initial_start_date, date(1991, 7, 3))
+
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.logger")
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.sync_trade_calendar")
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.sync_named_trade_calendar")
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.resolve_named_trade_calendar_context")
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.TushareClient")
+    @patch("app.data_ingestion.scheduler_tasks.trade_calendar.get_settings")
+    def test_trade_calendar_task_writes_named_calendar_facts(
+        self,
+        get_settings_mock,
+        client_class,
+        resolve_context_mock,
+        named_sync_mock,
+        legacy_sync_mock,
+        logger_mock,
+    ) -> None:
+        metadata = SimpleNamespace(
+            calendar_id="SSE",
+            registry=object(),
+            definition=object(),
+            source_priority=object(),
+            source_revision="source-rev-1",
+        )
+        resolve_context_mock.return_value = metadata
+        named_sync_mock.return_value = TradeCalendarSyncResult(
+            ranges_completed=1,
+            received=2,
+            changed=2,
+            unchanged=0,
+            synced_through_date=date(2026, 8, 29),
+            start_date=date(2026, 1, 1),
+            end_date=date(2026, 8, 29),
+            calendar_id="SSE",
+        )
+        parameters = TradeCalendarSyncParameters(
+            exchange="XSHG",
+            initial_start_date=date(2026, 1, 1),
+        )
+
+        payload = sync_trade_calendar_task(
+            TaskContext(task_id=uuid4(), run_id=uuid4()), parameters
+        )
+
+        resolve_context_mock.assert_called_once()
+        named_sync_mock.assert_called_once()
+        self.assertEqual(named_sync_mock.call_args.kwargs["calendar_id"], "SSE")
+        self.assertEqual(
+            named_sync_mock.call_args.kwargs["source_revision"], "source-rev-1"
+        )
+        legacy_sync_mock.assert_not_called()
+        self.assertEqual(payload["calendar_id"], "SSE")
 
     def test_validates_discriminated_schedule_and_custom_parameters(self) -> None:
         payload = TaskCreate.model_validate(

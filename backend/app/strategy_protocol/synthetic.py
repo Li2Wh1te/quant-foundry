@@ -44,8 +44,17 @@ from .data_view import (
 SYNTHETIC_TIMEZONE = "Asia/Shanghai"
 """Fixed timezone of the synthetic session; never read from the host."""
 
+# Stable labels retained for wire compatibility.  Session dates are resolved
+# from the named five-session fixture below rather than blindly subtracting
+# calendar days (which would manufacture weekend trading sessions).
 SYNTHETIC_SESSION_OFFSETS = (4, 3, 2, 1, 0)
-"""Day offsets of the five synthetic sessions, ending at the decision day."""
+SYNTHETIC_SESSION_NAMES = (
+    "named_session_1",
+    "named_session_2",
+    "named_session_3",
+    "named_session_4",
+    "named_session_5",
+)
 
 SYNTHETIC_BAR_CLOSE = Decimal("10.0000")
 SYNTHETIC_BAR_OPEN = Decimal("9.9000")
@@ -59,6 +68,24 @@ def synthetic_instrument_id(name: str) -> UUID:
     """Deterministically derive a stable synthetic instrument identity."""
 
     return uuid5(NAMESPACE_URL, f"https://synthetic.quant-foundry.local/{name}")
+
+
+def synthetic_session_dates(session_date: date) -> tuple[date, ...]:
+    """Return the fixed five-session fixture ending at ``session_date``.
+
+    The fixture uses named trading sessions and skips Saturday/Sunday.  This
+    keeps checks deterministic for any supplied run date without relying on a
+    production calendar or accidentally exposing weekend bars.
+    """
+    if not isinstance(session_date, date) or isinstance(session_date, datetime):
+        raise ValueError("session_date must be a calendar date")
+    result: list[date] = []
+    cursor = session_date
+    while len(result) < len(SYNTHETIC_SESSION_NAMES):
+        if cursor.weekday() < 5:
+            result.append(cursor)
+        cursor -= timedelta(days=1)
+    return tuple(reversed(result))
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,9 +208,8 @@ def build_synthetic_context(
     part of the contract-check evidence.
     """
 
-    # Deterministic five-session calendar ending at the decision session.
-    base = request.session_date
-    sessions = [base - timedelta(days=offset) for offset in SYNTHETIC_SESSION_OFFSETS]
+    # Deterministic named five-session calendar; never infer weekend sessions.
+    sessions = synthetic_session_dates(request.session_date)
 
     identities: list[SyntheticIdentityRow] = []
     known_ids: set[UUID] = set()
@@ -328,4 +354,6 @@ __all__ = [
     "SyntheticUniverse",
     "build_synthetic_context",
     "synthetic_instrument_id",
+    "synthetic_session_dates",
+    "SYNTHETIC_SESSION_NAMES",
 ]

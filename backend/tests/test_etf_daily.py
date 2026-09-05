@@ -1,7 +1,7 @@
 """Tests for ETF daily-bar retrieval and atomic incremental synchronization."""
 
 import unittest
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from unittest.mock import Mock, call, patch
@@ -11,6 +11,7 @@ from app.data_ingestion.schemas.etf_daily import (
     EtfDailyBarUpsertResult,
 )
 from app.data_ingestion.schemas.trading_calendar import DataSyncCheckpointState
+from app.backtesting.data.errors import InstrumentCalendarUnresolvedError
 from app.data_ingestion.services.etf_daily import (
     ETF_DAILY_FIELDS,
     ETF_DAILY_FULL_SYNC_KEY,
@@ -95,6 +96,54 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         self.assertEqual(bars, [make_bar()])
 
+    def test_normalizes_source_invalid_ohlc_without_repairing_values(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {
+                "ts_code": "510330.SH",
+                "trade_date": "20260814",
+                "open": -1.25,
+                "high": 3.70,
+                "low": 4.00,
+                "close": 0,
+                "vol": 12345,
+                "amount": 46000.5,
+            }
+        ]
+
+        [bar] = normalize_etf_daily(
+            dataframe, expected_trade_date=date(2026, 8, 14)
+        )
+
+        self.assertEqual(bar.open, Decimal("-1.25"))
+        self.assertEqual(bar.high, Decimal("3.70"))
+        self.assertEqual(bar.low, Decimal("4.00"))
+        self.assertEqual(bar.close, Decimal("0"))
+
+    def test_normalizes_missing_source_values_as_none(self) -> None:
+        dataframe = Mock()
+        dataframe.to_dict.return_value = [
+            {
+                "ts_code": "510330.SH",
+                "trade_date": "20260814",
+                "open": None,
+                "high": "",
+                "low": "nan",
+                "close": "NaN",
+                "vol": None,
+                "amount": None,
+            }
+        ]
+
+        [bar] = normalize_etf_daily(
+            dataframe, expected_trade_date=date(2026, 8, 14)
+        )
+
+        self.assertEqual(
+            (bar.open, bar.high, bar.low, bar.close, bar.vol, bar.amount),
+            (None, None, None, None, None, None),
+        )
+
     def test_rejects_a_response_at_the_provider_row_limit(self) -> None:
         dataframe = Mock()
         dataframe.to_dict.return_value = [{}] * MAX_ETF_DAILY_ROWS
@@ -150,6 +199,9 @@ class FetchEtfDailyTestCase(unittest.TestCase):
             client,
             as_of_date=second_date,
             request_interval_ms=1_500,
+            calendar_ids=("SSE",),
+            calendar_for_code=lambda _ts_code: "SSE",
+            data_cutoff=datetime(2026, 8, 15, tzinfo=UTC),
         )
 
         self.assertEqual(result.days_completed, 2)
@@ -169,13 +221,75 @@ class FetchEtfDailyTestCase(unittest.TestCase):
         self.assertEqual(
             [item.args[0] for item in logger_mock.info.call_args_list],
             [
-                "etf_daily_incremental_sync_planned",
-                "etf_daily_incremental_sync_started",
-                "etf_daily_incremental_sync_succeeded",
-                "etf_daily_incremental_sync_started",
-                "etf_daily_incremental_sync_succeeded",
+                "etf_daily_calendar_planned",
+                "etf_daily_calendar_started",
+                "etf_daily_calendar_succeeded",
+                "etf_daily_calendar_started",
+                "etf_daily_calendar_succeeded",
             ],
         )
+        required_fields = {
+            "data_type",
+            "calendar_id",
+            "start_date",
+            "end_date",
+            "fetched_count",
+            "changed_count",
+            "unchanged_count",
+            "failed_count",
+            "checkpoint_scope",
+            "checkpoint_before",
+            "checkpoint_after",
+            "checkpoint_advanced",
+        }
+        for event_call in logger_mock.info.call_args_list:
+            self.assertTrue(required_fields.issubset(event_call.kwargs))
+            message = event_call.kwargs["message"]
+            for fragment in ("ETF 日线", "条", "checkpoint"):
+                self.assertIn(fragment, message)
+
+    @patch("app.data_ingestion.services.etf_daily.logger")
+    @patch("app.data_ingestion.services.etf_daily.fetch_etf_daily_for_trade_date")
+    @patch("app.data_ingestion.services.etf_daily._load_open_dates")
+    @patch("app.data_ingestion.services.etf_daily._load_checkpoint")
+    @patch("app.data_ingestion.services.etf_daily.get_settings")
+    @patch("app.data_ingestion.services.etf_daily.tushare_request_pacer")
+    def test_failed_market_session_emits_complete_failure_event(
+        self,
+        pacer_mock,
+        get_settings_mock,
+        load_checkpoint_mock,
+        load_open_dates_mock,
+        fetch_mock,
+        logger_mock,
+    ) -> None:
+        get_settings_mock.return_value = SimpleNamespace(
+            ingestion_request_interval_ms=1_000
+        )
+        load_checkpoint_mock.return_value = None
+        failed_date = date(2026, 8, 14)
+        load_open_dates_mock.return_value = [failed_date]
+        fetch_mock.side_effect = RuntimeError("provider unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "provider unavailable"):
+            sync_etf_daily_incremental(
+                Mock(),
+                as_of_date=failed_date,
+                calendar_ids=("SSE",),
+                calendar_for_code=lambda _ts_code: "SSE",
+                data_cutoff=datetime(2026, 8, 15, tzinfo=UTC),
+            )
+
+        self.assertEqual(
+            [item.args[0] for item in logger_mock.info.call_args_list],
+            ["etf_daily_calendar_planned", "etf_daily_calendar_started"],
+        )
+        failure = logger_mock.exception.call_args
+        self.assertEqual(failure.args[0], "etf_daily_calendar_failed")
+        self.assertEqual(failure.kwargs["failed_count"], 1)
+        self.assertFalse(failure.kwargs["checkpoint_advanced"])
+        self.assertIn("ETF 日线", failure.kwargs["message"])
+        self.assertIn("checkpoint 未推进", failure.kwargs["message"])
 
     @patch("app.data_ingestion.services.etf_daily._commit_etf_daily_date")
     @patch("app.data_ingestion.services.etf_daily.fetch_etf_daily_for_trade_date")
@@ -226,22 +340,18 @@ class FetchEtfDailyTestCase(unittest.TestCase):
             completed_checkpoint,
         )
 
-        result = sync_etf_daily_full(
-            Mock(),
-            as_of_date=date(2026, 8, 20),
-        )
+        with self.assertRaises(InstrumentCalendarUnresolvedError):
+            sync_etf_daily_full(
+                Mock(),
+                as_of_date=date(2026, 8, 20),
+            )
 
-        self.assertEqual(result.synced_through_date, frozen_target)
-        load_checkpoint_mock.assert_called_once_with(ETF_DAILY_FULL_SYNC_KEY)
-        load_open_dates_mock.assert_called_once_with(
-            exchange="SSE", start_date=resumed_date, end_date=frozen_target
-        )
-        self.assertEqual(
-            commit_mock.call_args.kwargs["full_cycle_target_date"], frozen_target
-        )
-        self.assertEqual(
-            commit_mock.call_args.kwargs["sync_key"], ETF_DAILY_FULL_SYNC_KEY
-        )
+        # The legacy entry point is blocked before it can read or advance the
+        # former market-wide checkpoint.
+        load_checkpoint_mock.assert_not_called()
+        load_open_dates_mock.assert_not_called()
+        fetch_mock.assert_not_called()
+        commit_mock.assert_not_called()
 
     @patch("app.data_ingestion.services.etf_daily.EtfCodeRepository")
     @patch("app.data_ingestion.services.etf_daily.get_engine")
@@ -350,9 +460,9 @@ class FetchEtfDailyTestCase(unittest.TestCase):
 
         self.assertIs(result, write_result)
         self.assertIs(actual_checkpoint, checkpoint)
-        bar_repository_class.return_value.upsert_bars.assert_called_once_with(
-            [make_bar()], source="tushare"
-        )
+        call_kwargs = bar_repository_class.return_value.upsert_bars.call_args.kwargs
+        self.assertEqual(call_kwargs["source"], "tushare")
+        self.assertIsNotNone(call_kwargs["accepted_at"])
         checkpoint_repository_class.return_value.advance.assert_called_once_with(
             sync_key=ETF_DAILY_INCREMENTAL_SYNC_KEY,
             scope_key=ETF_DAILY_SCOPE_KEY,

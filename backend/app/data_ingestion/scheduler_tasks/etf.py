@@ -7,7 +7,8 @@ import structlog
 
 from app.core.config import get_settings
 from app.data_ingestion.clients.tushare import TushareClient
-from app.data_ingestion.services.etf import sync_etf_basics
+from app.data_ingestion.constants import TUSHARE_SOURCE
+from app.data_ingestion.services.etf import ETF_BASIC_SCOPE_KEY, sync_etf_basics
 from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
 
@@ -39,12 +40,28 @@ def sync_etf_basics_task(
         message=(
             "ETF 基础信息采集完成：全部上市状态，适用日期不适用，"
             f"拉取 {payload['received']} 条，入库变更 {payload['changed']} 条，"
-            f"未变更 {payload['unchanged']} 条，游标已推进至 "
+            f"未变更 {payload['unchanged']} 条，checkpoint 已推进至 "
             f"{payload['refreshed_at']}。"
         ),
+        title="ETF 基础信息采集完成",
+        data_type="etf_basic",
+        calendar_id=None,
         start_date=None,
         end_date=None,
-        **payload,
+        fetched_count=payload["received"],
+        changed_count=payload["changed"],
+        unchanged_count=payload["unchanged"],
+        failed_count=0,
+        checkpoint_scope=ETF_BASIC_SCOPE_KEY,
+        checkpoint_before=None,
+        checkpoint_after=payload["refreshed_at"],
+        checkpoint_advanced=True,
+        source=TUSHARE_SOURCE,
+        source_revision=None,
+        reconciliation_range=None,
+        task_id=str(context.task_id),
+        run_id=str(context.run_id),
+        **{key: value for key, value in payload.items() if key not in {"start_date", "end_date"}},
     )
     return payload
 

@@ -547,7 +547,7 @@ def upgrade() -> None:
         ),
         sa.Column(
             "formula_version",
-            sa.String(length=32),
+            sa.String(length=64),
             nullable=False,
             comment="Version of the metric formula that produced the value.",
         ),

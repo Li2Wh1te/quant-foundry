@@ -23,6 +23,7 @@ from app.backtesting.pagination import (
 from app.backtesting.result_models import (
     BacktestDataChunkRecord,
     BacktestDataPreflightRecord,
+    BacktestEventRecord,
     BacktestEquityCurveRecord,
     BacktestFillRecord,
     BacktestMetricRecord,
@@ -36,6 +37,7 @@ from app.backtesting.result_models import (
 from app.backtesting.result_records import Base
 from app.backtesting.result_repository import (
     BacktestResultRepository,
+    InternalResultNotVisibleError,
     ResultFilterError,
     ResultRecordConflictError,
 )
@@ -80,6 +82,7 @@ def make_order(
 
 RESULT_TABLE_NAMES = [
     "backtest_steps",
+    "backtest_events",
     "backtest_decisions",
     "backtest_orders",
     "backtest_order_updates",
@@ -141,8 +144,61 @@ class ResultRepositoryTestCase(unittest.TestCase):
             self.assertIsNotNone(cursor)
         return collected, pages
 
+    def test_sqlite_fixture_preflight_kind_still_guards_formal_reads(self) -> None:
+        """A missing root table must not make an internal fixture public."""
+
+        self.repo.append(
+            "data_preflight",
+            BacktestDataPreflightRecord(
+                run_id=self.run_id,
+                phase=DataPhase.ADMISSION,
+                status="blocked",
+                report_hash="internal-report",
+                run_kind="internal_link_acceptance",
+                preflight_profile_key="internal_link_acceptance",
+                preflight_profile_version=1,
+            ),
+        )
+
+        with self.assertRaises(InternalResultNotVisibleError):
+            self.repo.read_page("data_preflight", run_id=self.run_id)
+
+        # ``include_internal`` is a repository-only diagnostic capability; the
+        # HTTP result router never forwards that caller-controlled flag.
+        page = self.repo.read_page(
+            "data_preflight", run_id=self.run_id, include_internal=True
+        )
+        self.assertEqual(len(page.items), 1)
+
 
 class WriteContractTestCase(ResultRepositoryTestCase):
+    def test_round_trips_events_in_sequence_order(self) -> None:
+        first = BacktestEventRecord(
+            run_id=self.run_id,
+            event_sequence=0,
+            step_sequence=0,
+            phase_sequence=1,
+            phase_key="observe",
+            event_type="market_observed",
+            event_time=ts(9),
+            payload={"price": "3.85"},
+        )
+        second = BacktestEventRecord(
+            run_id=self.run_id,
+            event_sequence=1,
+            step_sequence=0,
+            phase_sequence=2,
+            phase_key="match",
+            event_type="fill_created",
+            event_time=ts(9, 1),
+            payload={"fill_id": str(uuid4())},
+        )
+        self.repo.append("events", second, first)
+        page = self.repo.read_page("events", run_id=self.run_id)
+        self.assertEqual([row.event_sequence for row in page.items], [0, 1])
+        self.assertEqual(page.items[0].payload["price"], "3.85")
+        self.assertEqual(page.items[0].event_version, 1)
+
     def test_round_trips_orders_and_preserves_display_fields(self) -> None:
         order_id = self.seed_orders(1)[0]
         page = self.repo.read_page("orders", run_id=self.run_id)

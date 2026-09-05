@@ -67,6 +67,19 @@ interface EventPresentation {
 }
 
 const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
+  backtest_cancel_requested: { title: "回测取消请求已记录", summary: "该运行已收到取消请求，等待执行器处理。" },
+  backtest_chunk: { title: "回测数据块已处理", summary: "该运行已处理一个数据块，详细进度见展开记录。" },
+  backtest_claimed: { title: "回测运行已领取", summary: "执行器已领取该等待运行。" },
+  backtest_created: { title: "回测运行已创建", summary: "该运行配置已冻结并进入等待队列。" },
+  backtest_result_chunk_committed: { title: "回测结果块已提交", summary: "该运行的一批结果已提交存储。" },
+  backtest_terminal_write_rejected: { title: "回测终态写入被拒绝", summary: "该运行的终态写入未通过身份或状态检查。" },
+  backtest_worker_completed: { title: "回测执行器已完成", summary: "该运行执行器已完成处理，终态以核验结果为准。" },
+  corporate_action_collection_failed: { title: "公司行动采集失败", summary: "公司行动数据采集失败，日期范围和结果计数见详情。" },
+  corporate_action_collection_started: { title: "公司行动采集开始", summary: "公司行动数据采集已启动，日期范围见详情。" },
+  corporate_action_collection_succeeded: { title: "公司行动采集完成", summary: "公司行动数据采集已完成，日期范围、结果计数及检查点状态见详情。" },
+  task_run_claimed: { title: "任务运行已领取", summary: "任务执行器已领取该等待运行。" },
+  task_run_metadata_unavailable: { title: "任务运行元数据不可用", summary: "该任务运行的元数据读取失败，诊断信息见详情。" },
+  task_run_terminal_observed: { title: "任务运行终态已观测", summary: "已观测到该任务运行终态，结果见详情。" },
   request_completed: { title: "请求完成", summary: "接口请求已完成。" },
   request_failed: { title: "请求失败", summary: "接口请求失败，请查看展开详情。" },
   task_run_started: { title: "任务开始", summary: "调度器已开始执行该任务。" },
@@ -74,11 +87,61 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   task_run_failed: { title: "任务失败", summary: "任务执行失败，请查看异常详情。" },
   task_run_worker_crashed: { title: "任务执行器异常退出", summary: "任务执行器异常退出，系统正在补偿结束运行记录。" },
   task_run_failure_recovery_failed: { title: "任务运行记录补偿失败", summary: "任务执行器异常后的运行记录补偿失败，请查看异常详情。" },
-  trade_calendar_sync_planned: { title: "生成采集计划" },
-  trade_calendar_range_started: { title: "开始采集分段" },
-  trade_calendar_range_succeeded: { title: "完成采集分段" },
-  trade_calendar_range_failed: { title: "采集分段失败" },
+  task_run_cancel_requested: { title: "请求取消任务", summary: "Supervisor 已请求取消任务运行，正在等待执行器退出。" },
+  task_run_cancelled: { title: "任务已取消", summary: "任务运行已取消，终态记录已写入。" },
+  task_run_worker_exited: { title: "任务子进程退出", summary: "任务子进程已退出，系统正在核对退出码并写入运行终态。" },
+  task_run_terminal_written: { title: "任务终态已写入", summary: "任务运行终态已写入，完成标记和退出信息可在详情中查看。" },
+  task_run_lost_heartbeat_terminated: { title: "任务心跳失联并终止", summary: "任务运行连续 60 秒无有效心跳，已在取消宽限期后终止，原运行不会重启或复用。" },
+  runner_supervisor_lock_acquired: { title: "回测 Supervisor 取得锁", summary: "回测 Supervisor 已取得单实例锁并开始负责队列。" },
+  runner_supervisor_lock_busy: { title: "回测 Supervisor 未取得锁", summary: "已有回测 Supervisor 正在运行，本实例未领取任务。" },
+  runner_supervisor_recovery: { title: "回测 Supervisor 完成恢复扫描", summary: "回测 Supervisor 已扫描遗留运行并保留恢复审计证据。" },
+  backtest_worker_started: { title: "回测 worker 已启动", summary: "回测运行已领取并启动 worker，正在等待身份握手。" },
+  backtest_worker_handshake: { title: "回测 worker 握手完成", summary: "回测 worker 身份握手已验证，运行进入执行状态。" },
+  backtest_worker_resource_limit: { title: "回测资源限制已记录", summary: "回测 worker 已记录资源限制的平台支持和实际应用结果。" },
+  backtest_worker_failed: { title: "回测 worker 执行失败", summary: "回测 worker 执行失败，已保留失败诊断证据并等待终态复核。" },
+  backtest_worker_dependency_unavailable: { title: "回测 worker 依赖缺失", summary: "回测 worker 运行依赖不可用，未写入伪造完成标记。" },
+  backtest_worker_launch_failed: { title: "回测 worker 启动失败", summary: "回测 worker 启动失败，运行已进入不确定终态。" },
+  backtest_worker_exited: { title: "回测 worker 子进程退出", summary: "回测 worker 子进程已退出，Supervisor 正在核对退出码和完成证据。" },
+  backtest_worker_recovery_termination: { title: "回收回测孤儿 worker", summary: "启动恢复已终止遗留 worker，并记录进程组回收结果。" },
+  backtest_worker_failure_evidence_unavailable: { title: "回测失败证据缺失", summary: "回测 worker 未能写入失败诊断证据，运行将保留为不确定终态。" },
+  backtest_worker_failure_evidence_write_failed: { title: "回测失败证据写入失败", summary: "回测 worker 写入失败诊断证据时出错，运行将保留为不确定终态。" },
+  backtest_worker_termination_requested: { title: "请求终止回测 worker", summary: "回测 worker 已收到终止请求，Supervisor 正在等待退出。" },
+  backtest_runner_lost_heartbeat: { title: "回测心跳失联", summary: "回测运行连续 60 秒无有效心跳，已进入终止复核且不会自动重启。" },
+  backtest_run_terminal: { title: "回测运行进入终态", summary: "回测运行已完成退出码、完成标记和完整性证据复核。" },
+  backtest_terminal_written: { title: "回测终态已写入", summary: "回测运行终态及原因已写入结构化审计记录。" },
+  backtest_completion_marker_received: { title: "收到回测完成标记", summary: "Supervisor 已收到回测 worker 的完成标记，正在校验运行身份和协议字段。" },
+  backtest_completion_marker_validated: { title: "回测完成标记校验完成", summary: "回测完成标记的协议版本、运行身份和失败证据已完成校验。" },
+  backtest_result_integrity_checked: { title: "回测结果完整性校验完成", summary: "已按固定结果范围复核摘要和各类结果计数，详情保留技术证据。" },
+  backtest_terminal_evidence_reconciled: { title: "回测终态证据已核对", summary: "退出码、完成标记和结果完整性证据已完成终态核对。" },
+  backtest_terminal_state_written: { title: "回测终态状态已写入", summary: "Supervisor 已根据终态证据写入最终运行状态和决议原因。" },
+  backtest_heartbeat_persisted: { title: "回测心跳已持久化", summary: "回测运行的最新步骤、交易日和心跳时间已按协议持久化。" },
+  backtest_runner_heartbeat_persist_failed: { title: "回测心跳持久化失败", summary: "本次回测心跳未能写入，系统将继续等待下一次兜底写入。" },
+  backtest_runner_progress_sink_failed: { title: "回测进度写入失败", summary: "本次回测进度未能持久化，核心回测逻辑仍在继续执行。" },
+  backtest_worker_progress_shutdown_failed: { title: "回测进度报告器关闭失败", summary: "回测 worker 结束时未能完成进度报告器收尾，终态将保留为待复核证据。" },
+  backtest_heartbeat_lost: { title: "回测心跳已失联", summary: "回测运行超过 60 秒没有有效心跳，已终止子进程并保留失联证据。" },
+  backtest_recovery_evidence_reconciled: { title: "回测恢复证据已核对", summary: "Supervisor 已完成遗留运行的进程身份和终态证据核对，未自动重启原运行。" },
+  scheduler_started: { title: "调度器启动", summary: "调度器已启动并加载活动任务。" },
+  scheduler_stopped: { title: "调度器停止", summary: "调度器已停止运行。" },
+  scheduler_disabled: { title: "调度器未启用", summary: "调度器配置为未启用，未执行调度任务。" },
+  task_sync_failed: { title: "任务同步失败", summary: "任务配置同步失败，请查看展开详情。" },
+  scheduled_run_ignored: { title: "计划运行已忽略", summary: "该计划运行与并发策略冲突，已按规则忽略。" },
+  scheduled_run_enqueue_failed: { title: "计划运行入队失败", summary: "计划运行未能加入执行队列，请查看展开详情。" },
+  application_started: { title: "应用启动", summary: "应用服务已启动。" },
+  application_stopped: { title: "应用停止", summary: "应用服务已停止。" },
   trade_calendar_sync_completed: { title: "交易日历采集完成" },
+  trade_calendar_sync_planned: { title: "生成交易日历采集计划", summary: "已生成交易日历采集分段计划。" },
+  trade_calendar_range_started: { title: "开始采集交易日历", summary: "正在采集交易日历分段。" },
+  trade_calendar_range_succeeded: { title: "完成交易日历采集", summary: "交易日历分段已完成，详情包含日期范围和计数。" },
+  trade_calendar_range_failed: { title: "交易日历采集失败", summary: "交易日历分段采集失败，checkpoint 未推进。" },
+  trade_calendar_named_sync_planned: { title: "生成具名交易日历采集计划" },
+  trade_calendar_named_range_started: { title: "开始采集具名日历", summary: "正在采集具名交易日历分段。" },
+  trade_calendar_named_range_succeeded: { title: "完成具名日历采集", summary: "具名交易日历分段已完成，详情包含范围、计数和 checkpoint。" },
+  trade_calendar_named_range_failed: { title: "具名日历采集失败", summary: "具名交易日历分段采集失败，checkpoint 未推进。" },
+  calendar_reconciliation_started: { title: "开始日历修订校验", summary: "正在校验日历修订范围和覆盖缺口。" },
+  calendar_reconciliation_completed: { title: "完成日历修订校验", summary: "日历修订范围已完成校验并更新覆盖证据。" },
+  calendar_reconciliation_blocked: { title: "日历修订校验阻断", summary: "日历修订范围仍有缺口或冲突，checkpoint 未推进。" },
+  corporate_action_calendar_unresolved: { title: "公司行动日历未解析", summary: "公司行动关联的交易日历暂未解析，请查看展开详情。" },
+  legacy_trade_calendar_backfill_completed: { title: "历史交易日历回填完成", summary: "历史交易日历回填已完成。" },
   etf_basic_sync_started: {
     title: "开始采集 ETF 基础信息",
     summary: "正在拉取全部状态的 ETF 基础信息。"
@@ -104,7 +167,41 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   etf_daily_full_sync_started: { title: "开始采集 ETF 日线全量" },
   etf_daily_full_sync_succeeded: { title: "完成采集 ETF 日线全量" },
   etf_daily_full_sync_failed: { title: "ETF 日线全量采集失败" },
-  etf_daily_full_sync_completed: { title: "ETF 日线全量采集完成" }
+  etf_daily_full_sync_completed: { title: "ETF 日线全量采集完成" },
+  etf_daily_calendar_succeeded: { title: "完成按日历采集 ETF 日线" },
+  etf_daily_calendar_planned: { title: "生成按日历采集 ETF 日线计划" },
+  etf_daily_calendar_started: { title: "开始按日历采集 ETF 日线" },
+  etf_daily_calendar_failed: { title: "按日历采集 ETF 日线失败" },
+  etf_cash_dividend_incremental_sync_started: { title: "开始采集 ETF 现金分红增量", summary: "正在拉取公告日期范围内的 ETF 现金分红。" },
+  etf_cash_dividend_incremental_sync_succeeded: { title: "完成采集 ETF 现金分红增量" },
+  etf_cash_dividend_incremental_sync_failed: { title: "ETF 现金分红增量采集失败", summary: "现金分红增量采集失败，checkpoint 未推进。" },
+  etf_cash_dividend_full_sync_started: { title: "开始采集 ETF 现金分红全量" },
+  etf_cash_dividend_full_sync_succeeded: { title: "完成采集 ETF 现金分红全量" },
+  etf_cash_dividend_reconciliation_started: { title: "开始校验 ETF 现金分红" },
+  etf_cash_dividend_reconciliation_succeeded: { title: "完成校验 ETF 现金分红" },
+  etf_adjustment_incremental_sync_planned: { title: "生成 ETF 复权因子增量计划" },
+  etf_adjustment_incremental_sync_started: { title: "开始采集 ETF 复权因子增量" },
+  etf_adjustment_incremental_sync_succeeded: { title: "完成采集 ETF 复权因子增量" },
+  etf_adjustment_incremental_sync_failed: { title: "ETF 复权因子增量采集失败" },
+  etf_adjustment_full_sync_planned: { title: "生成 ETF 复权因子全量计划" },
+  etf_adjustment_full_sync_started: { title: "开始采集 ETF 复权因子全量" },
+  etf_adjustment_full_sync_succeeded: { title: "完成采集 ETF 复权因子全量" },
+  etf_adjustment_full_sync_failed: { title: "ETF 复权因子全量采集失败" },
+  etf_adjustment_reconciliation_planned: { title: "生成 ETF 复权因子校验计划" },
+  etf_adjustment_reconciliation_started: { title: "开始校验 ETF 复权因子" },
+  etf_adjustment_reconciliation_succeeded: { title: "完成校验 ETF 复权因子" },
+  etf_adjustment_reconciliation_failed: { title: "ETF 复权因子校验失败" },
+  etf_adjustment_sync_started: { title: "开始采集 ETF 复权因子" },
+  etf_adjustment_sync_succeeded: { title: "完成采集 ETF 复权因子" },
+  etf_adjustment_sync_failed: { title: "ETF 复权因子采集失败" },
+  etf_adjustment_calendar_succeeded: { title: "完成按日历采集 ETF 复权因子" },
+  etf_adjustment_calendar_planned: { title: "生成按日历采集 ETF 复权因子计划" },
+  etf_adjustment_incremental_planned: { title: "生成按日历采集 ETF 复权因子计划" },
+  etf_adjustment_incremental_started: { title: "开始按日历采集 ETF 复权因子" },
+  etf_adjustment_incremental_failed: { title: "按日历采集 ETF 复权因子失败" },
+  etf_adjustment_full_planned: { title: "生成按日历采集 ETF 复权因子计划" },
+  etf_adjustment_full_started: { title: "开始按日历采集 ETF 复权因子" },
+  etf_adjustment_full_failed: { title: "按日历采集 ETF 复权因子失败" }
 };
 
 function eventPresentation(entry: LogEntry): EventPresentation {
@@ -135,6 +232,12 @@ function describeEntry(entry: LogEntry): string {
 
   const presentation = eventPresentation(entry);
   if (presentation.summary) return presentation.summary;
+
+  // Known events without a backend message still receive a concise Chinese
+  // fallback rather than exposing an English logger payload as the summary.
+  if (typeof entry.event === "string" && EVENT_PRESENTATIONS[entry.event]) {
+    return `${presentation.title}。`;
+  }
 
   // Keep operator-facing summaries Chinese even when a web server or a third
   // party emits only technical English. Raw fields remain available on expand.
@@ -451,10 +554,16 @@ export function LogPage() {
                 <div className="log-entry__detail">
                   <dl>
                     <div><dt>Request ID</dt><dd>{entry.request_id || "—"}</dd></div>
+                    <div><dt>任务 ID</dt><dd>{entry.task_id || "—"}</dd></div>
+                    <div><dt>运行 ID</dt><dd>{entry.run_id || "—"}</dd></div>
+                    <div><dt>任务类型</dt><dd>{entry.task_type || "—"}</dd></div>
+                    <div><dt>错误类型</dt><dd>{entry.error_type || "—"}</dd></div>
+                    <div><dt>错误信息</dt><dd>{entry.error_message || "—"}</dd></div>
                     <div><dt>接口路径</dt><dd>{entry.path || "—"}</dd></div>
                     <div><dt>HTTP 状态</dt><dd>{entry.status_code ?? "—"}</dd></div>
                     <div><dt>耗时</dt><dd>{typeof entry.duration_ms === "number" ? `${entry.duration_ms} ms` : "—"}</dd></div>
                   </dl>
+                  {(entry.stack || entry.exception) && <pre className="log-entry__stack">{entry.stack || entry.exception}</pre>}
                   <pre>{JSON.stringify(entry, null, 2)}</pre>
                 </div>
               </details>

@@ -40,6 +40,16 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 500)
         self.assertEqual(settings.scheduler_max_queued_runs, 1_000)
         self.assertEqual(settings.scheduler_misfire_grace_seconds, 60)
+        self.assertEqual(settings.backtest_max_workers, 1)
+        self.assertEqual(settings.backtest_max_queued_runs, 32)
+        self.assertIsNone(settings.backtest_internal_max_queued_runs)
+        self.assertEqual(settings.backtest_run_timeout_seconds, 7_200)
+        self.assertEqual(settings.backtest_cancel_grace_seconds, 10)
+        self.assertEqual(settings.backtest_stdout_max_bytes, 1_048_576)
+        self.assertEqual(settings.backtest_memory_limit_mib, 1_024)
+        self.assertEqual(settings.backtest_heartbeat_max_interval_seconds, 15)
+        self.assertEqual(settings.backtest_lost_heartbeat_seconds, 60)
+        self.assertEqual(settings.backtest_progress_persist_interval_seconds, 5)
         self.assertIsNone(settings.tushare_token)
         self.assertEqual(settings.tushare_api_url, "http://api.tushare.pro")
         self.assertEqual(settings.ingestion_request_interval_ms, 1_000)
@@ -67,6 +77,16 @@ class SettingsTestCase(unittest.TestCase):
             "QF_SCHEDULER_DISPATCH_INTERVAL_MS": "1000",
             "QF_SCHEDULER_MAX_QUEUED_RUNS": "500",
             "QF_SCHEDULER_MISFIRE_GRACE_SECONDS": "120",
+            "QF_BACKTEST_MAX_WORKERS": "2",
+            "QF_BACKTEST_MAX_QUEUED_RUNS": "16",
+            "QF_BACKTEST_INTERNAL_MAX_QUEUED_RUNS": "4",
+            "QF_BACKTEST_RUN_TIMEOUT_SECONDS": "3600",
+            "QF_BACKTEST_CANCEL_GRACE_SECONDS": "30",
+            "QF_BACKTEST_STDOUT_MAX_BYTES": "2048",
+            "QF_BACKTEST_MEMORY_LIMIT_MIB": "512",
+            "QF_BACKTEST_HEARTBEAT_MAX_INTERVAL_SECONDS": "20",
+            "QF_BACKTEST_LOST_HEARTBEAT_SECONDS": "61",
+            "QF_BACKTEST_PROGRESS_PERSIST_INTERVAL_SECONDS": "10",
             "QF_TUSHARE_TOKEN": "tushare-secret",
             "QF_TUSHARE_API_URL": "https://tu.brze.top",
             "QF_INGESTION_REQUEST_INTERVAL_MS": "1500",
@@ -97,6 +117,16 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 1000)
         self.assertEqual(settings.scheduler_max_queued_runs, 500)
         self.assertEqual(settings.scheduler_misfire_grace_seconds, 120)
+        self.assertEqual(settings.backtest_max_workers, 2)
+        self.assertEqual(settings.backtest_max_queued_runs, 16)
+        self.assertEqual(settings.backtest_internal_max_queued_runs, 4)
+        self.assertEqual(settings.backtest_run_timeout_seconds, 3_600)
+        self.assertEqual(settings.backtest_cancel_grace_seconds, 30)
+        self.assertEqual(settings.backtest_stdout_max_bytes, 2_048)
+        self.assertEqual(settings.backtest_memory_limit_mib, 512)
+        self.assertEqual(settings.backtest_heartbeat_max_interval_seconds, 20)
+        self.assertEqual(settings.backtest_lost_heartbeat_seconds, 61)
+        self.assertEqual(settings.backtest_progress_persist_interval_seconds, 10)
         self.assertEqual(settings.tushare_token.get_secret_value(), "tushare-secret")
         self.assertEqual(settings.tushare_api_url, "https://tu.brze.top")
         self.assertEqual(settings.ingestion_request_interval_ms, 1_500)
@@ -141,6 +171,78 @@ class SettingsTestCase(unittest.TestCase):
                             database_password="test-secret",
                             _env_file=None,
                         )
+
+    def test_backtest_settings_are_independent_from_scheduler_settings(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "QF_SCHEDULER_MAX_WORKERS": "64",
+                "QF_SCHEDULER_MAX_QUEUED_RUNS": "99999",
+                "QF_API_TOKEN": API_TOKEN,
+                "QF_CURSOR_SIGNING_KEY": CURSOR_SIGNING_KEY,
+                "QF_DATABASE_PASSWORD": "test-secret",
+            },
+            clear=True,
+        ):
+            settings = Settings(_env_file=None)
+
+        self.assertEqual(settings.backtest_max_workers, 1)
+        self.assertEqual(settings.backtest_max_queued_runs, 32)
+        self.assertEqual(settings.scheduler_max_workers, 64)
+        self.assertEqual(settings.scheduler_max_queued_runs, 99_999)
+
+    def test_backtest_cross_field_constraints_are_rejected(self) -> None:
+        invalid_settings = (
+            {"backtest_lost_heartbeat_seconds": 44},
+            {
+                "backtest_heartbeat_max_interval_seconds": 20,
+                "backtest_lost_heartbeat_seconds": 59,
+            },
+            {"backtest_progress_persist_interval_seconds": 16},
+            {"backtest_cancel_grace_seconds": 7_200},
+            {"backtest_internal_max_queued_runs": 0},
+            {"backtest_internal_max_queued_runs": 32},
+            {"backtest_max_queued_runs": 4, "backtest_internal_max_queued_runs": 4},
+            {"backtest_max_queued_runs": 4, "backtest_internal_max_queued_runs": 5},
+        )
+
+        for overrides in invalid_settings:
+            with self.subTest(overrides=overrides):
+                with self.assertRaises(ValidationError):
+                    Settings(
+                        api_token=API_TOKEN,
+                        cursor_signing_key=CURSOR_SIGNING_KEY,
+                        database_password="test-secret",
+                        _env_file=None,
+                        **overrides,
+                    )
+
+    def test_backtest_numeric_values_reject_non_integers_and_overflow(self) -> None:
+        invalid_values = (True, 1.5, "", "1.5", "true", str(2**63))
+
+        for value in invalid_values:
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    Settings(
+                        api_token=API_TOKEN,
+                        cursor_signing_key=CURSOR_SIGNING_KEY,
+                        database_password="test-secret",
+                        _env_file=None,
+                        backtest_max_workers=value,
+                    )
+
+        with patch.dict(
+            os.environ,
+            {
+                "QF_BACKTEST_MAX_WORKERS": "",
+                "QF_API_TOKEN": API_TOKEN,
+                "QF_CURSOR_SIGNING_KEY": CURSOR_SIGNING_KEY,
+                "QF_DATABASE_PASSWORD": "test-secret",
+            },
+            clear=True,
+        ):
+            with self.assertRaises(ValidationError):
+                Settings(_env_file=None)
 
     def test_database_password_is_required(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
@@ -189,6 +291,9 @@ class SettingsTestCase(unittest.TestCase):
         settings = Settings(
             api_token=API_TOKEN,
             cursor_signing_key=CURSOR_SIGNING_KEY,
+            database_host="127.0.0.1",
+            database_port=5432,
+            database_name="quant_foundry",
             database_user="user@example.com",
             database_password="p@ss/word",
             _env_file=None,

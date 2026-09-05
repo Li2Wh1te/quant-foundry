@@ -196,4 +196,12 @@ def _validate_parameter_contract(
                 message="默认参数必须是对象。",
             )
         )
+    if issues:
+        return issues
+    from app.strategies.parameter_contract import validate_parameters
+
+    issues.extend(
+        StrategyValidationIssue(code="parameter_contract_invalid", message=message)
+        for message in validate_parameters(parameter_schema, default_parameters)
+    )
     return issues

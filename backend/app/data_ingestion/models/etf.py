@@ -31,7 +31,12 @@ class EtfEntity(Base):
 
     __tablename__ = "etf_entities"
 
-    id: Mapped[UUID] = mapped_column(Uuid, primary_key=True)
+    # ETF identities are a subset of the generic instrument identity space:
+    # the primary key doubles as a foreign key into instruments.id so ORM
+    # metadata and the deployed schema (see migration 20260822_03) agree.
+    id: Mapped[UUID] = mapped_column(
+        Uuid, ForeignKey("instruments.id"), primary_key=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

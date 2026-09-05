@@ -14,18 +14,20 @@ without dialect-specific constraints.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     Index,
     Integer,
     Numeric,
     String,
     Uuid,
+    ForeignKey,
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
@@ -44,6 +46,7 @@ JsonType = JSONB().with_variant(JSON(), "sqlite")
 # create only these tables from the shared declarative metadata.
 RESULT_TABLE_NAMES = [
     "backtest_steps",
+    "backtest_events",
     "backtest_decisions",
     "backtest_orders",
     "backtest_order_updates",
@@ -53,6 +56,7 @@ RESULT_TABLE_NAMES = [
     "backtest_metrics",
     "backtest_data_preflight",
     "backtest_data_chunks",
+    "backtest_analysis_summaries",
 ]
 
 
@@ -78,6 +82,7 @@ class _RunBoundRecord(Base):
     )
     run_id: Mapped[UUID] = mapped_column(
         Uuid,
+        ForeignKey("backtest_runs.id", ondelete="RESTRICT"),
         nullable=False,
         comment="Owning backtest run; every result row is bound to exactly one run. "
         "A foreign key to backtest_runs is added by the run-creation task.",
@@ -141,6 +146,69 @@ class BacktestStepRecord(_RunBoundRecord):
     )
 
 
+
+
+class BacktestEventResultRecord(_RunBoundRecord):
+    """One immutable domain event retained for run-level audit."""
+
+    __tablename__ = "backtest_events"
+    __table_args__ = (
+        Index(
+            "uq_backtest_events_run_sequence",
+            "run_id",
+            "event_sequence",
+            unique=True,
+        ),
+        Index(
+            "ix_backtest_events_run_sort_key",
+            "run_id",
+            "event_sequence",
+        ),
+    )
+
+    event_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Run-global monotonic domain-event sequence.",
+    )
+    step_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Official time-step sequence that emitted the event.",
+    )
+    phase_sequence: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        comment="Phase sequence inside the step that emitted the event.",
+    )
+    phase_key: Mapped[str] = mapped_column(
+        String(64),
+        nullable=False,
+        comment="Timing phase identity attached to the event.",
+    )
+    event_type: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+        comment="Stable domain-event type.",
+    )
+    event_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        comment="Version of the event payload contract.",
+    )
+    event_time: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        comment="Event timestamp in the frozen run timezone.",
+    )
+    payload: Mapped[dict] = mapped_column(
+        JsonType,
+        nullable=False,
+        comment="JSON-safe immutable event payload.",
+    )
+
+
 class BacktestDecisionRecord(_RunBoundRecord):
     """One strategy decision produced during a step."""
 
@@ -194,7 +262,10 @@ class BacktestDecisionRecord(_RunBoundRecord):
     validation_issues: Mapped[list] = mapped_column(
         JsonType,
         nullable=False,
-        comment="Structured validation issues when the decision was rejected.",
+        comment=(
+            "Structured validation issues when the decision was rejected; "
+            "candidate PIT qualification evidence uses this existing JSON field."
+        ),
     )
     duration_ms: Mapped[Decimal | None] = mapped_column(
         Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
@@ -234,6 +305,11 @@ class BacktestOrderResultRecord(_RunBoundRecord):
             "run_id",
             "instrument_id",
         ),
+        Index(
+            "ix_backtest_orders_run_decision",
+            "run_id",
+            "decision_id",
+        ),
     )
 
     order_id: Mapped[UUID] = mapped_column(
@@ -245,6 +321,11 @@ class BacktestOrderResultRecord(_RunBoundRecord):
         Uuid,
         nullable=True,
         comment="Originating order intent, when the pipeline recorded one.",
+    )
+    decision_id: Mapped[UUID | None] = mapped_column(
+        Uuid,
+        nullable=True,
+        comment="Originating strategy decision, when the pipeline recorded one.",
     )
     instrument_id: Mapped[UUID] = mapped_column(
         Uuid,
@@ -376,8 +457,10 @@ class BacktestFillResultRecord(_RunBoundRecord):
             "ix_backtest_fills_run_sort_key",
             "run_id",
             "timestamp",
+            "fill_sequence",
             "fill_id",
         ),
+        Index("uq_backtest_fills_run_sequence", "run_id", "fill_sequence", unique=True),
         Index(
             "ix_backtest_fills_run_instrument",
             "run_id",
@@ -389,6 +472,11 @@ class BacktestFillResultRecord(_RunBoundRecord):
         Uuid,
         nullable=False,
         comment="Business identity of the fill within the run.",
+    )
+    fill_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Stable deterministic in-run sequence; never derived from UUID or insertion time.",
     )
     order_id: Mapped[UUID] = mapped_column(
         Uuid,
@@ -464,6 +552,45 @@ class BacktestFillResultRecord(_RunBoundRecord):
         Integer,
         nullable=True,
         comment="Version of the slippage model applied to this fill.",
+    )
+    currency: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        default="CNY",
+        server_default="CNY",
+        comment="Settlement currency of the fill.",
+    )
+    contract_multiplier: Mapped[Decimal] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=False,
+        default=Decimal("1"),
+        server_default="1",
+        comment="Contract multiplier resolved from the frozen rule snapshot.",
+    )
+    gross_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="execution_price x quantity x contract_multiplier before fees.",
+    )
+    fee_breakdown: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Frozen fee components with schedule key/version and rounding contract.",
+    )
+    settlement_calendar_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Calendar that owns the deferred settlement of a buy fill.",
+    )
+    settlement_due_session: Mapped[date | None] = mapped_column(
+        Date(),
+        nullable=True,
+        comment="Session whose pre-match boundary releases this buy fill.",
+    )
+    settlement_boundary_id: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Boundary identifier that released the due quantity.",
     )
 
 
@@ -642,6 +769,26 @@ class BacktestMetricRecord(_RunBoundRecord):
             "(value IS NULL) = (unavailable_reason IS NOT NULL)",
             name="metric_value_xor_reason",
         ),
+        CheckConstraint(
+            "(analyzer_key IS NULL) = (analyzer_version IS NULL)",
+            name="analyzer_identity_pair",
+        ),
+        CheckConstraint(
+            "length(metric_key) BETWEEN 1 AND 100",
+            name="metric_key_length",
+        ),
+        CheckConstraint(
+            "length(formula_version) BETWEEN 1 AND 64",
+            name="formula_version_length",
+        ),
+        CheckConstraint(
+            "unit IS NULL OR length(unit) BETWEEN 1 AND 32",
+            name="metric_unit_length",
+        ),
+        CheckConstraint(
+            "analyzer_key IS NULL OR length(analyzer_key) BETWEEN 1 AND 100",
+            name="analyzer_key_length",
+        ),
         Index(
             "uq_backtest_metrics_run_key_version",
             "run_id",
@@ -657,7 +804,7 @@ class BacktestMetricRecord(_RunBoundRecord):
         comment="Stable metric key.",
     )
     formula_version: Mapped[str] = mapped_column(
-        String(32),
+        String(64),
         nullable=False,
         comment="Version of the metric formula that produced the value.",
     )
@@ -691,6 +838,39 @@ class BacktestMetricRecord(_RunBoundRecord):
         nullable=True,
         comment="Why the value is unavailable; required exactly when value is null.",
     )
+    # Analyzer identity (task package 06).  Both columns are null together
+    # for legacy rows written before analyzers existed; new rows must pair
+    # them, enforced by the analyzer_identity_pair check constraint.
+    analyzer_key: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        comment="Stable key of the analyzer that produced this metric; "
+        "null only for legacy rows.",
+    )
+    analyzer_version: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Registered version of the producing analyzer; paired with analyzer_key.",
+    )
+    analyzer_metadata: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Analyzer context such as reason_code, rate convention, and "
+        "formula signature references.",
+    )
+
+    @property
+    def analyzer_state(self) -> str:
+        """Registry-relative state exposed verbatim by the result API."""
+
+        from app.backtesting.result_models import resolve_analyzer_state
+
+        return resolve_analyzer_state(
+            self.analyzer_key,
+            self.analyzer_version,
+            self.metric_key,
+            self.formula_version,
+        ).value
 
 
 class BacktestDataPreflightResultRecord(_RunBoundRecord):
@@ -720,6 +900,13 @@ class BacktestDataPreflightResultRecord(_RunBoundRecord):
         String(128),
         nullable=False,
         comment="Hash over the preflight report content.",
+    )
+    hash_schema_version: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=1,
+        server_default="1",
+        comment="Canonical preflight hash payload version (1 legacy, 2 calendar evidence).",
     )
     capabilities: Mapped[dict] = mapped_column(
         JsonType,
@@ -796,11 +983,14 @@ class BacktestDataChunkRecord(_RunBoundRecord):
         nullable=False,
         comment="Version of the chunking policy that produced boundaries.",
     )
-    token_digest: Mapped[str] = mapped_column(
+    token_digest: Mapped[str | None] = mapped_column(
         String(128),
-        nullable=False,
+        nullable=True,
         comment="Non-sensitive digest identifying the data token.",
     )
+    consistency_mode: Mapped[str] = mapped_column(String(40), nullable=False, comment="Consistency mode.")
+    coverage_summary: Mapped[dict] = mapped_column(JsonType, nullable=False, comment="Bounded consistency coverage evidence.")
+    failure_phase: Mapped[str | None] = mapped_column(String(64), nullable=True, comment="Failure phase when validation failed.")
     validation_status: Mapped[str] = mapped_column(
         String(16),
         nullable=False,
@@ -823,9 +1013,167 @@ class BacktestDataChunkRecord(_RunBoundRecord):
     )
 
 
+class BacktestAnalysisSummaryRecord(_RunBoundRecord):
+    """Run-level analyzer lifecycle status and frozen analysis evidence.
+
+    This table is the formal landing point of run-level analysis state
+    (task package 06); ``status`` is never stored in a free-form JSON
+    field.  ``run_id`` stays unique without a ``backtest_runs`` foreign key
+    because the unified run table does not exist yet.
+    """
+
+    __tablename__ = "backtest_analysis_summaries"
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('partial', 'final', 'aborted')",
+            name="analysis_summary_status_allowed",
+        ),
+        CheckConstraint(
+            "(status = 'aborted') = (abort_reason IS NOT NULL)",
+            name="analysis_summary_abort_reason_pair",
+        ),
+        Index(
+            "uq_backtest_analysis_summaries_run",
+            "run_id",
+            unique=True,
+        ),
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        comment="Analysis lifecycle status: partial, final, or aborted.",
+    )
+    analyzer_snapshot: Mapped[dict] = mapped_column(
+        JsonType,
+        nullable=False,
+        comment="Frozen AnalyzerSpec identities, parameters, and converter identity.",
+    )
+    formal_timeline: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Immutable ordered formal sessions and their timeline hash.",
+    )
+    formula_signature: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="Hash over the logical formula configuration (spec identities, "
+        "parameters, decimal policy).",
+    )
+    input_evidence_signature: Mapped[str] = mapped_column(
+        String(128),
+        nullable=False,
+        comment="Hash over the actual input evidence (E0, observations, fills, "
+        "rate snapshot hash).",
+    )
+    initial_equity: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Frozen E0 from the initial equity snapshot.",
+    )
+    valid_day_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Formal days with a valid positive end-of-day equity.",
+    )
+    candidate_return_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Contiguous return candidates available from E0 without splicing invalid days.",
+    )
+    fill_count: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Accounting-applied fill count at the latest update.",
+    )
+    gross_traded_notional: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Sum of applied gross traded notionals at the latest update.",
+    )
+    cumulative_fees: Mapped[Decimal | None] = mapped_column(
+        Numeric(NUMERIC_PRECISION, NUMERIC_SCALE),
+        nullable=True,
+        comment="Sum of applied fees at the latest update.",
+    )
+    rate_snapshot: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Complete frozen PIT daily risk-free rate series (Sharpe B "
+        "only); empty for A/C runs.",
+    )
+    rate_snapshot_hash: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Deterministic hash of the frozen rate snapshot content.",
+    )
+    rate_source_versions: Mapped[dict | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Rate source key/version and query parameters of the snapshot.",
+    )
+    missing_ranges: Mapped[list[dict[str, str]] | None] = mapped_column(
+        JsonType,
+        nullable=True,
+        comment="Deterministic contiguous missing-session ranges of the rate series.",
+    )
+    reporting_currency: Mapped[str] = mapped_column(
+        String(8),
+        nullable=False,
+        comment="Single reporting currency; equals the accounting policy currency.",
+    )
+    last_chunk_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment=(
+            "Zero-based sequence of the latest successfully persisted chunk; "
+            "aborted runs never record the failed chunk."
+        ),
+    )
+    last_chunk_token: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Opaque digest binding the latest accepted partial chunk.",
+    )
+    completed_through_session: Mapped[date | None] = mapped_column(
+        Date(),
+        nullable=True,
+        comment="Last session whose end-of-day observation was committed.",
+    )
+    abort_reason: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+        comment="Structured failure reason; required exactly when aborted.",
+    )
+    failed_step_sequence: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        comment="Step whose failure aborted the run.",
+    )
+    terminal_fingerprint: Mapped[str | None] = mapped_column(
+        String(128),
+        nullable=True,
+        comment="Frozen business-content fingerprint for terminal retries.",
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+        comment="Latest write timestamp of this summary.",
+    )
+    finalized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        comment="Terminal finalization time; set only for final/aborted rows.",
+    )
+
+
 __all__ = [
+    "BacktestAnalysisSummaryRecord",
     "BacktestDataChunkRecord",
     "BacktestDataPreflightResultRecord",
+    "BacktestEventResultRecord",
     "BacktestDecisionRecord",
     "BacktestEquityCurveRecord",
     "BacktestFillResultRecord",

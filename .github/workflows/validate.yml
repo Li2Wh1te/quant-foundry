@@ -13,6 +13,30 @@ jobs:
   test:
     name: Test and validate release metadata
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-test-password
+          POSTGRES_DB: quant_foundry_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quant_foundry_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      QF_ENVIRONMENT: test
+      QF_API_TOKEN: ci-api-token-at-least-thirty-two-characters
+      QF_CURSOR_SIGNING_KEY: ci-cursor-signing-key-at-least-thirty-two
+      QF_DATABASE_HOST: 127.0.0.1
+      QF_DATABASE_PORT: 5432
+      QF_DATABASE_USER: postgres
+      QF_DATABASE_PASSWORD: postgres-test-password
+      QF_DATABASE_NAME: quant_foundry_test
+      POSTGRES_TEST_ENABLED: "1"
 
     steps:
       - name: Check out source
@@ -43,6 +67,9 @@ jobs:
 
       - name: Install backend dependencies
         run: cd backend && uv sync --locked
+
+      - name: Apply PostgreSQL migrations
+        run: cd backend && uv run alembic upgrade head
 
       - name: Install frontend dependencies
         run: cd frontend && pnpm install --frozen-lockfile

@@ -243,6 +243,65 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
         self.assertEqual(revision.runtime_manifest, DEFAULT_RUNTIME_MANIFEST)
         self.assertIsNot(revision.runtime_manifest, DEFAULT_RUNTIME_MANIFEST)
 
+    def test_publish_reuses_latest_revision_when_all_identity_fields_match(self) -> None:
+        strategy, draft = self._strategy_with_draft(version=4)
+        latest = StrategyRevision(
+            id=uuid4(),
+            strategy_id=strategy.id,
+            revision_number=7,
+            source_code=draft.source_code,
+            source_hash=draft.source_hash,
+            parameter_schema=deepcopy(draft.parameter_schema),
+            default_parameters=deepcopy(draft.default_parameters),
+            runtime_manifest=deepcopy(DEFAULT_RUNTIME_MANIFEST),
+        )
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.get_draft.return_value = draft
+        self.session.scalar.return_value = latest
+
+        revision = self.service.publish_revision(
+            strategy.id, expected_draft_version=4
+        )
+
+        self.assertIs(revision, latest)
+        self.assertTrue(self.service.last_publish_reused)
+        self.service.repository.next_revision_number.assert_not_called()
+        self.session.add.assert_not_called()
+        self.session.flush.assert_not_called()
+
+    def test_publish_creates_revision_when_runtime_manifest_differs(self) -> None:
+        strategy, draft = self._strategy_with_draft(version=4)
+        latest = StrategyRevision(
+            id=uuid4(),
+            strategy_id=strategy.id,
+            revision_number=7,
+            source_code=draft.source_code,
+            source_hash=draft.source_hash,
+            parameter_schema=deepcopy(draft.parameter_schema),
+            default_parameters=deepcopy(draft.default_parameters),
+            runtime_manifest={
+                "strategy_contract_version": 1,
+                "worker_image": "old",
+            },
+        )
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.get_draft.return_value = draft
+        self.service.repository.next_revision_number.return_value = 8
+        self.session.scalar.return_value = latest
+
+        revision = self.service.publish_revision(
+            strategy.id,
+            expected_draft_version=4,
+            runtime_manifest={
+                "strategy_contract_version": 1,
+                "worker_image": "new",
+            },
+        )
+
+        self.assertEqual(revision.revision_number, 8)
+        self.assertFalse(self.service.last_publish_reused)
+        self.session.add.assert_called_once_with(revision)
+
     def test_publish_rejects_manifests_with_wrong_protocol_version(self) -> None:
         strategy, draft = self._strategy_with_draft(version=1)
         self.service.repository.get_strategy.return_value = strategy
