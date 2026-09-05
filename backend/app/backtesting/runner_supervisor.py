@@ -612,17 +612,37 @@ class RunnerSupervisor:
         # ``message`` is a reserved LogRecord attribute in the stdlib.  Put
         # the Chinese operator summary in the log message itself while the
         # structured event key and technical fields remain in ``extra``.
+        # Logging never opens a repository read: failure reporting must keep
+        # working when the database or the supervisor lock is unavailable.
+        run_id = fields.get("run_id")
+        kind = fields.get("run_kind") or getattr(self, "_run_kinds", {}).get(str(run_id))
+        if kind == "internal_link_acceptance":
+            message = f"内部链路验收：{message}"
+            fields = {**fields, "run_kind": kind, "visibility": "internal"}
         extra = {"event": event, **fields}
         logger.log(level, message, extra=extra)
+
+    def _remember_run(self, row: Any) -> Any:
+        """Cache immutable presentation identity while performing normal reads."""
+        if row is not None:
+            binding = _row_value(row, "binding")
+            kind = _row_value(row, "run_kind", _row_value(binding, "run_kind"))
+            if not hasattr(self, "_run_kinds"):
+                self._run_kinds = {}
+            self._run_kinds[str(_row_id(row))] = kind
+            # Keep long-lived supervisors bounded even after many runs.
+            if len(self._run_kinds) > 1024:
+                self._run_kinds.pop(next(iter(self._run_kinds)))
+        return row
 
     def _get(self, run_id: UUID | str) -> Any | None:
         for name in ("get", "get_run", "find"):
             method = getattr(self.repository, name, None)
             if callable(method):
-                return method(run_id)
+                return self._remember_run(method(run_id))
         rows = getattr(self.repository, "rows", None)
         if isinstance(rows, Mapping):
-            return rows.get(str(run_id), rows.get(run_id))
+            return self._remember_run(rows.get(str(run_id), rows.get(run_id)))
         return None
 
     def _list_active(self) -> list[Any]:
@@ -630,7 +650,7 @@ class RunnerSupervisor:
             method = getattr(self.repository, name, None)
             if callable(method):
                 rows = method()
-                return [row for row in rows if _row_value(row, "status") in ACTIVE_STATUSES]
+                return [self._remember_run(row) for row in rows if _row_value(row, "status") in ACTIVE_STATUSES]
         return []
 
     def _list_nonterminal(self) -> list[Any]:
@@ -641,7 +661,7 @@ class RunnerSupervisor:
             if callable(method):
                 rows = method()
                 return [
-                    row
+                    self._remember_run(row)
                     for row in rows
                     if _row_value(row, "status") not in TERMINAL_STATUSES
                 ]
@@ -669,7 +689,7 @@ class RunnerSupervisor:
                 row = self._get(claimed) if claimed is not None else None
         if row is None:
             return None
-        return row
+        return self._remember_run(row)
 
     def _mark_starting(self, row: Any, launch_id: UUID) -> None:
         _set_row_value(row, "status", "starting")

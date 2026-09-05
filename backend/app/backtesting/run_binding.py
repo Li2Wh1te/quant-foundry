@@ -125,6 +125,7 @@ class RunBinding:
                 ),
                 "account_profile_id": self.spec.account_profile_id,
                 "account_profile_version": self.spec.account_profile_version,
+                "fee_schedule_selection": ({"key": self.spec.fee_schedule_selection.key, "version": self.spec.fee_schedule_selection.version, "parameters": {}} if self.spec.fee_schedule_selection else None),
                 "data_cutoff": self.spec.data_cutoff,
                 "component_selections": {key: {"key": value.key, "version": value.version, "parameters": _safe_mapping(value.parameters)} for key, value in self.spec.component_selections.items()},
                 "analyzer_selections": [{"key": value.key, "version": value.version, "parameters": _safe_mapping(value.parameters)} for value in self.spec.analyzer_selections],

@@ -9,14 +9,11 @@ from app.backtesting.spec import ComponentSelection
 from app.backtesting.registry import build_default_component_registry, RegistryError
 
 
-FIXED_POLICIES = {
-    "data_provider": ("etf_ingestion", "ETF 数据", "ETF Data"),
-    "rule_package": ("china_listed_etf_rules", "境内 ETF 规则", "China ETF Rules"),
-    "calendar_axis_policy": ("strict_compatible", "严格兼容日历", "Strict Compatible Calendars"),
-    "time_axis": ("trading_day", "交易日时间轴", "Trading Day Axis"),
-    "accounting_policy": ("accounting_policy", "T+1 账户会计", "T+1 Accounting"),
-    "corporate_action_timing": ("after_open_match", "现金分红有效日", "Cash Dividend Effective Date"),
-}
+from app.backtesting.infrastructure import INFRASTRUCTURE
+
+# Compatibility name for callers inspecting default selections; this map is
+# never used to construct a component or bypass its registered schema.
+FIXED_POLICIES = {kind: (key, zh, en) for kind, key, zh, en, _ in INFRASTRUCTURE}
 
 
 def resolve_components(slippage=None, selections=None, analyzers=()):
@@ -35,19 +32,10 @@ def resolve_components(slippage=None, selections=None, analyzers=()):
     # The first formal profile supports one implementation per infrastructure
     # policy. Making this constraint explicit preserves future version freedom.
     for kind, selected in selections.items():
-        expected = requested[kind]
-        if (selected.key, selected.version) != (expected.key, expected.version):
-            raise RegistryError(f"unsupported formal component: {kind} {selected.key}@{selected.version}")
         requested[kind] = selected
     requested["slippage_model"] = slippage or ComponentSelection("none", 1, {"price_tick": "0.01"})
 
     def resolve(kind, selected):
-        if kind in FIXED_POLICIES:
-            key, zh, en = FIXED_POLICIES[kind]
-            if selected.parameters:
-                raise RegistryError(f"{kind} has no configurable parameters in v1")
-            return {"key": key, "version": 1, "kind": kind, "name_zh": zh, "name_en": en,
-                    "display_name": f"{zh}（{en}）", "parameters": {}, "capabilities": {"frequency": "1d"}}
         entry = registry.resolve(selected.key, selected.version)
         if entry.component_kind != kind:
             raise RegistryError(f"{selected.key} is not a {kind}")
@@ -94,17 +82,27 @@ def validate_runtime_policies(components, request, *, require_all=False):
     Legacy snapshots may omit newly explicit policies, but an identity present
     in any snapshot must never be silently replaced by the Worker.
     """
-    for kind, (key, _, _) in FIXED_POLICIES.items():
+    registry = build_default_component_registry()
+    for kind in FIXED_POLICIES:
         selected = components.get(kind)
         if selected is None and not require_all:
             continue
-        if not isinstance(selected, Mapping) or (
-            selected.get("key"), selected.get("version"), dict(selected.get("parameters", {}))
-        ) != (key, 1, {}):
-            raise RegistryError(f"runtime cannot honor frozen policy {kind}")
-    if request.provider_key != FIXED_POLICIES["data_provider"][0]:
-        raise RegistryError("runtime cannot honor frozen data provider")
+        if not isinstance(selected, Mapping):
+            raise RegistryError(f"runtime is missing frozen policy {kind}")
+        try:
+            entry = registry.resolve(selected["key"], selected["version"])
+        except RegistryError as exc:
+            raise RegistryError(f"runtime cannot resolve frozen {kind}: {exc}") from exc
+        if entry.component_kind != kind:
+            raise RegistryError(f"frozen component is not a {kind}")
+        entry.construct(selected.get("parameters", {}))
+    for kind, actual in (("data_provider", request.provider_key),
+                         ("rule_package", request.rule_package.key),
+                         ("calendar_axis_policy", request.calendar_axis_policy.key)):
+        selected = components.get(kind)
+        if selected and selected["key"] != actual:
+            raise RegistryError(f"runtime cannot honor frozen {kind.replace(chr(95), chr(32))}")
     for kind in ("rule_package", "calendar_axis_policy"):
-        actual = getattr(request, kind)
-        if (actual.key, actual.version) != (FIXED_POLICIES[kind][0], 1):
-            raise RegistryError(f"runtime cannot honor data request {kind}")
+        selected = components.get(kind)
+        if selected and selected["version"] != getattr(request, kind).version:
+            raise RegistryError(f"runtime cannot honor frozen {kind} version")

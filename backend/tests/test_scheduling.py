@@ -49,7 +49,8 @@ def make_test_registry() -> TaskRegistry:
     registry.register(
         TaskDefinition(
             key=TEST_TASK_TYPE,
-            name="Test noop",
+            name="测试空任务",
+            english_name="Test noop",
             parameters_model=TestTaskParameters,
             handler=noop_task_handler,
         )

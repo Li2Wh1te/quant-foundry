@@ -76,6 +76,7 @@ export function BacktestComparisonView({ result }: { result: Row }) {
     <h3>配置与数据口径差异</h3>
     {(result.configuration_diff || []).map((diff: Row) => <section key={diff.run_id}><h4>{diff.run_id}</h4>{!Object.keys(diff.fields || {}).length ? <p>与基准已记录字段一致；缺失证据仍需单独确认。</p> : <table><thead><tr><th>字段</th><th>基准运行</th><th>当前运行</th></tr></thead><tbody>{Object.entries(diff.fields).map(([key, raw]) => { const item = raw as Row; return <tr key={key}><th>{key.replace(/^[^.]+/, (group) => fieldNames[group] || group)}</th><td>{item.baseline_present ? text(item.baseline) : "未记录"}</td><td>{item.current_present ? text(item.current) : "未记录"}</td></tr>; })}</tbody></table>}</section>)}
     {summaries.map((summary) => <section key={summary.run_id}><h4>{summary.run_id} 数据证据</h4>{!summary.data_evidence?.session_evidence_available && <p role="alert">缺少会话内最终预检证据，不能据此认定数据口径相同。</p>}<EvidenceTable title="PIT、覆盖度、复权与来源修订" value={summary.data_evidence} /><EvidenceTable title="冻结配置与行为版本" value={summary} /></section>)}
+    <section><h3>复权证明</h3><EvidenceTable title="算法、适配器、状态与因子截止规则" value={summaries.map((summary) => ({ run_id: summary.run_id, adjustment_series: summary.data_evidence?.adjustment_series || {} }))} /></section>
   </div>;
 }
 

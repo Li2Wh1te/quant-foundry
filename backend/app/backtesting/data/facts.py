@@ -856,11 +856,24 @@ class Bar:
     attributes: Mapping[str, object] = MappingProxyType({})
     validation_rule_version: ContractRef | str | None = None
     open_interest: Decimal | int | str | None = None
+    start_time: datetime | None = None
+    end_time: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "instrument_id", _require_uuid(self.instrument_id, "instrument_id")
         )
+        # Intraday bars require explicit aware boundaries. Daily providers
+        # may retain their established exchange-session date representation.
+        if (self.start_time is None) != (self.end_time is None):
+            raise ProviderContractViolationError("bar time boundaries must be supplied together")
+        if self.start_time is not None:
+            start = _aware_datetime(self.start_time, "start_time")
+            end = _aware_datetime(self.end_time, "end_time")
+            if start >= end:
+                raise ProviderContractViolationError("bar start_time must precede end_time")
+        elif self.frequency != "1d":
+            raise ProviderContractViolationError("non-daily bars require explicit time boundaries")
         day = _plain_date(self.trade_date, "trade_date")
         object.__setattr__(self, "trade_date", day)
         object.__setattr__(
@@ -970,6 +983,8 @@ class Tick:
     evidence: FactEvidence
     schema: ContractRef | None = None
     attributes: Mapping[str, object] = MappingProxyType({})
+    bid: Decimal | int | str | None = None
+    ask: Decimal | int | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -982,6 +997,10 @@ class Tick:
         object.__setattr__(
             self, "quantity", _non_negative_decimal(self.quantity, "quantity")
         )
+        for name in ("bid", "ask"):
+            value = getattr(self, name)
+            if value is not None:
+                object.__setattr__(self, name, _positive_decimal(value, name))
         if not isinstance(self.evidence, FactEvidence):
             raise ProviderContractViolationError("evidence must be a FactEvidence")
         object.__setattr__(self, "schema", _validated_schema(self.schema, "schema"))
@@ -1101,6 +1120,10 @@ class CorporateAction:
     cash_effective_phase: str | None = None
     cash_amount_per_unit: Decimal | int | str | None = None
     currency: str | None = None
+    # New units per old unit and an optional absolute source quantity change.
+    # These are source facts, never an instruction to adjust a v1 portfolio.
+    quantity_ratio: Decimal | int | str | None = None
+    quantity_delta: Decimal | int | str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -1109,6 +1132,10 @@ class CorporateAction:
         object.__setattr__(
             self, "action_type", _non_blank_text(self.action_type, "action_type")
         )
+        if self.quantity_ratio is not None:
+            object.__setattr__(self, "quantity_ratio", _positive_decimal(self.quantity_ratio, "quantity_ratio"))
+        if self.quantity_delta is not None:
+            object.__setattr__(self, "quantity_delta", _finite_decimal(self.quantity_delta, "quantity_delta"))
         day = _plain_date(self.ex_date, "ex_date")
         object.__setattr__(self, "ex_date", day)
         if self.valid_from is not None:

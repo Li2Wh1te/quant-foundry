@@ -204,7 +204,7 @@ class TaskResponse(BaseModel):
 class TaskTypeResponse(BaseModel):
     key: str
     name: str
-    english_name: str | None
+    english_name: str = Field(min_length=1)
     parameter_version: int
     parameter_schema: dict[str, Any]
 

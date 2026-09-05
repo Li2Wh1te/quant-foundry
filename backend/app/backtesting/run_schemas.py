@@ -5,7 +5,7 @@ from decimal import Decimal
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator
 
 
 DecimalInput = Decimal | int | str
@@ -75,6 +75,7 @@ class RunCreateRequest(BaseModel):
     # resolves this profile once and freezes its complete configuration.
     account_profile_id: UUID | None = None
     account_profile_version: int | None = Field(default=None, ge=1)
+    fee_schedule_selection: ComponentSelectionRequest | None = None
     component_selections: dict[str, ComponentSelectionRequest] = Field(default_factory=dict)
     analyzer_selections: list[ComponentSelectionRequest] = Field(default_factory=list)
     slippage_model: ComponentSelectionRequest = Field(
@@ -122,14 +123,58 @@ class RunCreateRequest(BaseModel):
         return normalized
 
 
+class InternalFixtureRequest(BaseModel):
+    """Reuse the data contract before accepting internal evidence over HTTP."""
+
+    model_config = ConfigDict(extra="forbid")
+    fixture_key: str
+    fixture_version: StrictInt | StrictStr
+    capability: str
+    scope: dict[str, Any]
+    proof_summary: str | dict[str, Any]
+    content_hash: str
+
+    @model_validator(mode="after")
+    def validate_fixture(self):
+        self.to_domain()
+        return self
+
+    def to_domain(self):
+        from app.backtesting.data.requests import InternalFixture
+
+        values = self.model_dump()
+        scope = dict(values["scope"])
+        ids = scope.get("instrument_ids", ())
+        if not isinstance(ids, (list, tuple)):
+            raise ValueError("fixture instrument_ids must be a list")
+        if not self.proof_summary:
+            raise ValueError("fixture proof_summary must not be empty")
+        scope["instrument_ids"] = [UUID(str(value)) for value in ids]
+        values["scope"] = scope
+        return InternalFixture(**values)
+
+
 class InternalRunCreateRequest(RunCreateRequest):
-    pass
+    internal_fixtures: list[InternalFixtureRequest] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def unique_fixtures(self):
+        identities = [(item.fixture_key, str(item.fixture_version)) for item in self.internal_fixtures]
+        if len(identities) != len(set(identities)):
+            raise ValueError("internal fixture identities must be unique")
+        for item in self.internal_fixtures:
+            fixture = item.to_domain()
+            if fixture.start_date > self.backtest_config.start_date or fixture.end_date < self.backtest_config.end_date:
+                raise ValueError("internal fixture scope must cover the run dates")
+        return self
 
 class RunResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
     run_id: UUID
     run_kind: str
     profile: str
+    visibility: Literal["formal", "internal"] = "formal"
+    label: str = "正式回测"
     status: str
     terminal_status: str | None = None
     config_hash: str
@@ -154,7 +199,9 @@ class RunResponse(BaseModel):
     # ``progress_ratio`` is the public protocol field.  The persistence layer
     # still stores the task-08/22 ``progress`` column, so the router performs
     # the one-way projection at this boundary instead of exposing both names.
-    progress_ratio: float = 0
+    progress_ratio: Decimal = Decimal("0")
+    completed_steps: int | None = None
+    total_steps: int | None = None
     current_trading_date: date | None = None
     current_step: str | None = None
     created_at: datetime | None = None
@@ -201,6 +248,14 @@ class RunResponse(BaseModel):
     runner_exit_report: dict[str, Any] | None = None
     result_integrity_evidence: dict[str, Any] | None = None
     result_counts: dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def classify_run(self):
+        # All creation, list and detail projections share the same label.
+        internal = self.run_kind == "internal_link_acceptance"
+        self.visibility = "internal" if internal else "formal"
+        self.label = "内部链路验收" if internal else "正式回测"
+        return self
 
 class RunError(BaseModel):
     code: str

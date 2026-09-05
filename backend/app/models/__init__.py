@@ -111,3 +111,5 @@ __all__ = [
     "CalendarResolutionHeadRecord",
     "CalendarReconciliationRangeRecord",
 ]
+
+from app.backtesting.fee_catalog import FeeScheduleVersionRecord  # noqa: F401

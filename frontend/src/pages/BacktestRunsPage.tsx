@@ -1,3 +1,5 @@
+import { BacktestRunFilters } from "../components/BacktestRunFilters";
+import type { BacktestRunFilters as RunFilters } from "../api/backtestRuns";
 import { BacktestReport } from "../components/BacktestReport";
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -29,8 +31,8 @@ function formatStatus(status: string): string {
   return statusLabel[status] || "运行状态（待识别）";
 }
 
-function percent(progress: number | undefined): number {
-  return Math.round(Math.max(0, Math.min(1, progress ?? 0)) * 100);
+function percent(progress: string | number | undefined): number {
+  return Math.round(Math.max(0, Math.min(1, Number(progress ?? 0))) * 100);
 }
 
 function evidence(run: BacktestRun): Record<string, unknown> {
@@ -64,6 +66,7 @@ function evidence(run: BacktestRun): Record<string, unknown> {
 }
 
 export function BacktestRunsPage() {
+  const [filters, setFilters] = useState<RunFilters>({});
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selected, setSelected] = useState<BacktestRun | null>(null);
   const [message, setMessage] = useState("");
@@ -94,7 +97,7 @@ export function BacktestRunsPage() {
     listInFlightRef.current = true;
     const requestGeneration = ++listRequestGenerationRef.current;
     try {
-      const data = await listBacktestRuns(signal);
+      const data = await listBacktestRuns(signal, undefined, filters);
       const items = (data.items || []).filter((run) => run.run_kind !== "internal_link_acceptance");
       activeRunsRef.current = items.some((run) => !isTerminalBacktestStatus(run.status));
       if (mountedRef.current) setRuns(items);
@@ -108,7 +111,7 @@ export function BacktestRunsPage() {
         listInFlightRef.current = false;
       }
     }
-  }, []);
+  }, [filters]);
 
   const refreshDetail = useCallback(async (id: string, signal?: AbortSignal): Promise<void> => {
     if (!id || detailInFlightRef.current) return;
@@ -225,13 +228,14 @@ export function BacktestRunsPage() {
   return (
     <section data-polling-protocol={FOREGROUND_POLLING_PROTOCOL}>
       <h1>回测运行</h1>
+      <BacktestRunFilters onApply={setFilters} />
       <p>新运行请从对应策略的回测工作台创建，以完整选择账户、数据范围和执行配置。</p>
       {message && <p role="status">{message}</p>}
 
       {runs.map((run) => (
         <article key={run.run_id}>
           <button type="button" onClick={() => openDetail(run)}>
-            <div>{run.run_id}</div>
+            <div>{run.label || (run.run_kind === "internal_link_acceptance" ? "内部链路验收" : "正式回测")} · {run.run_id}</div>
             <div>{formatStatus(run.status)} {percent(run.progress_ratio)}%</div>
             <div>{run.current_trading_date || ""}</div>
           </button>

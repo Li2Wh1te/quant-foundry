@@ -428,7 +428,7 @@ class NotApplicableTestCase(unittest.TestCase):
 
         model = BarMarketExecutionModel(
             slippage_model=BpsSlippageModel(slippage_bps="0", price_tick="0.01"),
-            fee_calculator=FeeCalculator(schedule=FeeSchedule(key="test", fee_rules=())),
+            fee_calculator=FeeCalculator(schedule=FeeSchedule(version=1, key="test", fee_rules=())),
         )
         context = MatchContext(currency="CNY", available_cash="100000")
         buy = Order(
@@ -507,7 +507,7 @@ class FormalMarketStateTestCase(unittest.TestCase):
         model = BarMarketExecutionModel(
             slippage_model=BpsSlippageModel(slippage_bps="0", price_tick="0.01"),
             fee_calculator=FeeCalculator(
-                schedule=FeeSchedule(key="test", fee_rules=())
+                schedule=FeeSchedule(version=1, key="test", fee_rules=())
             ),
         )
         context = MatchContext(currency="CNY", available_cash="100000")

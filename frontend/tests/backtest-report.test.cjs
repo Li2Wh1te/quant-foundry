@@ -72,3 +72,18 @@ test("metric comparison retains top-level annualization and rate evidence", () =
   assert.match(html, /published A/);
   assert.match(html, /365/);
 });
+
+test("run filters survive ordinary, scoped and cursor list requests", async () => {
+  const { listBacktestRuns, fetchStrategyBacktestWorkspace } = require("../src/api/backtestRuns.ts");
+  const requests = [];
+  const original = global.fetch;
+  global.fetch = async (path) => { requests.push(new URL(path, "http://localhost")); return { ok: true, json: async () => ({ items: [] }) }; };
+  const filters = { strategy_revision_id: "revision", status: "succeeded", created_after: "2026-01-01T00:00:00+08:00", created_before: "2026-02-01T00:00:00Z", config_summary: "费用 10% & 参数" };
+  try {
+    await listBacktestRuns(undefined, undefined, filters);
+    await listBacktestRuns(undefined, "strategy", filters);
+    await fetchStrategyBacktestWorkspace("strategy", undefined, "signed+cursor", filters);
+    for (const request of requests) for (const [key, value] of Object.entries(filters)) assert.equal(request.searchParams.get(key), value);
+    assert.equal(requests[2].searchParams.get("cursor"), "signed+cursor");
+  } finally { global.fetch = original; }
+});

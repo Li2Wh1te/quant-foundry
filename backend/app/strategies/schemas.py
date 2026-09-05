@@ -131,6 +131,7 @@ class StrategySummaryResponse(BaseModel):
 class StrategyDetailResponse(StrategySummaryResponse):
     """One editor-oriented strategy response with its draft and current revision."""
 
+    draft_changed_since_revision: bool = False
     draft: StrategyDraftResponse
     current_revision: StrategyRevisionSummaryResponse | None
 

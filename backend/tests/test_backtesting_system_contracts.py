@@ -329,6 +329,7 @@ def test_sql_calendar_admission_keeps_fixed_scope_warmup_and_capability_gates():
     request = replace(_data_request(), warmup_sessions=2)
     provider = object.__new__(SqlBacktestProvider)
     provider.calendar_provider = Mock()
+    provider.calendar_policy = __import__("app.backtesting.infrastructure", fromlist=["StrictCalendarPolicy"]).StrictCalendarPolicy()
     captured = []
     class CalendarReached(Exception):
         pass

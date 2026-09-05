@@ -612,7 +612,7 @@ class ContractMultiplierTestCase(unittest.TestCase):
 
 class FeeCategoryResolutionTestCase(unittest.TestCase):
     def test_required_category_missing_from_snapshot_fails_closed(self) -> None:
-        schedule = FeeSchedule(key="s", fee_rules=(
+        schedule = FeeSchedule(version=1, key="s", fee_rules=(
             FeeRule(
                 key="stamp_duty", category="stamp_duty", side="sell",
                 rate="0.001",
@@ -629,7 +629,7 @@ class FeeCategoryResolutionTestCase(unittest.TestCase):
             )
 
     def test_undeclared_categories_are_never_charged(self) -> None:
-        schedule = FeeScheduleSnapshot(
+        schedule = FeeScheduleSnapshot(version=1,
             key="acct_fee_v1",
             fee_rules=(
                 FeeRule(
@@ -652,7 +652,7 @@ class FeeCategoryResolutionTestCase(unittest.TestCase):
             schedule, fee_categories={"commission"}, side="sell"
         )
         breakdown = FeeCalculator(
-            FeeScheduleSnapshot(key=schedule.key, fee_rules=rules)
+            FeeScheduleSnapshot(version=1, key=schedule.key, fee_rules=rules)
         ).calculate(side="sell", notional="1000")
         self.assertEqual(breakdown.total, Decimal("5.00"))
         categories = {component.category for component in breakdown.components}
@@ -667,7 +667,7 @@ class FeeCategoryResolutionTestCase(unittest.TestCase):
             rounding_precision="0.01",
         )
         breakdown = FeeCalculator(
-            FeeSchedule(key="s", fee_rules=(rule,))
+            FeeSchedule(version=1, key="s", fee_rules=(rule,))
         ).calculate(side="buy", notional="1000", quantity="100")
         self.assertEqual(breakdown.total, Decimal("0.10"))
 
@@ -678,7 +678,7 @@ class FeeCategoryResolutionTestCase(unittest.TestCase):
             rounding_scope="commission", rounding_mode=FeeRoundingMode.HALF_UP,
             rounding_precision="0.01",
         )
-        calculator = FeeCalculator(FeeSchedule(key="s", fee_rules=(rule,)))
+        calculator = FeeCalculator(FeeSchedule(version=1, key="s", fee_rules=(rule,)))
         self.assertEqual(
             calculator.calculate(side="buy", notional="10000").total,
             Decimal("3.00"),
@@ -689,7 +689,7 @@ class FeeCategoryResolutionTestCase(unittest.TestCase):
         )
 
     def test_unmatched_fee_category_rejects_order_as_fee_rule_unresolved(self) -> None:
-        empty_schedule = FeeSchedule(key="only_stamp", fee_rules=(
+        empty_schedule = FeeSchedule(version=1, key="only_stamp", fee_rules=(
             FeeRule(
                 key="stamp_duty", category="stamp_duty", side="sell",
                 rate="0.001",
@@ -1050,7 +1050,7 @@ class ReviewFixTestCase(unittest.TestCase):
             rounding_scope="commission", rounding_mode=FeeRoundingMode.HALF_UP,
             rounding_precision="0.01",
         )
-        schedule = FeeSchedule(key="s", fee_rules=(applicable_rule,))
+        schedule = FeeSchedule(version=1, key="s", fee_rules=(applicable_rule,))
 
         segment = snapshot_segment()
         resolved = InstrumentExecutionPolicy.from_rule_snapshot(

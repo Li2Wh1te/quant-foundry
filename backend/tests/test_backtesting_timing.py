@@ -95,7 +95,7 @@ class AfterCloseToNextOpenV1Tests(unittest.TestCase):
             TimingPhase.PRE_OPEN_SETTLE: None,
             TimingPhase.OBSERVE: DataViewKind.ENGINE,
             TimingPhase.MATCH: DataViewKind.ENGINE,
-            TimingPhase.ACCOUNT: None,
+            TimingPhase.ACCOUNT: DataViewKind.ENGINE,
             TimingPhase.CASH_ACTIONS: DataViewKind.ENGINE,
             TimingPhase.VALUE: DataViewKind.ENGINE,
             TimingPhase.ANALYZE: None,

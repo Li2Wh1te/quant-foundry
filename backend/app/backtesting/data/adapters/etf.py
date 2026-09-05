@@ -1389,17 +1389,11 @@ class EtfFactsAdapter:
                     },
                 )
             if action_type in {"split", "consolidation", "share_change"}:
-                # v1 keeps quantity actions in the common fact model but does
-                # not account for them.  Failing here prevents a later
-                # snapshot conversion from silently dropping the event.
-                raise ProviderContractViolationError(
-                    "quantity-class corporate actions are unsupported in formal v1",
-                    details={
-                        "event_id": str(row.event_id),
-                        "action_type": action_type,
-                        "reason_code": "quantity_corporate_action_unsupported",
-                    },
-                )
+                # Preserve quantity facts for coverage/audit consumers. The
+                # formal qualification and cash snapshot boundaries reject
+                # them; fact projection must not erase the source evidence.
+                result.append(_quantity_action_fact(row, query))
+                continue
 
             evidence_payload = dict(getattr(row, "evidence", None) or {})
             ex_date = row.ex_date
@@ -3278,3 +3272,34 @@ def build_data_preflight_payloads(
             "failure_reason": failure_reason,
         },
     }
+
+
+def _quantity_action_fact(row, query):
+    """Project quantity events without borrowing cash-dividend date rules."""
+    observed = getattr(row, "observed_at", None)
+    known = getattr(row, "known_at", None)
+    effective = getattr(row, "effective_time", None)
+    ex_date = getattr(row, "ex_date", None)
+    ratio = getattr(row, "quantity_ratio", None)
+    delta = getattr(row, "quantity_delta", None)
+    revision = getattr(row, "source_revision", None)
+    if observed is None or effective is None or ex_date is None or not revision or (ratio is None and delta is None):
+        raise ProviderContractViolationError("quantity action source evidence is incomplete", details={
+            "reason_code": "quantity_corporate_action_incomplete", "event_id": str(row.event_id)})
+    if observed.tzinfo is None:
+        observed = observed.replace(tzinfo=timezone.utc)
+    if known is not None and known.tzinfo is None:
+        known = known.replace(tzinfo=timezone.utc)
+    if observed > query.boundary.data_cutoff or (known is not None and known > query.boundary.data_cutoff) or (
+        query.boundary.knowledge_as_of is not None and (known is None or known > query.boundary.knowledge_as_of)
+    ):
+        raise ProviderContractViolationError("quantity action is not visible at the requested PIT cutoff")
+    return CorporateAction(
+        instrument_id=row.instrument_id, action_type=row.action_type, ex_date=ex_date,
+        effective_time=effective, quantity_ratio=ratio, quantity_delta=delta,
+        valid_from=getattr(row, "valid_from", None), valid_to=getattr(row, "valid_to", None),
+        evidence=FactEvidence(source=row.source, observed_at=observed, known_at=known,
+                              source_revision=str(revision), quality_status=QualityStatus(row.quality)),
+        attributes={"event_id":str(row.event_id), "fact_version":row.fact_version,
+                    "source_evidence":dict(getattr(row, "evidence", {}) or {})},
+    )

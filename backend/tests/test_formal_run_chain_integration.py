@@ -289,7 +289,7 @@ class UnifiedRunChainTestCase(unittest.TestCase):
 
         model = BarMarketExecutionModel(
             slippage_model=BpsSlippageModel(slippage_bps="0", price_tick="0.001"),
-            fee_calculator=FeeCalculator(schedule=FeeSchedule(key="test", fee_rules=())),
+            fee_calculator=FeeCalculator(schedule=FeeSchedule(version=1, key="test", fee_rules=())),
         )
         sell = Order(
             order_id=uuid4(),

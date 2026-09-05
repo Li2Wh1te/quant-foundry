@@ -337,7 +337,7 @@ class CorporateActionProviderTests(unittest.TestCase):
             _adapter([row]).corporate_actions(_query())
         self.assertEqual(
             context.exception.details["reason_code"],
-            "quantity_corporate_action_unsupported",
+            "quantity_corporate_action_incomplete",
         )
 
     def test_adapter_blocks_cash_action_without_both_source_dates(self):

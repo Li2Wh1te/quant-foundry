@@ -146,7 +146,8 @@ class IngestionSchedulerTaskTests(unittest.TestCase):
         registry.register(
             TaskDefinition(
                 key=task_type,
-                name="Trading status",
+                name="交易状态",
+                english_name="Trading status",
                 parameters_model=_EmptyParameters,
                 handler=handler,
             )

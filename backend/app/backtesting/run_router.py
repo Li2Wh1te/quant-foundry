@@ -8,7 +8,8 @@ decision; no endpoint executes strategy code or writes a final status.
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import date
+from decimal import Decimal
+from datetime import date, datetime
 import logging
 from typing import Any, Mapping
 from uuid import UUID
@@ -235,6 +236,7 @@ def _build_spec(
         strategy_parameters=payload.parameters,
         account_profile_id=payload.account_profile_id,
         account_profile_version=payload.account_profile_version,
+        fee_schedule_selection=ComponentSelection(payload.fee_schedule_selection.key, payload.fee_schedule_selection.version, payload.fee_schedule_selection.parameters) if payload.fee_schedule_selection else None,
         data_cutoff=payload.data_cutoff,
         component_selections={key: ComponentSelection(value.key, value.version, value.parameters) for key, value in payload.component_selections.items()},
         analyzer_selections=tuple(ComponentSelection(value.key, value.version, value.parameters) for value in payload.analyzer_selections),
@@ -280,7 +282,10 @@ def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
             "parameters": dict(payload.parameters or {}),
         },
         components=components,
-        data_request={},
+        data_request=(
+            {"internal_fixtures": [item.to_domain().as_dict() for item in payload.internal_fixtures]}
+            if isinstance(payload, InternalRunCreateRequest) and payload.internal_fixtures else {}
+        ),
         account=(
             {"profile_id": str(payload.account_profile_id), "version": payload.account_profile_version}
             if payload.account_profile_id is not None
@@ -453,12 +458,14 @@ def _response(run: BacktestRun | object) -> RunResponse:
         "random_seed": getattr(run, "random_seed", None),
         # The database column is retained for compatibility with the existing
         # run root, while the API exposes the canonical protocol name only.
-        "progress_ratio": float(
+        "progress_ratio": Decimal(str(
             getattr(run, "progress_ratio", None)
             if getattr(run, "progress_ratio", None) is not None
             else getattr(run, "progress", 0)
             or 0
-        ),
+        )),
+        "completed_steps": (getattr(run, "checkpoint", None) or {}).get("completed_steps"),
+        "total_steps": (getattr(run, "checkpoint", None) or {}).get("total_steps"),
         "current_trading_date": current_date,
         "current_step": str(raw_current_step) if raw_current_step is not None else None,
         "created_at": getattr(run, "created_at", None),
@@ -688,7 +695,7 @@ def _create(
                     f"{binding.spec.start_date} 至 {binding.spec.end_date}",
                     "已进入正式等待队列"
                     if kind == FORMAL_KIND
-                    else "已进入内部等待队列",
+                    else "内部链路验收已进入内部等待队列",
                 ),
                 "run_id": str(row.id),
                 "run_kind": row.run_kind,
@@ -1054,9 +1061,15 @@ def _list(
     limit: int,
     offset: int,
     owner_scope: str = "default",
-    strategy_revision_id: str | None = None,
+    strategy_revision_id: UUID | None = None,
     strategy_id: str | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
 ) -> dict[str, list[RunResponse]]:
+    if strategy_revision_id is not None:
+        strategy_revision_id = str(strategy_revision_id)
     # FastAPI resolves Query defaults before dispatch; direct function callers
     # receive Query marker objects instead, so normalize them here as well.
     if not isinstance(limit, int):
@@ -1071,6 +1084,8 @@ def _list(
             offset=offset,
             strategy_revision_id=strategy_revision_id,
             strategy_id=strategy_id,
+            status=status, created_after=created_after, created_before=created_before,
+            config_summary=config_summary,
         )
         return {"items": [_response(row) for row in rows]}
     rows = [
@@ -1080,10 +1095,16 @@ def _list(
         and run.owner_scope == owner_scope
         and (
             strategy_revision_id is None
-            or str(run.binding.strategy.get("strategy_id", run.binding.strategy.get("revision_id", "")))
+            or str(run.binding.strategy.get("revision_id", ""))
             == strategy_revision_id
         )
     ]
+    rows = [run for run in rows if
+            (strategy_id is None or str(run.binding.strategy.get("strategy_id", "")) == strategy_id)
+            and (status is None or run.status == status)
+            and (created_after is None or (getattr(run, "created_at", None) is not None and run.created_at >= created_after))
+            and (created_before is None or (getattr(run, "created_at", None) is not None and run.created_at <= created_before))
+            and (not config_summary or config_summary.casefold() in str(_wire_value(run.binding.config)).casefold())]
     return {"items": [_response(run) for run in rows[offset : offset + limit]]}
 
 
@@ -1093,6 +1114,11 @@ def list_runs(
     request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    strategy_revision_id: UUID | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
 ) -> dict[str, list[RunResponse]]:
     return _list(
         kind=FORMAL_KIND,
@@ -1100,6 +1126,8 @@ def list_runs(
         owner_scope=_owner_scope(request),
         limit=limit,
         offset=offset,
+        strategy_revision_id=strategy_revision_id, status=status,
+        created_after=created_after, created_before=created_before, config_summary=config_summary,
     )
 
 
@@ -1126,12 +1154,19 @@ def list_strategy_runs(
     request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    strategy_revision_id: UUID | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
 ) -> dict[str, list[RunResponse]]:
     return _list(
         kind=FORMAL_KIND,
         session=session,
         limit=limit,
         offset=offset,
+        strategy_revision_id=strategy_revision_id, status=status,
+        created_after=created_after, created_before=created_before, config_summary=config_summary,
         owner_scope=_owner_scope(request),
         strategy_id=strategy_id,
     )
@@ -1246,8 +1281,13 @@ def list_runs_alias(
     request: Request = None,  # type: ignore[assignment]
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    strategy_revision_id: UUID | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
 ) -> dict[str, list[RunResponse]]:
-    return list_runs(session=session, request=request, limit=limit, offset=offset)
+    return list_runs(session=session, request=request, limit=limit, offset=offset, strategy_revision_id=strategy_revision_id, status=status, created_after=created_after, created_before=created_before, config_summary=config_summary)
 
 
 @formal_alias_router.get("/{run_id}")

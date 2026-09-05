@@ -450,6 +450,20 @@ class BacktestResultPersistenceService:
                 outcome=outcome,
             )
             root.data_preflight_hash = session_hash
+            report = getattr(outcome, "report", None)
+            payload = report.as_dict() if hasattr(report, "as_dict") else {}
+            root.audit_projection = {
+                "schema_version": 1,
+                "stage": "session",
+                "data_preflight_hash": session_hash,
+                "data_contract_version": payload.get("data_contract_version"),
+                "consistency": payload.get("consistency"),
+                "calendar": payload.get("calendar"),
+                "coverage": payload.get("coverage"),
+                "revision": payload.get("revision"),
+                "adjustment_series": payload.get("adjustment_series_policy") or payload.get("adjustment_series"),
+                "non_strict_pit": payload.get("non_strict_pit"),
+            }
             self.session.flush()
             transaction.commit()
         except Exception:

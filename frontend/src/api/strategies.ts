@@ -38,6 +38,7 @@ export interface StrategyRevision extends StrategyRevisionSummary {
 }
 
 export interface StrategyDetail extends StrategySummary {
+  draft_changed_since_revision?: boolean;
   draft: StrategyDraft;
   current_revision: StrategyRevisionSummary | null;
 }

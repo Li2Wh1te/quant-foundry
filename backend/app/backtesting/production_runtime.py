@@ -224,7 +224,7 @@ class SqlBacktestProvider:
 
     provider_key = ETF_PROVIDER_KEY
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, calendar_policy=None, rule_registry=None):
         self.session = session
         self.identity_repository = InstrumentIdentityRepository(session)
         self.mapping_repository = InstrumentCodeMappingRepository(session)
@@ -232,8 +232,9 @@ class SqlBacktestProvider:
         self.corporate_action_repository = CorporateActionRepository(session)
         self.rule_facts_repository = RuleFactsRepository(session)
         self.exception_repository = RuleExceptionSetsRepository(session)
-        self.rule_registry = RulePackageRegistry()
-        register_china_listed_etf_rules(self.rule_registry)
+        registry = build_default_component_registry()
+        self.rule_registry = rule_registry or registry.resolve("china_listed_etf_rules", 1).construct().build()
+        self.calendar_policy = calendar_policy or registry.resolve("strict_compatible", 1).construct().build()
         self.spec_provider = InstrumentSpecProvider(identity_repository=self.identity_repository, mapping_repository=self.mapping_repository, rule_fact_repository=self.rule_facts_repository, exception_repository=self.exception_repository, rule_registry=self.rule_registry)
         self.adapter = EtfFactsAdapter(
             code_mappings=self._code_mappings,
@@ -718,13 +719,9 @@ class SqlBacktestProvider:
         # Calendar resolution precedes run admission. Do not manufacture an
         # admitted DataRequest with placeholder hashes or discard fixed scope
         # and warmup just to access the authoritative calendar projection.
-        snapshot = self.calendar_provider.open_calendar_snapshot(CalendarSnapshotRequest(
-            calendar_ids=calendars, formal_start=request.requested_window.start_date,
-            formal_end=request.requested_window.end_date, warmup_sessions=request.warmup_sessions,
-            query_boundary=request.query_boundary, instrument_ids=request.fixed_instrument_ids,
-            provider_key=request.provider_key, package_key=request.rule_package.key,
-            package_version=request.rule_package.version,
-        ))
+        snapshot = self.calendar_policy.open_snapshot(
+            self.calendar_provider, request, calendar_ids=calendars,
+        )
         capability_issues, capability_evidence = evaluate_calendar_capability_gate(self.calendar_provider, request, snapshot)
         calendar_report = _snapshot_report(
             request, snapshot, capability_manifest_version=1,
@@ -822,6 +819,14 @@ class SqlBacktestProvider:
                     knowledge_as_of=request.query_boundary.knowledge_as_of,
                 )
             )
+            for row in corporate_action_rows:
+                if row.action_type in {"split", "consolidation", "share_change"}:
+                    issues.append(PreflightIssue(
+                        code="quantity_corporate_action_unsupported", severity=IssueSeverity.ERROR,
+                        scope="formal", message="标的存在首版尚未支持的数量类公司行动，已阻断回测。",
+                        field="corporate_actions", instrument_id=row.instrument_id,
+                        details={"event_id": str(row.event_id), "action_type": row.action_type},
+                    ))
             proofs = self.corporate_action_repository.coverage(
                 request.fixed_instrument_ids,
                 request.requested_window.start_date,
@@ -1305,7 +1310,22 @@ class SqlBacktestChunkSession:
                 },
             )
         return result
-    def adjusted_series(self, _query): raise UnsupportedCapabilityError("formal v1 does not enable adjusted series")
+    def adjusted_series(self, query):
+        self._require()
+        if DataCapability.ADJUSTED_SERIES not in self._fact_types:
+            raise ProviderContractViolationError("adjusted-series reads were not declared for this chunk")
+        if query.price_basis is PriceBasis.RAW:
+            raise UnsupportedCapabilityError("raw prices do not have an adjustment series")
+        dates = self._dates(query.window)
+        rows = []
+        for instrument_id in query.instrument_ids:
+            resolution = self.provider.adapter.resolve(
+                instrument_id, sessions=dates, data_cutoff=query.boundary.data_cutoff
+            )
+            rows.extend(self.provider.adapter.adjusted_series(
+                instrument_id, resolution=resolution, price_basis=query.price_basis
+            ).points)
+        return tuple(sorted(rows, key=lambda row: (row.point_date, str(row.instrument_id))))
     def trading_rules(self, _query): return ()
     def trading_status(self, query):
         self._require()
@@ -1607,6 +1627,7 @@ def binding_from_row(row, *, session: Session | None = None):
             dict(slippage_payload.get("parameters", {})),
         ),
         account_profile_version=spec_payload.get("account_profile_version"),
+        fee_schedule_selection=(ComponentSelection(**spec_payload["fee_schedule_selection"]) if spec_payload.get("fee_schedule_selection") else None),
         data_cutoff=(datetime.fromisoformat(spec_payload["data_cutoff"]) if spec_payload.get("data_cutoff") else None),
         component_selections={key: ComponentSelection(value["key"], value["version"], value.get("parameters", {})) for key, value in spec_payload.get("component_selections", {}).items()},
         analyzer_selections=tuple(ComponentSelection(value["key"], value["version"], value.get("parameters", {})) for value in spec_payload.get("analyzer_selections", ())),
@@ -1788,8 +1809,35 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
     """Build the worker runtime from persisted, immutable run inputs."""
 
     del worker_id  # Worker identity belongs to supervision, not engine semantics.
+    registry = build_default_component_registry()
+    components = binding.components
+    if not isinstance(components, Mapping):
+        raise ProviderContractViolationError(
+            "persisted run has no frozen component snapshot"
+        )
+
+    def component(kind, fallback):
+        selected = components.get(kind)
+        if selected is None:
+            if binding.run_kind == "backtest_run":
+                raise ProviderContractViolationError(
+                    f"formal run is missing frozen component {kind}"
+                )
+            selected = {"key": fallback, "version": 1, "parameters": {}}
+        if isinstance(selected, list):
+            return ()
+        entry = registry.resolve(selected["key"], int(selected["version"]))
+        if entry.component_kind != kind:
+            raise ProviderContractViolationError(f"frozen component is not a {kind}")
+        return entry.construct(selected.get("parameters", {}))
+
+
     request = deserialize_data_request(binding.data_request)
-    provider = SqlBacktestProvider(session)
+    provider = component("data_provider", "etf_ingestion").build(
+        session=session,
+        calendar_policy=component("calendar_axis_policy", "strict_compatible").build(),
+        rule_registry=component("rule_package", "china_listed_etf_rules").build(),
+    )
     data_session = provider.open_session(request)
     writer = BacktestResultPersistenceService(
         session,
@@ -1809,28 +1857,8 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
         request=request,
         writer=writer,
     )
-    corporate_actions = _corporate_action_snapshot(data_session, request)
-    axis = TradingDayAxis(data_session.resolved_sessions)
-    registry = build_default_component_registry()
-    components = binding.components
-    if not isinstance(components, Mapping):
-        raise ProviderContractViolationError(
-            "persisted run has no frozen component snapshot"
-        )
-
-    def component(kind, fallback):
-        selected = components.get(kind)
-        if selected is None:
-            if binding.run_kind == "backtest_run":
-                raise ProviderContractViolationError(
-                    f"formal run is missing frozen component {kind}"
-                )
-            selected = {"key": fallback, "version": 1, "parameters": {}}
-        if isinstance(selected, list):
-            return ()
-        entry = registry.resolve(selected["key"], int(selected["version"]))
-        return entry.factory(selected.get("parameters", {}))
-
+    corporate_actions = component("corporate_action_timing", "after_open_match").build(data_session=data_session, request=request)
+    axis = component("time_axis", "trading_day").build(sessions=data_session.resolved_sessions)
     timing = component(TIMING_POLICY_KIND, "after_close_to_next_open")
     execution = component(EXECUTION_MODEL_KIND, "bar_market")
     interpreter = component(
@@ -1892,10 +1920,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
         strategy=strategy,
         interpreter=interpreter,
         execution_model=execution,
-        accounting=AccountingPolicy(
-            currency=binding.spec.currency,
-            settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
-        ),
+        accounting=component("accounting_policy", "accounting_policy").build(currency=binding.spec.currency),
         random_seed=binding.random_seed,
         initial_portfolio=_initial_portfolio(binding, analysis.initial_equity_snapshot if analysis else None),
         settlement_calendar=settlement,
@@ -2034,8 +2059,9 @@ def build_formal_binding(
 
     if spec.strategy_revision_id != revision.id:
         raise ValueError("strategy revision does not match the immutable run spec")
-    if spec.dynamic_universe:
-        raise ValueError("the SQL daily profile requires an explicit fixed instrument scope")
+    # Dynamic scopes are resolved by the chunk's PIT universe query.  The
+    # initial fixed ids are only the admission seed (for positions/rules),
+    # never an implicit replacement for the dynamic candidate set.
     provider = SqlBacktestProvider(session)
     ids = tuple(
         sorted(
@@ -2172,6 +2198,15 @@ def build_formal_binding(
         }
     )
     account = _account_snapshot(session, spec.account_profile_id, spec.account_profile_version)
+    if spec.fee_schedule_selection is not None:
+        from app.backtesting.fee_catalog import FeeCatalogRepository
+        fee = spec.fee_schedule_selection
+        fee_snapshot = FeeCatalogRepository(session).require(fee.key, fee.version)
+        account.update(fee_schedule=fee_snapshot, fee_schedule_key=fee.key,
+                       fee_schedule_version=fee.version, fee_schedule_source="fee_catalog")
+        account.pop("snapshot_hash", None)
+        account["snapshot_hash"] = canonical_hash(account)
+
     components = default_components(spec.slippage_model, spec.component_selections, spec.analyzer_selections)
     _admit_formal_analysis(spec, components, outcome.outcome.report, provider, "00000000-0000-4000-8000-000000000000", frozen)
     from app.backtesting.component_config import selections_from_snapshot

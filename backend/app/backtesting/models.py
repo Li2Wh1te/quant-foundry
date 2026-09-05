@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -253,6 +254,9 @@ class BacktestRunRecord(Base):
     # from the request so query projections can expose evidence without
     # re-resolving a mutable provider.
     data_evidence: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
+    # Versioned, bounded projection of the complete audit dimensions used by
+    # comparison and operator views; detailed reports remain in evidence rows.
+    audit_projection: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict, server_default=text("'{}'::jsonb"))
     # Immutable four-level admission evidence.  The binding snapshot remains
     # the source of truth; this projection makes gate status queryable without
     # reopening mutable data or strategy dependencies.
@@ -274,7 +278,7 @@ class BacktestRunRecord(Base):
     analyzer_specs: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, nullable=False, default=list)
     behavior_versions: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False, default=dict)
     random_seed: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    progress: Mapped[float] = mapped_column(Numeric(6, 5), nullable=False, server_default="0")
+    progress: Mapped[Decimal] = mapped_column(Numeric(), nullable=False, server_default="0")
     # Canonical supervisor progress fields.  ``current_date`` and the legacy
     # integer step column are retained below for rows created by task 08; all
     # new runner code writes the explicit canonical columns.

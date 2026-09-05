@@ -24,6 +24,7 @@ Key constraints implemented here (frozen by data-contract version 1):
 
 from __future__ import annotations
 
+from app.backtesting.data.memory_facts import FAMILIES, fact_payload, query_facts
 from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 import json
@@ -212,7 +213,7 @@ _SERVABLE_CHUNK_FACT_TYPES = frozenset(
     # Universe reads are immutable metadata reads bound to the same chunk
     # consistency context.  They do not widen the formal chunk and therefore
     # can safely participate in the declared token fact set.
-    {DataCapability.BARS, DataCapability.COVERAGE, DataCapability.UNIVERSE}
+    {DataCapability.BARS, DataCapability.COVERAGE, DataCapability.UNIVERSE, *FAMILIES}
 )
 """Fact types one chunk can actually serve in the first version.
 
@@ -270,6 +271,15 @@ class MemoryDataSet:
     # table.  They are only used when an explicit universe source is injected;
     # a dataset never promotes these rows to a dynamic catalogue by itself.
     pit_instruments: tuple[object, ...] = ()
+    # None is unsupported; an empty tuple enables reads without claiming coverage.
+    ticks: tuple[object, ...] | None = None
+    values: tuple[object, ...] | None = None
+    adjusted_points: tuple[object, ...] | None = None
+    corporate_actions: tuple[object, ...] | None = None
+    mappings: tuple[object, ...] | None = None
+    rules: tuple[object, ...] | None = None
+    statuses: tuple[object, ...] | None = None
+
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -320,6 +330,17 @@ class MemoryDataSet:
             ),
         )
         object.__setattr__(self, "pit_instruments", tuple(self.pit_instruments))
+        for name, fact_type in FAMILIES.values():
+            rows = getattr(self, name)
+            if rows is not None:
+                rows = tuple(rows)
+                if any(not isinstance(row, fact_type) for row in rows):
+                    raise InvalidDataRequestError(f"{name} contains an invalid fact type")
+                digests = [canonical_hash(fact_payload(row)) for row in rows]
+                if len(set(digests)) != len(rows):
+                    raise InvalidDataRequestError(f"{name} contains duplicate facts")
+                object.__setattr__(self, name, tuple(row for _, row in sorted(zip(digests, rows))))
+
 
         definitions = tuple(self.calendar_definitions)
         object.__setattr__(
@@ -818,6 +839,8 @@ class MemoryDataProvider:
             if self._universe_supported
             else served_base
         )
+        served = (*served, *(capability for capability, (name, _) in FAMILIES.items()
+                             if getattr(dataset, name) is not None))
         self._manifest = DataCapabilityManifest(
             provider_key=dataset.provider_key,
             manifest_version=capability_manifest_version,
@@ -3411,6 +3434,9 @@ class MemoryDataProvider:
                 }
                 for fact in self._dataset.calendar_facts
             ]
+        for capability, (name, _) in FAMILIES.items():
+            if capability in requested:
+                payload[name] = fact_payload(getattr(self._dataset, name))
         return canonical_hash(payload)
 
     def _revision_snapshot(self) -> tuple[object, ...]:
@@ -3441,6 +3467,8 @@ class MemoryDataProvider:
     def _covers_fact_type(self, capability: DataCapability) -> bool:
         """Whether the dataset actually backs one declared fact type."""
 
+        if capability in FAMILIES and getattr(self._dataset, FAMILIES[capability][0]) is not None:
+            return True
         if capability is DataCapability.BARS:
             return bool(self._dataset.bars)
         if capability is DataCapability.CALENDARS:
@@ -5725,22 +5753,14 @@ class MemoryDataChunkSession:
             rows.append(spec)
         return tuple(sorted(rows, key=lambda spec: str(spec.instrument_id)))
 
-    def instrument_mappings(
-        self, query: InstrumentMappingQuery
-    ) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not implement instrument_mappings"
-        )
+    def instrument_mappings(self, query: InstrumentMappingQuery) -> tuple[object, ...]:
+        return query_facts(self, query, DataCapability.MAPPINGS, InstrumentMappingQuery)
 
     def trading_rules(self, query: TradingRuleQuery) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not implement trading_rules"
-        )
+        return query_facts(self, query, DataCapability.RULES, TradingRuleQuery)
 
     def trading_status(self, query: TradingStatusQuery) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not implement trading_status"
-        )
+        return query_facts(self, query, DataCapability.STATUS, TradingStatusQuery)
 
     def universe(self, query: UniverseQuery) -> tuple[InstrumentSpec, ...]:
         """Return PIT-qualified candidates for the current decision step.
@@ -6151,22 +6171,16 @@ class MemoryDataChunkSession:
         return tuple(rows)
 
     def ticks(self, query: TickQuery) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError("the memory fixture does not serve ticks")
+        return query_facts(self, query, DataCapability.TICKS, TickQuery)
 
     def values(self, query: DataValueQuery) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError("the memory fixture does not serve values")
+        return query_facts(self, query, DataCapability.VALUES, DataValueQuery)
 
     def adjusted_series(self, query: AdjustedSeriesQuery) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not serve adjusted_series"
-        )
+        return query_facts(self, query, DataCapability.ADJUSTED_SERIES, AdjustedSeriesQuery)
 
-    def corporate_actions(
-        self, query: CorporateActionQuery
-    ) -> tuple[object, ...]:
-        raise UnsupportedCapabilityError(
-            "the memory fixture does not serve corporate_actions"
-        )
+    def corporate_actions(self, query: CorporateActionQuery) -> tuple[object, ...]:
+        return query_facts(self, query, DataCapability.ACTIONS, CorporateActionQuery)
 
     def coverage(self, query: CoverageQuery) -> DataCoverageReport:
         """Coverage accounting over one capability and explicit window.

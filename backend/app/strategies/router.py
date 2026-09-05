@@ -1,6 +1,7 @@
 """Authenticated HTTP APIs for private database-backed strategy management."""
 
 from typing import Annotated
+from datetime import datetime
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Response, status
@@ -54,6 +55,11 @@ def strategy_backtest_workspace(
     request: Request = None,  # type: ignore[assignment]
     limit: Annotated[int, Query(ge=1, le=500)] = 100,
     cursor: str | None = None,
+    strategy_revision_id: UUID | None = None,
+    status: str | None = None,
+    created_after: datetime | None = None,
+    created_before: datetime | None = None,
+    config_summary: str | None = None,
 ) -> StrategyBacktestWorkspaceResponse:
     """Compose strategy metadata, published revisions and formal runs."""
     strategy = _strategy_or_404(session, strategy_id)
@@ -68,6 +74,8 @@ def strategy_backtest_workspace(
             limit=limit,
             cursor=cursor,
             signing_key=signing_key,
+            strategy_revision_id=strategy_revision_id, status=status,
+            created_after=created_after, created_before=created_before, config_summary=config_summary,
         )
     except CursorError as exc:
         raise HTTPException(
@@ -90,7 +98,7 @@ def strategy_backtest_workspace(
             "id": strategy.id, "name": strategy.name, "state": strategy.state,
             "current_revision_id": strategy.current_revision_id,
             "draft_version": draft.version if draft else None,
-            "draft_changed_since_revision": bool(draft and current and draft.source_hash != current.source_hash),
+            "draft_changed_since_revision": _draft_changed_since_revision(draft, current),
         },
         published_revisions=[{
             "id": r.id, "revision_number": r.revision_number, "source_hash": r.source_hash,
@@ -322,6 +330,15 @@ def _strategy_or_404(session: Session, strategy_id: UUID) -> Strategy:
     return strategy
 
 
+def _draft_changed_since_revision(draft, revision) -> bool:
+    """Compare all published inputs; saving or reverting source alone is insufficient."""
+    return bool(draft and revision and (
+        draft.source_hash != revision.source_hash
+        or draft.parameter_schema != revision.parameter_schema
+        or draft.default_parameters != revision.default_parameters
+    ))
+
+
 def _strategy_detail_response(
     session: Session, strategy: Strategy
 ) -> StrategyDetailResponse:
@@ -333,6 +350,7 @@ def _strategy_detail_response(
     current_revision = _current_revision_or_conflict(repository, strategy)
     return StrategyDetailResponse(
         **_strategy_summary_response(strategy).model_dump(),
+        draft_changed_since_revision=_draft_changed_since_revision(draft, current_revision),
         draft=StrategyDraftResponse.model_validate(draft),
         current_revision=(
             StrategyRevisionSummaryResponse.model_validate(current_revision)

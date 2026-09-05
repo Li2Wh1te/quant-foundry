@@ -67,6 +67,19 @@ interface EventPresentation {
 }
 
 const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
+  backtest_cancel_requested: { title: "回测取消请求已记录", summary: "该运行已收到取消请求，等待执行器处理。" },
+  backtest_chunk: { title: "回测数据块已处理", summary: "该运行已处理一个数据块，详细进度见展开记录。" },
+  backtest_claimed: { title: "回测运行已领取", summary: "执行器已领取该等待运行。" },
+  backtest_created: { title: "回测运行已创建", summary: "该运行配置已冻结并进入等待队列。" },
+  backtest_result_chunk_committed: { title: "回测结果块已提交", summary: "该运行的一批结果已提交存储。" },
+  backtest_terminal_write_rejected: { title: "回测终态写入被拒绝", summary: "该运行的终态写入未通过身份或状态检查。" },
+  backtest_worker_completed: { title: "回测执行器已完成", summary: "该运行执行器已完成处理，终态以核验结果为准。" },
+  corporate_action_collection_failed: { title: "公司行动采集失败", summary: "公司行动数据采集失败，日期范围和结果计数见详情。" },
+  corporate_action_collection_started: { title: "公司行动采集开始", summary: "公司行动数据采集已启动，日期范围见详情。" },
+  corporate_action_collection_succeeded: { title: "公司行动采集完成", summary: "公司行动数据采集已完成，日期范围、结果计数及检查点状态见详情。" },
+  task_run_claimed: { title: "任务运行已领取", summary: "任务执行器已领取该等待运行。" },
+  task_run_metadata_unavailable: { title: "任务运行元数据不可用", summary: "该任务运行的元数据读取失败，诊断信息见详情。" },
+  task_run_terminal_observed: { title: "任务运行终态已观测", summary: "已观测到该任务运行终态，结果见详情。" },
   request_completed: { title: "请求完成", summary: "接口请求已完成。" },
   request_failed: { title: "请求失败", summary: "接口请求失败，请查看展开详情。" },
   task_run_started: { title: "任务开始", summary: "调度器已开始执行该任务。" },

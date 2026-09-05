@@ -1,3 +1,6 @@
+import { listFeeSchedules, type FeeCatalogVersion } from "../api/backtestRuns";
+import { BacktestRunFilters } from "../components/BacktestRunFilters";
+import type { BacktestRunFilters as RunFilters } from "../api/backtestRuns";
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
@@ -117,6 +120,8 @@ export function StrategyBacktestsPage() {
   const [accountVersions, setAccountVersions] = useState<AccountProfile[]>([]);
   const [componentOptions, setComponentOptions] = useState<Record<string, Array<ComponentSelectionInput & { display_name: string }>>>({});
   const [componentSelections, setComponentSelections] = useState<Record<string, ComponentSelectionInput>>({});
+  const [feeVersions, setFeeVersions] = useState<FeeCatalogVersion[]>([]);
+  const [feeIdentity, setFeeIdentity] = useState("");
   const [accountVersion, setAccountVersion] = useState("");
   const [sharpeMode, setSharpeMode] = useState("sharpe_simple");
   const [riskFreeRate, setRiskFreeRate] = useState("0");
@@ -127,6 +132,9 @@ export function StrategyBacktestsPage() {
   const inputGeneration = useRef(0);
   const admissionFingerprint = useRef<string | null>(null);
   const creationKey = useRef<string | null>(null);
+  const [runFilters, setRunFilters] = useState<RunFilters>({});
+  const runFiltersRef = useRef(runFilters);
+  runFiltersRef.current = runFilters;
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selected, setSelected] = useState<BacktestRun | null>(null);
   const [message, setMessage] = useState("");
@@ -189,12 +197,12 @@ export function StrategyBacktestsPage() {
       setStrategy(strategyDetail);
       setRevisions(published);
       // Historical run evidence must not replace admission for current inputs.
-      setRuns(
+      if (!Object.values(runFiltersRef.current).some(Boolean)) setRuns(
         (workspace.runs?.items || []).filter(
           (run: BacktestRun) => run.run_kind === "backtest_run",
         ),
       );
-      setRunCursor(workspace.runs.next_cursor || null);
+      if (!Object.values(runFiltersRef.current).some(Boolean)) setRunCursor(workspace.runs.next_cursor || null);
       setComponentOptions(workspace.component_options || {});
       setComponentSelections(Object.fromEntries(Object.entries(workspace.component_options || {}).filter(([, options]) => options.length > 0).map(([kind, options]) => [kind, { key: options[0].key, version: options[0].version, parameters: options[0].parameters }])));
       setAccounts(availableAccounts);
@@ -230,6 +238,25 @@ export function StrategyBacktestsPage() {
     return () => { active = false; };
   }, [accountProfileId]);
 
+  useEffect(() => {
+    const controller = new AbortController();
+    setRuns([]); setRunCursor(null);
+    fetchStrategyBacktestWorkspace(strategyId, controller.signal, undefined, runFilters).then(workspace => {
+      if (controller.signal.aborted) return;
+      setRuns(workspace.runs.items);
+      setRunCursor(workspace.runs.next_cursor || null);
+    }).catch(error => { if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "运行筛选失败。"); });
+    return () => controller.abort();
+  }, [strategyId, runFilters]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    listFeeSchedules(controller.signal).then(setFeeVersions).catch(error => {
+      if (!controller.signal.aborted) setMessage(error instanceof Error ? error.message : "费用目录加载失败。");
+    });
+    return () => controller.abort();
+  }, []);
+
   const hasActiveRun = runs.some((run) => !isTerminalBacktestStatus(run.status));
   useEffect(() => {
     if (!hasActiveRun) return;
@@ -239,7 +266,7 @@ export function StrategyBacktestsPage() {
     const poll = async () => {
       if (stopped || document.visibilityState !== "visible") return;
       try {
-        const workspace = await fetchStrategyBacktestWorkspace(strategyId);
+        const workspace = await fetchStrategyBacktestWorkspace(strategyId, undefined, undefined, runFilters);
         // Historical run evidence must not replace admission for current inputs.
         const nextRuns = (workspace.runs?.items || []).filter(
           (run: BacktestRun) => run.run_kind === "backtest_run",
@@ -249,7 +276,8 @@ export function StrategyBacktestsPage() {
         const olderActive = runsRef.current.filter((item) => !isTerminalBacktestStatus(item.status) && !nextRuns.some((fresh) => fresh.run_id === item.run_id));
         nextRuns.push(...await Promise.all(olderActive.map((item) => getBacktestRun(item.run_id))));
         if (stopped) return;
-        setRuns((current) => [...nextRuns, ...current.filter((item) => !nextRuns.some((fresh: BacktestRun) => fresh.run_id === item.run_id))]);
+        const matchesStatus = (run: BacktestRun) => !runFilters.status || run.status === runFilters.status;
+        setRuns((current) => [...nextRuns, ...current.filter((item) => !nextRuns.some((fresh: BacktestRun) => fresh.run_id === item.run_id))].filter(matchesStatus));
         if (selectedRef.current) {
           const fresh = nextRuns.find(
             (run: BacktestRun) => run.run_id === selectedRef.current?.run_id,
@@ -281,7 +309,7 @@ export function StrategyBacktestsPage() {
       if (timer) window.clearTimeout(timer);
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [hasActiveRun, strategyId]);
+  }, [hasActiveRun, strategyId, runFilters]);
 
   const selectedSlippage = slippageModels.find(
     (item) => `${item.key}@${item.version}` === slippageIdentity,
@@ -386,6 +414,9 @@ export function StrategyBacktestsPage() {
       account_profile_id: accountProfileId,
       data_cutoff: typeof preflight?.data_cutoff === "string" ? preflight.data_cutoff : undefined,
       account_profile_version: Number(accountVersion),
+      fee_schedule_selection: feeVersions.find(item => `${item.key}@${item.version}` === feeIdentity)
+        ? { key: feeVersions.find(item => `${item.key}@${item.version}` === feeIdentity)!.key,
+            version: feeVersions.find(item => `${item.key}@${item.version}` === feeIdentity)!.version, parameters: {} } : undefined,
       component_selections: componentSelections,
       analyzer_selections: [
         { key: sharpeMode, version: 1, parameters: sharpeMode === "sharpe_config_rf" ? { rf_annual: riskFreeRate, rf_source_note: riskFreeNote } : {} },
@@ -453,8 +484,8 @@ export function StrategyBacktestsPage() {
     if (!runCursor) return;
     const generation = workspaceGeneration.current;
     try {
-      const workspace = await fetchStrategyBacktestWorkspace(strategyId, undefined, runCursor);
-      if (generation !== workspaceGeneration.current) return;
+      const workspace = await fetchStrategyBacktestWorkspace(strategyId, undefined, runCursor, runFilters);
+      if (generation !== workspaceGeneration.current || runFiltersRef.current !== runFilters) return;
       setRuns((current) => [...current, ...workspace.runs.items.filter((run) => !current.some((item) => item.run_id === run.run_id))]);
       setRunCursor(workspace.runs.next_cursor || null);
     } catch (error) { if (generation === workspaceGeneration.current) setMessage(error instanceof Error ? error.message : "运行列表加载失败。"); }
@@ -743,6 +774,10 @@ export function StrategyBacktestsPage() {
       </fieldset>
 
       <fieldset><legend>账户版本与分析口径</legend>
+        <label>费用方案<select value={feeIdentity} onChange={event => { setFeeIdentity(event.target.value); resetAdmission(); }}>
+          <option value="">使用所选账户版本绑定的费用方案</option>
+          {feeVersions.map(item => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · 版本 {item.version}</option>)}
+        </select></label>
         <label>账户历史版本<select value={accountVersion} onChange={(event) => { setAccountVersion(event.target.value); resetAdmission(); }}><option value="">请选择版本</option>{accountVersions.map((item) => <option key={item.version} value={item.version} disabled={item.status !== "active"}>{item.name} · 版本 {item.version} · 费用版本 {item.fee_schedule_version}{item.status !== "active" ? "（不可用）" : ""}</option>)}</select></label>
         <label>夏普口径<select value={sharpeMode} onChange={(event) => { setSharpeMode(event.target.value); resetAdmission(); }}><option value="sharpe_simple">不扣无风险利率</option><option value="sharpe_config_rf">冻结年化无风险利率</option><option value="sharpe_pit_rf">PIT 日利率（当前数据源未提供，仅禁用夏普）</option></select></label>
         {sharpeMode === "sharpe_config_rf" && <><label>年化利率<input value={riskFreeRate} onChange={(event) => { setRiskFreeRate(event.target.value); resetAdmission(); }} /></label><label>利率来源说明<input value={riskFreeNote} onChange={(event) => { setRiskFreeNote(event.target.value); resetAdmission(); }} /></label></>}
@@ -779,6 +814,7 @@ export function StrategyBacktestsPage() {
         </details>
       )}
 
+      <BacktestRunFilters onApply={setRunFilters} />
       <div>
         {runs.map((run) => (
           <article key={run.run_id}>
@@ -788,7 +824,7 @@ export function StrategyBacktestsPage() {
             </button>
             <span>
               日期 {run.current_trading_date || "—"} · 步骤 {run.current_step || "—"} · 进度{" "}
-              {Math.round((run.progress_ratio || 0) * 100)}% · 心跳 {run.last_heartbeat_at || "—"}
+              {Math.round(Number(run.progress_ratio || 0) * 100)}% · 心跳 {run.last_heartbeat_at || "—"}
             </span>
             {stale(run) && <p role="alert">心跳已超过 60 秒未更新，请关注运行状态（不会修改状态）。</p>}
             {isTerminalBacktestStatus(run.status) && (

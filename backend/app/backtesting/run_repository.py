@@ -8,11 +8,12 @@ the same serialization point without depending on an in-process mutex.
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from datetime import date, datetime, timezone
 from typing import Any, Mapping
 from uuid import UUID, uuid4
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import String, cast, and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -689,17 +690,33 @@ class DatabaseRunRepository:
         owner_scope: str | None = None,
         strategy_revision_id: str | None = None,
         strategy_id: str | None = None,
+        status: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        config_summary: str | None = None,
         limit: int = 100,
         offset: int = 0,
     ) -> list[BacktestRunRecord]:
         """List one logical queue; formal callers never see internal roots."""
 
         self._validate_kind(queue_kind)
+        if strategy_revision_id is not None:
+            strategy_revision_id = str(strategy_revision_id)
         if limit < 1 or limit > 500 or offset < 0:
             raise ValueError("limit must be between 1 and 500 and offset non-negative")
         statement = select(BacktestRunRecord).where(
             BacktestRunRecord.run_kind == queue_kind
         )
+        # Apply filters before pagination and bind the same values into the
+        # signed cursor below so a cursor cannot cross filter boundaries.
+        if status:
+            statement = statement.where(BacktestRunRecord.status == status)
+        if created_after is not None:
+            statement = statement.where(BacktestRunRecord.created_at >= created_after)
+        if created_before is not None:
+            statement = statement.where(BacktestRunRecord.created_at <= created_before)
+        if config_summary:
+            statement = statement.where(cast(BacktestRunRecord.backtest_config, String).icontains(config_summary, autoescape=True))
         visible_scope = owner_scope if owner_scope is not None else tenant_id
         if visible_scope is not None:
             statement = statement.where(
@@ -730,6 +747,10 @@ class DatabaseRunRepository:
         owner_scope: str | None = None,
         strategy_revision_id: str | None = None,
         strategy_id: str | None = None,
+        status: str | None = None,
+        created_after: datetime | None = None,
+        created_before: datetime | None = None,
+        config_summary: str | None = None,
         limit: int = 100,
         cursor: str | None = None,
     ) -> CursorPage:
@@ -742,10 +763,22 @@ class DatabaseRunRepository:
         """
 
         self._validate_kind(queue_kind)
+        if strategy_revision_id is not None:
+            strategy_revision_id = str(strategy_revision_id)
         checked_limit = normalize_limit(limit)
         statement = select(BacktestRunRecord).where(
             BacktestRunRecord.run_kind == queue_kind
         )
+        # Apply filters before pagination and bind the same values into the
+        # signed cursor below so a cursor cannot cross filter boundaries.
+        if status:
+            statement = statement.where(BacktestRunRecord.status == status)
+        if created_after is not None:
+            statement = statement.where(BacktestRunRecord.created_at >= created_after)
+        if created_before is not None:
+            statement = statement.where(BacktestRunRecord.created_at <= created_before)
+        if config_summary:
+            statement = statement.where(cast(BacktestRunRecord.backtest_config, String).icontains(config_summary, autoescape=True))
         visible_scope = owner_scope if owner_scope is not None else tenant_id
         if visible_scope is not None:
             statement = statement.where(
@@ -767,6 +800,10 @@ class DatabaseRunRepository:
             "tenant_id": visible_scope,
             "strategy_revision_id": strategy_revision_id,
             "strategy_id": strategy_id,
+            "status": status,
+            "created_after": created_after.isoformat() if created_after else None,
+            "created_before": created_before.isoformat() if created_before else None,
+            "config_summary": config_summary,
             "limit": checked_limit,
             "sort": ["created_at", "id"],
             "direction": "asc",
@@ -1023,7 +1060,7 @@ class DatabaseRunRepository:
     def record_progress(
         self,
         run_id: UUID | str,
-        progress: float,
+        progress: Decimal | float,
         *,
         launch_id: UUID | str | None = None,
         current_trading_date: date | None = None,
@@ -1034,7 +1071,8 @@ class DatabaseRunRepository:
     ) -> BacktestRunRecord | None:
         """Persist monotonic progress/heartbeat evidence for a live run."""
 
-        if not 0 <= float(progress) <= 1:
+        progress = Decimal(str(progress))
+        if not progress.is_finite() or not 0 <= progress <= 1:
             raise ValueError("progress must be in [0, 1]")
         if launch_id is None:
             # A run identity without its launch identity is not sufficient to
@@ -1051,7 +1089,7 @@ class DatabaseRunRepository:
             return False
         if row.status not in {"starting", "running", "cancel_requested"}:
             raise InvalidRunTransition("terminal run cannot receive progress")
-        if float(progress) < float(row.progress or 0):
+        if progress < Decimal(str(row.progress or 0)):
             raise ValueError("progress cannot move backwards")
         timestamp = heartbeat_at or _utcnow()
         # Keep the launch/status/monotonic predicates in the database write.

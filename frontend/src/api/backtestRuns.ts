@@ -2,9 +2,13 @@ import { readApiToken } from "../auth/tokenStorage";
 export type BacktestRun = {
   run_id: string;
   run_kind: string;
+  visibility?: "formal" | "internal";
+  label?: string;
   status: string;
   terminal_status?: string | null;
-  progress_ratio: number;
+  progress_ratio: string | number;
+  completed_steps?: number | null;
+  total_steps?: number | null;
   current_trading_date?: string | null;
   current_step?: string | null;
   last_heartbeat_at?: string | null;
@@ -93,6 +97,7 @@ export interface BacktestRunCreateInput {
   backtest_config: BacktestConfigInput;
   account_profile_id?: string | null;
   account_profile_version?: number;
+  fee_schedule_selection?: ComponentSelectionInput;
   analyzer_selections?: ComponentSelectionInput[];
   component_selections?: Record<string, ComponentSelectionInput>;
   slippage_model: ComponentSelectionInput;
@@ -172,10 +177,23 @@ async function request(path: string, init: RequestInit = {}, signal?: AbortSigna
   return response.json();
 }
 
-export const listBacktestRuns = (signal?: AbortSignal, strategyId?: string): Promise<BacktestRunListResponse> =>
-  request(strategyId ? `/api/admin/backtest-runs/strategies/${encodeURIComponent(strategyId)}/backtests` : "/api/admin/backtest-runs", {}, signal) as Promise<BacktestRunListResponse>;
-export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal, cursor?: string): Promise<StrategyBacktestWorkspace> =>
-  request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, {}, signal) as Promise<StrategyBacktestWorkspace>;
+export interface BacktestRunFilters {
+  strategy_revision_id?: string;
+  status?: string;
+  created_after?: string;
+  created_before?: string;
+  config_summary?: string;
+}
+function runQuery(filters: BacktestRunFilters, cursor?: string): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value);
+  if (cursor) query.set("cursor", cursor);
+  return query.size ? `?${query}` : "";
+}
+export const listBacktestRuns = (signal?: AbortSignal, strategyId?: string, filters: BacktestRunFilters = {}): Promise<BacktestRunListResponse> =>
+  request((strategyId ? `/api/admin/backtest-runs/strategies/${encodeURIComponent(strategyId)}/backtests` : "/api/admin/backtest-runs") + runQuery(filters), {}, signal) as Promise<BacktestRunListResponse>;
+export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal, cursor?: string, filters: BacktestRunFilters = {}): Promise<StrategyBacktestWorkspace> =>
+  request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests${runQuery(filters, cursor)}`, {}, signal) as Promise<StrategyBacktestWorkspace>;
 export const createBacktestRun=(payload:BacktestRunCreateInput, idempotencyKey?: string)=>{
   const body = {...payload, ...(idempotencyKey ? {idempotency_key: idempotencyKey} : {})};
   return request("/api/admin/backtests",{method:"POST",headers:idempotencyKey ? {"Idempotency-Key": idempotencyKey} : undefined,body:JSON.stringify(body)});
@@ -195,3 +213,6 @@ export const rerunBacktest = (run: BacktestRun, idempotencyKey = crypto.randomUU
     method: "POST",
     headers: { "Idempotency-Key": idempotencyKey }
   }) as Promise<BacktestRun>;
+
+export interface FeeCatalogVersion { key: string; version: number; display_name: string; snapshot_hash: string; }
+export const listFeeSchedules = (signal?: AbortSignal) => request("/api/admin/backtest-fee-schedules", {}, signal) as Promise<FeeCatalogVersion[]>;

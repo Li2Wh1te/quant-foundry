@@ -32,8 +32,8 @@ class TaskDefinition:
     name: str
     parameters_model: type[BaseModel]
     handler: TaskHandler
+    english_name: str
     parameter_version: int = 1
-    english_name: str | None = None
 
 
 class TaskRegistry:
@@ -41,6 +41,12 @@ class TaskRegistry:
         self._definitions: dict[str, TaskDefinition] = {}
 
     def register(self, definition: TaskDefinition) -> None:
+        # Validate all public identifiers before mutating the registry so an
+        # invalid plugin cannot leak incomplete labels into task selectors.
+        for field in ("key", "name", "english_name"):
+            value = getattr(definition, field)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"task type {field} must be non-blank text")
         if definition.key in self._definitions:
             raise ValueError(f"task type already registered: {definition.key}")
         self._definitions[definition.key] = definition

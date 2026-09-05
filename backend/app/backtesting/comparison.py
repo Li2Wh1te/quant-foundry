@@ -78,11 +78,22 @@ def metric_projection(row):
 def evidence_projection(root, reports):
     """Keep admission and execution evidence separate, including missingness."""
     from app.backtesting.result_schemas import BacktestDataPreflightItem
+    evidence = root.data_evidence or {}
+    # Expose the frozen adjustment proof as a first-class comparison field;
+    # callers must not reconstruct it from opaque request JSON.
+    adjustment = evidence.get("adjustment_series") or evidence.get("adjustment_series_policy") or {}
+    if not adjustment:
+        for report in reports:
+            payload = getattr(report, "report", None) or {}
+            if isinstance(payload, dict) and payload.get("adjustment_series_policy"):
+                adjustment = payload["adjustment_series_policy"]
+                break
     return {
-        "admission": root.data_evidence or {},
+        "admission": evidence,
         "admission_hash": root.data_admission_preflight_hash,
         "session_hash": root.data_preflight_hash,
         "session_evidence_available": any(row.phase == "session" for row in reports),
+        "adjustment_series": adjustment,
         "reports": [BacktestDataPreflightItem.model_validate(row).model_dump(mode="json") for row in reports],
     }
 

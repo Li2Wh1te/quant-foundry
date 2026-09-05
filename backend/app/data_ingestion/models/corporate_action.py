@@ -41,6 +41,8 @@ class CorporateActionFact(Base):
     effective_time: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     cash_effective_phase: Mapped[str | None] = mapped_column(String(32))
     cash_amount_per_unit: Mapped[Decimal | None] = mapped_column(Numeric(24, 12))
+    quantity_ratio: Mapped[Decimal | None] = mapped_column(Numeric(28, 12))
+    quantity_delta: Mapped[Decimal | None] = mapped_column(Numeric(28, 12))
     currency: Mapped[str | None] = mapped_column(String(16))
     entitlement_rule: Mapped[str | None] = mapped_column(String(64))
     cash_date_rule: Mapped[str | None] = mapped_column(String(64))

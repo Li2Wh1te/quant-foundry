@@ -812,4 +812,6 @@ def build_default_component_registry() -> ComponentRegistry:
         parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
         capabilities={"metric_keys": ("total_return", "annualized_return", "max_drawdown", "volatility"), "annualization_factor": 252},
     ))
+    from app.backtesting.infrastructure import register_infrastructure
+    register_infrastructure(registry)
     return registry

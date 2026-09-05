@@ -108,6 +108,7 @@ def test_build_runtime_freezes_corporate_actions_from_the_open_data_session():
         raise SnapshotReached
 
     binding = SimpleNamespace(
+        components=__import__("app.backtesting.component_config", fromlist=["resolve_components"]).resolve_components(),
         run_id=uuid4(),
         run_kind="backtest_run",
         profile="formal@1",

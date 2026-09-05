@@ -68,7 +68,7 @@ class SchedulerRuntime:
 
     def start(self) -> None:
         if not self.settings.scheduler_enabled:
-            logger.info("scheduler_disabled")
+            logger.info("scheduler_disabled", message="调度器已按配置禁用，本实例不启动任务调度。")
             return
 
         with Session(get_engine()) as session:
@@ -83,7 +83,7 @@ class SchedulerRuntime:
                 self.sync_task(task_id)
             except Exception:
                 # One stale task definition must not prevent the API from starting.
-                logger.exception("task_sync_failed", task_id=str(task_id))
+                logger.exception("task_sync_failed", task_id=str(task_id), message=f"调度任务 {task_id} 同步失败，已跳过该任务并继续启动。")
         self.scheduler.add_job(
             self.dispatch_queued_runs,
             trigger="interval",
@@ -96,6 +96,7 @@ class SchedulerRuntime:
         self.scheduler.resume()
         logger.info(
             "scheduler_started",
+            message=f"调度器已启动，加载 {len(active_task_ids)} 个活动任务并标记 {interrupted} 个遗留运行中断。",
             active_tasks=len(active_task_ids),
             interrupted_runs=interrupted,
             max_workers=self.settings.scheduler_max_workers,
@@ -105,7 +106,7 @@ class SchedulerRuntime:
         if self.running:
             self.scheduler.shutdown(wait=False)
         self.executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("scheduler_stopped")
+        logger.info("scheduler_stopped", message="本实例调度器已停止，待执行任务已取消。")
 
     def sync_task(self, task_id: UUID) -> None:
         if not self.settings.scheduler_enabled:
@@ -223,9 +224,9 @@ class SchedulerRuntime:
                     )
                     session.commit()
         except TaskConflictError:
-            logger.info("scheduled_run_ignored", task_id=str(task_id))
+            logger.info("scheduled_run_ignored", task_id=str(task_id), message=f"调度任务 {task_id} 本次触发已忽略，未创建运行。")
         except Exception:
-            logger.exception("scheduled_run_enqueue_failed", task_id=str(task_id))
+            logger.exception("scheduled_run_enqueue_failed", task_id=str(task_id), message=f"调度任务 {task_id} 创建等待运行失败，已记录异常。")
 
     def _execute_run(self, run_id: UUID) -> None:
         task_id: UUID | None = None

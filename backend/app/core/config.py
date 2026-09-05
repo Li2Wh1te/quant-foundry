@@ -73,7 +73,7 @@ class Settings(BaseSettings):
     scheduler_max_queued_runs: int = Field(default=1_000, ge=1, le=100_000)
     scheduler_misfire_grace_seconds: int = Field(default=60, ge=1, le=86_400)
     backtest_max_workers: int = Field(default=1, ge=1)
-    backtest_max_queued_runs: int = Field(default=32, ge=1)
+    backtest_max_queued_runs: int = Field(default=32, ge=1, le=32)
     backtest_internal_max_queued_runs: int | None = Field(default=None, ge=1, lt=32)
     backtest_run_timeout_seconds: int = Field(default=7_200, ge=1)
     backtest_cancel_grace_seconds: int = Field(default=10, ge=1)

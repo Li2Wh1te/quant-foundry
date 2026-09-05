@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
-from decimal import Decimal
+from decimal import Context, Decimal, localcontext
 import inspect
 import logging
 from threading import Event, Lock, RLock, Thread, current_thread
@@ -67,7 +67,10 @@ class FrozenTimelineProgress:
     def ratio(self) -> Decimal:
         """Return an exact 0..1 decimal ratio, never a wall-clock estimate."""
 
-        return Decimal(self.completed_steps) / Decimal(self.total_steps)
+        # Freeze Decimal precision independently of strategy code. The integer
+        # step counts accompany the ratio to preserve repeating fractions.
+        with localcontext(Context(prec=28)):
+            return Decimal(self.completed_steps) / Decimal(self.total_steps)
 
     @property
     def current_date(self) -> str | None:
@@ -90,6 +93,8 @@ class ProgressSnapshot:
     run_id: UUID | str | None = None
     launch_id: UUID | str | None = None
     worker_id: str | None = None
+    completed_steps: int | None = None
+    total_steps: int | None = None
 
     @property
     def progress_ratio(self) -> Decimal:
@@ -329,6 +334,8 @@ class ProgressReporter:
                 run_id=self.run_id,
                 launch_id=self.launch_id,
                 worker_id=self.worker_id,
+                completed_steps=progress.completed_steps if isinstance(progress, FrozenTimelineProgress) else None,
+                total_steps=progress.total_steps if isinstance(progress, FrozenTimelineProgress) else None,
             )
             self._last_snapshot = snapshot
             self._last_step = current_step
@@ -404,6 +411,8 @@ class ProgressReporter:
             self.run_id,
             self.launch_id,
             self.worker_id,
+            snapshot.completed_steps,
+            snapshot.total_steps,
         )
         with self._state_lock:
             self._last_snapshot = result
@@ -434,6 +443,7 @@ class ProgressReporter:
                 current_step = self._last_step
             if current_trading_date is None:
                 current_trading_date = self._last_date
+            previous = self._last_snapshot
         snapshot = ProgressSnapshot(
             self._last_progress,
             current_step,
@@ -444,6 +454,8 @@ class ProgressReporter:
             self.run_id,
             self.launch_id,
             self.worker_id,
+            previous.completed_steps if previous else None,
+            previous.total_steps if previous else None,
         )
         with self._write_lock:
             with self._state_lock:
@@ -467,6 +479,8 @@ class ProgressReporter:
             self.run_id,
             self.launch_id,
             self.worker_id,
+            snapshot.completed_steps,
+            snapshot.total_steps,
         )
         with self._state_lock:
             self._last_snapshot = result
@@ -522,7 +536,9 @@ class ProgressReporter:
         if snapshot is None:
             return None
         return self.report(
-            snapshot.progress,
+            FrozenTimelineProgress(snapshot.total_steps, snapshot.completed_steps)
+            if snapshot.total_steps is not None and snapshot.completed_steps is not None
+            else snapshot.progress,
             current_step=snapshot.current_step,
             current_trading_date=snapshot.current_trading_date,
             now=now,
@@ -716,6 +732,8 @@ class DatabaseProgressPersistence:
                 heartbeat_at=snapshot.heartbeat_at,
                 persisted_at=snapshot.heartbeat_at,
                 launch_id=UUID(str(snapshot.launch_id)),
+                **({"checkpoint": {"completed_steps": snapshot.completed_steps, "total_steps": snapshot.total_steps}}
+                   if snapshot.total_steps is not None else {}),
             )
             if changed is None or changed is False:
                 # No row or a launch/status predicate miss is not a valid

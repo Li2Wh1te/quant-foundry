@@ -6594,6 +6594,8 @@ class DeterministicBacktestRunner:
     def _phase_account(
         self, context: PhaseContext
     ) -> list[tuple[str, Mapping[str, Any]]]:
+        if not isinstance(context.phase_view, EngineDataView):
+            raise DomainValidationError("the account phase requires an EngineDataView")
         emitted: list[tuple[str, Mapping[str, Any]]] = []
         fills, self._pending_fills = self._pending_fills, ()
         for fill in fills:
@@ -7622,15 +7624,15 @@ class DeterministicBacktestRunner:
             if position.is_zero:
                 continue
             candidate = self._identities.get(instrument_id)
-            trading_code = (
-                candidate.trading_code if candidate is not None else str(instrument_id)
-            )
-            name = candidate.name if candidate is not None else str(instrument_id)
-            display_name = (
-                candidate.display_name
-                if candidate is not None
-                else str(instrument_id)
-            )
+            # A stable identifier is not a historical display fact. Fail at
+            # the context boundary instead of fabricating labels for strategies.
+            if candidate is None:
+                raise DomainValidationError(
+                    f"position {instrument_id} is missing effective identity facts"
+                )
+            trading_code = candidate.trading_code
+            name = candidate.name
+            display_name = candidate.display_name
             positions.append(
                 PositionDTO(
                     instrument_id=instrument_id,

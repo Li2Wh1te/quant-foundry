@@ -1498,6 +1498,8 @@ class TestChunksAndConsistency(unittest.TestCase):
             instrument_id=IID_A,
             trade_date=J5,
             frequency="1m",
+            start_time=datetime(2026, 1, 5, 9, 30, tzinfo=timezone.utc),
+            end_time=datetime(2026, 1, 5, 9, 31, tzinfo=timezone.utc),
             open="10",
             high="11",
             low="9",

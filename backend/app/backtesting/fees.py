@@ -301,15 +301,14 @@ class FeeRule:
 class FeeSchedule:
     """Fee rules selected by an account profile.
 
-    ``version`` is an optional compatibility/audit value for the existing
-    fill-calculation boundary.  It is not an account revision, is not
-    incremented by profile updates, and is not used to resolve a run.  The
-    immutable run boundary is ``FeeScheduleSnapshot`` in ``account_profiles``.
+    ``version`` is a required immutable fee identity, independent of account
+    revisions. Every snapshot and restricted rule selection preserves it so
+    the run audit can always resolve the exact source fee configuration.
     """
 
     key: str
     fee_rules: tuple[FeeRule, ...]
-    version: int | None = None
+    version: int
     metadata: Mapping[str, str] = MappingProxyType({})
     test_only: bool = False
 
@@ -319,7 +318,7 @@ class FeeSchedule:
         normalized_key = self.key.strip()
         if normalized_key == "zero_cost" and not self.test_only:
             raise FeeError("zero_cost is reserved for test-only fee schedules")
-        if self.version is not None and self.version <= 0:
+        if type(self.version) is not int or self.version <= 0:
             raise FeeError("fee schedule version must be positive")
         rules = tuple(self.fee_rules)
         keys = [rule.key for rule in rules]
@@ -333,7 +332,7 @@ class FeeSchedule:
     def zero_cost(cls) -> "FeeSchedule":
         """Return the explicit test-only zero-cost fixture."""
 
-        return cls(key="zero_cost", fee_rules=(), test_only=True)
+        return cls(key="zero_cost", version=1, fee_rules=(), test_only=True)
 
     def validate_for_run(self) -> None:
         """Validate that this schedule is eligible for a formal backtest."""
@@ -365,13 +364,13 @@ class FeeScheduleSnapshot:
 
     key: str
     fee_rules: tuple[FeeRule, ...]
+    version: int
     metadata: Mapping[str, str] = MappingProxyType({})
-    version: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.key, str) or not self.key.strip():
             raise FeeError("fee schedule snapshot key must be non-blank text")
-        if self.version is not None and self.version <= 0:
+        if type(self.version) is not int or self.version <= 0:
             raise FeeError("fee schedule snapshot version must be positive")
         rules = tuple(self.fee_rules)
         keys = [rule.key for rule in rules]

@@ -52,7 +52,7 @@ class AccountProfileService:
         normalized_name = _normalize_name(name)
         if self.repository.name_exists(normalized_name):
             raise AccountProfileNameConflictError(normalized_name)
-        schedule = _build_schedule(fee_schedule)
+        schedule = _build_schedule(fee_schedule, version=1)
         _validate_formal_schedule(schedule)
         record = BacktestAccountProfileRecord(
             id=uuid4(),
@@ -102,7 +102,7 @@ class AccountProfileService:
             record.status = _normalize_status(status)
             changed = True
         if fee_schedule is not None:
-            schedule = _build_schedule(fee_schedule)
+            schedule = _build_schedule(fee_schedule, version=int(record.fee_schedule_version) + 1)
             _validate_formal_schedule(schedule)
             record.fee_schedule_key = schedule.key
             record.fee_schedule_version = int(record.fee_schedule_version or 1) + 1
@@ -214,7 +214,7 @@ def _normalize_status(value: AccountProfileStatus | str) -> str:
         raise AccountProfileValidationError("账户状态不受支持") from exc
 
 
-def _build_schedule(payload: Mapping[str, Any]) -> FeeSchedule:
+def _build_schedule(payload: Mapping[str, Any], *, version: int) -> FeeSchedule:
     """Build the domain fee schedule so all rule invariants are enforced."""
 
     try:
@@ -222,11 +222,9 @@ def _build_schedule(payload: Mapping[str, Any]) -> FeeSchedule:
         schedule = FeeSchedule(
             key=str(payload["key"]),
             fee_rules=rules,
-            version=(
-                int(payload["version"])
-                if payload.get("version") is not None
-                else None
-            ),
+            # The catalog allocates a concrete revision before constructing
+            # the domain object; drafts never create unversioned snapshots.
+            version=version,
             metadata=dict(payload.get("metadata", {})),
         )
     except (KeyError, TypeError, ValueError) as exc:
@@ -286,7 +284,8 @@ def fee_schedule_from_record(record: BacktestAccountProfileRecord) -> FeeSchedul
             "version": int(getattr(record, "fee_schedule_version", None) or 1),
             "fee_rules": deepcopy(record.fee_rules),
             "metadata": deepcopy(record.fee_schedule_metadata),
-        }
+        },
+        version=record.fee_schedule_version,
     )
 
 

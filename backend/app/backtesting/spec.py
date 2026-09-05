@@ -181,6 +181,7 @@ class BacktestSpec:
     strategy_parameters: Mapping[str, Any] | None = None
     account_profile_id: UUID | None = None
     account_profile_version: int | None = None
+    fee_schedule_selection: ComponentSelection | None = None
     data_cutoff: datetime | None = None
     # Exact selections are resolved once, then copied into the run binding.
     component_selections: Mapping[str, ComponentSelection] = field(default_factory=dict)
@@ -204,6 +205,10 @@ class BacktestSpec:
             or self.data_cutoff.tzinfo is None or self.data_cutoff.utcoffset() is None
         ):
             raise DomainValidationError("data_cutoff must be a timezone-aware datetime")
+        if self.fee_schedule_selection is not None and (
+            not isinstance(self.fee_schedule_selection, ComponentSelection) or self.fee_schedule_selection.parameters
+        ):
+            raise DomainValidationError("fee schedule selection requires an exact key/version without parameters")
         if self.account_profile_version is not None and (type(self.account_profile_version) is not int or self.account_profile_version < 1):
             raise DomainValidationError("account_profile_version must be positive")
         if not isinstance(self.component_selections, Mapping) or any(not isinstance(item, ComponentSelection) for item in self.component_selections.values()):
