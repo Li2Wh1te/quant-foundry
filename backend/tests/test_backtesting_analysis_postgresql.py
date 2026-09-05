@@ -25,6 +25,7 @@ from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
+from app.backtesting.models import BacktestRunRecord
 from app.backtesting.result_models import BacktestAnalysisSummaryRecord
 from app.backtesting.result_records import BacktestAnalysisSummaryRecord as SummaryOrm
 from app.backtesting.result_repository import (
@@ -96,12 +97,23 @@ class PostgreSqlAnalysisPersistenceTestCase(unittest.TestCase):
     def tearDownClass(cls) -> None:
         cls.engine.dispose()
 
+    def setUp(self) -> None:
+        # Summaries now reference the durable run root. Commit it before the
+        # concurrent writers start so this test exercises summary uniqueness.
+        self.run_id = uuid4()
+        with self.engine.begin() as connection:
+            connection.execute(BacktestRunRecord.__table__.insert().values(
+                id=self.run_id, run_kind="backtest_run", profile="formal@1",
+                status="queued", idempotency_key=str(self.run_id), config_hash="a" * 64,
+            ))
+
     def tearDown(self) -> None:
         with self.engine.begin() as connection:
-            connection.execute(SummaryOrm.__table__.delete())
+            connection.execute(SummaryOrm.__table__.delete().where(SummaryOrm.run_id == self.run_id))
+            connection.execute(BacktestRunRecord.__table__.delete().where(BacktestRunRecord.id == self.run_id))
 
     def test_competing_insert_leaves_exactly_one_summary(self) -> None:
-        run_id = uuid4()
+        run_id = self.run_id
         barrier = threading.Barrier(2)
         outcomes: list[str] = []
 
@@ -146,7 +158,7 @@ class PostgreSqlAnalysisPersistenceTestCase(unittest.TestCase):
         self.assertEqual(count, 1)
 
     def test_summary_update_waits_for_postgresql_row_lock(self) -> None:
-        run_id = uuid4()
+        run_id = self.run_id
         with Session(self.engine) as session:
             BacktestResultRepository(
                 session, cursor_signing_key="postgres-test-signing-key"
@@ -176,7 +188,7 @@ class PostgreSqlAnalysisPersistenceTestCase(unittest.TestCase):
         self.assertTrue(finished.is_set())
 
     def test_postgresql_checkpoint_monotonicity_and_idempotency(self) -> None:
-        run_id = uuid4()
+        run_id = self.run_id
         with Session(self.engine) as session:
             repository = BacktestResultRepository(
                 session, cursor_signing_key="postgres-test-signing-key"
@@ -205,7 +217,17 @@ class PostgreSqlAnalysisPersistenceTestCase(unittest.TestCase):
 
 @unittest.skipUnless(ENABLED, "requires the disposable PostgreSQL CI service")
 class PostgreSqlAnalysisMigrationTestCase(unittest.TestCase):
-    def test_clean_database_round_trips_upgrade_and_downgrade(self) -> None:
+    # Pin analyzer downgrade tests to the analyzer revision. Later calendar
+    # revisions intentionally persist bootstrap evidence and refuse rollback;
+    # the CI migration step separately validates the full upgrade to head.
+
+    def test_head_upgrade_preserves_calendar_bootstrap_on_downgrade(self) -> None:
+        self._exercise_migrations("head", expected_error="contains persisted evidence")
+
+    def test_analysis_revision_round_trips_upgrade_and_downgrade(self) -> None:
+        self._exercise_migrations("20260825_04")
+
+    def _exercise_migrations(self, revision: str, expected_error: str | None = None) -> None:
         settings = get_settings()
         temporary_database = f"qf_migration_{uuid4().hex}"
         admin_dsn = _native_psycopg_dsn()
@@ -219,17 +241,18 @@ class PostgreSqlAnalysisMigrationTestCase(unittest.TestCase):
             )
         try:
             for command in (
-                ["uv", "run", "alembic", "upgrade", "head"],
+                ["uv", "run", "alembic", "upgrade", revision],
                 ["uv", "run", "alembic", "downgrade", "base"],
             ):
-                subprocess.run(
-                    command,
-                    cwd=BACKEND_ROOT,
-                    env=environment,
-                    check=True,
-                    capture_output=True,
-                    text=True,
+                result = subprocess.run(
+                    command, cwd=BACKEND_ROOT, env=environment,
+                    check=False, capture_output=True, text=True,
                 )
+                if command[-2] == "downgrade" and expected_error:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn(expected_error, result.stderr)
+                else:
+                    self.assertEqual(result.returncode, 0, result.stderr)
         finally:
             with psycopg.connect(admin_dsn, autocommit=True) as connection:
                 connection.execute(
@@ -263,7 +286,7 @@ class PostgreSqlAnalysisMigrationTestCase(unittest.TestCase):
         environment["QF_DATABASE_NAME"] = temporary_database
         try:
             subprocess.run(
-                ["uv", "run", "alembic", "upgrade", "head"],
+                ["uv", "run", "alembic", "upgrade", "20260825_04"],
                 cwd=BACKEND_ROOT,
                 env=environment,
                 check=True,

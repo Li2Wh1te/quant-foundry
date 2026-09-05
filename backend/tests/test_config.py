@@ -291,6 +291,9 @@ class SettingsTestCase(unittest.TestCase):
         settings = Settings(
             api_token=API_TOKEN,
             cursor_signing_key=CURSOR_SIGNING_KEY,
+            database_host="127.0.0.1",
+            database_port=5432,
+            database_name="quant_foundry",
             database_user="user@example.com",
             database_password="p@ss/word",
             _env_file=None,

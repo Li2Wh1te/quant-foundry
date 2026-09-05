@@ -485,9 +485,9 @@ class TestTokenFailureSemantics(unittest.TestCase):
             chunk_index=0,
             first_session_id=sessions[0].session_id,
             last_session_id=sessions[19].session_id,
-            fact_types=(DataCapability.BARS, DataCapability.MAPPINGS),
+            fact_types=(DataCapability.BARS, DataCapability.CALENDARS),
         )
-        # The token can never cover mappings on this provider, so opening
+        # Calendar facts are resolved before chunks on this provider, so opening
         # fails closed before any strategy stage could begin.
         with self.assertRaises(UnsupportedCapabilityError):
             session.open_chunk(query)

@@ -1283,7 +1283,7 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
         "requires the disposable PostgreSQL CI service",
     )
     def test_concurrent_identity_import_is_reserved_for_postgresql_ci(self):
-        source_code = f"TASK10_{uuid4().hex[:12]}.SH"
+        source_code = f"T10_{uuid4().hex[:8]}.SH"
         barrier = threading.Barrier(2)
         outcomes = []
 
@@ -1339,6 +1339,8 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
 
         identity_id = uuid4()
         logical_key = f"mapping:task10:concurrent:{uuid4()}"
+        # Isolate repeated runs while retaining one shared code for both writers.
+        source_code = f"C_{uuid4().hex[:10]}.SH"
         known_at = datetime(2026, 4, 2, tzinfo=UTC)
         previous_known_at = datetime(2026, 4, 1, tzinfo=UTC)
         with Session(self.engine) as session:
@@ -1347,7 +1349,7 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
             previous_id = self._insert_mapping_fact(
                 session,
                 instrument_id=identity_id,
-                source_code="CORRECTION.SH",
+                source_code=source_code,
                 valid_from=date(2026, 1, 1),
                 valid_to=None,
                 known_at=previous_known_at,
@@ -1356,7 +1358,7 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
             corrected_id = self._insert_mapping_fact(
                 session,
                 instrument_id=identity_id,
-                source_code="CORRECTION.SH",
+                source_code=source_code,
                 valid_from=date(2026, 1, 1),
                 valid_to=None,
                 known_at=known_at,
@@ -1381,7 +1383,7 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
                             fact_id=corrected_id,
                             instrument_id=identity_id,
                             source=SOURCE,
-                            source_code="CORRECTION.SH",
+                            source_code=source_code,
                             effective_range=Range(
                                 date(2026, 1, 1), None, bounds="[)"
                             ),
@@ -1460,7 +1462,7 @@ class PostgreSQLIdentityAcceptanceTests(unittest.TestCase):
         """One source code may be reassigned after its effective interval ends."""
 
         known_at = datetime(2026, 6, 2, tzinfo=UTC)
-        source_code = f"REUSE_{uuid4().hex[:12]}.SH"
+        source_code = f"R_{uuid4().hex[:10]}.SH"
         with Session(self.engine) as session:
             first_identity = self._insert_identity(session)
             second_identity = self._insert_identity(session)
