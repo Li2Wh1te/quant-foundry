@@ -67,12 +67,29 @@ class _Chunk:
         self.authorized = frozenset(instrument_ids)
 
 
-def _query(*, effective_date: date = date(2026, 1, 5)) -> UniverseQuery:
+class _CountingQuery:
+    """Minimal strategy query used to observe facade cache misses."""
+
+    def __init__(self, rows):
+        self.rows = tuple(rows)
+        self.calls = 0
+
+    def query(self, *, exchanges=None, asset_classes=None):
+        del exchanges, asset_classes
+        self.calls += 1
+        return self.rows
+
+
+def _query(
+    *,
+    effective_date: date = date(2026, 1, 5),
+    exchanges: tuple[str, ...] = ("SSE",),
+) -> UniverseQuery:
     """Build a complete bound PIT query for the fake chunk."""
 
     return UniverseQuery(
         rule=RULE,
-        market_scope=MarketScope(exchanges=("SSE",), asset_classes=("etf",)),
+        market_scope=MarketScope(exchanges=exchanges, asset_classes=("etf",)),
         effective_date=effective_date,
         boundary=QueryBoundary(
             datetime(2026, 1, 5, 15, tzinfo=UTC), include_cutoff_day=True
@@ -99,6 +116,41 @@ class CandidateViewTests(unittest.TestCase):
         self.assertEqual(chunk.authorized, frozenset({FIRST}))
         self.assertEqual(bound.query(exchanges=("SSE",)), rows)
         self.assertEqual(chunk.calls, 1)
+
+    def test_query_cache_evicts_after_the_shared_chunk_limit(self):
+        exchanges = tuple(f"X{index}" for index in range(129))
+        chunk = _Chunk((_candidate(FIRST, exchange=exchanges[0]),))
+        view = ChunkStrategyDataView(
+            chunk=chunk,
+            frequency="1d",
+            data_cutoff=datetime(2026, 1, 5, 15, tzinfo=UTC),
+            include_cutoff_day=True,
+            effective_date=date(2026, 1, 5),
+        )
+        bound = view.universe(_query(exchanges=exchanges))
+
+        for exchange in exchanges:
+            bound.query(exchanges=(exchange,))
+        self.assertEqual(chunk.calls, 129)
+
+        # The first of 129 filter combinations was evicted from the shared
+        # 128-entry LRU and must be read again instead of growing the cache.
+        bound.query(exchanges=(exchanges[0],))
+        self.assertEqual(chunk.calls, 130)
+
+    def test_strategy_facade_cache_uses_the_same_bounded_limit(self):
+        source = _CountingQuery((_candidate(FIRST),))
+        facade = UniverseQueryDTO(source)
+
+        for index in range(129):
+            facade.query(exchanges=(f"X{index}",))
+        self.assertEqual(source.calls, 129)
+
+        facade.query(exchanges=("X0",))
+        self.assertEqual(source.calls, 130)
+
+        facade._clear_cache()
+        self.assertEqual(facade.candidate_ids, frozenset())
 
     def test_strategy_filter_cannot_widen_frozen_scope(self):
         chunk = _Chunk((_candidate(FIRST),))

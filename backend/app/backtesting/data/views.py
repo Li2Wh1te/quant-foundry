@@ -33,6 +33,7 @@ from typing import Iterable, Protocol, runtime_checkable
 from uuid import UUID
 
 from app.backtesting.calendar_axis import normalize_calendar_id
+from app.backtesting.data.consistency import BoundedChunkCache
 from app.backtesting.data.errors import (
     InvalidDataRequestError,
     ProviderContractViolationError,
@@ -170,12 +171,32 @@ def _candidate_projection_key(candidate) -> tuple[str, ...]:
 class _ChunkUniverseQuery:
     """Strategy-facing, read-only wrapper over one bound PIT universe query."""
 
-    __slots__ = ("__view", "__query", "__cache", "__queried")
+    __slots__ = (
+        "__view",
+        "__query",
+        "__cache",
+        "__cache_scope",
+        "__queried",
+    )
 
     def __init__(self, view: "ChunkStrategyDataView", query: DataUniverseQuery):
         object.__setattr__(self, "_ChunkUniverseQuery__view", view)
         object.__setattr__(self, "_ChunkUniverseQuery__query", query)
-        object.__setattr__(self, "_ChunkUniverseQuery__cache", {})
+        # One facade belongs to exactly one chunk.  Object identity is a safe
+        # private scope marker because cached rows are never persisted or
+        # shared, while BoundedChunkCache supplies the common 128-entry LRU
+        # ceiling used by chunk-local query caches.
+        chunk = getattr(view, "_ChunkStrategyDataView__chunk", None)
+        object.__setattr__(
+            self,
+            "_ChunkUniverseQuery__cache_scope",
+            ("chunk", id(chunk)),
+        )
+        object.__setattr__(
+            self,
+            "_ChunkUniverseQuery__cache",
+            BoundedChunkCache(),
+        )
         object.__setattr__(self, "_ChunkUniverseQuery__queried", False)
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -367,10 +388,11 @@ class _ChunkUniverseQuery:
                 )
         cache_key = (requested_exchanges, requested_assets)
         cache = self.__cache
-        if cache_key in cache:
-            self._bind_authorized_candidates(query, cache[cache_key])
+        cached = cache.get(self.__cache_scope, cache_key)
+        if cached is not None:
+            self._bind_authorized_candidates(query, cached)
             object.__setattr__(self, "_ChunkUniverseQuery__queried", True)
-            return cache[cache_key]
+            return cached
         specs = self._ChunkUniverseQuery__view._query_universe_specs(query)
         rows = []
         for spec in specs:
@@ -403,9 +425,14 @@ class _ChunkUniverseQuery:
         # result, not the unfiltered provider result, so a strategy cannot
         # query one exchange and then read another exchange through bars().
         self._bind_authorized_candidates(query, result)
-        cache[cache_key] = result
+        cache.put(self.__cache_scope, cache_key, result)
         object.__setattr__(self, "_ChunkUniverseQuery__queried", True)
         return result
+
+    def _clear_cache(self) -> None:
+        """Release candidate results when the owning runtime chunk ends."""
+
+        self.__cache.clear()
 
     def _bind_authorized_candidates(self, query, candidates) -> None:
         """Pass the narrowed candidate ids to the owning chunk session."""

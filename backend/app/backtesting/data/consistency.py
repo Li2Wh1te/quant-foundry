@@ -110,6 +110,16 @@ class BoundedChunkCache:
         self._entries.clear()
         self._scope = None
 
+    def values(self) -> tuple[object, ...]:
+        """Return a stable snapshot without exposing mutable cache storage."""
+
+        return tuple(self._entries.values())
+
+    def __contains__(self, key: object) -> bool:
+        """Support read-only membership checks within the active scope."""
+
+        return self._scope is not None and (self._scope, key) in self._entries
+
     def __len__(self) -> int:
         return len(self._entries)
 

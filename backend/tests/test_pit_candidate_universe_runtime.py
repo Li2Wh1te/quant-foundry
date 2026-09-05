@@ -515,9 +515,10 @@ class FinalQualificationRuntimeTests(unittest.TestCase):
             runner._execution_facts[(INSTRUMENT_ID, D1)].suspension_state.value,
             "not_applicable",
         )
-        self.assertIn(
+        self.assertNotIn(
             (INSTRUMENT_ID, D0), runner._rule_policy_cache
         )
+        self.assertTrue(result.components["rule_snapshot"]["used_segments"])
 
     def test_final_recheck_uses_complete_engine_candidate_and_current_cutoff(self) -> None:
         _complete_evaluator.calls = []

@@ -66,6 +66,7 @@ from app.backtesting.dividends import (
     derive_cash_effective_session,
     entitlement_from_portfolio,
 )
+from app.backtesting.data.consistency import BoundedChunkCache
 from app.backtesting.data.corporate_actions import RunCorporateActionEventSnapshot
 from app.backtesting.session_matching import (
     MatchLedger,
@@ -2093,7 +2094,11 @@ class DeterministicBacktestRunner:
         self._universe_eligibility_policy_version = (
             self._resolve_policy_version(self._universe_scope_resolution)
         )
-        self._rule_policy_cache: dict[tuple[UUID, date], Any] = {}
+        # Execution policies are immutable projections, but they are still
+        # query results.  Keep them inside the same bounded cache contract as
+        # provider-backed chunk reads; the audit map below retains only small
+        # identities after each run_steps slice releases cached policy objects.
+        self._rule_policy_cache = BoundedChunkCache()
         self._used_rule_segments: dict[tuple[UUID, date], str] = {}
         if analysis_admission is not None:
             if analysis_engine is not None:
@@ -4853,7 +4858,8 @@ class DeterministicBacktestRunner:
         if not isinstance(effective_date, date):
             raise DomainValidationError("effective_at must be a date or datetime")
         cache_key = (instrument_id, effective_date)
-        policy = self._rule_policy_cache.get(cache_key)
+        cache_scope = ("run_steps", self._analysis_chunk_sequence)
+        policy = self._rule_policy_cache.get(cache_scope, cache_key)
         if policy is not None:
             return policy
         segment = bundle.segment_for(instrument_id, effective_date)
@@ -4874,9 +4880,25 @@ class DeterministicBacktestRunner:
                 f"instrument {instrument_id} rule snapshot currency "
                 f"{policy.currency!r} differs from run currency {self._currency!r}"
             )
-        self._rule_policy_cache[cache_key] = policy
+        self._rule_policy_cache.put(cache_scope, cache_key, policy)
         self._used_rule_segments[cache_key] = policy.resolution_hash
         return policy
+
+    def _release_chunk_query_caches(self, steps: Sequence[TimeStep]) -> None:
+        """Release query results while retaining domain and audit state."""
+
+        self._rule_policy_cache.clear()
+        for step in steps:
+            bound = self._step_universes.get(step.sequence)
+            if bound is None:
+                continue
+            source = getattr(bound.source, "_UniverseQueryDTO__query", bound.source)
+            clear = getattr(source, "_clear_cache", None)
+            if callable(clear):
+                # The immutable candidate snapshot on ``bound`` remains the
+                # run audit fact; only the provider/query result cache dies at
+                # this run_steps boundary, before another token can be bound.
+                clear()
 
     # ------------------------------------------------------------------
     # Public API
@@ -5096,6 +5118,11 @@ class DeterministicBacktestRunner:
             self._failed = True
             self._persist_failed_result()
             raise
+        finally:
+            # ``run_steps`` is the runtime chunk boundary for both direct and
+            # provider-driven execution.  Cleanup therefore runs on success,
+            # strategy/data failure, and failed-prefix persistence alike.
+            self._release_chunk_query_caches(ordered)
         self._next_expected_step = ordered[-1].sequence + 1
         if self._next_expected_step >= len(self._axis):
             hook = getattr(self._strategy, "on_finish", None)
@@ -7253,6 +7280,14 @@ class DeterministicBacktestRunner:
                 },
             )
             raise
+        finally:
+            # Strategy code may retain its context after on_step returns.
+            # Clear both public query facades now so such a reference cannot
+            # retain chunk candidate rows until the strategy object is freed.
+            for facade in (decision_context.universe, source_override):
+                clear = getattr(facade, "_clear_cache", None)
+                if callable(clear):
+                    clear()
         self._pending_decision = decision
         self._decisions.append(decision)
         return [

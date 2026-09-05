@@ -51,3 +51,17 @@ def test_bounded_chunk_cache_rejects_unscoped_and_clears_on_scope_change():
     cache.put("scope-b", "q", 2)
     assert cache.get("scope-a", "q") is None
     assert cache.get("scope-b", "q") == 2
+
+
+def test_bounded_chunk_cache_evicts_the_least_recently_used_entry():
+    cache = BoundedChunkCache(max_entries=2)
+    cache.put("scope", "old", 1)
+    cache.put("scope", "kept", 2)
+    assert cache.get("scope", "old") == 1
+
+    cache.put("scope", "new", 3)
+
+    assert cache.get("scope", "kept") is None
+    assert cache.get("scope", "old") == 1
+    assert cache.get("scope", "new") == 3
+    assert len(cache) == 2

@@ -27,6 +27,7 @@ from types import MappingProxyType
 from typing import Protocol, runtime_checkable
 from uuid import UUID
 
+from app.backtesting.data.consistency import BoundedChunkCache
 from app.backtesting.data.errors import (
     DataContractError,
     freeze_json,
@@ -1574,17 +1575,26 @@ class UniverseQueryDTO(_ReadOnlyFacade):
     strategies can never receive mutable or duplicated candidates.
     """
 
-    __slots__ = ("__query", "__cache", "__queried")
+    __slots__ = ("__query", "__cache", "__cache_scope", "__queried")
 
     def __init__(self, query: UniverseQuery) -> None:
         if not isinstance(query, UniverseQuery):
             raise ValueError("query must implement UniverseQuery")
         object.__setattr__(self, "_UniverseQueryDTO__query", query)
         # The cache belongs to one DTO instance, which is one decision-step
-        # view.  A subsequent step must receive a new DTO with a new bound
-        # effective date/data cutoff; keeping the cache here prevents repeated
-        # calls in a single step from observing mutable provider state.
-        object.__setattr__(self, "_UniverseQueryDTO__cache", {})
+        # view.  A subsequent step receives a new DTO and scope; the shared
+        # bounded cache keeps repeated filter combinations deterministic
+        # without allowing strategy input to grow memory without limit.
+        object.__setattr__(
+            self,
+            "_UniverseQueryDTO__cache_scope",
+            ("decision_query", id(query)),
+        )
+        object.__setattr__(
+            self,
+            "_UniverseQueryDTO__cache",
+            BoundedChunkCache(),
+        )
         object.__setattr__(self, "_UniverseQueryDTO__queried", False)
 
     def query(
@@ -1618,9 +1628,10 @@ class UniverseQueryDTO(_ReadOnlyFacade):
         normalized_assets = _labels(asset_classes, "asset_classes")
         cache_key = (normalized_exchanges, normalized_assets)
         cache = self.__cache
-        if cache_key in cache:
+        cached = cache.get(self.__cache_scope, cache_key)
+        if cached is not None:
             object.__setattr__(self, "_UniverseQueryDTO__queried", True)
-            return cache[cache_key]
+            return cached
 
         result = self._UniverseQueryDTO__query.query(
             exchanges=normalized_exchanges, asset_classes=normalized_assets
@@ -1645,9 +1656,17 @@ class UniverseQueryDTO(_ReadOnlyFacade):
             by_id[instrument_id]
             for instrument_id in sorted(by_id, key=str)
         )
-        cache[cache_key] = normalized
+        cache.put(self.__cache_scope, cache_key, normalized)
         object.__setattr__(self, "_UniverseQueryDTO__queried", True)
         return normalized
+
+    def _clear_cache(self) -> None:
+        """Release this facade and its bound query cache at step teardown."""
+
+        self.__cache.clear()
+        clear_bound_cache = getattr(self.__query, "_clear_cache", None)
+        if callable(clear_bound_cache):
+            clear_bound_cache()
 
     @property
     def has_queried(self) -> bool:
