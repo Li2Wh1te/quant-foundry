@@ -211,7 +211,7 @@ class CalendarSessionFactRecord(Base, _FactIdentityMixin):
             name="calendar_session_source_priority_required",
         ),
         CheckConstraint("override_mode IN ('inherit','explicit')", name="calendar_session_override_mode"),
-        CheckConstraint("(is_open = 0 AND override_mode = 'explicit') OR is_open = 1", name="calendar_session_closed_explicit"),
+        CheckConstraint("(NOT is_open AND override_mode = 'explicit') OR is_open", name="calendar_session_closed_explicit"),
         Index("ix_calendar_session_lookup", "calendar_id", "session_date", "known_at"),
         ForeignKeyConstraint(
             ["source", "source_priority_version", "source_priority_fact_id"],

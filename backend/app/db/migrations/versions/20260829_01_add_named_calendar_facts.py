@@ -795,7 +795,7 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("override_mode IN ('inherit','explicit')", name="calendar_session_override_mode"),
         sa.ForeignKeyConstraint(["source", "source_priority_version", "source_priority_fact_id"], ["calendar_source_priorities.source", "calendar_source_priorities.source_priority_version", "calendar_source_priorities.fact_id"], name="fk_calendar_session_source_priority"),
-        sa.CheckConstraint("(is_open = 0 AND override_mode = 'explicit') OR is_open = 1", name="calendar_session_closed_explicit"),
+        sa.CheckConstraint("(NOT is_open AND override_mode = 'explicit') OR is_open", name="calendar_session_closed_explicit"),
         sa.ForeignKeyConstraint(["supersedes_fact_id"], ["calendar_session_facts.fact_id"], name="fk_calendar_session_supersedes"),
     )
     op.create_index("ix_calendar_session_lookup", "calendar_session_facts", ["calendar_id", "session_date", "known_at"])
