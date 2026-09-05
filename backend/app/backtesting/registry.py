@@ -326,6 +326,7 @@ def _build_analyzer_spec(factory_key: str):
         from app.backtesting import analyzers
 
         builders = {
+            "performance": analyzers.build_performance_spec,
             ANALYZER_KEY_SHARPE_SIMPLE: analyzers.build_sharpe_simple_spec,
             ANALYZER_KEY_PIT_RF: analyzers.build_sharpe_pit_rf_spec,
             ANALYZER_KEY_CONFIG_RF: analyzers.build_sharpe_config_rf_spec,
@@ -805,4 +806,10 @@ def build_default_component_registry() -> ComponentRegistry:
             },
         )
     )
+    registry.register(ComponentRegistryEntry(
+        component_kind=ANALYZER_COMPONENT_KIND, key="performance", version=1,
+        name_zh="收益与风险", name_en="Return and Risk", factory=_build_analyzer_spec("performance"),
+        parameter_schema={"type": "object", "properties": {}, "additionalProperties": False},
+        capabilities={"metric_keys": ("total_return", "annualized_return", "max_drawdown", "volatility"), "annualization_factor": 252},
+    ))
     return registry

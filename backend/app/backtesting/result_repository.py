@@ -295,6 +295,8 @@ def _validate_metric_producer_contract(dto: BacktestMetricDto) -> None:
             "annual_rate_converter",
             "risk_free_rate_note",
         },
+        "performance": {"annualization_factor", "std_ddof", "initial_equity",
+                        "drawdown_convention", "candidate_return_count", "valid_equity_day_count"},
         "turnover": {"gross_traded_notional", "fill_count"},
         "fee_summary": {"gross_traded_notional", "cumulative_fees"},
     }
@@ -321,9 +323,9 @@ def _validate_metric_producer_contract(dto: BacktestMetricDto) -> None:
         raise ResultRecordConflictError(
             "risk_free_rate_note is reserved for configured-rate Sharpe metrics"
         )
-    if not dto.analyzer_key.startswith("sharpe_") and dto.annualization_factor is not None:
+    if dto.analyzer_key != "performance" and not dto.analyzer_key.startswith("sharpe_") and dto.annualization_factor is not None:
         raise ResultRecordConflictError(
-            "annualization_factor is reserved for Sharpe metrics"
+            "annualization_factor is reserved for Sharpe and performance metrics"
         )
     if reason_code == "ZERO_GROSS_TRADED_NOTIONAL" and (
         _metadata_decimal(metadata, "gross_traded_notional") != 0
@@ -355,6 +357,16 @@ def _validate_metric_producer_contract(dto: BacktestMetricDto) -> None:
         raise ResultRecordConflictError(
             "INVALID_EQUITY requires non-empty failed-session evidence"
         )
+    if dto.analyzer_key == "performance":
+        # Preserve the registered daily formula at the persistence boundary;
+        # arbitrary producers must not mislabel another convention as v1.
+        if (dto.annualization_factor != Decimal("252")
+                or metadata.get("annualization_factor") != "252"
+                or metadata.get("std_ddof") != 1
+                or metadata.get("drawdown_convention") != "positive_peak_to_trough"
+                or _metadata_decimal(metadata, "initial_equity") <= 0
+                or dto.sample_count != metadata.get("candidate_return_count")):
+            raise ResultRecordConflictError("performance metric violates its frozen daily convention")
     if dto.analyzer_key.startswith("sharpe_"):
         for count_name in ("valid_equity_day_count", "candidate_return_count"):
             count = metadata.get(count_name)

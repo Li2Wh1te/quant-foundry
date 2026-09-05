@@ -14,6 +14,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    JSON,
     Numeric,
     String,
     Uuid,
@@ -158,7 +159,40 @@ class BacktestAccountProfileRecord(Base):
     )
 
 
-__all__ = ["BacktestAccountProfileRecord"]
+class BacktestAccountProfileVersionRecord(Base):
+    """Append-only configuration plus independently mutable availability.
+
+    The current catalogue row is an editing convenience. This table is the
+    authority for a pinned version, including its complete fee configuration.
+    """
+
+    __tablename__ = "backtest_account_profile_versions"
+    __table_args__ = (
+        CheckConstraint("version > 0", name="version_positive"),
+        CheckConstraint("status IN ('active', 'inactive', 'retired')", name="status_supported"),
+    )
+    profile_id: Mapped[UUID] = mapped_column(Uuid, ForeignKey("backtest_account_profiles.id", ondelete="RESTRICT"), primary_key=True)
+    version: Mapped[int] = mapped_column(Integer, primary_key=True)
+    snapshot: Mapped[dict[str, Any]] = mapped_column(JSON().with_variant(JSONB, "postgresql"), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+
+@event.listens_for(BacktestAccountProfileVersionRecord, "before_update")
+def _protect_account_version(_mapper, _connection, target):
+    """Permit availability edits, but never mutate a historical definition."""
+    from sqlalchemy import inspect
+    state = inspect(target)
+    if any(state.attrs[name].history.has_changes() for name in ("profile_id", "version", "snapshot", "created_at")):
+        raise ValueError("account profile version configuration is immutable")
+
+
+@event.listens_for(BacktestAccountProfileVersionRecord, "before_delete")
+def _prevent_account_version_delete(_mapper, _connection, _target):
+    raise ValueError("account profile versions cannot be deleted")
+
+
+__all__ = ["BacktestAccountProfileRecord", "BacktestAccountProfileVersionRecord"]
 
 
 class BacktestRunRecord(Base):

@@ -1,3 +1,4 @@
+import { BacktestReport } from "../components/BacktestReport";
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import {
@@ -246,6 +247,7 @@ export function BacktestRunsPage() {
       {selected && (
         <aside aria-label="回测详情">
           <h2>回测详情</h2>
+          <BacktestReport run={selected} />
           <p>状态：{formatStatus(selected.status)}；当前交易日：{selected.current_trading_date || "—"}；步骤：{selected.current_step ?? "—"}</p>
           <p>完成比例：{percent(selected.progress_ratio)}%；最后心跳：{selected.last_heartbeat_at || "—"}</p>
           {selected.error_message && <p role="alert">错误：{selected.error_message}</p>}

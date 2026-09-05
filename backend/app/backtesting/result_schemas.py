@@ -368,6 +368,28 @@ class BacktestDataPreflightItem(_ResultItem):
                 payload.setdefault("preflight_profile", "internal_link_acceptance@1")
                 payload.setdefault("title", "内部链路验收")
                 payload.setdefault("message", "内部链路验收预检结果。")
+        # Calendar timestamps describe calendar knowledge only. Overall PIT
+        # support comes from the explicit provider projection, never inference
+        # from a calendar's non_strict_pit flag.
+        calendar = payload.get("calendar_summary")
+        if not isinstance(calendar, Mapping) or not calendar:
+            calendar = payload.get("session_summary")
+        if isinstance(calendar, Mapping):
+            context = calendar.get("pit_context")
+            if isinstance(context, Mapping):
+                calendar = {**context, **calendar}
+            for name in ("data_cutoff", "cutoff_local_date", "include_cutoff_day",
+                         "knowledge_as_of", "pit_profile", "profile_version",
+                         "calendar_revision_digest", "snapshot_fingerprint"):
+                if payload.get(name) is None and name in calendar:
+                    payload[name] = calendar[name]
+        pit = capabilities.get("__pit__") if isinstance(capabilities, Mapping) else None
+        if isinstance(pit, Mapping):
+            for name in ("non_strict_pit", "non_strict_pit_capabilities"):
+                if name in pit:
+                    payload[name] = pit[name]
+        elif payload.get("pit_status") in ("strict", "non_strict"):
+            payload["non_strict_pit"] = payload["pit_status"] == "non_strict"
         # Promote the bounded source revision summary while retaining the
         # original source_revisions mapping unchanged for audit detail.
         if payload.get("data_revision_summary") is None:

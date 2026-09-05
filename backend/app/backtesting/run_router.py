@@ -117,6 +117,10 @@ def _request_fingerprint(payload: RunCreateRequest, kind: str) -> str:
                 else None
             ),
             "random_seed": payload.random_seed,
+            "account_profile_version": payload.account_profile_version,
+            "data_cutoff": payload.data_cutoff,
+            "component_selections": {key: value.model_dump(mode="json") for key, value in payload.component_selections.items()},
+            "analyzer_selections": [value.model_dump(mode="json") for value in payload.analyzer_selections],
             "parameters": payload.parameters,
             "backtest_config": payload.backtest_config.model_dump(mode="json"),
             "slippage_model": payload.slippage_model.model_dump(mode="json"),
@@ -230,6 +234,10 @@ def _build_spec(
         strategy_revision_id=payload.strategy_revision_id,
         strategy_parameters=payload.parameters,
         account_profile_id=payload.account_profile_id,
+        account_profile_version=payload.account_profile_version,
+        data_cutoff=payload.data_cutoff,
+        component_selections={key: ComponentSelection(value.key, value.version, value.parameters) for key, value in payload.component_selections.items()},
+        analyzer_selections=tuple(ComponentSelection(value.key, value.version, value.parameters) for value in payload.analyzer_selections),
         slippage_model=ComponentSelection(
             payload.slippage_model.key,
             payload.slippage_model.version,
@@ -247,8 +255,12 @@ def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
     if kind not in {FORMAL_KIND, INTERNAL_KIND}:
         raise ValueError("unsupported trusted run kind")
     spec = _build_spec(payload, internal=kind == INTERNAL_KIND)
-    components = default_components(spec.slippage_model)
+    components = default_components(spec.slippage_model, spec.component_selections, spec.analyzer_selections)
     resolved_slippage = components["slippage_model"]
+    spec = replace(spec, analyzer_selections=tuple(
+        ComponentSelection(item["key"], item["version"], item.get("parameters", {}))
+        for item in components["analyzer"]
+    ))
     spec = replace(
         spec,
         slippage_model=ComponentSelection(
@@ -270,7 +282,7 @@ def _binding(payload: RunCreateRequest, *, kind: str) -> RunBinding:
         components=components,
         data_request={},
         account=(
-            {"profile_id": str(payload.account_profile_id)}
+            {"profile_id": str(payload.account_profile_id), "version": payload.account_profile_version}
             if payload.account_profile_id is not None
             else {}
         ),
@@ -293,7 +305,9 @@ def _wire_value(value: Any) -> Any:
         return {str(key): _wire_value(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_wire_value(item) for item in value]
-    if isinstance(value, (date, UUID)):
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, date):
         return value.isoformat()
     return value
 
@@ -823,9 +837,11 @@ def preflight(
             "status": binding.metadata.get("data_preflight_status", "ready"),
             "code": None,
             "message": "正式回测准入预检通过",
-            "report_hash": binding.metadata.get("admission_report_hash"),
+            "report_hash": binding.metadata.get("admission_qualification_hash", binding.metadata.get("admission_report_hash")),
+            "data_cutoff": binding.data_request.get("query_boundary", {}).get("data_cutoff"),
             "issues": evidence.get("issues", []) if isinstance(evidence, Mapping) else [],
             "gates": binding_result.formal_gate_evidence or {},
+            "disabled_metrics": binding.metadata.get("disabled_metrics", []),
         }
     except Exception as exc:
         gate_evidence = getattr(exc, "formal_gate_evidence", None)
@@ -844,6 +860,7 @@ def preflight(
             outcome_status = getattr(outcome, "status", "blocked") if outcome is not None else "blocked"
             return {
                 "status": getattr(outcome_status, "value", outcome_status),
+                "data_cutoff": _wire_value(getattr(getattr(getattr(outcome, "report", None), "query_boundary", None), "data_cutoff", None)),
                 "code": getattr(admission, "reason_code", None) or "formal_preflight_blocked",
                 "message": str(exc),
                 "report_hash": getattr(admission, "report_hash", None),

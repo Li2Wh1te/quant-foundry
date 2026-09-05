@@ -67,12 +67,16 @@ class ComponentSelectionRequest(BaseModel):
 
 class RunCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    data_cutoff: datetime | None = None
     strategy_revision_id: UUID
     parameters: dict[str, Any] | None = None
     backtest_config: BacktestConfigRequest
     # Account selection belongs to a run, not to the strategy. The server
     # resolves this profile once and freezes its complete configuration.
     account_profile_id: UUID | None = None
+    account_profile_version: int | None = Field(default=None, ge=1)
+    component_selections: dict[str, ComponentSelectionRequest] = Field(default_factory=dict)
+    analyzer_selections: list[ComponentSelectionRequest] = Field(default_factory=list)
     slippage_model: ComponentSelectionRequest = Field(
         default_factory=lambda: ComponentSelectionRequest(
             key="none", version=1, parameters={"price_tick": "0.01"}

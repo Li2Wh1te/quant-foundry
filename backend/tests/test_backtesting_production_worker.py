@@ -79,6 +79,10 @@ def test_production_worker_main_uses_wired_callbacks_instead_of_fixed_rejection(
     )
 
     with (
+        # This unit test exercises callback wiring. OS identity capture is
+        # covered by the dedicated process protocol tests, independently of
+        # whether the host sandbox permits querying its process table.
+        patch("app.backtesting.runner_process.get_process_start_token", return_value="fixture-start"),
         patch("app.core.config.get_settings", return_value=settings),
         patch("app.db.session.get_engine", return_value=object()),
         patch("sqlalchemy.orm.Session", side_effect=lambda _engine: _Session(row)),

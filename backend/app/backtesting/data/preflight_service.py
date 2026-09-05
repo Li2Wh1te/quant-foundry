@@ -545,6 +545,12 @@ class PreflightOutcome:
             "required_capabilities": [item.value for item in report.required_capabilities],
             PREFLIGHT_METADATA_KEY: metadata,
             "__consistency__": _consistency_summary(report),
+            # Preserve the overall data PIT contract separately from calendar
+            # PIT: a strict calendar does not make non-PIT bars strict.
+            "__pit__": {
+                "non_strict_pit": report.non_strict_pit,
+                "non_strict_pit_capabilities": [item.value for item in report.non_strict_pit_capabilities],
+            },
         }
         pit_status = (
             "non_strict"

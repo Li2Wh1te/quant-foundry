@@ -7,7 +7,7 @@ configuration.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any, Callable, Mapping, Sequence
 from types import MappingProxyType
@@ -98,7 +98,7 @@ class RunBinding:
             # Bump this only when the serialized meaning of a run input
             # changes.  The value is part of config_hash, so an old run can
             # never be mistaken for a new snapshot shape.
-            "schema_version": 2,
+            "schema_version": 3,
             "spec": {
                 "start_date": self.spec.start_date,
                 "end_date": self.spec.end_date,
@@ -124,6 +124,11 @@ class RunBinding:
                     else _safe_mapping(self.spec.strategy_parameters)
                 ),
                 "account_profile_id": self.spec.account_profile_id,
+                "account_profile_version": self.spec.account_profile_version,
+                "data_cutoff": self.spec.data_cutoff,
+                "component_selections": {key: {"key": value.key, "version": value.version, "parameters": _safe_mapping(value.parameters)} for key, value in self.spec.component_selections.items()},
+                "analyzer_selections": [{"key": value.key, "version": value.version, "parameters": _safe_mapping(value.parameters)} for value in self.spec.analyzer_selections],
+                "resolved_data_request": _safe_mapping(self.spec.resolved_data_request),
                 "slippage_model": {
                     "key": self.spec.slippage_model.key,
                     "version": self.spec.slippage_model.version,
@@ -178,6 +183,29 @@ class RunBindingBuilder:
             account.get("profile_id", account.get("account_profile_id"))
         ) != str(spec.account_profile_id):
             raise ValueError("resolved account profile does not match run spec")
+        if spec.account_profile_version is not None and int(account.get("version", 0)) != spec.account_profile_version:
+            raise ValueError("resolved account version does not match run spec")
+        if spec.data_cutoff is not None and data_request:
+            boundary = data_request.get("query_boundary", {})
+            if datetime.fromisoformat(str(boundary.get("data_cutoff"))) != spec.data_cutoff:
+                raise ValueError("resolved data cutoff does not match run spec")
+        if spec.resolved_data_request and _plain(spec.resolved_data_request) != _plain(data_request):
+            raise ValueError("resolved data request does not match run spec")
+        for kind, selected in spec.component_selections.items():
+            actual = components.get(kind, {})
+            if (actual.get("key"), actual.get("version"), _plain(actual.get("parameters", {}))) != (selected.key, selected.version, _plain(selected.parameters)):
+                raise ValueError(f"resolved {kind} does not match run spec")
+        expected_analyzers = [
+            {"key": item.key, "version": item.version, "parameters": _plain(item.parameters)}
+            for item in spec.analyzer_selections
+        ]
+        actual_analyzers = [
+            {"key": item.get("key"), "version": item.get("version"),
+             "parameters": _plain(item.get("parameters", {}))}
+            for item in components.get("analyzer", ())
+        ]
+        if expected_analyzers != actual_analyzers:
+            raise ValueError("resolved analyzers do not match run spec")
         if components:
             slippage = components.get("slippage_model")
             if not isinstance(slippage, Mapping) or (

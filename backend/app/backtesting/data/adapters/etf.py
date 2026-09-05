@@ -1628,7 +1628,17 @@ class EtfFactsAdapter:
                 source_revision=getattr(row, "source_revision", None),
             )
             count = row.event_count
-            details = {"event_count": count, "summary": row.summary or {}, **evidence_data}
+            # Repository evidence must never override the normalized coverage
+            # envelope. A single session_date is only an index into this fact,
+            # not a claim that an entire requested window was covered.
+            details = {
+                **evidence_data,
+                "event_count": count,
+                "summary": row.summary or {},
+                "start_date": row.start_date.isoformat(),
+                "end_date": row.end_date.isoformat(),
+                "action_type": row.action_type or "corporate_actions",
+            }
             facts.append(DataCoverageFact(
                 instrument_id=row.instrument_id, session_date=row.start_date,
                 capability=DataCapability.ACTIONS,

@@ -104,6 +104,8 @@ class AccountProfileSchemaTestCase(unittest.TestCase):
             {
                 "/api/admin/backtest-account-profiles",
                 "/api/admin/backtest-account-profiles/{profile_id}",
+                "/api/admin/backtest-account-profiles/{profile_id}/versions",
+                "/api/admin/backtest-account-profiles/{profile_id}/versions/{version}",
             },
         )
         self.assertNotIn("/api/backtest-runs", paths)
@@ -138,7 +140,7 @@ class AccountProfileServiceTestCase(unittest.TestCase):
         self.assertEqual(record.fee_schedule_key, "etf-cny")
         self.assertEqual(record.fee_rules[0]["rounding_precision"], "0.01")
         self.assertEqual(record.profile_metadata, {"owner": "quant"})
-        self.session.flush.assert_called_once_with()
+        self.assertEqual(self.session.flush.call_count, 2)
 
     def test_create_rejects_duplicate_name_and_incomplete_rounding(self) -> None:
         self.service.repository.name_exists.return_value = True
@@ -182,7 +184,8 @@ class AccountProfileServiceTestCase(unittest.TestCase):
         self.service.repository.get.assert_called_with(record.id, for_update=True)
 
         self.service.delete(record.id)
-        self.session.delete.assert_called_once_with(record)
+        self.session.delete.assert_not_called()
+        self.assertEqual(record.status, "retired")
 
 
 if __name__ == "__main__":

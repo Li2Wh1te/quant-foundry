@@ -6,6 +6,8 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
+from app.backtesting.account_profiles import AccountProfileStatus
 
 from app.backtesting.models import BacktestAccountProfileRecord
 from app.backtesting.schemas import (
@@ -29,6 +31,40 @@ router = APIRouter(
     prefix="/api/admin/backtest-account-profiles",
     tags=["admin-backtest-account-profiles"],
 )
+
+
+class VersionAvailabilityRequest(BaseModel):
+    status: AccountProfileStatus
+
+
+@router.get("/{profile_id}/versions", response_model=list[AccountProfileResponse])
+def list_account_versions(profile_id: UUID, session: Annotated[Session, Depends(get_db_session)]):
+    """List immutable versions with their current operational availability."""
+    try:
+        service = AccountProfileService(session)
+        return [_response(service.get_version(profile_id, row.version)) for row in service.versions(profile_id)]
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.get("/{profile_id}/versions/{version}", response_model=AccountProfileResponse)
+def get_account_version(profile_id: UUID, version: int, session: Annotated[Session, Depends(get_db_session)]):
+    try:
+        return _response(AccountProfileService(session).get_version(profile_id, version))
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.patch("/{profile_id}/versions/{version}", response_model=AccountProfileResponse)
+def set_account_version_availability(profile_id: UUID, version: int, payload: VersionAvailabilityRequest, session: Annotated[Session, Depends(get_db_session)]):
+    """Change availability only; historical configuration is append-only."""
+    try:
+        record = AccountProfileService(session).set_version_status(profile_id, version, payload.status)
+        session.commit()
+        return _response(record)
+    except Exception as exc:
+        session.rollback()
+        raise _http_error(exc) from exc
 
 
 @router.get("", response_model=list[AccountProfileResponse])
@@ -127,7 +163,7 @@ def delete_account_profile(
     profile_id: Annotated[UUID, Path()],
     session: Annotated[Session, Depends(get_db_session)],
 ) -> None:
-    """Delete an editable catalogue row; no historical run row is touched."""
+    """Retire a catalogue while retaining its immutable configuration history."""
 
     try:
         AccountProfileService(session).delete(profile_id)

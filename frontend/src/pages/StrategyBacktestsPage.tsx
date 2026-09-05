@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 
-import { listAccountProfiles, type AccountProfile } from "../api/accountProfiles";
+import { listAccountProfiles, listAccountProfileVersions, type AccountProfile } from "../api/accountProfiles";
 import {
   cancelBacktestRun,
   createBacktestRun,
@@ -14,13 +14,15 @@ import {
   type BacktestRun,
   type BacktestRunCreateInput,
   type ComponentDescriptor,
+  type ComponentSelectionInput,
   BacktestApiError,
 } from "../api/backtestRuns";
 import {
   compareBacktestRuns,
-  fetchBacktestPreflight,
   preflightBacktest,
 } from "../api/backtestPreflight";
+import { admissionAllowsCreation } from "../components/backtestAdmission";
+import { BacktestReport, BacktestComparisonView } from "../components/BacktestReport";
 import { getStrategy, type StrategyDetail } from "../api/strategies";
 
 const labels: Record<string, string> = {
@@ -101,7 +103,7 @@ export function StrategyBacktestsPage() {
   const [endDate, setEndDate] = useState(today);
   const [initialCash, setInitialCash] = useState("0");
   const [positions, setPositions] = useState<PositionDraft[]>([]);
-  const [dynamicUniverse, setDynamicUniverse] = useState(true);
+  const [dynamicUniverse] = useState(false);
   const [instrumentIds, setInstrumentIds] = useState("");
   const [exchanges, setExchanges] = useState<string[]>(["SSE", "SZSE"]);
   const [priceBasis, setPriceBasis] = useState<PriceBasis>("raw");
@@ -112,6 +114,19 @@ export function StrategyBacktestsPage() {
   const [slippageModels, setSlippageModels] = useState<ComponentDescriptor[]>([]);
   const [slippageIdentity, setSlippageIdentity] = useState("");
   const [slippageParameters, setSlippageParameters] = useState<Record<string, unknown>>({});
+  const [accountVersions, setAccountVersions] = useState<AccountProfile[]>([]);
+  const [componentOptions, setComponentOptions] = useState<Record<string, Array<ComponentSelectionInput & { display_name: string }>>>({});
+  const [componentSelections, setComponentSelections] = useState<Record<string, ComponentSelectionInput>>({});
+  const [accountVersion, setAccountVersion] = useState("");
+  const [sharpeMode, setSharpeMode] = useState("sharpe_simple");
+  const [riskFreeRate, setRiskFreeRate] = useState("0");
+  const [riskFreeNote, setRiskFreeNote] = useState("");
+  const [selectedRunIds, setSelectedRunIds] = useState<string[]>([]);
+  const [runCursor, setRunCursor] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const inputGeneration = useRef(0);
+  const admissionFingerprint = useRef<string | null>(null);
+  const creationKey = useRef<string | null>(null);
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selected, setSelected] = useState<BacktestRun | null>(null);
   const [message, setMessage] = useState("");
@@ -123,8 +138,16 @@ export function StrategyBacktestsPage() {
   const [pages, setPages] = useState<Record<string, any[]>>({});
   const [cursors, setCursors] = useState<Record<string, string | null>>({});
   const selectedRef = useRef<BacktestRun | null>(null);
+  const workspaceGeneration = useRef(0);
+  const runsRef = useRef(runs);
+  runsRef.current = runs;
+  const detailGeneration = useRef(0);
 
   const resetAdmission = () => {
+    inputGeneration.current += 1;
+    admissionFingerprint.current = null;
+    creationKey.current = null;
+    setGate(null);
     setPreflight(null);
     setConfirmed(false);
   };
@@ -146,13 +169,14 @@ export function StrategyBacktestsPage() {
     resetAdmission();
   };
 
-  const load = async () => {
+  const load = async (generation: number) => {
     try {
       const [strategyDetail, workspace, availableAccounts] = await Promise.all([
         getStrategy(strategyId),
         fetchStrategyBacktestWorkspace(strategyId),
         listAccountProfiles(),
       ]);
+      if (generation !== workspaceGeneration.current) return;
       const published = (workspace.published_revisions || []) as PublishedRevision[];
       const latest = [...published].sort(
         (left, right) => right.revision_number - left.revision_number,
@@ -164,12 +188,15 @@ export function StrategyBacktestsPage() {
 
       setStrategy(strategyDetail);
       setRevisions(published);
-      setGate(workspace.formal_gate || null);
+      // Historical run evidence must not replace admission for current inputs.
       setRuns(
         (workspace.runs?.items || []).filter(
           (run: BacktestRun) => run.run_kind === "backtest_run",
         ),
       );
+      setRunCursor(workspace.runs.next_cursor || null);
+      setComponentOptions(workspace.component_options || {});
+      setComponentSelections(Object.fromEntries(Object.entries(workspace.component_options || {}).filter(([, options]) => options.length > 0).map(([kind, options]) => [kind, { key: options[0].key, version: options[0].version, parameters: options[0].parameters }])));
       setAccounts(availableAccounts);
       setAccountProfileId((current) => current || availableAccounts[0]?.id || "");
       setSlippageModels(availableSlippage);
@@ -178,13 +205,30 @@ export function StrategyBacktestsPage() {
         selectSlippage(`${noSlippage.key}@${noSlippage.version}`, availableSlippage);
       }
     } catch (error) {
+      if (generation !== workspaceGeneration.current) return;
       setMessage(error instanceof Error ? error.message : "工作台加载失败。");
     }
   };
 
   useEffect(() => {
-    void load();
+    const generation = ++workspaceGeneration.current;
+    resetAdmission(); setStrategy(null); setRevisions([]); setRevisionId("");
+    setRuns([]); setSelected(null); selectedRef.current = null;
+    detailGeneration.current += 1;
+    setSelectedRunIds([]); setCompareResult(null); setRunCursor(null);
+    setPages({}); setCursors({}); setMessage(""); setBusy(false);
+    void load(generation);
+    return () => { workspaceGeneration.current += 1; inputGeneration.current += 1; };
   }, [strategyId]);
+
+  useEffect(() => {
+    let active = true;
+    setAccountVersions([]); setAccountVersion(""); resetAdmission();
+    if (accountProfileId) listAccountProfileVersions(accountProfileId).then((versions) => {
+      if (active) { setAccountVersions(versions); setAccountVersion(String(versions.find((item) => item.status === "active")?.version || "")); }
+    }).catch((error: Error) => { if (active) setMessage(error.message); });
+    return () => { active = false; };
+  }, [accountProfileId]);
 
   const hasActiveRun = runs.some((run) => !isTerminalBacktestStatus(run.status));
   useEffect(() => {
@@ -196,11 +240,16 @@ export function StrategyBacktestsPage() {
       if (stopped || document.visibilityState !== "visible") return;
       try {
         const workspace = await fetchStrategyBacktestWorkspace(strategyId);
-        setGate(workspace.formal_gate || null);
+        // Historical run evidence must not replace admission for current inputs.
         const nextRuns = (workspace.runs?.items || []).filter(
           (run: BacktestRun) => run.run_kind === "backtest_run",
         );
-        setRuns(nextRuns);
+        // Runs loaded from older pages remain live even when absent from the
+        // newest page. Refresh those identities through the run endpoint.
+        const olderActive = runsRef.current.filter((item) => !isTerminalBacktestStatus(item.status) && !nextRuns.some((fresh) => fresh.run_id === item.run_id));
+        nextRuns.push(...await Promise.all(olderActive.map((item) => getBacktestRun(item.run_id))));
+        if (stopped) return;
+        setRuns((current) => [...nextRuns, ...current.filter((item) => !nextRuns.some((fresh: BacktestRun) => fresh.run_id === item.run_id))]);
         if (selectedRef.current) {
           const fresh = nextRuns.find(
             (run: BacktestRun) => run.run_id === selectedRef.current?.run_id,
@@ -211,7 +260,7 @@ export function StrategyBacktestsPage() {
           }
         }
       } catch (error) {
-        setMessage(error instanceof Error ? error.message : "运行状态刷新失败。");
+        if (!stopped) setMessage(error instanceof Error ? error.message : "运行状态刷新失败。");
       } finally {
         // A transient request failure must not permanently stop a live run's
         // foreground polling cycle.
@@ -258,8 +307,8 @@ export function StrategyBacktestsPage() {
       setMessage("请先选择已发布策略版本。");
       return null;
     }
-    if (!accountProfileId) {
-      setMessage("请选择回测账户。");
+    if (!accountProfileId || !accountVersion) {
+      setMessage("请选择可用的回测账户版本。");
       return null;
     }
     if (!startDate || !endDate || startDate > endDate) {
@@ -335,6 +384,13 @@ export function StrategyBacktestsPage() {
         warmup_sessions: Number.parseInt(warmupSessions || "0", 10),
       },
       account_profile_id: accountProfileId,
+      data_cutoff: typeof preflight?.data_cutoff === "string" ? preflight.data_cutoff : undefined,
+      account_profile_version: Number(accountVersion),
+      component_selections: componentSelections,
+      analyzer_selections: [
+        { key: sharpeMode, version: 1, parameters: sharpeMode === "sharpe_config_rf" ? { rf_annual: riskFreeRate, rf_source_note: riskFreeNote } : {} },
+        ...["performance", "turnover", "fee_summary"].map((key) => ({ key, version: 1, parameters: {} })),
+      ],
       slippage_model: {
         key: selectedSlippage.key,
         version: selectedSlippage.version,
@@ -350,51 +406,66 @@ export function StrategyBacktestsPage() {
     };
   };
 
-  const create = async () => {
-    const key = crypto.randomUUID();
-    const payload = buildPayload(key);
-    if (!payload) return;
+  const fingerprint = (payload: BacktestRunCreateInput) => JSON.stringify({ ...payload, data_cutoff: undefined, idempotency_key: undefined, degraded: undefined, confirmed_admission_report_hash: undefined });
+
+  const checkAdmission = async () => {
+    if (busy) return;
+    const generation = inputGeneration.current;
+    const pageGeneration = workspaceGeneration.current;
+    const payload = buildPayload(crypto.randomUUID());
+    if (!payload || !accountVersion) return;
+    setBusy(true); setGate(null);
+    admissionFingerprint.current = null;
     try {
-      const admission = (await preflightBacktest(payload)) as Record<string, any>;
+      const admission = await preflightBacktest(payload) as Record<string, any>;
+      if (generation !== inputGeneration.current) return;
       setPreflight(admission);
-      setGate({
-        status: admission.status,
-        allowed: admission.status !== "blocked",
-        gates: admission.gates || {},
-        report_hash: admission.report_hash || null,
-      });
-      if (
-        admission.status === "blocked" ||
-        admission.code?.includes("blocked") ||
-        admission.account_snapshot_available === false ||
-        admission.fee_snapshot_available === false ||
-        admission.holdings_eligible === false
-      ) {
-        setMessage(
-          admission.message ||
-            "账户、费用快照不可用或初始持仓缺少资格，已阻断正式回测。",
-        );
-        return;
-      }
-      if (admission.status === "degraded" && !confirmed) {
-        setMessage("预检结果为降级，请确认同一报告后再创建。");
-        return;
-      }
-      const run = (await createBacktestRun(payload, key)) as BacktestRun;
-      setRuns((current) => [run, ...current.filter((item) => item.run_id !== run.run_id)]);
-      setGate(run.formal_gates || gate);
-      setMessage("正式回测已加入队列。");
-    } catch (error: any) {
-      setMessage(
-        error instanceof BacktestApiError
-          ? `${error.message}（${error.code || `HTTP ${error.status}`}）`
-          : error?.message || "创建回测失败。",
-      );
+      const allowed = admissionAllowsCreation(admission);
+      if (admission.report_hash !== payload.confirmed_admission_report_hash) setConfirmed(false);
+      setGate({ ...admission.gates, status: admission.status, allowed });
+      admissionFingerprint.current = fingerprint(payload);
+      setMessage(allowed ? "当前配置已通过预检，可以创建运行。" : admission.status === "degraded" ? "请勾选降级报告确认，再次预检以完成全部准入检查。" : "当前配置未通过预检，请查看问题并修改配置。");
+    } catch (error) { if (generation === inputGeneration.current) setMessage(error instanceof Error ? error.message : "预检失败。"); }
+    finally { if (pageGeneration === workspaceGeneration.current) setBusy(false); }
+  };
+
+  const create = async () => {
+    if (busy) return;
+    const pageGeneration = workspaceGeneration.current;
+    const generation = inputGeneration.current;
+    const key = creationKey.current || crypto.randomUUID();
+    const payload = buildPayload(key);
+    if (!payload || !gate?.allowed || admissionFingerprint.current !== fingerprint(payload) || (preflight?.status === "degraded" && !confirmed)) {
+      setMessage("请先完成当前配置的预检及必要确认。"); return;
     }
+    creationKey.current = key; setBusy(true);
+    try {
+      const run = await createBacktestRun(payload, key) as BacktestRun;
+      if (pageGeneration !== workspaceGeneration.current) return;
+      setRuns((current) => [run, ...current.filter((item) => item.run_id !== run.run_id)]);
+      if (generation === inputGeneration.current) { creationKey.current = null; setMessage("正式回测已加入队列。"); }
+    } catch (error) {
+      if (generation === inputGeneration.current) setMessage(error instanceof Error ? error.message : "创建回测失败。");
+    } finally { if (pageGeneration === workspaceGeneration.current) setBusy(false); }
+  };
+
+  const loadMoreRuns = async () => {
+    if (!runCursor) return;
+    const generation = workspaceGeneration.current;
+    try {
+      const workspace = await fetchStrategyBacktestWorkspace(strategyId, undefined, runCursor);
+      if (generation !== workspaceGeneration.current) return;
+      setRuns((current) => [...current, ...workspace.runs.items.filter((run) => !current.some((item) => item.run_id === run.run_id))]);
+      setRunCursor(workspace.runs.next_cursor || null);
+    } catch (error) { if (generation === workspaceGeneration.current) setMessage(error instanceof Error ? error.message : "运行列表加载失败。"); }
   };
 
   const loadTab = async (runId: string, kind: string, cursor?: string) => {
-    const page = await fetchBacktestResult(runId, kind, cursor);
+    const generation = detailGeneration.current;
+    let page;
+    try { page = await fetchBacktestResult(runId, kind, cursor); }
+    catch (error) { if (generation === detailGeneration.current) setMessage(error instanceof Error ? error.message : "结果加载失败。"); return; }
+    if (selectedRef.current?.run_id !== runId || generation !== detailGeneration.current) return;
     setPages((current) => ({
       ...current,
       [kind]: cursor
@@ -408,40 +479,54 @@ export function StrategyBacktestsPage() {
   };
 
   const open = async (run: BacktestRun) => {
+    const generation = ++detailGeneration.current;
     selectedRef.current = run;
     setSelected(run);
     setPages({});
     setCursors({});
     try {
       const detail = await getBacktestRun(run.run_id);
+      if (selectedRef.current?.run_id !== detail.run_id || generation !== detailGeneration.current) return;
       setSelected(detail);
       selectedRef.current = detail;
-      setPreflight((await fetchBacktestPreflight(detail.run_id)) as any);
-      setGate(detail.formal_gates || gate);
       await loadTab(detail.run_id, tab);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "详情加载失败。");
+      if (generation === detailGeneration.current) setMessage(error instanceof Error ? error.message : "详情加载失败。");
     }
   };
 
   const compare = async () => {
-    const ids = runs
-      .filter((run) => run.status === "succeeded")
-      .slice(0, 2)
-      .map((run) => run.run_id);
+    const generation = workspaceGeneration.current;
+    const ids = selectedRunIds;
     if (ids.length < 2) {
       setMessage("请选择两个已完成的正式运行进行比较。");
       return;
     }
     try {
-      setCompareResult(await compareBacktestRuns(ids));
+      const result = await compareBacktestRuns(ids);
+      if (generation !== workspaceGeneration.current) return;
+      setCompareResult(result);
       setMessage("比较结果已加载。");
     } catch (error: any) {
+      if (generation !== workspaceGeneration.current) return;
       setMessage(
         error instanceof BacktestApiError
           ? `${error.message}（${error.code || `HTTP ${error.status}`}）`
           : "比较失败。",
       );
+    }
+  };
+
+  const updateRun = async (run: BacktestRun, action: "rerun" | "cancel") => {
+    const generation = workspaceGeneration.current;
+    try {
+      const fresh = (action === "rerun" ? await rerunBacktest(run) : await cancelBacktestRun(run.run_id)) as BacktestRun;
+      if (generation !== workspaceGeneration.current) return;
+      // Updating history must leave the current form and its admission alone.
+      setRuns((current) => [fresh, ...current.filter((item) => item.run_id !== fresh.run_id)]);
+      if (selectedRef.current?.run_id === fresh.run_id) { selectedRef.current = fresh; setSelected(fresh); }
+    } catch (error) {
+      if (generation === workspaceGeneration.current) setMessage(error instanceof Error ? error.message : "运行操作失败。");
     }
   };
 
@@ -548,10 +633,7 @@ export function StrategyBacktestsPage() {
           Warmup 交易会话数
           <input type="number" min="0" max="512" value={warmupSessions} onChange={(event) => { setWarmupSessions(event.target.value); resetAdmission(); }} />
         </label>
-        <label>
-          <input type="checkbox" checked={dynamicUniverse} onChange={(event) => { setDynamicUniverse(event.target.checked); resetAdmission(); }} />
-          启用动态候选范围
-        </label>
+        <p>当前数据源支持固定标的范围；动态标的范围尚未开放。</p>
         <label>
           固定标的 UUID（逗号或换行分隔）
           <textarea value={instrumentIds} onChange={(event) => { setInstrumentIds(event.target.value); resetAdmission(); }} />
@@ -660,6 +742,13 @@ export function StrategyBacktestsPage() {
         <p>零滑点会明确冻结为 <code>none@1</code>，不会以空值代替。</p>
       </fieldset>
 
+      <fieldset><legend>账户版本与分析口径</legend>
+        <label>账户历史版本<select value={accountVersion} onChange={(event) => { setAccountVersion(event.target.value); resetAdmission(); }}><option value="">请选择版本</option>{accountVersions.map((item) => <option key={item.version} value={item.version} disabled={item.status !== "active"}>{item.name} · 版本 {item.version} · 费用版本 {item.fee_schedule_version}{item.status !== "active" ? "（不可用）" : ""}</option>)}</select></label>
+        <label>夏普口径<select value={sharpeMode} onChange={(event) => { setSharpeMode(event.target.value); resetAdmission(); }}><option value="sharpe_simple">不扣无风险利率</option><option value="sharpe_config_rf">冻结年化无风险利率</option><option value="sharpe_pit_rf">PIT 日利率（当前数据源未提供，仅禁用夏普）</option></select></label>
+        {sharpeMode === "sharpe_config_rf" && <><label>年化利率<input value={riskFreeRate} onChange={(event) => { setRiskFreeRate(event.target.value); resetAdmission(); }} /></label><label>利率来源说明<input value={riskFreeNote} onChange={(event) => { setRiskFreeNote(event.target.value); resetAdmission(); }} /></label></>}
+        <p>同时计算收益、年化收益、最大回撤、波动率、换手率和费用摘要。</p>
+      </fieldset>
+      <fieldset><legend>系统执行配置</legend>{Object.entries(componentOptions).map(([kind, options]) => <label key={kind}>{({ data_provider: "数据来源", rule_package: "交易规则", calendar_axis_policy: "日历策略", time_axis: "时间轴", timing_policy: "运行时序", execution_model: "成交模型", decision_interpreter: "决策解释", accounting_policy: "账户会计", corporate_action_timing: "公司行动时序" } as Record<string, string>)[kind] || "执行组件"}<select value={`${componentSelections[kind]?.key}@${componentSelections[kind]?.version}`} onChange={(event) => { const item = options.find((option) => `${option.key}@${option.version}` === event.target.value)!; setComponentSelections((current) => ({ ...current, [kind]: { key: item.key, version: item.version, parameters: item.parameters } })); resetAdmission(); }}>{options.map((item) => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · v{item.version}</option>)}</select></label>)}</fieldset>
       {gate && (
         <details>
           <summary>正式准入门禁：{String(gate.status || "未知")}</summary>
@@ -677,10 +766,9 @@ export function StrategyBacktestsPage() {
           确认降级报告 hash 后继续
         </label>
       )}
-      <button type="button" disabled={!revisionId || !accountProfileId} onClick={() => void create()}>
-        预检并创建正式回测
-      </button>{" "}
-      <button type="button" onClick={() => void compare()}>
+      <button type="button" disabled={busy || !revisionId || !accountProfileId || !accountVersion} onClick={() => void checkAdmission()}>预检当前配置</button>{" "}
+      <button type="button" disabled={busy || !gate?.allowed || (preflight?.status === "degraded" && !confirmed)} onClick={() => void create()}>创建正式回测</button>{" "}
+      <button type="button" disabled={selectedRunIds.length < 2} onClick={() => void compare()}>
         比较运行
       </button>
       {message && <p role="status">{message}</p>}
@@ -694,6 +782,7 @@ export function StrategyBacktestsPage() {
       <div>
         {runs.map((run) => (
           <article key={run.run_id}>
+            <label><input type="checkbox" aria-label={`比较 ${run.run_id}`} checked={selectedRunIds.includes(run.run_id)} disabled={run.status !== "succeeded" || (!selectedRunIds.includes(run.run_id) && selectedRunIds.length >= 10)} onChange={(event) => setSelectedRunIds((current) => event.target.checked ? [...current, run.run_id] : current.filter((id) => id !== run.run_id))} />加入比较</label>
             <button type="button" onClick={() => void open(run)}>
               {run.run_id} · {labels[run.status] || "运行状态（待识别）"}
             </button>
@@ -703,12 +792,12 @@ export function StrategyBacktestsPage() {
             </span>
             {stale(run) && <p role="alert">心跳已超过 60 秒未更新，请关注运行状态（不会修改状态）。</p>}
             {isTerminalBacktestStatus(run.status) && (
-              <button type="button" onClick={() => void rerunBacktest(run).then(load)}>
+              <button type="button" onClick={() => void updateRun(run, "rerun")}>
                 重新运行
               </button>
             )}
             {["queued", "starting", "running", "cancel_requested"].includes(run.status) && (
-              <button type="button" onClick={() => void cancelBacktestRun(run.run_id).then(load)}>
+              <button type="button" onClick={() => void updateRun(run, "cancel")}>
                 取消
               </button>
             )}
@@ -716,9 +805,12 @@ export function StrategyBacktestsPage() {
         ))}
       </div>
 
+      {runCursor && <button type="button" onClick={() => void loadMoreRuns()}>加载更多运行</button>}
+
       {selected && (
         <aside aria-label="回测详情">
           <h2>运行详情</h2>
+          <BacktestReport run={selected} />
           <p>
             状态：{labels[selected.status] || "未知"}；冻结 binding：
             {show((selected as any).resolved_run_binding || selected.strategy_revision_id)}；终态证据：
@@ -749,63 +841,15 @@ export function StrategyBacktestsPage() {
               加载更多结果
             </button>
           )}
-          <details>
-            <summary>数据准入预检（canonical）</summary>
-            <pre>{JSON.stringify(preflight, null, 2)}</pre>
-          </details>
         </aside>
       )}
 
       {compareResult != null && (
         <section aria-label="运行比较结果">
           <h2>比较结果</h2>
-          <Comparison result={compareResult} />
+          <BacktestComparisonView result={compareResult} />
         </section>
       )}
     </section>
-  );
-}
-
-function Curve({ title, series }: { title: string; series: unknown }) {
-  const points = Array.isArray(series)
-    ? series.filter((point: any) => Array.isArray(point) && point.length >= 2)
-    : [];
-  const xy = points
-    .map(
-      (point: any, index: number) =>
-        `${(index / Math.max(points.length - 1, 1)) * 100},${100 - (Number(point[1]) || 0)}`,
-    )
-    .join(" ");
-  return (
-    <section>
-      <h3>{title}</h3>
-      <svg
-        role="img"
-        aria-label={title}
-        viewBox="0 0 100 100"
-        preserveAspectRatio="none"
-        style={{ width: "100%", height: 160, border: "1px solid currentColor" }}
-      >
-        <polyline fill="none" stroke="currentColor" points={xy} />
-      </svg>
-      <pre>{JSON.stringify(series ?? "无数据", null, 2)}</pre>
-    </section>
-  );
-}
-
-function Comparison({ result }: { result: any }) {
-  const section = (title: string, value: unknown) => (
-    <section>
-      <h3>{title}</h3>
-      <pre>{JSON.stringify(value ?? "无数据", null, 2)}</pre>
-    </section>
-  );
-  return (
-    <div>
-      <Curve title="净值曲线（持久化点）" series={result.equity_curve_series} />
-      <Curve title="回撤曲线（持久化点）" series={result.drawdown_curve_series} />
-      {section("指标矩阵/公式版本/不可用原因", result.metric_matrix)}
-      {section("配置差异（参数、data request、behavior versions）", result.configuration_diff)}
-    </div>
   );
 }

@@ -1063,6 +1063,7 @@ def _admit_analysis_run_unwrapped(
     rate_session_open_at: Mapping[date, datetime] | Callable[[date], datetime] | None = None,
     cash_movements: Iterable[tuple[str, Any]] = (),
     analyzer_engine: Any | None = None,
+    disabled_analyzers: Sequence[str] = (),
 ) -> AnalyzerRunAdmission:
     """Single admission entry point composing every frozen gate.
 
@@ -1113,7 +1114,9 @@ def _admit_analysis_run_unwrapped(
         for spec in analyzer_specs
         if getattr(spec, "analyzer_key", None) in sharpe_keys
     ]
-    if len(selected_sharpe_specs) != 1:
+    if len(selected_sharpe_specs) != 1 and not (
+        not selected_sharpe_specs and tuple(disabled_analyzers) == (PIT_RF_ANALYZER_KEY,)
+    ):
         raise AdmissionBlockedError(
             "INVALID_ANALYZER_CONFIG",
             "every run must explicitly select exactly one Sharpe analyzer",

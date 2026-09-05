@@ -87,10 +87,14 @@ export interface ComponentSelectionInput {
 }
 
 export interface BacktestRunCreateInput {
+  data_cutoff?: string;
   strategy_revision_id: string;
   parameters?: Record<string, unknown> | null;
   backtest_config: BacktestConfigInput;
   account_profile_id?: string | null;
+  account_profile_version?: number;
+  analyzer_selections?: ComponentSelectionInput[];
+  component_selections?: Record<string, ComponentSelectionInput>;
   slippage_model: ComponentSelectionInput;
   random_seed?: number | null;
   idempotency_key?: string;
@@ -114,6 +118,7 @@ export type StrategyBacktestWorkspace = {
   strategy: Record<string, unknown>;
   published_revisions: Array<Record<string, unknown>>;
   slippage_models: ComponentDescriptor[];
+  component_options?: Record<string, Array<{ key: string; version: number; display_name: string; parameters: Record<string, unknown> }>>;
   formal_gate: Record<string, unknown>;
   runs: BacktestRunListResponse & { next_cursor?: string | null; has_more?: boolean };
 };
@@ -169,8 +174,8 @@ async function request(path: string, init: RequestInit = {}, signal?: AbortSigna
 
 export const listBacktestRuns = (signal?: AbortSignal, strategyId?: string): Promise<BacktestRunListResponse> =>
   request(strategyId ? `/api/admin/backtest-runs/strategies/${encodeURIComponent(strategyId)}/backtests` : "/api/admin/backtest-runs", {}, signal) as Promise<BacktestRunListResponse>;
-export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal): Promise<StrategyBacktestWorkspace> =>
-  request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests`, {}, signal) as Promise<StrategyBacktestWorkspace>;
+export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal, cursor?: string): Promise<StrategyBacktestWorkspace> =>
+  request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ""}`, {}, signal) as Promise<StrategyBacktestWorkspace>;
 export const createBacktestRun=(payload:BacktestRunCreateInput, idempotencyKey?: string)=>{
   const body = {...payload, ...(idempotencyKey ? {idempotency_key: idempotencyKey} : {})};
   return request("/api/admin/backtests",{method:"POST",headers:idempotencyKey ? {"Idempotency-Key": idempotencyKey} : undefined,body:JSON.stringify(body)});
@@ -179,8 +184,8 @@ export const getBacktestRun=(id:string, signal?: AbortSignal)=>request(`/api/adm
 export const cancelBacktestRun=(id:string)=>request(`/api/admin/backtest-runs/${id}/cancel`,{method:"POST"});
 export const compareBacktestRuns=(run_ids:string[])=>request(`/api/admin/backtest-runs/compare`,{method:"POST",body:JSON.stringify({run_ids})});
 
-export async function fetchBacktestResult<T = Record<string, unknown>>(runId: string, kind: string, cursor?: string, signal?: AbortSignal): Promise<BacktestResultPage<T>> {
-  const params = new URLSearchParams({ limit: "100" });
+export async function fetchBacktestResult<T = Record<string, unknown>>(runId: string, kind: string, cursor?: string, signal?: AbortSignal, filters: Record<string, string> = {}): Promise<BacktestResultPage<T>> {
+  const params = new URLSearchParams({ limit: "100", ...filters });
   if (cursor) params.set("cursor", cursor);
   return request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/${kind}?${params}`, {}, signal) as Promise<BacktestResultPage<T>>;
 }

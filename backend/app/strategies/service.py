@@ -484,6 +484,17 @@ def _normalize_description(value: str | None) -> str | None:
     return normalized or None
 
 
+def _plain_json_containers(value: Any) -> Any:
+    """Detach frozen run inputs while retaining JSON's array/object meaning."""
+    if isinstance(value, Mapping):
+        if any(not isinstance(key, str) for key in value):
+            raise StrategyStorageValidationError("JSON object keys must be strings")
+        return {key: _plain_json_containers(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_json_containers(item) for item in value]
+    return value
+
+
 def _normalize_json_object(
     value: Mapping[str, Any] | None, *, field_name: str
 ) -> dict[str, Any]:
@@ -504,7 +515,7 @@ def _normalize_json_object(
         )
     try:
         serialized = json.dumps(
-            deepcopy(dict(value)),
+            _plain_json_containers(value),
             ensure_ascii=False,
             allow_nan=False,
             separators=(",", ":"),
@@ -559,30 +570,7 @@ def _deep_freeze(value: Any) -> Any:
 
 
 def _validate_runtime_parameters(schema: Mapping[str, Any], parameters: Mapping[str, Any]) -> list[str]:
-    """Validate the small JSON-Schema profile supported by strategy v1."""
-    issues: list[str] = []
-    if schema.get("type") not in (None, "object"):
-        issues.append("schema type must be object")
-    required = schema.get("required", [])
-    if isinstance(required, list):
-        issues.extend(f"missing required parameter: {name}" for name in required if name not in parameters)
-    properties = schema.get("properties", {})
-    if isinstance(properties, Mapping):
-        if schema.get("additionalProperties") is False:
-            issues.extend(
-                f"unknown parameter: {name}"
-                for name in parameters
-                if name not in properties
-            )
-        for name, rule in properties.items():
-            if name not in parameters or not isinstance(rule, Mapping):
-                continue
-            expected = rule.get("type")
-            value = parameters[name]
-            valid = {"object": isinstance(value, Mapping), "array": isinstance(value, list),
-                     "string": isinstance(value, str), "boolean": isinstance(value, bool),
-                     "integer": isinstance(value, int) and not isinstance(value, bool),
-                     "number": isinstance(value, (int, float)) and not isinstance(value, bool)}.get(expected, True)
-            if not valid:
-                issues.append(f"parameter {name} has invalid type")
-    return issues
+    """Apply the exact same parameter contract used during publication."""
+    from app.strategies.parameter_contract import validate_parameters
+
+    return validate_parameters(schema, parameters)

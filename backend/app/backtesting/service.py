@@ -11,7 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.backtesting.account_profiles import AccountProfileStatus
 from app.backtesting.fees import FeeRule, FeeSchedule
-from app.backtesting.models import BacktestAccountProfileRecord
+from app.backtesting.models import BacktestAccountProfileRecord, BacktestAccountProfileVersionRecord
+from sqlalchemy import select
 from app.backtesting.repository import BacktestAccountProfileRepository
 
 
@@ -67,6 +68,10 @@ class AccountProfileService:
             profile_metadata=_json_value(dict(metadata)),
         )
         self.session.add(record)
+        # Establish the parent before inserting the version; there is no ORM
+        # relationship whose unit-of-work dependency could order these rows.
+        self.session.flush([record])
+        self._append_version(record)
         self.session.flush()
         return record
 
@@ -79,7 +84,7 @@ class AccountProfileService:
         fee_schedule: Mapping[str, Any] | None = None,
         metadata: Mapping[str, Any] | None = None,
     ) -> BacktestAccountProfileRecord:
-        """Replace supplied fields atomically; no revision is generated."""
+        """Lock the catalogue and append a complete immutable configuration."""
 
         record = self.repository.get(profile_id, for_update=True)
         if record is None:
@@ -111,6 +116,7 @@ class AccountProfileService:
             changed = True
         if changed:
             record.version = int(record.version or 1) + 1
+            self._append_version(record)
         self.session.flush()
         return record
 
@@ -123,13 +129,52 @@ class AccountProfileService:
         return record
 
     def delete(self, profile_id: UUID) -> None:
-        """Delete one catalogue profile; future run snapshots are independent."""
+        """Retire a catalogue without destroying its historical versions."""
 
         record = self.repository.get(profile_id, for_update=True)
         if record is None:
             raise AccountProfileNotFoundError(str(profile_id))
-        self.session.delete(record)
+        record.status = "retired"
         self.session.flush()
+
+    def _append_version(self, record) -> None:
+        """Copy configuration before flushing either row in the transaction."""
+        self.session.add(BacktestAccountProfileVersionRecord(
+            profile_id=record.id, version=int(record.version or 1), status=record.status,
+            snapshot=deepcopy({name: getattr(record, name) for name in (
+                "name", "fee_schedule_key", "fee_schedule_version", "fee_rules",
+                "fee_schedule_metadata", "profile_metadata",
+            )}),
+        ))
+
+    def versions(self, profile_id: UUID):
+        self.get(profile_id)
+        return list(self.session.scalars(select(BacktestAccountProfileVersionRecord).where(
+            BacktestAccountProfileVersionRecord.profile_id == profile_id
+        ).order_by(BacktestAccountProfileVersionRecord.version.desc())))
+
+    def get_version(self, profile_id: UUID, version: int):
+        """Resolve a pinned configuration without substituting the latest."""
+        from types import SimpleNamespace
+        current = self.get(profile_id)
+        row = self.session.get(BacktestAccountProfileVersionRecord, (profile_id, version))
+        if row is None:
+            raise AccountProfileNotFoundError(f"{profile_id}@{version}")
+        return SimpleNamespace(
+            **deepcopy(row.snapshot), id=profile_id, version=version,
+            status=current.status if current.status != "active" else row.status,
+            created_at=row.created_at, updated_at=row.created_at,
+        )
+
+    def set_version_status(self, profile_id: UUID, version: int, status):
+        self.get_version(profile_id, version)
+        row = self.session.scalar(select(BacktestAccountProfileVersionRecord).where(
+            BacktestAccountProfileVersionRecord.profile_id == profile_id,
+            BacktestAccountProfileVersionRecord.version == version,
+        ).with_for_update())
+        row.status = _normalize_status(status)
+        self.session.flush()
+        return self.get_version(profile_id, version)
 
     def list(
         self,

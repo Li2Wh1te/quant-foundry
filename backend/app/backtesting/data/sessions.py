@@ -435,7 +435,7 @@ def evaluate_calendar_capability_gate(
 
 
 def _snapshot_report(
-    request: DataRequest,
+    request: DataPreflightRequest,
     snapshot: CalendarSnapshot,
     *,
     capability_manifest_version: int,

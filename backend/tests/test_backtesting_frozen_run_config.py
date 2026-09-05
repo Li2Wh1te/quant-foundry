@@ -132,7 +132,7 @@ def test_binding_snapshot_contains_all_run_level_inputs_and_is_stable() -> None:
     )
 
     snapshot = _json_value(binding.config)
-    assert snapshot["schema_version"] == 2
+    assert snapshot["schema_version"] == 3
     assert snapshot["spec"]["warmup_sessions"] == 12
     assert snapshot["spec"]["strategy_revision_id"] == str(revision_id)
     assert snapshot["spec"]["strategy_parameters"] == {"window": 20}

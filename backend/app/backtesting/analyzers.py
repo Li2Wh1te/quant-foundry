@@ -1594,8 +1594,45 @@ def _produce_fee_summary(
     return tuple(results)
 
 
+def _produce_performance(state, spec):
+    """Compute E0-based returns, positive drawdown magnitude and sample risk.
+
+    Annualized return uses 252 official sessions; volatility uses simple daily
+    returns with ddof=1. Missing/non-positive equity never gets interpolated.
+    """
+    series = _build_equity_series(state.equity_observations, state.initial_equity_snapshot.equity_e0)
+    returns = [] if series.has_invalid_points else _daily_returns(series)
+    results = []
+    for descriptor in spec.output_contract:
+        reason = ReasonCode.INVALID_EQUITY if series.has_invalid_points else None
+        count = series.candidate_return_count
+        if reason is None and (not returns or (descriptor.metric_key == "volatility" and len(returns) < 2)):
+            reason = ReasonCode.INSUFFICIENT_RETURNS
+        metadata = {"annualization_factor": "252", "std_ddof": 1, "initial_equity": str(series.initial_equity), "drawdown_convention": "positive_peak_to_trough", "invalid_session_dates": [day.isoformat() for day in series.invalid_dates], "candidate_return_count": count, "valid_equity_day_count": series.valid_day_count}
+        if reason:
+            results.append(MetricResult.unavailable(run_id=state.run_id, spec=spec, metric_key=descriptor.metric_key, formula_version=descriptor.formula_version, unit=descriptor.unit, sample_count=count, reason_code=reason, extra_metadata=metadata))
+            continue
+        equities = [series.initial_equity, *(item.equity for item in series.ordered_observations)]
+        ratio = equities[-1] / equities[0]
+        if descriptor.metric_key == "total_return":
+            value = ratio - 1
+        elif descriptor.metric_key == "annualized_return":
+            value = ratio ** (ANNUALIZATION_FACTOR / len(returns)) - 1
+        elif descriptor.metric_key == "max_drawdown":
+            peak, value = equities[0], Decimal(0)
+            for equity in equities[1:]:
+                peak = max(peak, equity)
+                value = max(value, 1 - equity / peak)
+        else:
+            mean = sum(returns) / len(returns)
+            value = (sum((item - mean) ** 2 for item in returns) / (len(returns) - 1) * ANNUALIZATION_FACTOR).sqrt()
+        results.append(MetricResult.available(run_id=state.run_id, spec=spec, metric_key=descriptor.metric_key, formula_version=descriptor.formula_version, unit="ratio", value=value, sample_count=count, extra_metadata=metadata))
+    return tuple(results)
+
+
 #: Built-in v1 producers keyed by exact (analyzer_key, analyzer_version).
 _BUILTIN_PRODUCERS: dict[tuple[str, int], Callable[["_EngineState", AnalyzerSpec], tuple[MetricResult, ...]]] = {
+    ("performance", 1): _produce_performance,
     (SHARPE_SIMPLE_ANALYZER_KEY, 1): _produce_sharpe_simple,
     (PIT_RF_ANALYZER_KEY, 1): _produce_sharpe_pit_rf,
     (CONFIG_RF_ANALYZER_KEY, 1): _produce_sharpe_config_rf,
@@ -1852,7 +1889,27 @@ def build_fee_summary_spec(parameters: Mapping[str, Any] | None = None) -> Analy
     )
 
 
+def build_performance_spec(parameters=None):
+    """One versioned producer for the four basic daily performance metrics."""
+    return AnalyzerSpec(
+        analyzer_key="performance", analyzer_version=1,
+        name_zh="收益与风险", name_en="Return and Risk", parameters=parameters,
+        input_contract=_INPUT_CONTRACT_NO_RATES,
+        output_contract=tuple(MetricOutputDescriptor(
+            metric_key=key, formula_version=formula, unit="ratio",
+            sample_count_semantics="candidate_return_count_including_zero_return_days",
+            unavailable_reason_codes=(ReasonCode.INVALID_EQUITY, ReasonCode.INSUFFICIENT_RETURNS),
+        ) for key, formula in (
+            ("total_return", "total_return_e0_v1"),
+            ("annualized_return", "annualized_return_geometric_252_v1"),
+            ("max_drawdown", "max_drawdown_e0_positive_v1"),
+            ("volatility", "volatility_simple_ddof1_252_v1"),
+        )),
+    )
+
+
 _FROZEN_V1_OUTPUT_CONTRACTS: dict[tuple[str, int], tuple[MetricOutputDescriptor, ...]] = {
+    ("performance", 1): build_performance_spec().output_contract,
     (SHARPE_SIMPLE_ANALYZER_KEY, 1): build_sharpe_simple_spec().output_contract,
     (PIT_RF_ANALYZER_KEY, 1): build_sharpe_pit_rf_spec().output_contract,
     (CONFIG_RF_ANALYZER_KEY, 1): build_sharpe_config_rf_spec().output_contract,

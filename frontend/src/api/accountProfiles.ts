@@ -104,3 +104,8 @@ export function deleteAccountProfile(id: string): Promise<void> {
     method: "DELETE",
   });
 }
+
+/** Resolve historical account configuration without silently using latest. */
+export function listAccountProfileVersions(id: string): Promise<AccountProfile[]> {
+  return request(`/api/admin/backtest-account-profiles/${encodeURIComponent(id)}/versions`);
+}

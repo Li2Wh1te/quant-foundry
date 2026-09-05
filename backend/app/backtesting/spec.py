@@ -180,6 +180,12 @@ class BacktestSpec:
     strategy_revision_id: UUID | None = None
     strategy_parameters: Mapping[str, Any] | None = None
     account_profile_id: UUID | None = None
+    account_profile_version: int | None = None
+    data_cutoff: datetime | None = None
+    # Exact selections are resolved once, then copied into the run binding.
+    component_selections: Mapping[str, ComponentSelection] = field(default_factory=dict)
+    analyzer_selections: Sequence[ComponentSelection] = ()
+    resolved_data_request: Mapping[str, Any] = field(default_factory=dict)
     slippage_model: ComponentSelection = field(default_factory=_default_slippage_model)
     random_seed: int | None = None
     # These values are part of the run input even though the first engine
@@ -193,6 +199,20 @@ class BacktestSpec:
 
     def __post_init__(self) -> None:
         start_date = _plain_date(self.start_date, "start_date")
+        if self.data_cutoff is not None and (
+            not isinstance(self.data_cutoff, datetime)
+            or self.data_cutoff.tzinfo is None or self.data_cutoff.utcoffset() is None
+        ):
+            raise DomainValidationError("data_cutoff must be a timezone-aware datetime")
+        if self.account_profile_version is not None and (type(self.account_profile_version) is not int or self.account_profile_version < 1):
+            raise DomainValidationError("account_profile_version must be positive")
+        if not isinstance(self.component_selections, Mapping) or any(not isinstance(item, ComponentSelection) for item in self.component_selections.values()):
+            raise DomainValidationError("component_selections must contain ComponentSelection values")
+        if any(not isinstance(item, ComponentSelection) for item in self.analyzer_selections):
+            raise DomainValidationError("analyzer_selections must contain ComponentSelection values")
+        object.__setattr__(self, "component_selections", MappingProxyType(dict(self.component_selections)))
+        object.__setattr__(self, "analyzer_selections", tuple(self.analyzer_selections))
+        object.__setattr__(self, "resolved_data_request", _freeze_json(self.resolved_data_request))
         end_date = _plain_date(self.end_date, "end_date")
         if start_date > end_date:
             raise DomainValidationError("start_date cannot be after end_date")

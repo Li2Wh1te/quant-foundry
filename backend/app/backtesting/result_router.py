@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 from sqlalchemy import select
 from app.backtesting.models import BacktestRunRecord
 from app.core.auth import AuthenticatedPrincipal
-from app.backtesting.result_records import BacktestEquityCurveRecord, BacktestMetricRecord
+from app.backtesting.result_records import BacktestEquityCurveRecord, BacktestMetricRecord, BacktestDataPreflightResultRecord
+from app.backtesting.comparison import BacktestComparison, metric_projection, evidence_projection, configuration_difference
 
 from app.backtesting.pagination import (
     DEFAULT_PAGE_SIZE,
@@ -74,7 +75,7 @@ def _owner_scope(request: Request | None) -> str:
     return "default"
 
 
-@compare_router.post("/compare")
+@compare_router.post("/compare", response_model=BacktestComparison)
 def compare_runs(
     payload: dict = Body(...),
     session: Session = Depends(get_db_session),
@@ -82,8 +83,8 @@ def compare_runs(
 ) -> dict[str, object]:
     """Compare persisted formal runs without invoking runtime or analyzers."""
     run_ids = payload.get("run_ids") if isinstance(payload, dict) else None
-    if not isinstance(run_ids, list) or len(run_ids) < 2 or len(run_ids) != len(set(run_ids)):
-        raise HTTPException(status_code=422, detail="run_ids 必须为至少两个不重复的运行 ID")
+    if not isinstance(run_ids, list) or not 2 <= len(run_ids) <= 10 or any(not isinstance(value, str) for value in run_ids) or len(run_ids) != len(set(run_ids)):
+        raise HTTPException(status_code=422, detail="请选择 2 至 10 个不重复的运行 ID")
     try:
         ids = [UUID(str(value)) for value in run_ids]
     except (TypeError, ValueError) as exc:
@@ -124,6 +125,9 @@ def compare_runs(
         equity_by_run.setdefault(row.run_id, []).append(row)
     for row in metric_rows:
         metrics_by_run.setdefault(row.run_id, []).append(row)
+    reports = list(session.scalars(select(BacktestDataPreflightResultRecord).where(
+        BacktestDataPreflightResultRecord.run_id.in_(ids)
+    ).order_by(BacktestDataPreflightResultRecord.run_id, BacktestDataPreflightResultRecord.phase)))
     summaries = []
     curves = []
     drawdowns = []
@@ -133,7 +137,7 @@ def compare_runs(
         points = [{"as_of": row.as_of, "equity": (str(row.equity) if row.equity is not None else None), "drawdown": (str(row.drawdown) if row.drawdown is not None else None), "valuation_status": row.valuation_status} for row in equity_by_run[rid]]
         curves.append({"run_id": str(rid), "points": points})
         drawdowns.append({"run_id": str(rid), "points": [{"as_of": p["as_of"], "drawdown": p["drawdown"], "valuation_status": p["valuation_status"]} for p in points]})
-        metrics.append({"run_id": str(rid), "items": [{"metric_key": row.metric_key, "formula_version": row.formula_version, "value": (str(row.value) if row.value is not None else None), "unit": row.unit, "sample_count": row.sample_count, "unavailable_reason": row.unavailable_reason} for row in metrics_by_run[rid]]})
+        metrics.append({"run_id": str(rid), "items": [metric_projection(row) for row in metrics_by_run[rid]]})
         result_summary = root.result_summary if isinstance(root.result_summary, dict) else {}
         summaries.append({
             "run_id": str(rid),
@@ -146,23 +150,17 @@ def compare_runs(
             "behavior_versions": root.behavior_versions,
             "component_snapshot": result_summary.get("components", {}),
             "random_seed": root.random_seed,
+            "data_evidence": evidence_projection(root, [row for row in reports if row.run_id == rid]),
+            "account_snapshot": (root.backtest_config or {}).get("account", {}),
         })
     # Include a compact, deterministic configuration diff for each run pair;
     # curves/metrics are fetched in batches above, never by invoking runtime.
-    baseline = summaries[0].get("backtest_config") or summaries[0].get("parameters") or {}
     for summary in summaries:
-        current = summary.get("backtest_config") or summary.get("parameters") or {}
-        summary["config_diff"] = {
-            key: {"baseline": baseline.get(key), "current": current.get(key)}
-            for key in sorted(set(baseline) | set(current))
-            if baseline.get(key) != current.get(key)
-        }
-    metric_matrix = []
-    for rid in ids:
-        for row in metrics_by_run[rid]:
-            metric_matrix.append({"metric_key": row.metric_key, "formula_version": row.formula_version, "run_id": str(rid), "value": str(row.value) if row.value is not None else None, "unit": row.unit, "sample_count": row.sample_count, "unavailable_reason": row.unavailable_reason})
-    configuration_diff = [summary["config_diff"] for summary in summaries]
-    return {"summaries": summaries, "equity_curves": curves, "equity_curve_series": curves, "drawdown_curve_series": drawdowns, "metrics": metrics, "metric_matrix": metric_matrix, "configuration_diff": configuration_diff}
+        summary["config_diff"] = configuration_difference(summaries[0], summary)
+    metric_matrix = [metric_projection(row) for rid in ids for row in metrics_by_run[rid]]
+    configuration_diff = [{"run_id": summary["run_id"], "baseline_run_id": summaries[0]["run_id"], "fields": summary["config_diff"]} for summary in summaries]
+    return {"run_summaries": summaries, "summaries": summaries, "equity_curves": curves, "equity_curve_series": curves, "drawdown_curve_series": drawdowns, "metrics": metrics, "metric_matrix": metric_matrix, "configuration_diff": configuration_diff}
+
 
 legacy_router = APIRouter(
     prefix="/api/admin/backtests/{run_id}",
@@ -598,16 +596,16 @@ def _project_preflight_item(
         context = {}
     item.update(
         {
-            "data_cutoff": context.get("data_cutoff"),
-            "cutoff_local_date": context.get("cutoff_local_date"),
-            "include_cutoff_day": context.get("include_cutoff_day"),
-            "knowledge_as_of": context.get("knowledge_as_of"),
-            "pit_profile": context.get("pit_profile"),
-            "profile_version": context.get("profile_version"),
-            "non_strict_pit": pit_summary.get("non_strict_pit") if isinstance(pit_summary, dict) else None,
-            "non_strict_pit_capabilities": pit_summary.get("non_strict_pit_capabilities") if isinstance(pit_summary, dict) else None,
-            "calendar_revision_digest": pit_summary.get("calendar_revision_digest") if isinstance(pit_summary, dict) else None,
-            "snapshot_fingerprint": pit_summary.get("snapshot_fingerprint") if isinstance(pit_summary, dict) else None,
+            "data_cutoff": context.get("data_cutoff", item.get("data_cutoff")),
+            "cutoff_local_date": context.get("cutoff_local_date", item.get("cutoff_local_date")),
+            "include_cutoff_day": context.get("include_cutoff_day", item.get("include_cutoff_day")),
+            "knowledge_as_of": context.get("knowledge_as_of", item.get("knowledge_as_of")),
+            "pit_profile": context.get("pit_profile", item.get("pit_profile")),
+            "profile_version": context.get("profile_version", item.get("profile_version")),
+            "non_strict_pit": item.get("non_strict_pit") if item.get("non_strict_pit") is not None else pit_summary.get("non_strict_pit") if isinstance(pit_summary, dict) else None,
+            "non_strict_pit_capabilities": item.get("non_strict_pit_capabilities") if item.get("non_strict_pit_capabilities") is not None else pit_summary.get("non_strict_pit_capabilities") if isinstance(pit_summary, dict) else None,
+            "calendar_revision_digest": item.get("calendar_revision_digest") if item.get("calendar_revision_digest") is not None else pit_summary.get("calendar_revision_digest") if isinstance(pit_summary, dict) else None,
+            "snapshot_fingerprint": item.get("snapshot_fingerprint") if item.get("snapshot_fingerprint") is not None else pit_summary.get("snapshot_fingerprint") if isinstance(pit_summary, dict) else None,
         }
     )
     return item

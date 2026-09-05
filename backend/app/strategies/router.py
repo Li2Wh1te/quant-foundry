@@ -83,16 +83,8 @@ def strategy_backtest_workspace(
         "metric_decisions": [],
         "checked_at": None,
     }
-    if current is not None:
-        for row in rows:
-            candidate = getattr(row, "formal_gate_evidence", None)
-            if not isinstance(candidate, dict):
-                data_evidence = getattr(row, "data_evidence", {})
-                evidence = data_evidence if isinstance(data_evidence, dict) else {}
-                candidate = evidence.get("formal_gates")
-            if isinstance(candidate, dict) and candidate:
-                formal_gate = candidate
-                break
+    from app.backtesting.component_config import resolve_components
+    components = resolve_components()
     return StrategyBacktestWorkspaceResponse(
         strategy={
             "id": strategy.id, "name": strategy.name, "state": strategy.state,
@@ -112,6 +104,7 @@ def strategy_backtest_workspace(
             )
         ],
         formal_gate=formal_gate,
+        component_options={kind: [value] for kind, value in components.items() if kind not in ("analyzer", "slippage_model")},
         runs={"items": [_run_response(r) for r in rows],
               "next_cursor": page.next_cursor,
               "has_more": page.has_more,

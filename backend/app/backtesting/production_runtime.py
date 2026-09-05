@@ -114,7 +114,9 @@ def _json_value(value: Any) -> Any:
         return {str(k): _json_value(v) for k, v in value.items()}
     if isinstance(value, (tuple, list)):
         return [_json_value(v) for v in value]
-    if isinstance(value, (UUID, date, datetime)):
+    if isinstance(value, UUID):
+        return str(value)
+    if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Decimal):
         return str(value)
@@ -711,9 +713,23 @@ class SqlBacktestProvider:
         if isinstance(request, DataRequest):
             request = self.intent_from_data_request(request)
         calendars = self._calendar_ids(request)
-        bootstrap = self._bootstrap_request(request, calendars)
-        from app.backtesting.data.sessions import AuthoritativeDataSession
-        calendar_report = AuthoritativeDataSession(request=bootstrap, calendar_provider=self.calendar_provider).preflight()
+        from app.backtesting.calendar_axis import CalendarSnapshotRequest
+        from app.backtesting.data.sessions import _snapshot_report, evaluate_calendar_capability_gate
+        # Calendar resolution precedes run admission. Do not manufacture an
+        # admitted DataRequest with placeholder hashes or discard fixed scope
+        # and warmup just to access the authoritative calendar projection.
+        snapshot = self.calendar_provider.open_calendar_snapshot(CalendarSnapshotRequest(
+            calendar_ids=calendars, formal_start=request.requested_window.start_date,
+            formal_end=request.requested_window.end_date, warmup_sessions=request.warmup_sessions,
+            query_boundary=request.query_boundary, instrument_ids=request.fixed_instrument_ids,
+            provider_key=request.provider_key, package_key=request.rule_package.key,
+            package_version=request.rule_package.version,
+        ))
+        capability_issues, capability_evidence = evaluate_calendar_capability_gate(self.calendar_provider, request, snapshot)
+        calendar_report = _snapshot_report(
+            request, snapshot, capability_manifest_version=1,
+            extra_issues=capability_issues, capability_evidence=capability_evidence,
+        )
         expected = tuple(point.session_date for point in calendar_report.resolved_sessions)
         coverage_reports, issues, bars_by_instrument, mappings_by_instrument, source_rows = [], [], {}, {}, []
         trading_status_rows = []
@@ -960,10 +976,6 @@ class SqlBacktestProvider:
             },
             issues=tuple((*calendar_report.issues, *provider_issues)),
         )
-
-    @staticmethod
-    def _bootstrap_request(request, calendars):
-        return DataRequest(provider_key=request.provider_key, requested_window=request.requested_window, frequency=request.frequency, rule_package=request.rule_package, market_scope=request.market_scope, universe_query_policy=request.universe_query_policy, instrument_scope_mode=request.instrument_scope_mode, required_capabilities=request.required_capabilities, strategy_price_bases=request.strategy_price_bases, consistency_mode=request.consistency_mode, consistency_token_contract=request.consistency_token_contract, query_boundary=request.query_boundary, static_instrument_ids=(), resolved_calendar_ids=calendars, resolved_timezone="Asia/Shanghai", admission_calendar_session_signature="0" * 64, admission_preflight_status=PreflightStatus.READY, admission_preflight_hash="0" * 64)
 
     @staticmethod
     def intent_from_data_request(request):
@@ -1357,97 +1369,21 @@ class RuntimeBundle:
     writer: Any
 
 
-def default_components(
-    slippage_model: ComponentSelection | None = None,
-) -> dict[str, Any]:
-    """Return the complete v1 snapshot with the selected registered slippage."""
-
-    selected_slippage = slippage_model or ComponentSelection(
-        "none", 1, {"price_tick": "0.01"}
-    )
-    selections = {
-        TIMING_POLICY_KIND: (
-            "after_close_to_next_open",
-            1,
-            {},
-        ),
-        EXECUTION_MODEL_KIND: (
-            "bar_market",
-            1,
-            {
-                "commission_rate": "0.0003",
-                "commission_minimum": "5",
-            },
-        ),
-        # Formal sizing must use the interpreter that consumes frozen
-        # per-instrument rules, including contract_multiplier.
-        DECISION_INTERPRETER_KIND: (
-            "long_only_target_weights",
-            1,
-            {"weight_sum_tolerance": "0"},
-        ),
-        SLIPPAGE_MODEL_KIND: (
-            selected_slippage.key,
-            selected_slippage.version,
-            dict(selected_slippage.parameters),
-        ),
-    }
-    registry = build_default_component_registry()
-    snapshot: dict[str, Any] = {}
-    for kind, (key, version, requested_parameters) in selections.items():
-        entry = registry.resolve(key, version)
-        if entry.component_kind != kind:
-            raise RegistryError(f"component {key}@{version} is not a {kind}")
-        parameters = dict(requested_parameters)
-        properties = entry.parameter_schema.get("properties", {})
-        if isinstance(properties, Mapping):
-            unknown = set(parameters) - set(properties)
-            if unknown:
-                raise RegistryError(
-                    f"component {key}@{version} has unsupported parameters: "
-                    f"{', '.join(sorted(unknown))}"
-                )
-            for name, definition in properties.items():
-                if (
-                    name not in parameters
-                    and isinstance(definition, Mapping)
-                    and "default" in definition
-                ):
-                    parameters[name] = definition["default"]
-        missing = [
-            name
-            for name in entry.parameter_schema.get("required", ())
-            if name not in parameters
-        ]
-        if missing:
-            raise RegistryError(
-                f"component {key}@{version} is missing parameters: "
-                f"{', '.join(sorted(missing))}"
-            )
-        # Construction validates values after schema defaults are materialized;
-        # the instance is discarded because workers rebuild from the snapshot.
-        entry.construct(parameters)
-        snapshot[kind] = {
-            "key": entry.key,
-            "version": entry.version,
-            "kind": entry.component_kind,
-            "name_zh": entry.name_zh,
-            "name_en": entry.name_en,
-            "display_name": entry.display_name,
-            "parameter_schema": _json_value(entry.parameter_schema),
-            "capabilities": _json_value(entry.capabilities),
-            "parameters": _json_value(parameters),
-        }
-    snapshot[ANALYZER_COMPONENT_KIND] = []
-    return snapshot
+def default_components(slippage_model=None, selections=None, analyzers=()):
+    """Resolve the versioned formal profile through one shared boundary."""
+    from app.backtesting.component_config import resolve_components
+    return _json_value(resolve_components(slippage_model, selections, analyzers))
 
 
-def _account_snapshot(session: Session, profile_id: UUID | None) -> dict[str, Any]:
+def _account_snapshot(session: Session, profile_id: UUID | None, version: int | None = None) -> dict[str, Any]:
     """Resolve one current account and detach every value needed by a run."""
 
     if profile_id is None:
         raise ValueError("account_profile_id is required for a formal run")
-    record = AccountProfileService(session).get(profile_id)
+    service = AccountProfileService(session)
+    if version is None:
+        version = int(service.get(profile_id).version)
+    record = service.get_version(profile_id, version)
     if str(record.status) != "active":
         raise ValueError("selected account profile is not active")
     schedule = fee_schedule_from_record(record)
@@ -1594,7 +1530,7 @@ def binding_from_row(row, *, session: Session | None = None):
     """Rehydrate a binding exclusively from its persisted configuration."""
 
     config = row.backtest_config if isinstance(row.backtest_config, Mapping) else None
-    if not config or config.get("schema_version") not in {1, 2}:
+    if not config or config.get("schema_version") not in {1, 2, 3}:
         raise ValueError("persisted run has no supported frozen configuration snapshot")
     if canonical_hash(config) != row.config_hash:
         raise ValueError("persisted run configuration snapshot hash mismatch")
@@ -1670,8 +1606,25 @@ def binding_from_row(row, *, session: Session | None = None):
             int(slippage_payload.get("version", 1)),
             dict(slippage_payload.get("parameters", {})),
         ),
+        account_profile_version=spec_payload.get("account_profile_version"),
+        data_cutoff=(datetime.fromisoformat(spec_payload["data_cutoff"]) if spec_payload.get("data_cutoff") else None),
+        component_selections={key: ComponentSelection(value["key"], value["version"], value.get("parameters", {})) for key, value in spec_payload.get("component_selections", {}).items()},
+        analyzer_selections=tuple(ComponentSelection(value["key"], value["version"], value.get("parameters", {})) for value in spec_payload.get("analyzer_selections", ())),
+        resolved_data_request=spec_payload.get("resolved_data_request", {}),
         random_seed=config.get("random_seed"),
     )
+    if config["schema_version"] >= 3:
+        # Revalidate cross-field consistency, without resolving mutable catalog
+        # rows. A self-consistent hash alone does not prove valid semantics.
+        from app.backtesting.run_binding import RunBindingBuilder
+        RunBindingBuilder().build(
+            spec, run_kind=row.run_kind, strategy=strategy, components=components,
+            data_request=data_payload, account=account, metadata=metadata,
+            random_seed=config.get("random_seed"),
+        )
+    if row.run_kind == "backtest_run":
+        from app.backtesting.component_config import validate_runtime_policies
+        validate_runtime_policies(components, request, require_all=config["schema_version"] >= 3)
     rule_snapshot_bundle = None
     if session is not None and row.run_kind == "backtest_run":
         provider = SqlBacktestProvider(session)
@@ -1763,6 +1716,72 @@ def _validate_and_persist_session_preflight(
         error.failure_phase = "data_preflight"
         raise error
     return decision
+
+
+def _admit_formal_analysis(spec, components, report, provider, run_id, request=None):
+    """Use the established analyzer coordinator at both creation and startup.
+
+    Initial holdings require genuine pre-open PIT marks. Missing knowledge
+    evidence is never synthesized from the bar's trading date.
+    """
+    from datetime import timedelta
+    from app.backtesting.analysis_admission import admit_analysis_run, build_initial_equity_snapshot
+    from app.backtesting.data.facts import ClosePriceFact
+    selected = components.get("analyzer", ())
+    disabled = tuple(item["key"] for item in selected if item["key"] == "sharpe_pit_rf")
+    active = [item for item in selected if item["key"] not in disabled]
+    if not active:
+        return None
+    registry = build_default_component_registry()
+    axis = TradingDayAxis(report.resolved_sessions)
+    first = next(iter(axis))
+    before_open = first.start_time - timedelta(microseconds=1)
+    if request is not None:
+        before_open = min(before_open, request.query_boundary.data_cutoff)
+    close_facts = []
+    dates = tuple(item.session_date for item in report.warmup_sessions[-1:])
+    if spec.initial_positions and not dates and request is not None:
+        from app.backtesting.calendar_axis import CalendarSnapshotRequest
+        # Resolve one official predecessor independently of strategy warmup.
+        # Use prepare/load on the existing transaction: opening a second
+        # snapshot must not commit the caller's pending run/result writes.
+        calendar_request = CalendarSnapshotRequest(
+            calendar_ids=request.resolved_calendar_ids,
+            formal_start=report.resolved_sessions[0].session_date,
+            formal_end=report.resolved_sessions[0].session_date,
+            warmup_sessions=1, query_boundary=request.query_boundary,
+            instrument_ids=tuple(position.instrument_id for position in spec.initial_positions),
+            provider_key=request.provider_key, package_key=request.rule_package.key,
+            package_version=request.rule_package.version,
+        )
+        calendar = provider.calendar_provider
+        snapshot = calendar.load_calendar_snapshot(calendar.prepare_calendar_snapshot(calendar_request))
+        dates = tuple(item.session_date for item in snapshot.warmup_sessions[-1:])
+    for position in spec.initial_positions:
+        if dates:
+            resolution = provider.adapter.resolve(position.instrument_id, sessions=dates, data_cutoff=before_open)
+            for bar in provider.adapter.bars(position.instrument_id, resolution=resolution).bars:
+                close_facts.append(ClosePriceFact(position.instrument_id, bar.trade_date, bar.close, bar.evidence, currency=spec.currency))
+    # Mark the actual starting portfolio from the same strict facts as E0.
+    # Leaving equity equal to cash would reject every non-empty portfolio or
+    # introduce a false first-day return when the engine starts valuation.
+    initial_snapshot = build_initial_equity_snapshot(
+        run_id=str(run_id), first_formal_session_date=report.resolved_sessions[0].session_date,
+        formal_sessions=tuple(item.session_date for item in report.resolved_sessions),
+        market_open_at=first.start_time, valuation_as_of=before_open, data_cutoff_at=before_open,
+        initial_cash=spec.initial_cash,
+        initial_quantities={item.instrument_id: item.quantity for item in spec.initial_positions},
+        close_facts=close_facts, reporting_currency=spec.currency, accounting_currency=spec.currency,
+    )
+    portfolio = _initial_portfolio(SimpleNamespace(spec=spec), initial_snapshot)
+    return admit_analysis_run(
+        run_id=str(run_id), formal_sessions=tuple(item.session_date for item in report.resolved_sessions),
+        market_open_at=first.start_time, valuation_as_of=before_open, data_cutoff_at=before_open,
+        reporting_currency=spec.currency, accounting_currency=spec.currency,
+        initial_cash=spec.initial_cash, initial_portfolio_state=portfolio,
+        close_facts=close_facts, disabled_analyzers=disabled,
+        analyzer_specs=tuple(registry.resolve(item["key"], item["version"]).construct(item.get("parameters", {})) for item in active),
+    )
 
 
 def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
@@ -1864,6 +1883,7 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
             None,
         )
     )
+    analysis = _admit_formal_analysis(binding.spec, components, data_session.report, provider, binding.run_id, request)
     runner = DeterministicBacktestRunner(
         run_id=str(binding.run_id),
         axis=axis,
@@ -1877,18 +1897,22 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
             settlement_policy=SettlementPolicy.T_PLUS_ONE_BEFORE_OPEN_MATCH,
         ),
         random_seed=binding.random_seed,
-        initial_portfolio=_initial_portfolio(binding),
+        initial_portfolio=_initial_portfolio(binding, analysis.initial_equity_snapshot if analysis else None),
         settlement_calendar=settlement,
         corporate_actions=corporate_actions,
         fixed_authorized_instrument_ids=request.fixed_instrument_ids,
         rule_snapshot_bundle=rule_snapshot_bundle,
         result_sink=writer,
         progress_sink=progress_reporter,
+        analysis_admission=analysis,
+        pit_data_gateway=SimpleNamespace(
+            data_cutoff_at=lambda *, session_date, as_of: min(as_of, request.query_boundary.data_cutoff)
+        ),
     )
     return RuntimeBundle(runner, data_session, writer)
 
 
-def _initial_portfolio(binding):
+def _initial_portfolio(binding, initial_snapshot=None):
     positions = {
         item.instrument_id: PositionState(
             instrument_id=item.instrument_id,
@@ -1900,6 +1924,11 @@ def _initial_portfolio(binding):
         for item in binding.spec.initial_positions
     }
     cash = Decimal(str(binding.spec.initial_cash))
+    if initial_snapshot is not None:
+        for holding in initial_snapshot.holdings:
+            position = positions[holding.instrument_id]
+            position.mark_price = holding.close_price
+            position.unrealized_pnl = (holding.close_price - position.average_price) * position.quantity
     return PortfolioState(
         account=AccountState(
             cash_balances={binding.spec.currency: cash},
@@ -1907,9 +1936,9 @@ def _initial_portfolio(binding):
             frozen_cash=0,
             margin_used=0,
             margin_available=0,
-            equity=cash,
+            equity=initial_snapshot.equity_e0 if initial_snapshot is not None else cash,
         ),
-        as_of=datetime.combine(
+        as_of=initial_snapshot.market_open_at if initial_snapshot is not None else datetime.combine(
             binding.spec.start_date,
             time(9, 30),
             tzinfo=ZoneInfo(binding.spec.timezone),
@@ -2005,6 +2034,8 @@ def build_formal_binding(
 
     if spec.strategy_revision_id != revision.id:
         raise ValueError("strategy revision does not match the immutable run spec")
+    if spec.dynamic_universe:
+        raise ValueError("the SQL daily profile requires an explicit fixed instrument scope")
     provider = SqlBacktestProvider(session)
     ids = tuple(
         sorted(
@@ -2015,7 +2046,9 @@ def build_formal_binding(
             key=str,
         )
     )
-    cutoff = datetime.now(UTC)
+    cutoff = spec.data_cutoff or datetime.now(UTC)
+    if cutoff > datetime.now(UTC):
+        raise ValueError("data_cutoff cannot be in the future")
     intent = DataPreflightRequest(
         provider_key=provider.provider_key,
         requested_window=DateRange(spec.start_date, spec.end_date),
@@ -2111,6 +2144,7 @@ def build_formal_binding(
         timezone=frozen.resolved_timezone,
         frequency=frozen.frequency,
         warmup_sessions=frozen.warmup_sessions,
+        data_cutoff=frozen.query_boundary.data_cutoff,
     )
 
     from app.backtesting.run_binding import RunBindingBuilder
@@ -2137,8 +2171,11 @@ def build_formal_binding(
             "is_draft": False,
         }
     )
-    account = _account_snapshot(session, spec.account_profile_id)
-    components = default_components(spec.slippage_model)
+    account = _account_snapshot(session, spec.account_profile_id, spec.account_profile_version)
+    components = default_components(spec.slippage_model, spec.component_selections, spec.analyzer_selections)
+    _admit_formal_analysis(spec, components, outcome.outcome.report, provider, "00000000-0000-4000-8000-000000000000", frozen)
+    from app.backtesting.component_config import selections_from_snapshot
+    spec = replace(spec, account_profile_version=int(account["version"]), component_selections=selections_from_snapshot(components), analyzer_selections=tuple(ComponentSelection(item["key"], item["version"], item.get("parameters", {})) for item in components["analyzer"]), resolved_data_request=serialize_data_request(frozen))
     resolved_slippage = components[SLIPPAGE_MODEL_KIND]
     spec = replace(
         spec,
@@ -2158,6 +2195,7 @@ def build_formal_binding(
     gate_decision, formal_gate_evidence = RunAdmissionService().evaluate_gates(
         run_kind="backtest_run",
         checks=gate_checks,
+        metric_checks={item["key"]: item["key"] != "sharpe_pit_rf" for item in components.get("analyzer", [])},
         report_hash=outcome.report_hash,
         report_status=outcome.outcome.status,
         issues=outcome.outcome.report.issues,
@@ -2176,6 +2214,7 @@ def build_formal_binding(
         "admission_qualification_hash": outcome.outcome.report_hash,
         "data_evidence": _json_value(outcome.outcome.as_dict()),
         "data_preflight_status": frozen.admission_preflight_status.value,
+        "disabled_metrics": list(gate_decision.disabled_metrics),
         "behavior_versions": _behavior_versions(
             data_request=frozen,
             components=components,
