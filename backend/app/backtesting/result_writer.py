@@ -416,6 +416,51 @@ class BacktestResultPersistenceService:
 
         return self.persist_runtime_result(result, commit=True)
 
+    def persist_session_preflight(self, outcome: Any, *, commit: bool = True) -> int:
+        """Persist the Worker's authoritative preflight and root hash pointer.
+
+        Admission evidence is immutable input, while this session report is
+        runtime evidence.  The existing root columns deliberately keep those
+        hashes separate, and the phase-keyed result table retains the complete
+        report needed by operators and result APIs.
+        """
+
+        from app.backtesting.data.preflight_service import DataPreflightService
+
+        root = self._root()
+        session_hash = getattr(outcome, "base_report_hash", None)
+        if not isinstance(session_hash, str) or not session_hash:
+            raise ValueError("session preflight must expose a base report hash")
+        existing_hash = root.data_preflight_hash
+        # Older queued rows initialized this field with the admission hash.
+        # Permit that one legacy placeholder to advance, but never replace a
+        # different session hash after authoritative evidence was committed.
+        if existing_hash not in (
+            None,
+            root.data_admission_preflight_hash,
+            session_hash,
+        ):
+            raise ValueError("authoritative session preflight hash is immutable")
+
+        transaction = self.session.begin_nested()
+        try:
+            added = DataPreflightService.persist_session_report(
+                self.repository,
+                run_id=self.context.run_id,
+                outcome=outcome,
+            )
+            root.data_preflight_hash = session_hash
+            self.session.flush()
+            transaction.commit()
+        except Exception:
+            transaction.rollback()
+            raise
+        if commit:
+            # The evidence must survive a later strategy/runtime failure;
+            # execute_runtime may roll back its remaining unit of work.
+            self.session.commit()
+        return added
+
     def persist_data_chunk_evidence(
         self,
         evidence: Any,

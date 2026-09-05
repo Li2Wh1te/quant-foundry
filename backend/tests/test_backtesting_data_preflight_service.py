@@ -642,6 +642,31 @@ class PreflightServiceTestCase(unittest.TestCase):
             {issue.code for issue in outcome.report.issues},
         )
 
+    def test_worker_session_binds_persisted_admission_reference(self) -> None:
+        service = DataPreflightService(FakeProvider(self.base_report))
+        admission_hash = "a" * 64
+
+        decision = service.validate_session(
+            PreflightContext(
+                request=intent(),
+                provider=FakeProvider(self.base_report),
+            ),
+            admission_report_hash=admission_hash,
+            admission_status=PreflightStatus.READY,
+        )
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.admission_report_hash, admission_hash)
+        self.assertEqual(
+            decision.outcome.session_report_hash,
+            decision.report_diff[0]["session_value"],
+        )
+        self.assertFalse(decision.outcome.hash_match)
+        self.assertEqual(
+            decision.outcome.report_diff[0]["reason_code"],
+            "data_preflight_report_hash_mismatch",
+        )
+
     def test_session_hash_change_blocks_before_strategy_loader(self) -> None:
         page_provider = FakeProvider(self.base_report)
         service = DataPreflightService(page_provider)
@@ -706,6 +731,18 @@ class PreflightPersistenceTestCase(unittest.TestCase):
             dto = outcome.to_result_record(run_id, "admission")
             self.assertEqual(dto.admission_report_hash, outcome.report_hash)
             repository.append("data_preflight", dto)
+            session_outcome = replace(
+                outcome,
+                admission_report_hash=outcome.report_hash,
+                session_report_hash=outcome.report_hash,
+                hash_match=True,
+            )
+            DataPreflightService.persist_session_report(
+                repository,
+                run_id=run_id,
+                outcome=session_outcome,
+                admission=outcome,
+            )
             with self.assertRaises(InternalResultNotVisibleError):
                 repository.read_page("data_preflight", run_id=run_id)
             for query_context in (
@@ -723,11 +760,28 @@ class PreflightPersistenceTestCase(unittest.TestCase):
             page = repository.read_page(
                 "data_preflight", run_id=run_id, include_internal=True
             )
-            self.assertEqual(len(page.items), 1)
-            item = BacktestDataPreflightItem.model_validate(page.items[0])
-            self.assertEqual(item.run_kind, "internal_link_acceptance")
-            self.assertEqual(item.preflight_profile, "internal_link_acceptance@1")
-            self.assertIn("内部链路验收", item.title)
+            self.assertEqual(len(page.items), 2)
+            items = [
+                BacktestDataPreflightItem.model_validate(value)
+                for value in page.items
+            ]
+            self.assertEqual(
+                [item.phase for item in items],
+                ["admission", "session"],
+            )
+            self.assertTrue(items[1].hash_match)
+            self.assertEqual(items[1].admission_report_hash, outcome.report_hash)
+            self.assertEqual(items[1].session_report_hash, outcome.report_hash)
+            self.assertTrue(
+                all(item.run_kind == "internal_link_acceptance" for item in items)
+            )
+            self.assertTrue(
+                all(
+                    item.preflight_profile == "internal_link_acceptance@1"
+                    for item in items
+                )
+            )
+            self.assertTrue(all("内部链路验收" in item.title for item in items))
         finally:
             session.close()
             engine.dispose()

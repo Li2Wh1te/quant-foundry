@@ -103,10 +103,20 @@ def test_build_runtime_freezes_corporate_actions_from_the_open_data_session():
         captured.append((snapshot_session, snapshot_request))
         raise SnapshotReached
 
-    binding = SimpleNamespace(data_request=object())
+    binding = SimpleNamespace(
+        run_id=uuid4(),
+        run_kind="backtest_run",
+        profile="formal@1",
+        config_hash="a" * 64,
+        owner_scope="owner-a",
+        data_request=object(),
+    )
     with (
         patch("app.backtesting.production_runtime.deserialize_data_request", return_value=request),
         patch("app.backtesting.production_runtime.SqlBacktestProvider", return_value=provider),
+        patch(
+            "app.backtesting.production_runtime._validate_and_persist_session_preflight"
+        ) as validate_preflight,
         patch(
             "app.backtesting.production_runtime._corporate_action_snapshot",
             side_effect=capture,
@@ -126,6 +136,7 @@ def test_build_runtime_freezes_corporate_actions_from_the_open_data_session():
             raise AssertionError("build_runtime did not build a corporate-action snapshot")
 
     assert captured == [(data_session, request)]
+    validate_preflight.assert_called_once()
 
 
 def test_frozen_data_request_round_trips_through_the_worker_snapshot():

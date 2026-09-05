@@ -2393,90 +2393,118 @@ class DataPreflightService:
         context: PreflightContext | DataPreflightRequest | object,
         *,
         admission: AdmissionDecision | PreflightOutcome | None = None,
+        admission_report_hash: str | None = None,
+        admission_status: PreflightStatus | str | None = None,
         **overrides: object,
     ) -> SessionPreflightDecision:
-        """Re-run authoritative preflight before any strategy load/call."""
+        """Re-run authoritative preflight before any strategy load/call.
+
+        A queued Worker normally has only the persisted admission hash and
+        status, not the API process's in-memory ``PreflightOutcome``.  The
+        explicit reference fields let that Worker bind its authoritative
+        session report to the original admission without reconstructing a
+        typed report from JSON.
+        """
 
         page_outcome = admission.outcome if isinstance(admission, AdmissionDecision) else admission
-        outcome = self.preflight(context, authoritative=True, **overrides)
-        admission_hash = page_outcome.report_hash if page_outcome is not None else None
-        hash_match = None if admission_hash is None else admission_hash == outcome.report_hash
+        if page_outcome is not None and admission_report_hash is not None:
+            if page_outcome.report_hash != admission_report_hash:
+                raise InvalidDataRequestError(
+                    "admission outcome and admission_report_hash do not match"
+                )
+        if page_outcome is not None:
+            admission_report_hash = page_outcome.report_hash
+            admission_status = page_outcome.status
+        elif admission_status is not None and not isinstance(
+            admission_status, PreflightStatus
+        ):
+            try:
+                admission_status = PreflightStatus(str(admission_status))
+            except ValueError as exc:
+                raise InvalidDataRequestError(
+                    "admission_status must be a PreflightStatus"
+                ) from exc
+        if admission_report_hash is not None and (
+            not isinstance(admission_report_hash, str)
+            or not admission_report_hash.strip()
+        ):
+            raise InvalidDataRequestError(
+                "admission_report_hash must be non-blank text"
+            )
+
+        raw_outcome = self.preflight(context, authoritative=True, **overrides)
+        admission_hash = admission_report_hash
+        session_hash = raw_outcome.report_hash
+        hash_match = (
+            None if admission_hash is None else admission_hash == session_hash
+        )
+        report = raw_outcome.report
         report_diff: tuple[Mapping[str, object], ...] = ()
-        if page_outcome is not None and page_outcome.blocked:
+
+        if admission_status is PreflightStatus.BLOCKED:
             # A blocked page gate cannot be revived by a later session read,
             # even if the underlying provider now happens to report ready.
-            blocked_issue = _issue(
-                "data_preflight_blocked",
-                "页面准入预检未通过，会话不能重新放行该运行。",
-                field="admission_report",
-                details={"admission_report_hash": admission_hash},
-            )
-            outcome = PreflightOutcome(
-                report=_with_report_issues(outcome.report, (blocked_issue,)),
-                profile=outcome.profile,
-                fixed_instrument_ids=outcome.fixed_instrument_ids,
-                dynamic_scope=outcome.dynamic_scope,
-                fixtures=outcome.fixtures,
-                initial_position_report=outcome.initial_position_report,
-                admission_report_hash=admission_hash,
-                session_report_hash=outcome.report_hash,
-                hash_match=False,
-                failure_phase="data_preflight",
+            report = _with_report_issues(
+                report,
+                (
+                    _issue(
+                        "data_preflight_blocked",
+                        "页面准入预检未通过，会话不能重新放行该运行。",
+                        field="admission_report",
+                        details={"admission_report_hash": admission_hash},
+                    ),
+                ),
             )
             hash_match = False
-        if admission_hash is not None and not hash_match:
-            session_hash_before_block = outcome.report_hash
+
+        if admission_hash is not None and hash_match is False:
             report_diff = (
                 MappingProxyType(
                     {
                         "section": "preflight",
                         "field": "report_hash",
                         "page_value": admission_hash,
-                        "session_value": outcome.report_hash,
+                        "session_value": session_hash,
                         "reason_code": "data_preflight_report_hash_mismatch",
                     }
                 ),
             )
             # A hash change is informational when the authoritative session
-            # is ready (the session report is the final source of truth).
-            # It is a hard failure only when the session remains degraded and
-            # therefore requires the page's exact degraded confirmation.
-            if outcome.status is PreflightStatus.DEGRADED:
+            # is ready.  A degraded session still requires confirmation of
+            # this exact report and therefore becomes blocked on mismatch.
+            if raw_outcome.status is PreflightStatus.DEGRADED:
                 report = _with_report_issues(
-                    outcome.report,
-                    (_issue("data_preflight_report_hash_mismatch", "会话权威预检与页面准入报告不一致，已阻断回测。", field="report_hash", details=dict(report_diff[0])),),
+                    report,
+                    (
+                        _issue(
+                            "data_preflight_report_hash_mismatch",
+                            "会话权威预检与页面准入报告不一致，已阻断回测。",
+                            field="report_hash",
+                            details=dict(report_diff[0]),
+                        ),
+                    ),
                 )
-                outcome = PreflightOutcome(
-                    report=report, profile=outcome.profile,
-                    fixed_instrument_ids=outcome.fixed_instrument_ids,
-                    dynamic_scope=outcome.dynamic_scope, fixtures=outcome.fixtures,
-                    initial_position_report=outcome.initial_position_report,
-                    admission_report_hash=admission_hash,
-                    session_report_hash=session_hash_before_block,
-                    hash_match=False, report_diff=report_diff,
-                    failure_phase="data_preflight",
-                )
-        else:
-            outcome = PreflightOutcome(
-                report=outcome.report,
-                profile=outcome.profile,
-                fixed_instrument_ids=outcome.fixed_instrument_ids,
-                dynamic_scope=outcome.dynamic_scope,
-                fixtures=outcome.fixtures,
-                initial_position_report=outcome.initial_position_report,
-                admission_report_hash=admission_hash,
-                session_report_hash=outcome.report_hash,
-                hash_match=hash_match,
-                failure_phase="data_preflight" if outcome.blocked else None,
-            )
-        # A degraded report is executable only when the page explicitly
-        # confirmed the exact same hash; ready remains executable regardless
-        # of a hash change because the session report is authoritative.
-        page_degraded = page_outcome is not None and page_outcome.status is PreflightStatus.DEGRADED
+
+        # A degraded report is executable only when it still matches the
+        # confirmed admission report.  A ready session is authoritative and
+        # may proceed after recording an informational hash difference.
         allowed = (
-            outcome.status in (PreflightStatus.READY, PreflightStatus.DEGRADED)
-            and (hash_match is not False or outcome.status is PreflightStatus.READY)
-            and (outcome.status is PreflightStatus.READY or hash_match is True)
+            admission_status is not PreflightStatus.BLOCKED
+            and report.status in (PreflightStatus.READY, PreflightStatus.DEGRADED)
+            and (report.status is PreflightStatus.READY or hash_match is True)
+        )
+        outcome = PreflightOutcome(
+            report=report,
+            profile=raw_outcome.profile,
+            fixed_instrument_ids=raw_outcome.fixed_instrument_ids,
+            dynamic_scope=raw_outcome.dynamic_scope,
+            fixtures=raw_outcome.fixtures,
+            initial_position_report=raw_outcome.initial_position_report,
+            admission_report_hash=admission_hash,
+            session_report_hash=session_hash,
+            hash_match=hash_match,
+            report_diff=report_diff,
+            failure_phase=None if allowed else "data_preflight",
         )
         return SessionPreflightDecision(
             allowed=allowed,

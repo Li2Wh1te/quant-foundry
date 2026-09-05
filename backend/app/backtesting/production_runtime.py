@@ -31,7 +31,11 @@ from app.backtesting.fees import FeeCalculator, FeeRule, FeeSchedule
 from app.backtesting.data.adapters.etf import ETF_PROVIDER_KEY, EtfFactsAdapter
 from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
 from app.backtesting.calendar_models import CalendarResolutionHeadRecord
-from app.backtesting.data.errors import ProviderContractViolationError, UnsupportedCapabilityError
+from app.backtesting.data.errors import (
+    DataPreflightBlockedError,
+    ProviderContractViolationError,
+    UnsupportedCapabilityError,
+)
 from app.backtesting.data.protocols import (
     ConsistencyTokenStatus,
     DataCapabilityManifest,
@@ -1056,6 +1060,24 @@ class SqlBacktestSession:
         )
         self._state = "ready" if ready else "blocked"
         return self._report
+
+    def apply_preflight_decision(self, decision):
+        """Make the service-qualified report authoritative for all chunk reads."""
+
+        report = getattr(getattr(decision, "outcome", None), "report", None)
+        if not isinstance(report, DataPreflightReport):
+            raise ProviderContractViolationError(
+                "session preflight decision has no valid report"
+            )
+        self._report = report
+        self._resolved_sessions = report.resolved_sessions
+        self._warmup_sessions = report.warmup_sessions
+        ready = bool(getattr(decision, "allowed", False))
+        self._revision_vector = (
+            self.provider._database_revision_vector() if ready else None
+        )
+        self._state = "ready" if ready else "blocked"
+
     def open_chunk(self, query):
         if self._state != "ready":
             raise ProviderContractViolationError(
@@ -1676,6 +1698,73 @@ def binding_from_row(row, *, session: Session | None = None):
     )
 
 
+def _validate_and_persist_session_preflight(
+    binding,
+    *,
+    provider: SqlBacktestProvider,
+    data_session: SqlBacktestSession,
+    request: DataRequest,
+    writer: BacktestResultPersistenceService,
+) -> object:
+    """Persist the final data qualification observed by the isolated Worker."""
+
+    from app.backtesting.data.preflight_service import (
+        DataPreflightService,
+        PreflightContext,
+    )
+
+    raw_report = data_session.preflight()
+    metadata = binding.metadata if isinstance(binding.metadata, Mapping) else {}
+    admission_evidence = metadata.get("data_evidence", {})
+    admission_hash = metadata.get("admission_qualification_hash")
+    if admission_hash is None and isinstance(admission_evidence, Mapping):
+        # Compatibility for queued bindings created before the explicit
+        # metadata field was introduced; their immutable evidence already
+        # contains the same profile-bound qualification hash.
+        admission_hash = admission_evidence.get("report_hash")
+    if (
+        not isinstance(admission_hash, str)
+        or len(admission_hash) != 64
+        or any(character not in "0123456789abcdef" for character in admission_hash)
+    ):
+        raise ProviderContractViolationError(
+            "formal run is missing its admission qualification hash"
+        )
+
+    service = DataPreflightService(provider, profile=binding.profile)
+    decision = service.validate_session(
+        PreflightContext(
+            request=request,
+            provider=provider,
+            session=data_session,
+            profile=binding.profile,
+            run_kind=binding.run_kind,
+            spec=binding.spec,
+            initial_position_gateway=provider,
+            base_report=raw_report,
+        ),
+        admission_report_hash=admission_hash,
+        admission_status=request.admission_preflight_status,
+    )
+    data_session.apply_preflight_decision(decision)
+    # Commit this evidence before any strategy call.  A later rollback caused
+    # by strategy/runtime failure must not erase what the Worker actually saw.
+    writer.persist_session_preflight(decision.outcome, commit=True)
+    if not decision.allowed:
+        error = DataPreflightBlockedError(
+            "authoritative session preflight blocked execution",
+            details={
+                "admission_report_hash": decision.admission_report_hash,
+                "session_report_hash": decision.outcome.session_report_hash,
+                "hash_match": decision.hash_match,
+                "reason_code": decision.outcome.report.primary_issue_code,
+            },
+        )
+        error.failure_phase = "data_preflight"
+        raise error
+    return decision
+
+
 def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, progress_reporter=None):
     """Build the worker runtime from persisted, immutable run inputs."""
 
@@ -1683,7 +1772,24 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
     request = deserialize_data_request(binding.data_request)
     provider = SqlBacktestProvider(session)
     data_session = provider.open_session(request)
-    data_session.preflight()
+    writer = BacktestResultPersistenceService(
+        session,
+        BacktestResultContext(
+            run_id=UUID(str(binding.run_id)),
+            run_kind=binding.run_kind,
+            profile=binding.profile,
+            config_hash=binding.config_hash,
+            owner_scope=binding.owner_scope,
+            launch_id=launch_id,
+        ),
+    )
+    _validate_and_persist_session_preflight(
+        binding,
+        provider=provider,
+        data_session=data_session,
+        request=request,
+        writer=writer,
+    )
     corporate_actions = _corporate_action_snapshot(data_session, request)
     axis = TradingDayAxis(data_session.resolved_sessions)
     registry = build_default_component_registry()
@@ -1737,17 +1843,6 @@ def build_runtime(binding, *, session, launch_id, strategy_module, worker_id, pr
             )
 
     view = SqlRuntimeViewFactory(provider, data_session, request)
-    writer = BacktestResultPersistenceService(
-        session,
-        BacktestResultContext(
-            run_id=UUID(str(binding.run_id)),
-            run_kind=binding.run_kind,
-            profile=binding.profile,
-            config_hash=binding.config_hash,
-            owner_scope=binding.owner_scope,
-            launch_id=launch_id,
-        ),
-    )
     strategy = __import__(
         "app.strategy_protocol.adapter", fromlist=["FunctionStrategyAdapter"]
     ).FunctionStrategyAdapter(
@@ -1854,9 +1949,9 @@ def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, 
                 analysis_session_factory=lambda: Session(bind=session.get_bind()),
             )
         session.commit()
-        rows = BacktestResultRepository(session).read_integrity_rows(
-            UUID(str(binding.run_id))
-        )
+        rows = BacktestResultRepository(
+            session, cursor_signing_key="worker-integrity"
+        ).read_integrity_rows(UUID(str(binding.run_id)))
         return {
             "category": "succeeded",
             "integrity": compute_result_integrity(
@@ -1873,9 +1968,9 @@ def execute_runtime(binding, *, session, launch_id, strategy_module, worker_id, 
             session.rollback()
         except Exception:
             pass
-        rows = BacktestResultRepository(session).read_integrity_rows(
-            UUID(str(binding.run_id))
-        )
+        rows = BacktestResultRepository(
+            session, cursor_signing_key="worker-integrity"
+        ).read_integrity_rows(UUID(str(binding.run_id)))
         evidence = build_failure_evidence(exc, default_phase="backtest_execution")
         return {
             "category": "failed",
@@ -2075,7 +2170,10 @@ def build_formal_binding(
         )
     metadata = {
         "admission_report_hash": frozen.admission_preflight_hash,
-        "preflight_hash": frozen.admission_preflight_hash,
+        # This profile-bound hash lets the isolated Worker compare its
+        # session outcome without reconstructing a typed admission report from
+        # the JSON audit projection.
+        "admission_qualification_hash": outcome.outcome.report_hash,
         "data_evidence": _json_value(outcome.outcome.as_dict()),
         "data_preflight_status": frozen.admission_preflight_status.value,
         "behavior_versions": _behavior_versions(

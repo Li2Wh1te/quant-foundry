@@ -502,7 +502,10 @@ class DatabaseRunRepository:
                 data_request.get("data_chunk_size_sessions", 20)
             ),
             data_admission_preflight_hash=metadata.get("admission_report_hash"),
-            data_preflight_hash=metadata.get("preflight_hash"),
+            # The Worker owns the authoritative session hash.  Leaving it
+            # empty here prevents admission evidence from masquerading as the
+            # report that was actually observed when execution started.
+            data_preflight_hash=None,
             account_profile_id=(
                 str(account.get("profile_id", account.get("account_profile_id")))
                 if account.get("profile_id", account.get("account_profile_id"))
@@ -616,6 +619,12 @@ class DatabaseRunRepository:
         if limit is None or queued >= limit:
             raise self._capacity_error(FORMAL_KIND, queued)
 
+        data_evidence = _json_value(original.data_evidence)
+        if isinstance(data_evidence, dict):
+            # A rerun reuses immutable admission evidence, never the previous
+            # Worker's execution-time report.
+            data_evidence.pop("session_preflight", None)
+
         row = BacktestRunRecord(
             id=uuid4(),
             tenant_id=owner_scope,
@@ -634,7 +643,7 @@ class DatabaseRunRepository:
             initial_cash=original.initial_cash,
             initial_positions=_json_value(original.initial_positions),
             data_request=_json_value(original.data_request),
-            data_evidence=_json_value(original.data_evidence),
+            data_evidence=data_evidence,
             formal_gate_evidence=_json_value(original.formal_gate_evidence),
             pit_snapshot_hash=original.pit_snapshot_hash,
             pit_cutoff_at=original.pit_cutoff_at,
@@ -644,7 +653,7 @@ class DatabaseRunRepository:
             data_chunk_policy_version=original.data_chunk_policy_version,
             data_chunk_size_sessions=original.data_chunk_size_sessions,
             data_admission_preflight_hash=original.data_admission_preflight_hash,
-            data_preflight_hash=original.data_preflight_hash,
+            data_preflight_hash=None,
             account_profile_id=original.account_profile_id,
             account_profile_version=original.account_profile_version,
             fee_schedule_key=original.fee_schedule_key,

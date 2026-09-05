@@ -1,6 +1,7 @@
 from datetime import date, datetime, timezone
 from decimal import Decimal
 from types import SimpleNamespace
+from unittest.mock import patch
 from uuid import uuid4
 
 from app.backtesting.result_writer import (
@@ -108,6 +109,80 @@ def test_runtime_projection_preserves_event_and_point_in_time_valuation() -> Non
     assert batch.orders[0].decision_id == decision_id
     assert batch.component_snapshot["time_axis"]["key"] == "trading_day"
     assert batch.result_summary["random_seed"] == 17
+
+
+def test_session_preflight_is_committed_and_advances_the_root_hash() -> None:
+    events = []
+    transaction = SimpleNamespace(
+        commit=lambda: events.append("savepoint_commit"),
+        rollback=lambda: events.append("savepoint_rollback"),
+    )
+    session = SimpleNamespace(
+        begin_nested=lambda: transaction,
+        flush=lambda: events.append("flush"),
+        commit=lambda: events.append("commit"),
+    )
+    run_id = uuid4()
+    admission_hash = "a" * 64
+    session_hash = "b" * 64
+    root = SimpleNamespace(
+        data_admission_preflight_hash=admission_hash,
+        # Legacy queued rows used the admission hash as a placeholder.
+        data_preflight_hash=admission_hash,
+    )
+    outcome = SimpleNamespace(base_report_hash=session_hash)
+    writer = BacktestResultPersistenceService(
+        session,
+        BacktestResultContext(
+            run_id=run_id,
+            run_kind="backtest_run",
+            profile="formal@1",
+            config_hash="c" * 64,
+            launch_id=uuid4(),
+        ),
+    )
+    writer._root = lambda: root
+
+    with patch(
+        "app.backtesting.data.preflight_service.DataPreflightService.persist_session_report",
+        return_value=1,
+    ) as persist:
+        assert writer.persist_session_preflight(outcome) == 1
+
+    persist.assert_called_once_with(
+        writer.repository,
+        run_id=run_id,
+        outcome=outcome,
+    )
+    assert root.data_preflight_hash == session_hash
+    assert events == ["flush", "savepoint_commit", "commit"]
+
+
+def test_session_preflight_cannot_replace_committed_authoritative_hash() -> None:
+    root = SimpleNamespace(
+        data_admission_preflight_hash="a" * 64,
+        data_preflight_hash="b" * 64,
+    )
+    writer = BacktestResultPersistenceService(
+        SimpleNamespace(),
+        BacktestResultContext(
+            run_id=uuid4(),
+            run_kind="backtest_run",
+            profile="formal@1",
+            config_hash="c" * 64,
+            launch_id=uuid4(),
+        ),
+    )
+    writer._root = lambda: root
+
+    try:
+        writer.persist_session_preflight(
+            SimpleNamespace(base_report_hash="d" * 64)
+        )
+    except ValueError as exc:
+        assert str(exc) == "authoritative session preflight hash is immutable"
+    else:
+        raise AssertionError("committed session preflight hash was replaced")
 
 
 def test_component_snapshot_is_written_to_the_durable_run_summary() -> None:
