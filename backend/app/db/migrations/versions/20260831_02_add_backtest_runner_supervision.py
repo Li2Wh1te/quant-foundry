@@ -81,7 +81,7 @@ def _drop_constraint_if_present(bind, table: str, name: str) -> None:
     for item in sa.inspect(bind).get_check_constraints(table):
         actual_name = item.get("name")
         if actual_name == name or actual_name == f"ck_{table}_{name}":
-            op.drop_constraint(actual_name, table, type_="check")
+            op.execute(sa.text(f'ALTER TABLE "{table}" DROP CONSTRAINT IF EXISTS "{actual_name}"'))
             return
 
 
