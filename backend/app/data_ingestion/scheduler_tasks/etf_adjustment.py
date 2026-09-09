@@ -166,6 +166,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     """Register the three market-level factor synchronization task types."""
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_adjustment_incremental",
             name="ETF复权因子增量采集",
             english_name="Incremental Tushare ETF adjustment factors",
@@ -175,6 +176,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     )
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_adjustment_full",
             name="ETF复权因子全量采集",
             english_name="Full Tushare ETF adjustment factors",
@@ -184,6 +186,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     )
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_adjustment_reconciliation",
             name="ETF复权因子近期校验",
             english_name="Reconcile recent Tushare ETF adjustment factors",

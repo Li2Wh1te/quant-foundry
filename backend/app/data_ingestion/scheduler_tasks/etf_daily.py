@@ -152,6 +152,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     """Register independently checkpointed ETF daily-bar task types."""
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_daily_incremental",
             name="ETF日线增量采集",
             english_name="Incremental Tushare ETF daily bars",
@@ -161,6 +162,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     )
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_daily_full",
             name="ETF日线全量采集",
             english_name="Full Tushare ETF daily bars",
