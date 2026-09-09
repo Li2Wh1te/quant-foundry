@@ -60,12 +60,15 @@ class ServerTestCase(unittest.TestCase):
 
         with (
             patch("app.main.configure_logging") as configure_logging,
+            patch("app.main.initialize_sources") as initialize_sources,
             patch("app.main.dispose_engine") as dispose_engine,
             patch("app.main.SchedulerRuntime") as scheduler_runtime,
         ):
             asyncio.run(run_lifespan())
 
         configure_logging.assert_called_once_with(settings)
+        initialize_sources.assert_called_once()
+        self.assertIs(initialize_sources.call_args.args[1], settings)
         configure_logging.return_value.stop.assert_called_once_with()
         scheduler_runtime.assert_called_once_with(settings)
         scheduler_runtime.return_value.start.assert_called_once_with()
@@ -86,6 +89,7 @@ class ServerTestCase(unittest.TestCase):
 
         with (
             patch("app.main.configure_logging") as configure_logging,
+            patch("app.main.initialize_sources"),
             patch("app.main.dispose_engine") as dispose_engine,
             patch("app.main.SchedulerRuntime") as scheduler_runtime,
         ):
@@ -98,6 +102,22 @@ class ServerTestCase(unittest.TestCase):
         scheduler_runtime.return_value.stop.assert_called_once_with()
         dispose_engine.assert_called_once_with()
         configure_logging.return_value.stop.assert_called_once_with()
+
+    def test_source_migration_failure_prevents_scheduler_start_and_cleans_up(self):
+        app = create_app(Settings(api_token=API_TOKEN, database_password="test", _env_file=None))
+        async def run_lifespan():
+            async with app.router.lifespan_context(app):
+                self.fail("failed credential migration must prevent startup")
+        with (patch("app.main.initialize_sources", side_effect=RuntimeError("migration failed")),
+              patch("app.main.configure_logging") as logging,
+              patch("app.main.dispose_engine") as dispose,
+              patch("app.main.SchedulerRuntime") as scheduler):
+            with self.assertRaisesRegex(RuntimeError, "migration failed"):
+                asyncio.run(run_lifespan())
+        scheduler.return_value.start.assert_not_called()
+        scheduler.return_value.stop.assert_called_once()
+        logging.return_value.stop.assert_called_once()
+        dispose.assert_called_once()
 
 
 if __name__ == "__main__":

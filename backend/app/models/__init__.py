@@ -1,5 +1,7 @@
 """Import SQLAlchemy model modules here so Alembic can discover them."""
 
+from app.data_sources.models import DataSourceConfig
+
 from app.data_ingestion.models import (
     DataSyncCheckpoint,
     EtfCode,
@@ -62,6 +64,7 @@ from app.backtesting.result_records import (
 
 
 __all__ = [
+    "DataSourceConfig",
     "DataSyncCheckpoint",
     "BacktestAccountProfileRecord",
     "BacktestRunRecord",

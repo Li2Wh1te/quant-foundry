@@ -82,14 +82,27 @@ class Settings(BaseSettings):
     backtest_heartbeat_max_interval_seconds: int = Field(default=15, ge=1)
     backtest_lost_heartbeat_seconds: int = Field(default=60, ge=1)
     backtest_progress_persist_interval_seconds: int = Field(default=5, ge=1)
+    # Legacy input is consumed once during source initialization. All clients
+    # subsequently read the encrypted database record, never these env values.
     tushare_token: SecretStr | None = None
     tushare_api_url: str = Field(default="http://api.tushare.pro", min_length=1)
+    data_source_encryption_key: SecretStr | None = None
     ingestion_request_interval_ms: int = Field(default=1_000, ge=0, le=60_000)
     database_host: str = Field(default="127.0.0.1", min_length=1)
     database_port: int = Field(default=5432, ge=1, le=65535)
     database_user: str = Field(default="postgres", min_length=1)
     database_password: SecretStr
     database_name: str = Field(default="quant_foundry", min_length=1)
+
+    @field_validator("data_source_encryption_key", mode="before")
+    @classmethod
+    def validate_source_key(cls, value):
+        raw = value.get_secret_value() if isinstance(value, SecretStr) else value
+        if raw is None or raw == "":
+            return None
+        if not isinstance(raw, str) or re.fullmatch(r"[0-9a-fA-F]{64}", raw) is None:
+            raise ValueError("data source encryption key must contain 64 hexadecimal characters")
+        return value
 
     @field_validator("log_dir")
     @classmethod

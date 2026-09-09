@@ -7,12 +7,51 @@ from unittest.mock import patch
 from scripts.selfhost_env import (
     API_TOKEN_KEY,
     CURSOR_SIGNING_KEY,
+    DATA_SOURCE_ENCRYPTION_KEY,
     DATABASE_PASSWORD_KEY,
     ensure_selfhost_environment,
 )
 
 
 class SelfhostEnvironmentTestCase(unittest.TestCase):
+    def test_source_encryption_key_first_install_and_upgrade_preserve_existing_values(self):
+        for upgrade in (False, True):
+            with self.subTest(upgrade=upgrade), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                template, env = root / "template", root / ".env"
+                template.write_text("QF_API_TOKEN=\nQF_DATABASE_PASSWORD=\nQF_CURSOR_SIGNING_KEY=\n"
+                                    "QF_DATA_SOURCE_ENCRYPTION_KEY=\nQF_INGESTION_REQUEST_INTERVAL_MS=1000\n")
+                if upgrade:
+                    env.write_text("QF_TUSHARE_TOKEN=existing-provider-secret\n"
+                                   "QF_TUSHARE_API_URL=https://existing.example\n"
+                                   "QF_INGESTION_REQUEST_INTERVAL_MS=2000\n")
+                generated = ensure_selfhost_environment(env, template)
+                first = env.read_text()
+                self.assertIn(DATA_SOURCE_ENCRYPTION_KEY, generated)
+                key = next(line.split("=", 1)[1] for line in first.splitlines()
+                           if line.startswith(DATA_SOURCE_ENCRYPTION_KEY + "="))
+                self.assertEqual(len(bytes.fromhex(key)), 32)
+                self.assertEqual(ensure_selfhost_environment(env, template), set())
+                self.assertEqual(env.read_text(), first)
+                if upgrade:
+                    self.assertIn("QF_TUSHARE_TOKEN=existing-provider-secret", first)
+                    self.assertIn("QF_TUSHARE_API_URL=https://existing.example", first)
+                    self.assertIn("QF_INGESTION_REQUEST_INTERVAL_MS=2000", first)
+                else:
+                    self.assertNotIn("QF_TUSHARE_TOKEN=", first)
+                    self.assertIn("QF_INGESTION_REQUEST_INTERVAL_MS=1000", first)
+
+    def test_invalid_existing_source_key_is_not_replaced(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            template, env = root / "template", root / ".env"
+            template.write_text("QF_DATA_SOURCE_ENCRYPTION_KEY=\n")
+            original = "QF_DATA_SOURCE_ENCRYPTION_KEY=malformed-existing-key\n"
+            env.write_text(original)
+            with self.assertRaisesRegex(ValueError, "restore the original"):
+                ensure_selfhost_environment(env, template)
+            self.assertEqual(env.read_text(), original)
+
     def test_generates_secrets_and_preserves_them_on_subsequent_runs(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)

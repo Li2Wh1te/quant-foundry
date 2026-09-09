@@ -207,8 +207,13 @@ class OverviewContractTest(unittest.TestCase):
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(
             tushare_token=SecretStr("private-provider-credential")))))
         session = Mock()
+        session.get.return_value = SimpleNamespace(initialized=True, encrypted_secrets="encrypted")
         read_overview(request, response, session)
         service.return_value.read.assert_called_once_with(tushare_configured=True)
         session.connection.assert_called_once_with(
             execution_options={"isolation_level": "REPEATABLE READ"})
         self.assertEqual(response.headers["cache-control"], "no-store")
+        session.get.return_value = None
+        service.return_value.read.reset_mock()
+        read_overview(request, response, session)
+        service.return_value.read.assert_called_once_with(tushare_configured=False)

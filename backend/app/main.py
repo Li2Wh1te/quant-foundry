@@ -11,6 +11,8 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
+from app.data_sources.router import router as data_sources_router
+from app.data_sources.service import initialize_sources
 from app.backtesting.router import router as backtesting_router
 from app.backtesting.fee_catalog import router as fee_catalog_router
 from app.backtesting.run_router import router as backtest_run_router, formal_alias_router as formal_backtest_alias_router, internal_router as internal_backtest_run_router
@@ -21,7 +23,7 @@ from app.backtesting.result_router import (
     formal_result_alias_router as formal_backtest_result_alias_router,
 )
 from app.core.version import get_release_version
-from app.db.session import dispose_engine, get_db_session
+from app.db.session import dispose_engine, get_db_session, get_engine
 from app.logging.router import router as log_router
 from app.overview.router import router as overview_router
 from app.scheduling.router import router as scheduling_router
@@ -43,6 +45,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     scheduler_runtime = SchedulerRuntime(app.state.settings)
     app.state.scheduler_runtime = scheduler_runtime
     try:
+        with Session(get_engine()) as session:
+            initialize_sources(session, app.state.settings)
         scheduler_runtime.start()
         logger.info("application_started")
         yield
@@ -69,6 +73,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(overview_router)
     protected_router.include_router(scheduling_router)
     protected_router.include_router(data_ingestion_router)
+    protected_router.include_router(data_sources_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)
     protected_router.include_router(fee_catalog_router)
