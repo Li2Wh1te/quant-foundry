@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { LoadingScreen } from "./components/LoadingScreen";
+import { OverviewShell } from "./components/OverviewShell";
 import { VersionMismatchScreen } from "./components/VersionMismatchScreen";
 import { useAuth } from "./auth/AuthContext";
 import { AdminPage } from "./pages/AdminPage";
@@ -41,7 +42,7 @@ export function App() {
         path="/admin"
         element={
           <RequireAuth>
-            <AdminPage><DashboardPage /></AdminPage>
+            <OverviewShell><DashboardPage /></OverviewShell>
           </RequireAuth>
         }
       />
