@@ -64,8 +64,13 @@ class TaskWorkspaceTest(unittest.TestCase):
 
     def add_run(self, task, status, step):
         when = self.now + timedelta(seconds=step)
+        # Mirror the production lifecycle constraints so PostgreSQL fixtures
+        # represent valid executions, including skips that never started.
+        started = when if status not in ('queued', 'skipped', 'interrupted') else None
+        finished = when if status not in ('queued', 'running') else None
         run = TaskRun(task_id=task.id, task_version=1, task_type=task.task_type, trigger_type='manual',
-            parameters={}, parameter_version=1, status=status, created_at=when, available_at=when)
+            parameters={}, parameter_version=1, status=status, created_at=when, available_at=when,
+            started_at=started, finished_at=finished)
         self.session.add(run)
         self.session.flush()
         return run
