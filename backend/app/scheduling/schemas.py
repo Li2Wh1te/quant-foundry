@@ -207,6 +207,27 @@ class TaskTypeResponse(BaseModel):
     english_name: str = Field(min_length=1)
     parameter_version: int
     parameter_schema: dict[str, Any]
+    source_key: str | None = None
+
+
+class TaskWorkspaceItem(TaskResponse):
+    """Read-only presentation data; task state and live executions are separate."""
+
+    registered: bool
+    task_type_name: str | None
+    task_type_english_name: str | None
+    source_key: str | None
+    source_enabled: bool | None
+    source_configured: bool | None
+    running_count: int = Field(ge=0)
+    queued_count: int = Field(ge=0)
+
+
+class TaskWorkspaceResponse(BaseModel):
+    items: list[TaskWorkspaceItem]
+    total: int = Field(ge=0)
+    limit: int
+    offset: int
 
 
 def require_aware_datetime(value: datetime) -> datetime:

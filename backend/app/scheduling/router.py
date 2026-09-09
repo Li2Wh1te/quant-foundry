@@ -17,6 +17,7 @@ from app.scheduling.schemas import (
     TaskState,
     TaskTypeResponse,
     TaskUpdate,
+    TaskWorkspaceResponse,
 )
 from app.scheduling.service import (
     InvalidTaskParametersError,
@@ -25,6 +26,7 @@ from app.scheduling.service import (
     TaskNotFoundError,
     UnknownTaskTypeError,
 )
+from app.scheduling.workspace import WorkspaceStatus, task_workspace
 
 
 router = APIRouter(prefix="/api/admin", tags=["admin-scheduler"])
@@ -43,9 +45,24 @@ def list_task_types() -> list[TaskTypeResponse]:
             english_name=definition.english_name,
             parameter_version=definition.parameter_version,
             parameter_schema=definition.parameters_model.model_json_schema(),
+            source_key=definition.source_key,
         )
         for definition in task_registry.list()
     ]
+
+
+@router.get("/task-workspace", response_model=TaskWorkspaceResponse)
+def read_task_workspace(
+    session: Annotated[Session, Depends(get_db_session)],
+    runtime: Annotated[SchedulerRuntime, Depends(get_scheduler_runtime)],
+    query: Annotated[str, Query(max_length=200)] = "",
+    source_key: Annotated[str | None, Query(max_length=64)] = None,
+    status: WorkspaceStatus = "all",
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> TaskWorkspaceResponse:
+    return task_workspace(session, runtime, task_registry, query=query,
+                          source_key=source_key, status=status, limit=limit, offset=offset)
 
 
 @router.get("/tasks", response_model=list[TaskResponse])
