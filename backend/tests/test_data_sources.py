@@ -81,7 +81,8 @@ class DataSourceTest(unittest.TestCase):
     def task(self, once=False):
         task = ScheduledTask(name="测试任务", task_type=self.task_type, parameters={}, parameter_version=1,
             schedule=({"type": "once", "run_at": (datetime.now(UTC)+timedelta(hours=1)).isoformat()}
-                      if once else {"type": "interval", "seconds": 60}), state="active")
+                      if once else {"type": "interval", "seconds": 60,
+                                    "start_at": datetime.now(UTC).isoformat()}), state="active")
         self.session.add(task)
         self.session.commit()
         return task
@@ -209,6 +210,16 @@ class DataSourceTest(unittest.TestCase):
         with self.assertRaises(TaskConflictError):
             SchedulerService(self.session, self.registry).enqueue_run(task.id,
                 trigger_type=TriggerType.MANUAL, max_queued_runs=100)
+
+    def test_enabled_source_admits_manual_and_scheduled_interval_runs(self):
+        self.initialize(tushare_token="old")
+        scheduler = SchedulerService(self.session, self.registry)
+        for trigger in (TriggerType.MANUAL, TriggerType.SCHEDULED):
+            task = self.task()
+            run = scheduler.enqueue_run(task.id, trigger_type=trigger, max_queued_runs=100)
+            self.session.commit()
+            self.assertEqual(run.status, "queued")
+            self.assertEqual(task.state, "active")
 
     def test_other_provider_has_independent_fields(self):
         class OtherProvider:

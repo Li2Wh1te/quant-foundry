@@ -1,6 +1,7 @@
 """Verify source admission races using PostgreSQL locks in the disposable CI DB."""
 
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 import os
 from threading import Event
 import time
@@ -42,7 +43,8 @@ class SourceGateRaceTest(unittest.TestCase):
                 values={"api_url": "https://example.test"},
                 encrypted_secrets=encrypt(settings(), self.key, {"token": "synthetic"})))
             task = ScheduledTask(name="并发测试", task_type=self.key, parameters={}, parameter_version=1,
-                schedule={"type": "interval", "seconds": 60}, state="active")
+                schedule={"type": "interval", "seconds": 60,
+                          "start_at": datetime.now(UTC).isoformat()}, state="active")
             session.add(task)
             session.flush()
             self.task_id = task.id
