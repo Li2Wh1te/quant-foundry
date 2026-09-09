@@ -128,6 +128,7 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/logs", "get"),
             ("/api/admin/logs/clear", "post"),
             ("/api/admin/task-types", "get"),
+            ("/api/admin/task-workspace", "get"),
             ("/api/admin/tasks", "get"),
             ("/api/admin/tasks", "post"),
             ("/api/admin/task-runs", "get"),
