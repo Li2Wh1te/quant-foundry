@@ -293,6 +293,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     ):
         registry.register(
             TaskDefinition(
+                source_key="tushare",
                 key=key,
                 name=name,
                 english_name=english_name,

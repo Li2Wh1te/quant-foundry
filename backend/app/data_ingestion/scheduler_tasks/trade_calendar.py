@@ -114,6 +114,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     """Register Tushare trading calendar synchronization with the scheduler."""
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_trade_calendar",
             name="交易日历采集",
             english_name="Sync Tushare trade calendar",

@@ -70,6 +70,7 @@ def register_tasks(registry: TaskRegistry) -> None:
     """Register Tushare ETF reference-data synchronization with the scheduler."""
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_etf_basics",
             name="ETF基础信息采集",
             english_name="Sync Tushare ETF basics",

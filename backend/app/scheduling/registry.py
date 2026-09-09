@@ -34,6 +34,9 @@ class TaskDefinition:
     handler: TaskHandler
     english_name: str
     parameter_version: int = 1
+    # Explicit source ownership lets read models scope ingestion statistics
+    # without guessing from translated names or persisted task-key prefixes.
+    source_key: str | None = None
 
 
 class TaskRegistry:
@@ -49,6 +52,8 @@ class TaskRegistry:
                 raise ValueError(f"task type {field} must be non-blank text")
         if definition.key in self._definitions:
             raise ValueError(f"task type already registered: {definition.key}")
+        if definition.source_key is not None and not definition.source_key.strip():
+            raise ValueError("task type source_key must be non-blank when supplied")
         self._definitions[definition.key] = definition
 
     def get(self, key: str) -> TaskDefinition | None:

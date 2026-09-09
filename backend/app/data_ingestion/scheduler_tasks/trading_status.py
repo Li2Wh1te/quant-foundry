@@ -177,6 +177,7 @@ def register_tasks(registry: TaskRegistry) -> None:
 
     registry.register(
         TaskDefinition(
+            source_key="tushare",
             key="data.sync_trading_status",
             name="停牌交易状态采集",
             english_name="Trading status and suspension ingestion",

@@ -23,6 +23,7 @@ from app.backtesting.result_router import (
 from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session
 from app.logging.router import router as log_router
+from app.overview.router import router as overview_router
 from app.scheduling.router import router as scheduling_router
 from app.scheduling.runtime import SchedulerRuntime
 from app.strategies.router import router as strategies_router
@@ -65,6 +66,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     protected_router = APIRouter(dependencies=[Depends(require_api_token)])
     protected_router.include_router(log_router)
+    protected_router.include_router(overview_router)
     protected_router.include_router(scheduling_router)
     protected_router.include_router(data_ingestion_router)
     protected_router.include_router(strategies_router)
