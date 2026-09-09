@@ -33,7 +33,7 @@ const destinations = [
   ...toolItems.map(item => ({ ...item, group: "运行与工具" }))
 ];
 
-/** Reviewed overview and source pages share this shell. Legacy routes retain their
+/** Reviewed overview, source and collection-task pages share this shell. Legacy routes retain their
  * existing theme setting until each page is reviewed and accepted separately. */
 export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH" }: { children: React.ReactNode; title?: string; section?: string }) {
   const { logout } = useAuth();
@@ -59,7 +59,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
   }, []);
   useEffect(() => {
     const onShortcut = (event: KeyboardEvent) => {
-      if (document.querySelector("dialog[open]")) return;
+      if (document.querySelector("dialog:modal")) return;
       if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
         event.preventDefault(); if (open) close(); else show();
       }

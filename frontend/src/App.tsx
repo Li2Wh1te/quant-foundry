@@ -60,7 +60,7 @@ export function App() {
         path="/admin/tasks"
         element={
           <RequireAuth>
-            <AdminPage><TaskSchedulerPage /></AdminPage>
+            <OverviewShell title="采集任务" section="DATA OPS"><TaskSchedulerPage /></OverviewShell>
           </RequireAuth>
         }
       />
