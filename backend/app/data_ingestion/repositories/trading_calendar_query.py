@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 from datetime import date, datetime
 
-from sqlalchemy import Select, func, select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.data_ingestion.constants import TRADE_CALENDAR_SYNC_KEY
@@ -61,6 +61,40 @@ class TradingCalendarQueryRepository:
             select(func.count()).select_from(TradingCalendarDay).where(*filters)
         )
         return items, int(total or 0)
+
+    def get_day(
+        self, exchange: str, calendar_date: date
+    ) -> tuple[TradingCalendarDay | None, date | None]:
+        """Return a stored day and its next open day only with complete coverage.
+
+        A later known open day is not necessarily the next trading day: missing
+        dates in between may themselves be open. Count the intervening closed
+        records using the exchange/date primary key, and return unknown unless
+        every intervening calendar date is explicitly recorded as closed. This
+        also handles holidays and year boundaries without weekday assumptions.
+        """
+        day = self.session.get(TradingCalendarDay, (exchange, calendar_date))
+        if day is None:
+            return None, None
+        next_date = self.session.scalar(
+            select(func.min(TradingCalendarDay.calendar_date)).where(
+                TradingCalendarDay.exchange == exchange,
+                TradingCalendarDay.calendar_date > calendar_date,
+                TradingCalendarDay.is_open.is_(True),
+            )
+        )
+        if next_date is not None:
+            closed_count = self.session.scalar(
+                select(func.count()).select_from(TradingCalendarDay).where(
+                    TradingCalendarDay.exchange == exchange,
+                    TradingCalendarDay.calendar_date > calendar_date,
+                    TradingCalendarDay.calendar_date < next_date,
+                    TradingCalendarDay.is_open.is_(False),
+                )
+            )
+            if closed_count != (next_date - calendar_date).days - 1:
+                next_date = None
+        return day, next_date
 
     def overview(self) -> TradingCalendarOverview:
         """Return database coverage and committed cursors for operator status."""

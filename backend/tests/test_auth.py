@@ -134,6 +134,7 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/task-runs", "get"),
             ("/api/admin/data-collections/trading-calendar", "get"),
             ("/api/admin/data-collections/trading-calendar/overview", "get"),
+            ("/api/admin/data-collections/trading-calendar/{exchange}/{calendar_date}", "get"),
             ("/api/admin/data-collections/etfs", "get"),
             ("/api/admin/data-collections/etfs/overview", "get"),
             ("/api/admin/data-collections/etfs/{ts_code}", "get"),
