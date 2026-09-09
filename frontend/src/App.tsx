@@ -9,6 +9,7 @@ import { AccountProfilesPage } from "./pages/AccountProfilesPage";
 import { BacktestPreflightPage } from "./pages/BacktestPreflightPage";
 import { BacktestRunsPage } from "./pages/BacktestRunsPage";
 import { DashboardPage } from "./pages/DashboardPage";
+import { DataSourcesPage } from "./pages/DataSourcesPage";
 import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
@@ -54,6 +55,7 @@ export function App() {
           </RequireAuth>
         }
       />
+      <Route path="/admin/data-sources" element={<RequireAuth><OverviewShell title="数据源" section="DATA OPS"><DataSourcesPage /></OverviewShell></RequireAuth>} />
       <Route
         path="/admin/tasks"
         element={

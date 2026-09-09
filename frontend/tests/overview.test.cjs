@@ -54,7 +54,7 @@ test('server aggregates, retry reminders and task display names survive renderin
   assert.match(html, /已有后续执行排队或运行中/);
   assert.match(html, /交易日历同步（Trading Calendar Sync）/);
   assert.doesNotMatch(html, /internal_task_key/);
-  assert.match(html, /连接未检测/);
+  assert.match(html, /配置状态汇总/);
   assert.match(html, /已配置不代表连接可用/);
 });
 

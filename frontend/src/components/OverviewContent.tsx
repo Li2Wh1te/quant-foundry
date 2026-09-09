@@ -25,21 +25,21 @@ export function OverviewContent({ snapshot, loading, errors, refreshed, onRefres
     {errors.length > 0 && <div className="qfo-review-error" role="alert">{errors.join("、")}加载失败，已保留已有数据；尚未加载的数据以“—”显示。请刷新重试。</div>}
     <div className="qfo-sr-only" role="status">{loading ? "正在刷新总览" : errors.length ? "部分数据未能刷新" : refreshed ? "总览状态已刷新" : ""}</div>
     <section className="qfo-metric-band" aria-label="运营指标">
-      <div className="qfo-metric"><div className="qfo-metric-label"><Database aria-hidden="true" />已配置数据源</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.configured_sources)}</div><div className="qfo-metric-unit">/ {count(metrics?.total_sources)}</div><div className="qfo-metric-note">{metrics ? "连接未检测" : "等待数据"}</div></div></div>
+      <div className="qfo-metric"><div className="qfo-metric-label"><Database aria-hidden="true" />已配置数据源</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.configured_sources)}</div><div className="qfo-metric-unit">/ {count(metrics?.total_sources)}</div><div className="qfo-metric-note">{metrics ? "配置状态汇总" : "等待数据"}</div></div></div>
       <div className="qfo-metric"><div className="qfo-metric-label"><Clock3 aria-hidden="true" />启用采集任务</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.active_tasks)}</div><div className="qfo-metric-note">{metrics ? `${count(metrics.queued_runs)} 项等待 · ${count(metrics.running_runs)} 项运行中` : "等待数据"}</div></div></div>
       <div className="qfo-metric" title={operations ? `上海时间 ${overviewTime(operations.day_start, true)} 至 ${overviewTime(operations.day_end, true)}（不含结束时刻），按实际开始时间统计` : "上海时区，按实际开始时间统计"}><div className="qfo-metric-label"><TrendingUp aria-hidden="true" />今日运行<span className="qfo-sr-only">（上海时区，按实际开始）</span></div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.today_runs)}</div><div className="qfo-metric-unit">次</div><div className="qfo-metric-note qfo-ok">{metrics ? `${count(metrics.today_succeeded)} 次成功` : "等待数据"}</div></div></div>
       <div className="qfo-metric"><div className="qfo-metric-label"><TriangleAlert aria-hidden="true" />需要处理</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.attention_tasks)}</div><div className="qfo-metric-unit">项</div><div className={`qfo-metric-note${metrics?.attention_tasks ? " qfo-warn" : ""}`}>{metrics ? metrics.attention_tasks ? "采集任务异常" : "暂无待处理" : "等待数据"}</div></div></div>
     </section>
     <div className="qfo-overview-grid">
       <section className="qfo-sheet qfo-sources" aria-labelledby="overview-sources-title">
-        <div className="qfo-sheet-head"><h2 className="qfo-sheet-title" id="overview-sources-title">数据源状态</h2><div className="qfo-sheet-meta">{count(metrics?.total_sources)} 个数据源 · 连接未检测</div><button type="button" className="qfo-sheet-link" aria-disabled="true" title="数据源管理尚未开放">管理数据源<ArrowRight aria-hidden="true" /></button></div>
+        <div className="qfo-sheet-head"><h2 className="qfo-sheet-title" id="overview-sources-title">数据源状态</h2><div className="qfo-sheet-meta">{count(metrics?.total_sources)} 个数据源 · 配置状态汇总</div><Link className="qfo-sheet-link" to="/admin/data-sources">管理数据源<ArrowRight aria-hidden="true" /></Link></div>
         <div className="qfo-source-table">{operations ? operations.sources.length ? operations.sources.map(source => <div className="qfo-source-row" key={source.key}>
           <div className="qfo-source-main"><div className="qfo-source-mark">{source.key === "tushare" ? "TS" : "DS"}</div><div><div className="qfo-source-name">{source.name}</div><div className="qfo-source-sub">ETF 基础信息、交易日历等结构化数据</div></div></div>
           <div className="qfo-source-stat"><span>配置状态</span><div className="qfo-source-status"><i aria-hidden="true" />{source.configured ? "已配置" : "未配置"}</div></div>
           <div className="qfo-source-stat"><span>启用任务</span><b>{count(source.active_tasks)}</b></div>
           <div className="qfo-source-stat"><span>最近成功同步</span><b><Timestamp value={source.last_success_at} /></b></div>
         </div>) : <div className="qfo-empty-body">暂无数据源</div> : <div className="qfo-empty-body">{pending}</div>}</div>
-        <p className="qfo-source-extra">已配置不代表连接可用；连接测试将在数据源管理中提供。</p>
+        <p className="qfo-source-extra">已配置不代表连接可用；请在数据源管理中查看检查结果或测试连接。</p>
       </section>
       <section className="qfo-sheet qfo-attention" aria-labelledby="overview-attention-title">
         <div className="qfo-sheet-head"><h2 className="qfo-sheet-title" id="overview-attention-title">需要处理</h2><Link className="qfo-sheet-link" to="/admin/tasks">查看任务<ArrowRight aria-hidden="true" /></Link></div>

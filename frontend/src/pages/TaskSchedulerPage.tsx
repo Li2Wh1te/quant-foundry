@@ -4,7 +4,7 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 
 import {
   changeTaskState, createTask, listRecentTaskRuns, listTaskRuns, listTaskTypes, listTasks,
@@ -235,6 +235,8 @@ function RunIcon({ status }: { status: TaskRun["status"] }) {
 export function TaskSchedulerPage() {
   const { logout } = useAuth();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [fromSource] = useState(() => searchParams.has("create_type"));
   const [tasks, setTasks] = useState<SchedulerTask[]>([]);
   const [taskTypes, setTaskTypes] = useState<TaskType[]>([]);
   const [runs, setRuns] = useState<TaskRun[]>([]);
@@ -274,6 +276,19 @@ export function TaskSchedulerPage() {
   }, [handleError]);
 
   useEffect(() => { void loadTasks(); }, [loadTasks]);
+  useEffect(() => {
+    const key = searchParams.get("create_type");
+    if (!key || loading || !taskTypes.length) return;
+    const selected = taskTypes.find(item => item.key === key);
+    if (selected) {
+      // A source-page entry preselects only a registered type. It never creates
+      // a task until the operator completes and submits this existing form.
+      setDraft(newTaskDraft([selected, ...taskTypes.filter(item => item.key !== key)]));
+      setModalMode("create");
+    } else setError("该采集脚本当前未注册，请返回数据源刷新后重试。");
+    const next = new URLSearchParams(searchParams); next.delete("create_type");
+    setSearchParams(next, { replace: true });
+  }, [loading, searchParams, setSearchParams, taskTypes]);
   useEffect(() => {
     if (!selectedTask) { setRuns([]); return; }
     setRuns([]);
@@ -325,6 +340,7 @@ export function TaskSchedulerPage() {
   }
 
   return <section className="tasks-page" aria-labelledby="tasks-title">
+    {fromSource && <Link className="toolbar-button" to="/admin/data-sources">返回数据源</Link>}
     <div className="page-heading tasks-page__heading"><div><h2 id="tasks-title">任务调度</h2><p>查看计划任务、执行队列和最近运行结果</p></div><div className="tasks-page__actions"><button className="toolbar-button" type="button" disabled={refreshing} onClick={() => void loadTasks(true)}><RefreshCw className={refreshing ? "spin" : ""} aria-hidden="true" />刷新</button><button className="task-create-button" type="button" disabled={loading || taskTypes.length === 0} title={taskTypes.length === 0 ? "请先在后端注册任务类型" : undefined} onClick={openCreate}><Plus aria-hidden="true" />新建任务</button></div></div>
     {error && <div className="task-message task-message--error" role="alert"><CircleAlert aria-hidden="true" />{error}</div>}
     {!loading && taskTypes.length === 0 && <div className="task-message" role="status">当前没有已注册的任务类型。请先在后端注册业务任务，随后即可在这里创建计划。</div>}
