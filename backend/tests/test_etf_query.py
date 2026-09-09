@@ -46,11 +46,11 @@ class EtfQueryRepositoryTestCase(unittest.TestCase):
         session.execute.return_value.one.return_value = (
             3,
             2,
-            2,
             date(2024, 1, 1),
             date(2026, 8, 15),
             datetime(2026, 8, 16, 10, 0, tzinfo=UTC),
         )
+        session.scalars.return_value = ["SSE", "SH", "SZ"]
         session.get.return_value = DataSyncCheckpoint(
             sync_key="tushare.etf_basic",
             scope_key="market=CN",
@@ -61,6 +61,7 @@ class EtfQueryRepositoryTestCase(unittest.TestCase):
 
         self.assertEqual(overview.total_records, 3)
         self.assertEqual(overview.exchange_count, 2)
+        self.assertEqual(overview.exchanges, ["SSE", "SZSE"])
         self.assertEqual(overview.listed_count, 2)
         self.assertEqual(overview.first_list_date, date(2024, 1, 1))
         self.assertEqual(overview.latest_list_date, date(2026, 8, 15))

@@ -4,7 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
 from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
@@ -29,6 +29,12 @@ class TradingCalendarDayResponse(BaseModel):
     is_open: bool
     previous_trading_date: date | None
     updated_at: datetime
+
+
+class TradingCalendarDetailResponse(TradingCalendarDayResponse):
+    """Selected date facts; a null next date means stored coverage is insufficient."""
+
+    next_trading_date: date | None
 
 
 class TradingCalendarPageResponse(BaseModel):
@@ -91,6 +97,7 @@ class EtfOverviewResponse(BaseModel):
     latest_list_date: date | None
     last_updated_at: datetime | None
     refreshed_at: datetime | None
+    exchanges: list[str]
 
 
 class EtfDailyBarResponse(BaseModel):
@@ -133,6 +140,7 @@ def list_trading_calendar_days(
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> TradingCalendarPageResponse:
     """List all stored calendar rows with server-side filters and pagination."""
+    _validate_date_range(start_date, end_date)
     items, total = TradingCalendarQueryRepository(session).list_days(
         exchange=exchange,
         is_open=is_open,
@@ -165,6 +173,30 @@ def get_trading_calendar_overview(
         end_date=overview.end_date,
         last_updated_at=overview.last_updated_at,
         checkpoints=overview.checkpoints,
+    )
+
+
+@router.get(
+    "/trading-calendar/{exchange}/{calendar_date}",
+    response_model=TradingCalendarDetailResponse,
+)
+def get_trading_calendar_day(
+    exchange: Annotated[str, Path(min_length=1, max_length=16)],
+    calendar_date: date,
+    session: Annotated[Session, Depends(get_db_session)],
+) -> TradingCalendarDetailResponse:
+    """Read selected-date facts without guessing holidays or missing calendar rows."""
+    day, next_date = TradingCalendarQueryRepository(session).get_day(
+        exchange, calendar_date
+    )
+    if day is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="该交易所的所选日期尚未采集，请先同步交易日历。",
+        )
+    return TradingCalendarDetailResponse(
+        **TradingCalendarDayResponse.model_validate(day).model_dump(),
+        next_trading_date=next_date,
     )
 
 
@@ -207,6 +239,7 @@ def get_etf_overview(
         latest_list_date=overview.latest_list_date,
         last_updated_at=overview.last_updated_at,
         refreshed_at=overview.refreshed_at,
+        exchanges=overview.exchanges,
     )
 
 

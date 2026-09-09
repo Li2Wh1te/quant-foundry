@@ -34,6 +34,7 @@ class EtfOverview:
     latest_list_date: date | None
     last_updated_at: datetime | None
     refreshed_at: datetime | None
+    exchanges: list[str]
 
 
 class EtfQueryRepository:
@@ -75,25 +76,33 @@ class EtfQueryRepository:
         summary = self.session.execute(
             select(
                 func.count(EtfCode.ts_code),
-                func.count(func.distinct(EtfCode.exchange)),
                 func.count(EtfCode.ts_code).filter(EtfCode.list_status == "L"),
                 func.min(EtfCode.list_date),
                 func.max(EtfCode.list_date),
                 func.max(EtfCode.last_seen_at),
             ).where(EtfCode.source == self.source)
         ).one()
+        # Report actual source-scoped markets, normalizing legacy aliases before
+        # counting so SH/SSE and SZ/SZSE cannot appear as different exchanges.
+        exchanges = sorted({
+            self._exchange_codes(exchange)[0]
+            for exchange in self.session.scalars(
+                select(EtfCode.exchange).where(EtfCode.source == self.source).distinct()
+            )
+        })
         checkpoint = self.session.get(
             DataSyncCheckpoint,
             {"sync_key": ETF_BASIC_SYNC_KEY, "scope_key": "market=CN"},
         )
         return EtfOverview(
             total_records=int(summary[0] or 0),
-            exchange_count=int(summary[1] or 0),
-            listed_count=int(summary[2] or 0),
-            first_list_date=summary[3],
-            latest_list_date=summary[4],
-            last_updated_at=summary[5],
+            exchange_count=len(exchanges),
+            listed_count=int(summary[1] or 0),
+            first_list_date=summary[2],
+            latest_list_date=summary[3],
+            last_updated_at=summary[4],
             refreshed_at=self._refresh_timestamp(checkpoint),
+            exchanges=exchanges,
         )
 
     def _filters(
@@ -106,15 +115,15 @@ class EtfQueryRepository:
         """Build predicates once so the list and count always agree."""
         filters: list[object] = [EtfCode.source == self.source]
         if keyword is not None:
-            pattern = f"%{keyword}%"
-            filters.append(
-                or_(
-                    EtfCode.ts_code.ilike(pattern),
-                    EtfCode.csname.ilike(pattern),
-                    EtfCode.extname.ilike(pattern),
-                    EtfCode.cname.ilike(pattern),
-                )
-            )
+            # Match the market workspace's literal substring search across fund,
+            # tracked-index and manager fields. Escape LIKE metacharacters so a
+            # typed '%' or '_' does not accidentally select the whole catalogue.
+            filters.append(or_(
+                *(column.icontains(keyword.strip(), autoescape=True) for column in (
+                    EtfCode.ts_code, EtfCode.csname, EtfCode.extname, EtfCode.cname,
+                    EtfCode.index_code, EtfCode.index_name, EtfCode.mgr_name,
+                ))
+            ))
         if exchange is not None:
             filters.append(EtfCode.exchange.in_(self._exchange_codes(exchange)))
         if list_status is not None:
