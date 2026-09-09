@@ -21,6 +21,7 @@ from app.scheduling.schemas import (
     schedule_adapter,
 )
 from app.scheduling.triggers import build_trigger
+from app.data_sources.service import configured, lock_source_gates
 
 
 class TaskNotFoundError(Exception):
@@ -146,6 +147,7 @@ class SchedulerService:
         max_queued_runs: int,
         scheduled_at: datetime | None = None,
     ) -> TaskRun:
+        sources = lock_source_gates(self.session, self.registry)
         task = self._require_task(task_id, for_update=True)
         allowed_states = (
             (TaskState.ACTIVE.value,)
@@ -167,8 +169,14 @@ class SchedulerService:
             task_id=None, statuses=(RunStatus.QUEUED.value,)
         )
 
+        definition = self.registry.get(task.task_type)
+        source = sources.get(definition.source_key) if definition else None
         skip_reason: str | None = None
-        if total_queued >= max_queued_runs:
+        if source is not None and (not source.enabled or not configured(source)):
+            skip_reason = "数据源已停用或尚未配置，本次运行已跳过。"
+            if trigger_type == TriggerType.MANUAL:
+                raise TaskConflictError("数据源已停用或尚未配置，无法手动运行。")
+        elif total_queued >= max_queued_runs:
             skip_reason = "Global queue limit reached."
         elif task.overlap_policy == OverlapPolicy.SKIP.value:
             if running + queued >= task.concurrency_limit:

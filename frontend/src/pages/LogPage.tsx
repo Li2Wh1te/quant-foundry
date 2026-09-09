@@ -127,6 +127,8 @@ const EVENT_PRESENTATIONS: Record<string, EventPresentation> = {
   scheduled_run_ignored: { title: "计划运行已忽略", summary: "该计划运行与并发策略冲突，已按规则忽略。" },
   scheduled_run_enqueue_failed: { title: "计划运行入队失败", summary: "计划运行未能加入执行队列，请查看展开详情。" },
   application_started: { title: "应用启动", summary: "应用服务已启动。" },
+  data_source_config_saved: { title: "数据源配置已保存", summary: "数据源连接已验证并保存，新运行将使用更新后的配置。" },
+  data_source_state_changed: { title: "数据源状态已调整", summary: "数据源启停状态已更新，任务按当前来源状态执行。" },
   application_stopped: { title: "应用停止", summary: "应用服务已停止。" },
   trade_calendar_sync_completed: { title: "交易日历采集完成" },
   trade_calendar_sync_planned: { title: "生成交易日历采集计划", summary: "已生成交易日历采集分段计划。" },

@@ -16,6 +16,7 @@ from app.core.config import Settings
 from app.db.session import get_engine
 from app.data_ingestion.clients.tushare import TushareClient
 from app.data_ingestion.repositories.sync_checkpoint import DataSyncCheckpointRepository
+from app.data_sources.service import configured, lock_source_gates, skip_source_queue
 from app.scheduling.registry import TaskContext, TaskRegistry, task_registry
 from app.scheduling.repository import SchedulerRepository
 from app.scheduling.schemas import (
@@ -179,6 +180,11 @@ class SchedulerRuntime:
                 return
 
             with Session(get_engine()) as session:
+                sources = lock_source_gates(session, self.registry)
+                blocked_types = [item.key for item in self.registry.list()
+                    if item.source_key in sources and (
+                        not sources[item.source_key].enabled or not configured(sources[item.source_key]))]
+                skip_source_queue(session, blocked_types, "数据源已停用或尚未配置，本次等待运行已跳过。")
                 repository = SchedulerRepository(session)
                 run_ids = repository.claim_queued_runs(slots)
                 run_context = {

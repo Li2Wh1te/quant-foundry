@@ -146,11 +146,13 @@ def run(context, parameters):
 
 ### 1. 配置采集凭据
 
-在根目录 `.env` 设置自己的 `QF_TUSHARE_TOKEN`，然后让服务读取新配置：
+在数据源页面选择 Tushare，配置 API 地址和 Token。测试连接只验证表单；保存时先验证，
+通过后才替换当前配置。已有 Token 留空表示沿用，页面不会回显原值。
 
-```bash
-make selfhost-deploy-backend
-```
+升级时先执行 `make selfhost`（或 `make selfhost-deploy-backend`），环境初始化会补齐独立的
+`QF_DATA_SOURCE_ENCRYPTION_KEY`。服务首次启动将旧 `.env` 的 Tushare 配置一次迁移到数据库，
+原文件保持不变；之后修改旧 Tushare 环境变量不会覆盖页面配置。请将加密密钥与数据库一起安全备份，
+不要在已有配置时更换或删除密钥。未使用部署脚本时，需要自行配置 64 位随机十六进制密钥并执行数据库迁移。
 
 Tushare 账户还需具备所用接口的访问权限。Token、接口权限和本地数据覆盖是不同的前提；
 项目不附带数据源账户或一键离线行情包。
@@ -322,7 +324,7 @@ QF_WEB_PORT=8080
 | `QF_API_TOKEN` | Web 与业务 API 的共享访问凭据 |
 | `QF_CURSOR_SIGNING_KEY` | 回测结果游标签名密钥，仅服务端持有 |
 | `QF_BACKTEST_INTERNAL_TOKEN` | 内部验收接口专用凭据，普通用户上手不需要 |
-| `QF_TUSHARE_TOKEN` / `QF_TUSHARE_API_URL` | 采集 Token 与 Tushare 请求地址 |
+| `QF_DATA_SOURCE_ENCRYPTION_KEY` | 数据源凭据加密密钥；Tushare 连接参数由页面管理，旧环境配置仅迁移一次 |
 | `QF_INGESTION_REQUEST_INTERVAL_MS` | 外部采集请求的最小间隔；任务参数只能提高该间隔 |
 | `QF_DATABASE_*` | PostgreSQL 连接配置 |
 | `QF_SERVER_*` / `QF_WEB_*` | Backend 监听与自托管 Web 地址、端口 |

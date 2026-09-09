@@ -25,11 +25,13 @@ DATABASE_PASSWORD_KEY = "QF_DATABASE_PASSWORD"
 API_TOKEN_KEY = "QF_API_TOKEN"
 BACKTEST_INTERNAL_TOKEN_KEY = "QF_BACKTEST_INTERNAL_TOKEN"
 CURSOR_SIGNING_KEY = "QF_CURSOR_SIGNING_KEY"
+DATA_SOURCE_ENCRYPTION_KEY = "QF_DATA_SOURCE_ENCRYPTION_KEY"
 SECRET_KEYS = (
     DATABASE_PASSWORD_KEY,
     API_TOKEN_KEY,
     BACKTEST_INTERNAL_TOKEN_KEY,
     CURSOR_SIGNING_KEY,
+    DATA_SOURCE_ENCRYPTION_KEY,
 )
 LEGACY_URL_KEY = "QF_DATABASE_URL"
 WEAK_DATABASE_PASSWORDS = {"", "change-me", "postgres"}
@@ -82,6 +84,16 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
         generated_keys,
         minimum_length=32,
     )
+    source_key_configured = DATA_SOURCE_ENCRYPTION_KEY in values or DATA_SOURCE_ENCRYPTION_KEY in template_values
+    source_key = values.get(DATA_SOURCE_ENCRYPTION_KEY, "")
+    if source_key_configured:
+        if not source_key or source_key == "change-me":
+            source_key = secrets.token_hex(32)
+            generated_keys.add(DATA_SOURCE_ENCRYPTION_KEY)
+        elif re.fullmatch(r"[0-9a-fA-F]{64}", source_key) is None:
+            # A replacement key cannot decrypt existing records. Refuse to
+            # mutate an invalid nonempty value instead of silently losing data.
+            raise ValueError("Invalid QF_DATA_SOURCE_ENCRYPTION_KEY; restore the original 64-character hex key.")
     # Existing self-hosted installations retain their .env across deployments.
     # Seed only keys absent from that file with template defaults so new
     # configuration (for example, a newly added data provider) becomes visible
@@ -103,6 +115,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
             else {}
         ),
         CURSOR_SIGNING_KEY: cursor_signing_key,
+        **({DATA_SOURCE_ENCRYPTION_KEY: source_key} if source_key_configured else {}),
     }
 
     updated_lines: list[str] = []

@@ -1,9 +1,12 @@
 """Tushare Pro SDK client setup."""
 
 import tushare as ts
-from tushare.pro import client as _ts_client
+from sqlalchemy.orm import Session
 
 from app.core.config import Settings
+from app.db.session import get_engine
+from app.data_sources.service import runtime_credentials
+from app.data_sources.providers import SourceError
 
 FUND_DIV_FIELDS = (
     "ts_code,ann_date,imp_anndate,base_date,div_proc,record_date,ex_date,"
@@ -17,12 +20,23 @@ class TushareClient:
     """Configure and expose the official Tushare Pro SDK client."""
 
     def __init__(self, settings: Settings) -> None:
-        if settings.tushare_token is None:
-            raise ValueError(
-                "QF_TUSHARE_TOKEN must be configured before using the Tushare client"
-            )
-        _ts_client.DataApi._DataApi__http_url = settings.tushare_api_url
-        self.pro = ts.pro_api(settings.tushare_token.get_secret_value())
+        with Session(get_engine()) as session:
+            values, secrets = runtime_credentials(session, settings, "tushare")
+        self.pro = ts.pro_api(secrets["token"])
+        # The SDK has a class-level default URL. Shadow it on this instance so
+        # a page save cannot redirect an already running job to another server.
+        self.pro._DataApi__http_url = values["api_url"]
+        original_query = self.pro.query
+
+        def safe_query(*args, **kwargs):
+            # Vendor/proxy error messages can echo authentication payloads.
+            # Suppress the exception chain before ingestion logs persist it.
+            try:
+                return original_query(*args, **kwargs)
+            except Exception:
+                raise SourceError("Tushare 数据请求失败，请检查连接、接口权限与调用额度。", status_code=502) from None
+
+        self.pro.query = safe_query
 
     def fund_div(self, *, ann_date: str | None = None, ts_code: str | None = None,
                  start_date: str | None = None, end_date: str | None = None,

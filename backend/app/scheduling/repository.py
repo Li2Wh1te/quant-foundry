@@ -125,7 +125,7 @@ class SchedulerRepository:
         self.session.flush()
         return run
 
-    def claim_queued_runs(self, limit: int) -> list[UUID]:
+    def claim_queued_runs(self, limit: int, *, task_types: list[str] | None = None) -> list[UUID]:
         if limit <= 0:
             return []
 
@@ -165,6 +165,9 @@ class SchedulerRepository:
                 TaskRun.available_at <= now,
                 ScheduledTask.state != TaskState.ARCHIVED.value,
                 running_count < ScheduledTask.concurrency_limit,
+                # Optional scoping is useful for provider-specific dispatch
+                # and keeps isolated admission tests away from unrelated runs.
+                TaskRun.task_type.in_(task_types) if task_types is not None else True,
             )
             .cte("eligible_task_runs")
         )
