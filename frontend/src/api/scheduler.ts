@@ -64,11 +64,12 @@ export interface TaskType {
   english_name: string | null;
   parameter_version: number;
   parameter_schema: Record<string, unknown>;
+  source_key?: string | null;
 }
 
 export interface TaskPayload {
   name: string;
-  description?: string;
+  description?: string | null;
   task_type: string;
   parameters: Record<string, unknown>;
   schedule: TaskSchedule;
@@ -91,32 +92,65 @@ function headers(): HeadersInit {
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const response = await fetch(path, { ...init, headers: { ...headers(), ...init?.headers } });
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  init?.signal?.addEventListener("abort", abort, { once: true });
+  if (init?.signal?.aborted) abort();
+  const timer = setTimeout(abort, 20000);
+  try {
+  const response = await fetch(path, { ...init, cache: "no-store", signal: controller.signal, headers: { ...headers(), ...init?.headers } });
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）。`;
     try {
       const body = await response.json() as { detail?: unknown };
-      if (typeof body.detail === "string") message = body.detail;
+      if (typeof body.detail === "string" && /[\u4e00-\u9fff]/.test(body.detail) && body.detail.length < 500) message = body.detail;
       else if (Array.isArray(body.detail)) message = "提交内容校验失败，请检查任务配置。";
     } catch {
       // Keep the status fallback when the response body is not JSON.
     }
+    if (response.status === 409) message = "任务状态或版本已变化，请刷新后核对配置再操作。";
+    if (response.status === 404) message = "任务已不存在，请刷新任务列表。";
+    if (response.status === 503) message = "调度服务暂不可用，请稍后刷新核对任务状态。";
+    if (response.status === 422) message = "任务配置不符合要求，请检查脚本参数、日期与执行计划。";
     throw new SchedulerApiError(message, response.status);
   }
   if (response.status === 204) return undefined as T;
-  return response.json() as Promise<T>;
+  return await response.json() as T;
+  } catch (error) {
+    if (init?.signal?.aborted) throw new DOMException("Request aborted", "AbortError");
+    if (error instanceof SchedulerApiError) throw error;
+    throw new SchedulerApiError(init?.method && init.method !== "GET"
+      ? "未能确认操作结果，请刷新并核对任务及运行历史，不要重复提交。"
+      : "任务数据加载失败，请检查网络后刷新重试。", 0);
+  } finally {
+    clearTimeout(timer); init?.signal?.removeEventListener("abort", abort);
+  }
 }
 
 export function listTasks(): Promise<SchedulerTask[]> {
   return request<SchedulerTask[]>("/api/admin/tasks");
 }
 
-export function listTaskTypes(): Promise<TaskType[]> {
-  return request<TaskType[]>("/api/admin/task-types");
+export function listTaskTypes(signal?: AbortSignal): Promise<TaskType[]> {
+  return request<TaskType[]>("/api/admin/task-types", { signal });
 }
 
-export function listTaskRuns(taskId: string): Promise<TaskRun[]> {
-  return request<TaskRun[]>(`/api/admin/tasks/${taskId}/runs?limit=20`);
+export function listTaskRuns(taskId: string, offset = 0, signal?: AbortSignal): Promise<TaskRun[]> {
+  return request<TaskRun[]>(`/api/admin/tasks/${encodeURIComponent(taskId)}/runs?limit=10&offset=${offset}`, { signal });
+}
+
+export type WorkspaceStatus = "all" | "active" | "paused" | "completed" | "running" | "queued" | "attention";
+export interface WorkspaceTask extends SchedulerTask {
+  registered: boolean; task_type_name: string | null; task_type_english_name: string | null;
+  source_key: string | null; source_enabled: boolean | null; source_configured: boolean | null;
+  running_count: number; queued_count: number;
+}
+export interface TaskWorkspace { items: WorkspaceTask[]; total: number; limit: number; offset: number }
+export function listTaskWorkspace(options: { query?: string; source_key?: string; status?: WorkspaceStatus; offset?: number }, signal?: AbortSignal): Promise<TaskWorkspace> {
+  const query = new URLSearchParams({ limit: "20", offset: String(options.offset ?? 0), status: options.status ?? "all" });
+  if (options.query) query.set("query", options.query);
+  if (options.source_key) query.set("source_key", options.source_key);
+  return request<TaskWorkspace>(`/api/admin/task-workspace?${query}`, { signal });
 }
 
 export function listRecentTaskRuns(): Promise<TaskRun[]> {
