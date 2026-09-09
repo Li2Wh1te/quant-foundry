@@ -221,6 +221,18 @@ class DataSourceTest(unittest.TestCase):
             self.assertEqual(run.status, "queued")
             self.assertEqual(task.state, "active")
 
+    def test_disable_skips_both_existing_and_newly_admitted_queue_entries(self):
+        self.initialize(tushare_token="old")
+        task = self.task()
+        task.overlap_policy, task.queue_limit = "queue", 2
+        self.session.commit()
+        scheduler = SchedulerService(self.session, self.registry)
+        for _ in range(2):
+            run = scheduler.enqueue_run(task.id, trigger_type=TriggerType.MANUAL, max_queued_runs=100)
+            self.assertEqual(run.status, "queued", run.error_message)
+            self.session.commit()
+        self.assertEqual(self.service.set_enabled("tushare", 1, False)["skipped_runs"], 2)
+
     def test_other_provider_has_independent_fields(self):
         class OtherProvider:
             key, name = "other", "其他测试源"

@@ -132,9 +132,11 @@ class SourceGateRaceTest(unittest.TestCase):
         def enqueue(session):
             task = session.get(ScheduledTask, self.task_id)
             task.overlap_policy, task.concurrency_limit = "queue", 2
+            task.queue_limit = 2
             session.flush()
-            SchedulerService(session, self.registry).enqueue_run(self.task_id,
+            run = SchedulerService(session, self.registry).enqueue_run(self.task_id,
                 trigger_type=TriggerType.MANUAL, max_queued_runs=100)
+            self.assertEqual(run.status, "queued", run.error_message)
         def disable(session):
             return DataSourceService(session, settings(), self.registry).set_enabled(self.key, 1, False)["skipped_runs"]
         self.assertEqual(self.race(enqueue, disable), 2)
