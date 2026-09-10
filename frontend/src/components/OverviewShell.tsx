@@ -11,7 +11,7 @@ const groups = [
     { label: "数据源", to: "/admin/data-sources", icon: Database },
     { label: "采集任务", to: "/admin/tasks", icon: Clock3 }
   ] },
-  { label: "市场数据", items: [{ label: "A 股市场", to: "", icon: ChartNoAxesColumn }] },
+  { label: "市场数据", items: [{ label: "A 股市场", to: "/admin/data/etf-basics", icon: ChartNoAxesColumn }] },
   { label: "策略研究", items: [
     { label: "策略工作台", to: "/admin/strategies", icon: Code2 },
     { label: "策略数据接口", to: "/admin/strategy-data", icon: BookOpen },
@@ -27,7 +27,6 @@ const toolItems = [
 ];
 const destinations = [
   ...groups.flatMap(group => group.items.filter(item => item.to).map(item => ({ ...item, group: group.label }))),
-  { label: "ETF 基础信息", to: "/admin/data/etf-basics", group: "市场数据" },
   { label: "交易日历", to: "/admin/data/trading-calendar", group: "数据资产" },
   { label: "回测预检", to: "/admin/backtest-preflight", group: "策略研究" },
   ...toolItems.map(item => ({ ...item, group: "运行与工具" }))
@@ -35,7 +34,7 @@ const destinations = [
 
 /** Reviewed overview, source and collection-task pages share this shell. Legacy routes retain their
  * existing theme setting until each page is reviewed and accepted separately. */
-export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH" }: { children: React.ReactNode; title?: string; section?: string }) {
+export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH", className = "" }: { children: React.ReactNode; title?: string; section?: string; className?: string }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
@@ -87,7 +86,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
     if (item.to === "/docs") return <a key={item.label} className={className} aria-label={label} title={label} href="/docs" target="_blank" rel="noreferrer">{content}</a>;
     return <Link key={item.label} className={className} aria-label={label} title={label} to={item.to} aria-current={item.to === location.pathname ? "page" : undefined}>{content}</Link>;
   }
-  return <div className="qfo-root">
+  return <div className={`qfo-root ${className}`}>
     <div className={`qfo-app${collapsed ? " qfo-sidebar-collapsed" : ""}`} inert={open}>
       <aside className="qfo-sidebar" aria-label="工作区侧栏">
         <div className="qfo-brand"><div className="qfo-mark">QF</div><div className="qfo-brand-copy"><div className="qfo-brand-name">Quant Foundry</div><div className="qfo-brand-meta">RESEARCH SYSTEM</div></div></div>

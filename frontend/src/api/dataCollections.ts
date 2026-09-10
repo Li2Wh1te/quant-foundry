@@ -8,6 +8,10 @@ export interface TradingCalendarDay {
   updated_at: string;
 }
 
+export interface TradingCalendarDetail extends TradingCalendarDay {
+  next_trading_date: string | null;
+}
+
 export interface TradingCalendarPage {
   items: TradingCalendarDay[];
   total: number;
@@ -65,6 +69,7 @@ export interface EtfOverview {
   latest_list_date: string | null;
   last_updated_at: string | null;
   refreshed_at: string | null;
+  exchanges: string[];
 }
 
 export interface EtfFilters {
@@ -114,8 +119,10 @@ function headers(): HeadersInit {
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
-async function request<T>(path: string): Promise<T> {
-  const response = await fetch(path, { headers: headers() });
+async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
+  // Refreshes inspect persisted facts again; cancellation also guards callers
+  // against a response whose JSON finishes after the selection has changed.
+  const response = await fetch(path, { headers: headers(), cache: "no-store", signal });
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）。`;
     try {
@@ -126,14 +133,16 @@ async function request<T>(path: string): Promise<T> {
     }
     throw new DataCollectionApiError(message, response.status);
   }
-  return response.json() as Promise<T>;
+  const value = await response.json() as T;
+  signal?.throwIfAborted();
+  return value;
 }
 
 export function getTradingCalendarOverview(): Promise<TradingCalendarOverview> {
   return request<TradingCalendarOverview>("/api/admin/data-collections/trading-calendar/overview");
 }
 
-export function listTradingCalendarDays(filters: TradingCalendarFilters): Promise<TradingCalendarPage> {
+export function listTradingCalendarDays(filters: TradingCalendarFilters, signal?: AbortSignal): Promise<TradingCalendarPage> {
   const params = new URLSearchParams();
   if (filters.exchange) params.set("exchange", filters.exchange);
   if (filters.isOpen !== undefined) params.set("is_open", String(filters.isOpen));
@@ -141,21 +150,25 @@ export function listTradingCalendarDays(filters: TradingCalendarFilters): Promis
   if (filters.endDate) params.set("end_date", filters.endDate);
   params.set("limit", String(filters.limit ?? 50));
   params.set("offset", String(filters.offset ?? 0));
-  return request<TradingCalendarPage>(`/api/admin/data-collections/trading-calendar?${params}`);
+  return request<TradingCalendarPage>(`/api/admin/data-collections/trading-calendar?${params}`, signal);
 }
 
-export function getEtfOverview(): Promise<EtfOverview> {
-  return request<EtfOverview>("/api/admin/data-collections/etfs/overview");
+export function getTradingCalendarDay(exchange: string, date: string, signal?: AbortSignal): Promise<TradingCalendarDetail> {
+  return request<TradingCalendarDetail>(`/api/admin/data-collections/trading-calendar/${encodeURIComponent(exchange)}/${encodeURIComponent(date)}`, signal);
 }
 
-export function listEtfs(filters: EtfFilters): Promise<EtfPage> {
+export function getEtfOverview(signal?: AbortSignal): Promise<EtfOverview> {
+  return request<EtfOverview>("/api/admin/data-collections/etfs/overview", signal);
+}
+
+export function listEtfs(filters: EtfFilters, signal?: AbortSignal): Promise<EtfPage> {
   const params = new URLSearchParams();
   if (filters.keyword) params.set("keyword", filters.keyword);
   if (filters.exchange) params.set("exchange", filters.exchange);
   if (filters.listStatus) params.set("list_status", filters.listStatus);
   params.set("limit", String(filters.limit ?? 50));
   params.set("offset", String(filters.offset ?? 0));
-  return request<EtfPage>(`/api/admin/data-collections/etfs?${params}`);
+  return request<EtfPage>(`/api/admin/data-collections/etfs?${params}`, signal);
 }
 
 function timeSeriesParams(filters: EtfTimeSeriesFilters): string {

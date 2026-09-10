@@ -10,7 +10,8 @@ import { BacktestPreflightPage } from "./pages/BacktestPreflightPage";
 import { BacktestRunsPage } from "./pages/BacktestRunsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DataSourcesPage } from "./pages/DataSourcesPage";
-import { DataCollectionPage, EtfBasicsPage } from "./pages/DataCollectionPage";
+import { DataCollectionPage } from "./pages/DataCollectionPage";
+import { MarketPage } from "./pages/MarketPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
 import { LoginPage } from "./pages/LoginPage";
 import { LogPage } from "./pages/LogPage";
@@ -66,7 +67,7 @@ export function App() {
       />
       <Route
         path="/admin/data/trading-calendar"
-        element={<RequireAuth><AdminPage><DataCollectionPage page="trading-calendar" /></AdminPage></RequireAuth>}
+        element={<RequireAuth><Navigate to="/admin/data/etf-basics?calendar=open" replace /></RequireAuth>}
       />
       <Route
         path="/admin/data/daily-quotes"
@@ -74,7 +75,7 @@ export function App() {
       />
       <Route
         path="/admin/data/etf-basics"
-        element={<RequireAuth><AdminPage><EtfBasicsPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><OverviewShell title="A 股市场" section="MARKET DATA" className="qfm-root"><MarketPage /></OverviewShell></RequireAuth>}
       />
       <Route
         path="/admin/data/etf-basics/:tsCode"
