@@ -1,0 +1,133 @@
+/* The approved A-share B baseline is scoped to this route. Other reviewed
+   pages keep their own density and responsive layout decisions. */
+.qfo-root.qfm-root { --canvas:#F5F2EC; --surface:#FFFCF7; --surface-2:#F4F0E9; --surface-3:#EEEAE3; --text:#20262B; --text-2:#414B53; --muted:#626D76; --muted-2:#626D76; --orange-600:#B24323; font-variant-numeric:tabular-nums; }
+.qfm-root .qfo-main { overflow:auto; padding:20px 24px; }
+.qfm-root .qfo-topbar { background:var(--canvas); backdrop-filter:none; }
+.qfm-root .qfo-sidebar { background:#EEEAE3; }
+.qfm-root .qfo-icon-btn,.qfm-root .qfo-secondary-btn { height:36px; }
+.qfm-root .qfo-icon-btn { width:36px; }
+.qfm-root .qfo-secondary-btn { font-size:14px; font-weight:650; }
+.qfm-root .qfo-secondary-btn svg { width:18px; height:18px; }
+/* Pending list requests keep controls and keyboard focus in place. Native
+   disabled styling is reserved for unavailable actions, such as page boundaries. */
+.qfm-root .qfm-page-head button[aria-disabled="true"]:not(:disabled),.qfm-root .qfm-pagination button[aria-disabled="true"]:not(:disabled) { cursor:progress; }
+.qfm-root .qfm-content { height:100%; min-height:560px; width:min(100%,1580px); margin:0 auto; display:flex; flex-direction:column; gap:16px; }
+.qfm-root .qfm-page-head { margin:0; align-items:center; gap:16px; }
+.qfm-root .qfm-page-head h1 { font-size:32px; line-height:40px; font-weight:700; }
+.qfm-root .qfm-page-head .qfo-page-desc { font-size:13px; line-height:20px; margin-top:4px; }
+.qfm-root .qfm-market-band { flex-shrink:0; min-height:104px; display:grid; grid-template-columns:1fr .7fr 1.45fr 1fr; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+.qfm-root .qfm-metric { padding:12px 16px; min-width:0; }
+.qfm-root .qfm-metric+.qfm-metric { border-left:1px solid var(--border); }
+.qfm-root .qfm-metric-label { font-size:12px; line-height:18px; color:var(--muted); margin-bottom:6px; font-weight:600; }
+.qfm-root .qfm-metric-value { font-size:22px; line-height:30px; font-weight:650; letter-spacing:-.02em; overflow-wrap:anywhere; }
+.qfm-root .qfm-metric-value.qfm-mono { font-size:14px; line-height:30px; letter-spacing:-.01em; }
+.qfm-root .qfm-metric-sub { font-size:12px; line-height:18px; color:var(--muted); margin-top:4px; }
+.qfm-root .qfm-mono { font-family:"Geist Mono","SFMono-Regular",monospace; font-size:12px; }
+.qfm-root .qfm-muted { color:var(--muted); }
+.qfm-root .qfm-workspace { flex:1; min-height:260px; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
+.qfm-root .qfm-workspace-head { height:48px; flex-shrink:0; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 16px; }
+.qfm-root .qfm-workspace-head h2 { font-size:16px; line-height:24px; font-weight:650; }
+.qfm-root .qfm-workspace-meta { margin-left:auto; color:var(--muted); font-size:12px; }
+.qfm-root .qfm-workspace-meta strong { color:var(--text); }
+.qfm-root .qfm-toolbar { min-height:60px; flex-shrink:0; display:flex; align-items:center; flex-wrap:wrap; gap:8px; padding:12px; border-bottom:1px solid var(--border); background:var(--surface-2); }
+.qfm-root .qfm-search { width:280px; max-width:100%; height:36px; display:flex; align-items:center; gap:8px; padding:0 10px; border:1px solid var(--border); border-radius:8px; background:var(--surface); color:var(--muted); }
+.qfm-root .qfm-search:focus-within { border-color:var(--orange); outline:2px solid var(--orange-100); outline-offset:1px; }
+.qfm-root .qfm-search svg { width:15px; height:15px; flex-shrink:0; }
+.qfm-root .qfm-search input { width:100%; min-width:0; padding:0; border:0; outline:0; box-shadow:none; border-radius:0; background:transparent; color:var(--text); font-size:14px; }
+.qfm-root .qfm-search input::placeholder { color:var(--muted); }
+.qfm-root .qfm-filter { position:relative; }
+.qfm-root .qfm-filter-trigger { height:36px; min-width:148px; border:1px solid var(--border); border-radius:8px; background:var(--surface); display:flex; align-items:center; gap:8px; padding:0 10px; cursor:pointer; font-size:13px; }
+.qfm-root .qfm-filter-trigger:hover,.qfm-root .qfm-filter-trigger[aria-expanded=true] { border-color:var(--border-strong); background:#fff; }
+.qfm-root .qfm-filter-prefix { color:var(--muted); }
+.qfm-root .qfm-filter-trigger svg { margin-left:auto; width:14px; height:14px; color:var(--muted); transition:transform .12s ease-out; }
+.qfm-root .qfm-filter-trigger[aria-expanded=true] svg { transform:rotate(180deg); }
+.qfm-root .qfm-filter-menu { position:absolute; top:42px; left:0; min-width:180px; padding:5px; border:1px solid var(--border); border-radius:9px; background:var(--surface); box-shadow:0 12px 34px #20262B1F; z-index:20; }
+.qfm-root .qfm-filter-option { width:100%; height:36px; padding:0 9px; border:0; border-radius:6px; background:transparent; display:flex; align-items:center; gap:8px; cursor:pointer; text-align:left; font-size:14px; }
+.qfm-root .qfm-filter-option:hover { background:var(--surface-2); }
+.qfm-root .qfm-filter-option[aria-selected=true] { background:var(--orange-50); font-weight:650; }
+.qfm-root .qfm-filter-option svg { width:15px; height:15px; color:transparent; }
+.qfm-root .qfm-filter-option[aria-selected=true] svg { color:var(--orange); }
+.qfm-root .qfm-chips { display:flex; gap:4px; }
+.qfm-root .qfm-chip { height:36px; padding:0 10px; border:1px solid transparent; border-radius:7px; background:transparent; color:var(--muted); font-size:13px; cursor:pointer; }
+.qfm-root .qfm-chip:hover { background:var(--surface); }
+.qfm-root .qfm-chip[aria-pressed=true] { background:var(--orange-50); color:var(--orange-600); border-color:var(--orange-100); }
+.qfm-root .qfm-toolbar-count { margin-left:auto; color:var(--muted); font-size:12px; }
+.qfm-root .qfm-table-wrap { flex:1; min-height:0; overflow:auto; scrollbar-gutter:stable; scrollbar-width:thin; scrollbar-color:#D6D0C8 transparent; }
+.qfm-root .qfm-table { width:100%; min-width:1040px; border-collapse:separate; border-spacing:0; table-layout:fixed; font-size:14px; }
+.qfm-root .qfm-table th { position:sticky; top:0; z-index:1; height:36px; padding:0 12px; background:var(--surface-2); text-align:left; font-size:12px; font-weight:600; color:var(--muted); border-bottom:1px solid var(--border); }
+.qfm-root .qfm-table td { height:64px; padding:8px 12px; border-bottom:1px solid #ECE8E1; color:var(--text-2); vertical-align:middle; overflow:hidden; }
+.qfm-root .qfm-table th:last-child,.qfm-root .qfm-table td:last-child { text-align:right; }
+.qfm-root .qfm-table tbody tr[data-code] { cursor:pointer; transition:background .1s ease-out; }
+.qfm-root .qfm-table tbody tr[data-code]:hover,.qfm-root .qfm-table tr:focus-within { background:var(--orange-50); }
+.qfm-root .qfm-code { font:600 12px/18px "Geist Mono","SFMono-Regular",monospace; white-space:nowrap; }
+.qfm-root .qfm-name { display:block; font-size:14px; line-height:22px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
+.qfm-root a.qfm-name:hover,.qfm-root .qfm-code:hover { text-decoration:underline; }
+.qfm-root .qfm-name-sub { font-size:13px; line-height:20px; margin-top:2px; color:var(--muted); }
+.qfm-root .qfm-state { display:inline-flex; align-items:center; gap:6px; font-size:13px; font-weight:500; white-space:nowrap; color:var(--muted); }
+.qfm-root .qfm-state-L { color:#326543; }
+.qfm-root .qfm-state-P { color:#80601E; }
+.qfm-root .qfm-state i,.qfm-root .qfm-aside-state i,.qfm-root .qfm-day-state i { width:6px; height:6px; border-radius:50%; background:currentColor; flex-shrink:0; }
+.qfm-root .qfm-pagination { flex-shrink:0; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; padding:10px 12px; border-top:1px solid var(--border); font-size:12px; }
+.qfm-root .qfm-pagination-controls { display:flex; align-items:center; gap:8px; }
+.qfm-root .qfm-pagination select { height:36px; padding:0 8px; border:1px solid var(--border); border-radius:8px; color:var(--text); background:var(--surface); font:inherit; }
+.qfm-root .qfm-error { flex-shrink:0; padding:12px 16px; background:var(--red-bg); color:#A2463F; border-bottom:1px solid #E0BFB8; font-size:13px; line-height:20px; }
+.qfm-root .qfm-error span { display:block; }
+.qfm-root .qfm-text-button { padding:0; margin-left:8px; border:0; background:transparent; color:inherit; text-decoration:underline; cursor:pointer; font:inherit; }
+.qfm-root .qfm-table td.qfm-empty { height:160px; text-align:center; color:var(--muted); cursor:default; white-space:normal; }
+.qfm-root .qfm-empty a { text-decoration:underline; }
+.qfm-root .qfm-skeleton { display:block; width:85%; height:14px; border-radius:4px; background:var(--surface-3); }
+.qfm-root .qfm-toast { left:50%; right:auto; transform:translateX(-50%); bottom:22px; text-align:center; }
+.qfm-root .qfm-spin { animation:qfm-spin 1s linear infinite; }
+@keyframes qfm-spin { to { transform:rotate(360deg); } }
+.qfm-root button:focus-visible,.qfm-root a:focus-visible,.qfm-root select:focus-visible,.qfm-root [tabindex]:focus-visible { outline:2px solid var(--orange); outline-offset:2px; }
+.qfm-root .qfm-table-wrap:focus-visible { outline-offset:-2px; }
+/* Native dialog provides focus containment without changing the approved
+   centered month grid and date inspector composition. */
+.qfm-root .qfm-calendar-dialog { width:min(1040px,calc(100vw - 32px)); height:min(740px,calc(100dvh - 32px)); max-width:none; max-height:none; margin:auto; padding:0; background:var(--surface); color:var(--text); border:1px solid var(--border); border-radius:12px; box-shadow:0 20px 60px #20262B26; overflow:hidden; }
+.qfm-root .qfm-calendar-dialog[open] { display:grid; grid-template-rows:64px auto minmax(0,1fr); }
+.qfm-root .qfm-calendar-dialog::backdrop { background:#20262B38; }
+.qfm-root .qfm-calendar-head { display:flex; align-items:center; justify-content:space-between; padding:0 20px; border-bottom:1px solid var(--border); }
+.qfm-root .qfm-dialog-kicker { color:var(--orange); font:650 11px/16px "Geist Mono",monospace; letter-spacing:.13em; }
+.qfm-root .qfm-calendar-head h2 { font-size:22px; line-height:30px; font-weight:650; }
+.qfm-root .qfm-calendar-toolbar { display:flex; flex-wrap:wrap; align-items:center; min-height:60px; gap:8px; padding:12px 16px; background:var(--surface-2); border-bottom:1px solid var(--border); }
+.qfm-root .qfm-month-nav { display:flex; align-items:center; margin-left:4px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden; }
+.qfm-root .qfm-month-nav button { width:34px; height:34px; border:0; background:transparent; display:grid; place-items:center; cursor:pointer; }
+.qfm-root .qfm-month-nav button:hover { background:var(--surface-2); }
+.qfm-root .qfm-month-nav svg { width:14px; height:14px; }
+.qfm-root .qfm-month-label { min-width:104px; text-align:center; font:650 13px/18px "Geist Mono",monospace; border-left:1px solid var(--border); border-right:1px solid var(--border); }
+.qfm-root .qfm-legend { margin-left:auto; display:flex; align-items:center; gap:12px; color:var(--muted); font-size:12px; }
+.qfm-root .qfm-legend span { display:flex; align-items:center; gap:6px; }
+.qfm-root .qfm-legend i { width:8px; height:8px; border-radius:2px; border:1px solid #BFD5C5; background:var(--green-bg); }
+.qfm-root .qfm-legend i.qfm-closed { background:var(--surface-3); border-color:var(--border); }
+.qfm-root .qfm-legend i.qfm-today { background:var(--orange-50); border-color:#F0A387; }
+.qfm-root .qfm-calendar-body { min-height:0; display:grid; grid-template-columns:minmax(0,1fr) 264px; overflow:auto; }
+.qfm-root .qfm-calendar-main { display:flex; flex-direction:column; min-width:0; min-height:0; padding:12px; gap:8px; border-right:1px solid var(--border); }
+.qfm-root .qfm-calendar-main .qfm-error { padding:8px; }
+.qfm-root .qfm-weekdays { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:6px; height:28px; flex-shrink:0; align-items:center; text-align:center; color:var(--muted); font-size:12px; }
+.qfm-root .qfm-calendar-grid { flex:1; display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); grid-template-rows:repeat(6,minmax(56px,1fr)); gap:6px; }
+.qfm-root .qfm-day { min-width:0; min-height:56px; border:1px solid var(--border); border-radius:7px; background:var(--surface); padding:8px; display:flex; flex-direction:column; justify-content:space-between; cursor:pointer; transition:border .1s ease-out,background .1s ease-out; }
+.qfm-root .qfm-day:hover { border-color:var(--border-strong); background:#fff; }
+.qfm-root .qfm-day.qfm-out { opacity:.38; }
+.qfm-root .qfm-day.qfm-closed { background:var(--surface-2); }
+.qfm-root .qfm-day.qfm-unknown { border-style:dashed; }
+.qfm-root .qfm-day.qfm-today { background:var(--orange-50); border-color:#F0A387; }
+.qfm-root .qfm-day.qfm-selected { border-color:var(--orange); box-shadow:0 0 0 2px #E85F3226; }
+.qfm-root .qfm-day-num { font:650 13px/18px "Geist Mono",monospace; }
+.qfm-root .qfm-day-state { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--muted); }
+.qfm-root .qfm-day.qfm-open .qfm-day-state { color:var(--green); }
+.qfm-root .qfm-calendar-aside { display:flex; flex-direction:column; min-height:0; padding:16px; background:var(--surface-2); }
+.qfm-root .qfm-aside-date { margin-top:7px; font-size:22px; line-height:30px; font-weight:650; }
+.qfm-root .qfm-aside-state { align-self:flex-start; display:flex; align-items:center; gap:6px; padding:5px 8px; margin-top:7px; border-radius:6px; font-size:13px; color:var(--green); background:var(--green-bg); }
+.qfm-root .qfm-aside-state.qfm-closed,.qfm-root .qfm-aside-state.qfm-unknown { background:var(--surface-3); color:var(--muted); }
+.qfm-root .qfm-detail-list { margin:16px 0 0; border-top:1px solid var(--border); }
+.qfm-root .qfm-detail-list div { display:flex; justify-content:space-between; align-items:center; min-height:52px; gap:12px; padding:10px 0; border-bottom:1px solid var(--border); }
+.qfm-root .qfm-detail-list dt { color:var(--muted); font-size:13px; }
+.qfm-root .qfm-detail-list dd { margin:0; font-size:13px; text-align:right; font-weight:650; }
+.qfm-root .qfm-detail-list dd.qfm-mono { font-size:12px; }
+.qfm-root .qfm-aside-note { margin:16px 0 0; font-size:12px; line-height:18px; color:var(--muted); }
+@media(min-width:1880px) { .qfm-root .qfo-main { padding:24px 32px; } .qfm-root .qfm-content { width:min(100%,1640px); } }
+@media(max-width:1380px) { .qfm-root .qfo-main { padding:16px 18px; } .qfm-root .qfm-search { width:248px; } .qfm-root .qfm-market-band { grid-template-columns:1fr .65fr 1.4fr 1fr; } .qfm-root .qfm-metric { padding:12px; } .qfm-root .qfm-metric-value { font-size:20px; } }
+@media(max-height:820px) and (min-width:981px) { .qfm-root .qfo-main { padding-top:14px; padding-bottom:14px; } .qfm-root .qfm-content { gap:12px; } .qfm-root .qfm-page-head h1 { font-size:28px; line-height:36px; } .qfm-root .qfm-market-band { min-height:96px; } .qfm-root .qfm-metric-label { margin-bottom:4px; } .qfm-root .qfm-metric-value { font-size:20px; } .qfm-root .qfm-table td { height:60px; } .qfm-root .qfm-calendar-dialog { height:calc(100dvh - 24px); } .qfm-root .qfm-day { padding:6px; } }
+@media(max-width:980px) { .qfm-root .qfo-main { padding:16px 12px; } .qfm-root .qfm-content { height:auto; min-height:100%; } .qfm-root .qfm-page-head { grid-template-columns:1fr; gap:12px; } .qfm-root .qfm-market-band { grid-template-columns:repeat(2,minmax(0,1fr)); } .qfm-root .qfm-metric:nth-child(n+3) { border-top:1px solid var(--border); } .qfm-root .qfm-metric:nth-child(3) { border-left:0; } .qfm-root .qfm-workspace { min-height:420px; } .qfm-root .qfm-table-wrap { flex:auto; max-height:55vh; min-height:220px; } .qfm-root .qfm-toolbar-count { margin-left:0; } .qfm-root .qfm-calendar-body { display:block; } .qfm-root .qfm-calendar-main { border-right:0; min-height:440px; } .qfm-root .qfm-calendar-grid { min-height:380px; } .qfm-root .qfm-calendar-aside { border-top:1px solid var(--border); } .qfm-root .qfm-detail-list { display:grid; grid-template-columns:1fr 1fr; gap:0 20px; margin-top:12px; } .qfm-root .qfm-legend { flex-wrap:wrap; margin-left:0; } }
+@media(max-width:620px) { .qfm-root .qfm-content { gap:12px; } .qfm-root .qfm-market-band { grid-template-columns:1fr; } .qfm-root .qfm-metric+.qfm-metric { border-left:0; border-top:1px solid var(--border); } .qfm-root .qfm-page-head h1 { font-size:28px; line-height:36px; } .qfm-root .qfm-metric-value { font-size:22px; } .qfm-root .qfm-workspace-head { flex-wrap:wrap; height:auto; min-height:56px; padding:8px 12px; gap:4px; } .qfm-root .qfm-workspace-meta { margin-left:0; width:100%; } .qfm-root .qfm-toolbar { align-items:flex-start; } .qfm-root .qfm-search { width:100%; } .qfm-root .qfm-chips,.qfm-root .qfm-pagination-controls { flex-wrap:wrap; } .qfm-root .qfm-calendar-dialog { width:calc(100vw - 16px); height:calc(100dvh - 16px); } .qfm-root .qfm-calendar-head { padding:0 12px; } .qfm-root .qfm-calendar-toolbar { padding:8px; } .qfm-root .qfm-calendar-toolbar .qfm-filter-trigger { min-width:128px; } .qfm-root .qfm-month-nav { margin-left:0; } .qfm-root .qfm-month-label { min-width:86px; } .qfm-root .qfm-calendar-main { padding:8px; gap:4px; } .qfm-root .qfm-calendar-grid,.qfm-root .qfm-weekdays { gap:3px; } .qfm-root .qfm-day { padding:5px 2px; } .qfm-root .qfm-day-state { gap:0; justify-content:center; } .qfm-root .qfm-day-state i { display:none; } .qfm-root .qfm-day-num { font-size:12px; } .qfm-root .qfm-detail-list { grid-template-columns:1fr; } .qfm-root .qfm-calendar-aside { padding:12px; } .qfm-root .qfm-legend { gap:8px; } }
+@media(prefers-reduced-motion:reduce) { .qfm-root *,.qfm-root *::before,.qfm-root *::after { transition:none!important; animation:none!important; } }

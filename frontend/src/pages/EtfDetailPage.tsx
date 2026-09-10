@@ -7,7 +7,8 @@ import {
   type KLineData
 } from "klinecharts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
+import { marketReturnTo } from "./market/marketPresentation";
 
 import {
   DataCollectionApiError,
@@ -503,6 +504,7 @@ function InteractiveKLineChart({
 
 export function EtfDetailPage() {
   const { tsCode = "" } = useParams();
+  const location = useLocation();
   const { logout } = useAuth();
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -605,10 +607,11 @@ export function EtfDetailPage() {
   if (!etf) return <section className="collection-page"><div className="collection-empty-state">{error ?? "ETF 不存在。"}</div></section>;
 
   return <section className="collection-page etf-detail-page" aria-labelledby="etf-detail-title">
-    <button className="etf-detail__back" type="button" onClick={() => navigate("/admin/data/etf-basics") }><ChevronLeft aria-hidden="true" />返回 ETF 列表</button>
+    <button className="etf-detail__back" type="button" onClick={() => navigate(marketReturnTo(location.state?.marketReturnTo)) }><ChevronLeft aria-hidden="true" />返回 ETF 列表</button>
     <div className="page-heading etf-detail__heading"><div><div className="etf-detail__title"><h2 id="etf-detail-title">{displayName}</h2><span>{etf.ts_code}</span></div><p>查看该 ETF 的基础资料、日线行情与复权因子</p></div></div>
     {error && <div className="page-error" role="alert">{error}</div>}
-    <div className="etf-detail__tabs" role="tablist" aria-label="ETF 详情页签">{TABS.map((item) => <button key={item.key} className={tab === item.key ? "active" : ""} type="button" role="tab" aria-selected={tab === item.key} onClick={() => setSearchParams(item.key === "basic" ? {} : { tab: item.key })}>{item.label}</button>)}</div>
+    {/* Tab URL changes must retain the originating market filters in history. */}
+    <div className="etf-detail__tabs" role="tablist" aria-label="ETF 详情页签">{TABS.map((item) => <button key={item.key} className={tab === item.key ? "active" : ""} type="button" role="tab" aria-selected={tab === item.key} onClick={() => setSearchParams(item.key === "basic" ? {} : { tab: item.key }, { state: location.state })}>{item.label}</button>)}</div>
     {tab === "basic" && <section className="collection-table etf-detail__basic"><div className="collection-table__heading"><div><h3>基础资料</h3><span>ETF 基础信息的当前数据</span></div></div><dl><div><dt>交易所</dt><dd>{exchangeLabel(etf.exchange)}</dd></div><div><dt>上市状态</dt><dd>{statusLabel(etf.list_status)}</dd></div><div><dt>上市日期</dt><dd>{formatDate(etf.list_date)}</dd></div><div><dt>跟踪指数</dt><dd>{etf.index_name ?? "—"}</dd></div><div><dt>管理人</dt><dd>{etf.mgr_name ?? "—"}</dd></div><div><dt>管理费率</dt><dd>{etf.mgt_fee ? `${numberText(etf.mgt_fee)}%` : "—"}</dd></div></dl></section>}
     {tab !== "basic" && <>
       <div className="etf-detail__filters">
