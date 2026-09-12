@@ -63,11 +63,9 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             import json
             from app.strategies.router import router
             from app.db.session import get_db_session
-            from app.backtesting.run_router import _cursor_signing_key
             app = FastAPI()
             app.include_router(router)
             app.dependency_overrides[get_db_session] = lambda: session
-            app.dependency_overrides[_cursor_signing_key] = lambda: args["signing_key"]
             async def request_workspace():
                 messages = []
                 async def receive():
