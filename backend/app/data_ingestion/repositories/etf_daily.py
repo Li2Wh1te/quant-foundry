@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -61,6 +62,12 @@ class EtfDailyBarRepository:
                 "close": bar.close,
                 "vol": bar.vol,
                 "amount": bar.amount,
+                # Match PostgreSQL's stored precision before comparing so
+                # repeated provider values with extra decimals stay idempotent.
+                **{field: value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+                   if value is not None else None
+                   for field in ("pre_close", "change", "pct_chg")
+                   for value in (getattr(bar, field),)},
                 "source_revision": revision,
             }
             if current is None:
@@ -74,7 +81,24 @@ class EtfDailyBarRepository:
             )
             old_revision = getattr(current, "source_revision", None)
             if old_revision == revision:
-                counts["unchanged"] += 1
+                # Display-only change facts do not invalidate a frozen OHLCV
+                # revision. Backfill them separately, preserving updated_at
+                # (the original-bar evidence timestamp) and its audit chain.
+                supplemental = {
+                    field: values[field] for field in ("pre_close", "change", "pct_chg")
+                    if getattr(current, field, None) != values[field]
+                }
+                if supplemental:
+                    self.session.execute(
+                        table.update().where(
+                            table.c.source == source,
+                            table.c.ts_code == bar.ts_code,
+                            table.c.trade_date == bar.trade_date,
+                        ).values(**supplemental, updated_at=table.c.updated_at)
+                    )
+                    counts["metadata_backfilled"] += 1
+                else:
+                    counts["unchanged"] += 1
                 continue
             if changed_fields:
                 kind = "correction"

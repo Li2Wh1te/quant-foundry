@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 
 # Keep this aligned with Tushare's documented single-ETF ``fund_daily`` example.
-ETF_DAILY_FIELDS = "trade_date,open,high,low,close,vol,amount"
+ETF_DAILY_FIELDS = "trade_date,open,high,low,close,vol,amount,pre_close,change,pct_chg"
 # The whole-market request needs the provider code to form the database key.
 ETF_DAILY_MARKET_FIELDS = f"ts_code,{ETF_DAILY_FIELDS}"
 ETF_DAILY_SCOPE_KEY = "market=CN"
@@ -749,6 +749,9 @@ def _normalize_etf_daily_row(row: object) -> EtfDailyBarInput:
         close=_parse_decimal(row.get("close"), "close"),
         vol=_parse_non_negative_decimal(row.get("vol"), "vol"),
         amount=_parse_non_negative_decimal(row.get("amount"), "amount"),
+        pre_close=_parse_decimal(row.get("pre_close"), "pre_close"),
+        change=_parse_decimal(row.get("change"), "change"),
+        pct_chg=_parse_decimal(row.get("pct_chg"), "pct_chg"),
     )
 
 
