@@ -79,7 +79,7 @@ export function App() {
       />
       <Route
         path="/admin/data/etf-basics/:tsCode"
-        element={<RequireAuth><AdminPage><EtfDetailPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><EtfDetailPage /></RequireAuth>}
       />
       <Route
         path="/admin/strategy-data"
