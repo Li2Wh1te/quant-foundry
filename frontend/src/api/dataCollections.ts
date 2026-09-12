@@ -83,14 +83,19 @@ export interface EtfFilters {
 export interface EtfDailyBar {
   ts_code: string;
   trade_date: string;
-  open: string;
-  high: string;
-  low: string;
-  close: string;
-  vol: string;
-  amount: string;
+  open: string | null;
+  high: string | null;
+  low: string | null;
+  close: string | null;
+  vol: string | null;
+  amount: string | null;
   source: string;
   updated_at: string;
+  pre_close?: string | null;
+  change?: string | null;
+  pct_chg?: string | null;
+  volume_unit?: string;
+  amount_unit?: string;
 }
 
 export interface EtfAdjustmentFactor {
@@ -179,26 +184,28 @@ function timeSeriesParams(filters: EtfTimeSeriesFilters): string {
   return params.toString();
 }
 
-export function getEtf(tsCode: string): Promise<EtfCode> {
-  return request<EtfCode>(`/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}`);
+export function getEtf(tsCode: string, signal?: AbortSignal): Promise<EtfCode> {
+  return request<EtfCode>(`/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}`, signal);
 }
 
 export function listEtfDailyBars(
   tsCode: string,
-  filters: EtfTimeSeriesFilters
+  filters: EtfTimeSeriesFilters,
+  signal?: AbortSignal
 ): Promise<EtfDailyBar[]> {
   const params = timeSeriesParams(filters);
   return request<EtfDailyBar[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars${params ? `?${params}` : ""}`
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars${params ? `?${params}` : ""}`, signal
   );
 }
 
 export function listEtfAdjustmentFactors(
   tsCode: string,
-  filters: EtfTimeSeriesFilters
+  filters: EtfTimeSeriesFilters,
+  signal?: AbortSignal
 ): Promise<EtfAdjustmentFactor[]> {
   const params = timeSeriesParams(filters);
   return request<EtfAdjustmentFactor[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors${params ? `?${params}` : ""}`
+    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors${params ? `?${params}` : ""}`, signal
   );
 }
