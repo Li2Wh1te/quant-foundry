@@ -56,10 +56,11 @@ def resolve_components(slippage=None, selections=None, analyzers=()):
             validate_v1_analyzer_spec(constructed)
             if selected.key == "sharpe_config_rf":
                 resolve_config_rf_daily(constructed)
+        descriptor = entry.describe()
         return {"key": entry.key, "version": entry.version, "kind": kind,
                 "name_zh": entry.name_zh, "name_en": entry.name_en, "display_name": entry.display_name,
-                "parameters": parameters, "parameter_schema": dict(entry.parameter_schema),
-                "capabilities": dict(entry.capabilities)}
+                "parameters": parameters, "parameter_schema": descriptor["parameter_schema"],
+                "capabilities": descriptor["capabilities"]}
 
     result = {kind: resolve(kind, selected) for kind, selected in requested.items()}
     identities = [(item.key, item.version) for item in analyzers]

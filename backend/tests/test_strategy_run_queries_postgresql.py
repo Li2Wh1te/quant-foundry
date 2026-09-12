@@ -57,6 +57,22 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             assert {first.items[0].id, second.items[0].id} == set(matching)
             assert repo.list(strategy_id=str(uuid4()), owner_scope=owner) == []
             assert not repo.list_page(**{**args, "strategy_id": str(uuid4())}).items
+            # Exercise the whole HTTP response, not only repository SQL.
+            from fastapi import FastAPI
+            from fastapi.testclient import TestClient
+            from app.strategies.router import router
+            from app.db.session import get_db_session
+            from app.backtesting.run_router import _cursor_signing_key
+            app = FastAPI()
+            app.include_router(router)
+            app.dependency_overrides[get_db_session] = lambda: session
+            app.dependency_overrides[_cursor_signing_key] = lambda: args["signing_key"]
+            with TestClient(app) as client:
+                response = client.get(f"/api/admin/strategies/{strategy.id}/backtests")
+                assert response.status_code == 200
+                payload = response.json()
+                assert payload["published_revisions"][0]["id"] == str(revision.id)
+                assert payload["component_options"]["execution_model"][0]["parameter_schema"]["properties"]
             session.rollback()
     finally:
         engine.dispose()
