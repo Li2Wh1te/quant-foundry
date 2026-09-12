@@ -2,6 +2,7 @@
 
 from collections.abc import Iterable
 from datetime import UTC, date, datetime
+from decimal import Decimal, ROUND_HALF_UP
 
 from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert
@@ -61,9 +62,12 @@ class EtfDailyBarRepository:
                 "close": bar.close,
                 "vol": bar.vol,
                 "amount": bar.amount,
-                "pre_close": bar.pre_close,
-                "change": bar.change,
-                "pct_chg": bar.pct_chg,
+                # Match PostgreSQL's stored precision before comparing so
+                # repeated provider values with extra decimals stay idempotent.
+                **{field: value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP)
+                   if value is not None else None
+                   for field in ("pre_close", "change", "pct_chg")
+                   for value in (getattr(bar, field),)},
                 "source_revision": revision,
             }
             if current is None:

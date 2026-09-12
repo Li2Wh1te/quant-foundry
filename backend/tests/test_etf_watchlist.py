@@ -22,6 +22,8 @@ from tests.test_auth import API_TOKEN, request_status
 from app.core.config import Settings
 from app.db.session import get_db_session
 from app.main import create_app
+from app.data_ingestion.services.etf_daily import normalize_etf_daily
+from tests.test_etf_daily import make_dataframe
 
 
 def quote(**changes):
@@ -140,5 +142,20 @@ def test_display_backfill_preserves_bar_revision_and_original_timestamp():
     session.get.return_value = SimpleNamespace(**asdict(enriched), source_revision=revision)
     session.execute.reset_mock()
     result = EtfDailyBarRepository(session).upsert_bars([enriched], source="tushare")
+    assert result.unchanged == 1
+    session.execute.assert_not_called()
+
+
+def test_provider_change_facts_are_read_without_recalculation():
+    frame = make_dataframe()
+    frame.to_dict.return_value[0].update(pre_close="3.70", change="0.04", pct_chg="1.0810811")
+    bar = normalize_etf_daily(frame, expected_trade_date=date(2026, 8, 14))[0]
+    assert bar.pre_close == Decimal("3.70")
+    assert bar.change == Decimal("0.04")
+    assert bar.pct_chg == Decimal("1.0810811")
+    stored = replace(bar, pct_chg=Decimal("1.081081"))
+    session = Mock()
+    session.get.return_value = SimpleNamespace(**asdict(stored), source_revision=canonical_row_revision(bar, source="tushare"))
+    result = EtfDailyBarRepository(session).upsert_bars([bar], source="tushare")
     assert result.unchanged == 1
     session.execute.assert_not_called()
