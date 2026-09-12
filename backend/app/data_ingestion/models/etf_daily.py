@@ -41,6 +41,11 @@ class EtfDailyBar(Base):
     close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     vol: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
     amount: Mapped[Decimal | None] = mapped_column(Numeric(24, 4), nullable=True)
+    # Provider daily-change facts are a display supplement. They do not change
+    # the OHLCV revision contract consumed by frozen backtest evidence.
+    pre_close: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    change: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    pct_chg: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )

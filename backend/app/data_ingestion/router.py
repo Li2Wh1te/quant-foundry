@@ -113,6 +113,11 @@ class EtfDailyBarResponse(BaseModel):
     close: Decimal | None
     vol: Decimal | None
     amount: Decimal | None
+    pre_close: Decimal | None = None
+    change: Decimal | None = None
+    pct_chg: Decimal | None = None
+    volume_unit: str = "手"
+    amount_unit: str = "千元"
     source: str
     updated_at: datetime
 

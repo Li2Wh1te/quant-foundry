@@ -11,6 +11,7 @@ from app.core.config import Settings, get_settings
 from app.core.logging import configure_logging
 from app.core.request_logging import log_request
 from app.data_ingestion.router import router as data_ingestion_router
+from app.data_ingestion.watchlist_router import router as etf_watchlist_router
 from app.data_sources.router import router as data_sources_router
 from app.data_sources.service import initialize_sources
 from app.backtesting.router import router as backtesting_router
@@ -73,6 +74,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(overview_router)
     protected_router.include_router(scheduling_router)
     protected_router.include_router(data_ingestion_router)
+    protected_router.include_router(etf_watchlist_router)
     protected_router.include_router(data_sources_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)

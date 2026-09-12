@@ -23,6 +23,11 @@ class EtfDailyBarInput:
     close: Decimal | None
     vol: Decimal | None
     amount: Decimal | None
+    # Optional for older sources and existing fixtures. Never derive these
+    # values from adjacent stored bars, which may span missing sessions.
+    pre_close: Decimal | None = None
+    change: Decimal | None = None
+    pct_chg: Decimal | None = None
 
 
 def _canonical_decimal(
