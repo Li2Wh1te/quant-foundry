@@ -59,7 +59,8 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             assert not repo.list_page(**{**args, "strategy_id": str(uuid4())}).items
             # Exercise the whole HTTP response, not only repository SQL.
             from fastapi import FastAPI
-            from fastapi.testclient import TestClient
+            import asyncio
+            import json
             from app.strategies.router import router
             from app.db.session import get_db_session
             from app.backtesting.run_router import _cursor_signing_key
@@ -67,12 +68,24 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             app.include_router(router)
             app.dependency_overrides[get_db_session] = lambda: session
             app.dependency_overrides[_cursor_signing_key] = lambda: args["signing_key"]
-            with TestClient(app) as client:
-                response = client.get(f"/api/admin/strategies/{strategy.id}/backtests")
-                assert response.status_code == 200
-                payload = response.json()
-                assert payload["published_revisions"][0]["id"] == str(revision.id)
-                assert payload["component_options"]["execution_model"][0]["parameter_schema"]["properties"]
+            async def request_workspace():
+                messages = []
+                async def receive():
+                    return {"type": "http.request", "body": b"", "more_body": False}
+                async def send(message):
+                    messages.append(message)
+                await app({
+                    "type": "http", "asgi": {"version": "3.0"},
+                    "http_version": "1.1", "method": "GET", "scheme": "http",
+                    "path": f"/api/admin/strategies/{strategy.id}/backtests",
+                    "root_path": "", "query_string": b"", "headers": [],
+                    "server": ("test", 80), "client": ("127.0.0.1", 1234),
+                }, receive, send)
+                assert next(m for m in messages if m["type"] == "http.response.start")["status"] == 200
+                return json.loads(b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body"))
+            payload = asyncio.run(request_workspace())
+            assert payload["published_revisions"][0]["id"] == str(revision.id)
+            assert payload["component_options"]["execution_model"][0]["parameter_schema"]["properties"]
             session.rollback()
     finally:
         engine.dispose()
