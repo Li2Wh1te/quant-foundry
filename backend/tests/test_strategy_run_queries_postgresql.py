@@ -65,6 +65,8 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             from app.db.session import get_db_session
             app = FastAPI()
             app.include_router(router)
+            from app.core.config import Settings
+            app.state.settings = Settings(cursor_signing_key=args["signing_key"], api_token="test-api-token-at-least-thirty-two-characters")
             app.dependency_overrides[get_db_session] = lambda: session
             async def request_workspace():
                 messages = []
