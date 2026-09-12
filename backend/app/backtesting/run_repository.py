@@ -729,7 +729,9 @@ class DatabaseRunRepository:
         if strategy_id is not None:
             statement = statement.join(
                 StrategyRevision,
-                StrategyRevision.id == BacktestRunRecord.strategy_revision_id,
+                # Legacy run bindings are text; cast the trusted UUID side so
+                # malformed historical text never causes a PostgreSQL UUID error.
+                cast(StrategyRevision.id, String) == BacktestRunRecord.strategy_revision_id,
             ).where(StrategyRevision.strategy_id == strategy_id)
         statement = (
             statement.order_by(BacktestRunRecord.created_at, BacktestRunRecord.id)
@@ -791,7 +793,9 @@ class DatabaseRunRepository:
         if strategy_id is not None:
             statement = statement.join(
                 StrategyRevision,
-                StrategyRevision.id == BacktestRunRecord.strategy_revision_id,
+                # Legacy run bindings are text; cast the trusted UUID side so
+                # malformed historical text never causes a PostgreSQL UUID error.
+                cast(StrategyRevision.id, String) == BacktestRunRecord.strategy_revision_id,
             ).where(StrategyRevision.strategy_id == strategy_id)
 
         query_payload = {
