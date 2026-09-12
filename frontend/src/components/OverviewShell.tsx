@@ -34,11 +34,11 @@ const destinations = [
 
 /** Reviewed overview, source and collection-task pages share this shell. Legacy routes retain their
  * existing theme setting until each page is reviewed and accepted separately. */
-export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH", className = "" }: { children: React.ReactNode; title?: string; section?: string; className?: string }) {
+export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH", className = "", workspace = false, beforeNavigate }: { children: React.ReactNode; title?: string; section?: string; className?: string; workspace?: boolean; beforeNavigate?: () => boolean }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(() => window.innerWidth <= 1240);
+  const [collapsed, setCollapsed] = useState(() => { if (workspace) { try { return localStorage.getItem("qfs-sidebar") !== "expanded"; } catch { return true; } } return window.innerWidth <= 1240; });
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -71,6 +71,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
     if (open) resultRef.current?.children[selected]?.scrollIntoView({ block: "nearest" });
   }, [selected, open]);
   function go(to: string) {
+    if (to === "logout" && beforeNavigate && !beforeNavigate()) return;
     close();
     if (to === "logout") { logout(); navigate("/login", { replace: true }); }
     else if (to === "/docs") window.open("/docs", "_blank", "noopener,noreferrer");
@@ -78,13 +79,14 @@ export function OverviewShell({ children, title = "数据运营总览", section 
   }
   function navItem(item: typeof toolItems[number], tool = false) {
     const Icon = item.icon;
-    const className = `qfo-nav-item${tool ? " qfo-tool-link" : ""}${item.to === location.pathname ? " qfo-active" : ""}${!item.to ? " qfo-nav-disabled" : ""}`;
+    const active=item.to === location.pathname || (workspace && item.to === "/admin/strategies" && location.pathname.startsWith("/admin/strategies/"));
+    const className = `qfo-nav-item${tool ? " qfo-tool-link" : ""}${active ? " qfo-active" : ""}${!item.to ? " qfo-nav-disabled" : ""}`;
     const label = item.to ? item.label : `${item.label}（尚未开放）`;
     const content = <><Icon aria-hidden="true" /><span>{item.label}</span></>;
     if (!item.to) return <button key={item.label} type="button" className={className} aria-disabled="true" aria-label={label} title={label}>{content}</button>;
     if (item.to === "logout") return <button key={item.label} type="button" className={className} aria-label={label} title={label} onClick={() => go(item.to)}>{content}</button>;
     if (item.to === "/docs") return <a key={item.label} className={className} aria-label={label} title={label} href="/docs" target="_blank" rel="noreferrer">{content}</a>;
-    return <Link key={item.label} className={className} aria-label={label} title={label} to={item.to} aria-current={item.to === location.pathname ? "page" : undefined}>{content}</Link>;
+    return <Link key={item.label} className={className} aria-label={label} title={label} to={item.to} aria-current={active ? "page" : undefined}>{content}</Link>;
   }
   return <div className={`qfo-root ${className}`}>
     <div className={`qfo-app${collapsed ? " qfo-sidebar-collapsed" : ""}`} inert={open}>
@@ -95,7 +97,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
       </aside>
       <section className="qfo-shell">
         <header className="qfo-topbar">
-          <button className="qfo-icon-btn qfo-sidebar-toggle" type="button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} aria-controls="overview-navigation" onClick={() => setCollapsed(value => !value)}><Menu aria-hidden="true" /></button>
+          <button className="qfo-icon-btn qfo-sidebar-toggle" type="button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} aria-controls="overview-navigation" onClick={() => setCollapsed(value => { if (workspace) { try { localStorage.setItem("qfs-sidebar", value ? "expanded" : "collapsed"); } catch { /* Storage is optional. */ } } return !value; })}><Menu aria-hidden="true" /></button>
           <div className="qfo-crumb"><span className="qfo-crumb-index">{section}</span><span className="qfo-crumb-sep">/</span><span className="qfo-crumb-title">{title}</span></div>
           <div className="qfo-top-actions"><button className="qfo-quick" type="button" aria-label="快速跳转" aria-haspopup="dialog" onClick={show}><Search aria-hidden="true" /><span>快速跳转</span><span className="qfo-kbd">⌘ K</span></button></div>
         </header>

@@ -1,25 +1,17 @@
 import {
   Archive,
-  CircleAlert,
-  CircleCheck,
-  Clock3,
   Code2,
-  Copy,
   ExternalLink,
-  FileCode2,
-  GitBranch,
-  History,
-  LoaderCircle,
   Plus,
   RefreshCw,
   Rocket,
   Save,
   ShieldCheck,
-  X
+  X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { FormEvent, KeyboardEvent } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import type { FormEvent } from "react";
+import { useBlocker, useNavigate, useParams } from "react-router-dom";
 
 import {
   archiveStrategy,
@@ -32,36 +24,19 @@ import {
   saveStrategyDraft,
   StrategyApiError,
   StrategyDetail,
-  StrategyDraft,
   StrategyRevision,
   StrategyRevisionSummary,
   StrategySummary,
   StrategyValidationIssue,
   StrategyValidationResult,
   updateStrategyMetadata,
-  validateStrategy
+  validateStrategy,
 } from "../api/strategies";
+import { OverviewShell } from "../components/OverviewShell";
+import { TEMPLATES, type TemplateKey } from "./strategies/templates";
+import { Drawer, ResizeHandle, RecentRuns } from "./strategies/WorkspaceParts";
+import "./strategies/StrategyWorkspace.css";
 import { useAuth } from "../auth/AuthContext";
-
-const SOURCE_TEMPLATE = `"""Private strategy entry point."""
-
-
-def run(context, parameters):
-    """Return one decision for the current step.
-
-    Two modes are supported in the first version:
-    - target_weights: submit the full target portfolio as
-      {"mode": "target_weights", "targets": {"<instrument_id>": "0.60"}}
-    - hold: submit no new trading intent with {"mode": "hold"}
-    """
-    return {"mode": "hold"}
-`;
-
-const EMPTY_PARAMETER_SCHEMA = {
-  type: "object",
-  properties: {},
-  additionalProperties: false
-};
 
 type EditorDraft = {
   name: string;
@@ -74,13 +49,13 @@ type EditorDraft = {
 type CreateDraft = {
   name: string;
   description: string;
-  sourceCode: string;
+  template: TemplateKey;
 };
 
 const EMPTY_CREATE_DRAFT: CreateDraft = {
   name: "",
   description: "",
-  sourceCode: SOURCE_TEMPLATE
+  template: "hold",
 };
 
 function prettyJson(value: Record<string, unknown>): string {
@@ -93,11 +68,14 @@ function editorDraftFromDetail(detail: StrategyDetail): EditorDraft {
     description: detail.description ?? "",
     sourceCode: detail.draft.source_code,
     parameterSchema: prettyJson(detail.draft.parameter_schema),
-    defaultParameters: prettyJson(detail.draft.default_parameters)
+    defaultParameters: prettyJson(detail.draft.default_parameters),
   };
 }
 
-function parseJsonObject(value: string, label: string): Record<string, unknown> {
+function parseJsonObject(
+  value: string,
+  label: string,
+): Record<string, unknown> {
   let parsed: unknown;
   try {
     parsed = JSON.parse(value);
@@ -114,7 +92,10 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   if (value && typeof value === "object") {
     const object = value as Record<string, unknown>;
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`).join(",")}}`;
+    return `{${Object.keys(object)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonicalJson(object[key])}`)
+      .join(",")}}`;
   }
   return JSON.stringify(value) ?? "undefined";
 }
@@ -129,7 +110,7 @@ function formatTimestamp(value: string | null | undefined): string {
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false
+    hour12: false,
   }).format(date);
 }
 
@@ -143,33 +124,52 @@ function issueLocation(issue: StrategyValidationIssue): string {
   return `第 ${issue.line} 行${issue.column ? `，第 ${issue.column} 列` : ""}`;
 }
 
-function stateLabel(detail: StrategyDetail, validation: StrategyValidationResult | null, isDirty: boolean): string {
+function stateLabel(
+  detail: StrategyDetail,
+  validation: StrategyValidationResult | null,
+  isDirty: boolean,
+): string {
   if (detail.state === "archived") return "已归档";
-  if (!isDirty && validation?.draft_version === detail.draft.version && !validation.valid) return "发布检查失败";
+  if (
+    !isDirty &&
+    validation?.draft_version === detail.draft.version &&
+    !validation.valid
+  )
+    return "发布检查失败";
   if (!detail.current_revision_id) return "从未发布";
   if (isDirty || detail.draft_changed_since_revision) return "草稿有未发布修改";
   return "已发布";
 }
 
-function isSameEditorDraft(detail: StrategyDetail, draft: EditorDraft): boolean {
-  return detail.name === draft.name
-    && (detail.description ?? "") === draft.description
-    && detail.draft.source_code === draft.sourceCode
-    && canonicalJson(detail.draft.parameter_schema) === canonicalJson(parseJsonObject(draft.parameterSchema, "参数 Schema"))
-    && canonicalJson(detail.draft.default_parameters) === canonicalJson(parseJsonObject(draft.defaultParameters, "默认参数"));
+function isSameEditorDraft(
+  detail: StrategyDetail,
+  draft: EditorDraft,
+): boolean {
+  return (
+    detail.name === draft.name &&
+    (detail.description ?? "") === draft.description &&
+    detail.draft.source_code === draft.sourceCode &&
+    canonicalJson(detail.draft.parameter_schema) ===
+      canonicalJson(parseJsonObject(draft.parameterSchema, "参数 Schema")) &&
+    canonicalJson(detail.draft.default_parameters) ===
+      canonicalJson(parseJsonObject(draft.defaultParameters, "默认参数"))
+  );
 }
 
 function sourceLineCount(source: string): number {
   return source.length === 0 ? 1 : source.split("\n").length;
 }
 
-function validationFromError(error: StrategyApiError, detail: StrategyDetail | null): StrategyValidationResult | null {
+function validationFromError(
+  error: StrategyApiError,
+  detail: StrategyDetail | null,
+): StrategyValidationResult | null {
   if (error.issues.length === 0 || !detail) return null;
   return {
     valid: false,
     draft_version: detail.draft.version,
     source_hash: detail.draft.source_hash,
-    issues: error.issues
+    issues: error.issues,
   };
 }
 
@@ -189,9 +189,13 @@ export function StrategiesPage() {
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
   const [revisions, setRevisions] = useState<StrategyRevisionSummary[]>([]);
   const [draft, setDraft] = useState<EditorDraft | null>(null);
-  const [validation, setValidation] = useState<StrategyValidationResult | null>(null);
-  const [revisionPreview, setRevisionPreview] = useState<StrategyRevision | null>(null);
-  const [createDraft, setCreateDraft] = useState<CreateDraft>(EMPTY_CREATE_DRAFT);
+  const [validation, setValidation] = useState<StrategyValidationResult | null>(
+    null,
+  );
+  const [revisionPreview, setRevisionPreview] =
+    useState<StrategyRevision | null>(null);
+  const [createDraft, setCreateDraft] =
+    useState<CreateDraft>(EMPTY_CREATE_DRAFT);
   const [createOpen, setCreateOpen] = useState(false);
   const [revisionLoading, setRevisionLoading] = useState(false);
   const [loadingList, setLoadingList] = useState(true);
@@ -203,84 +207,230 @@ export function StrategiesPage() {
   const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(() => sessionValue("search", ""));
   const detailRequestSequence = useRef(0);
   const revisionRequestSequence = useRef(0);
 
-  const selectedSummary = strategies.find((item) => item.id === strategyId) ?? null;
   const isArchived = detail?.state === "archived";
-  const isDirty = Boolean(detail && draft && !isSameEditorDraftSafe(detail, draft));
-  const publishedCount = strategies.filter((item) => item.current_revision_id !== null).length;
-  const draftCount = strategies.length - publishedCount;
+  const isDirty = Boolean(
+    detail && draft && !isSameEditorDraftSafe(detail, draft),
+  );
+  const busy = saving || validating || publishing || archiving || refreshing;
+  const [file, setFile] = useState<
+    "sourceCode" | "defaultParameters" | "description"
+  >("sourceCode");
+  const [panel, setPanel] = useState("parameters");
+  const [filter, setFilter] = useState(() => sessionValue("filter", "all"));
+  const [overlay, setOverlay] = useState("");
+  const [explorer, setExplorer] = useState(
+      () => sessionValue("explorer", "true") === "true",
+    ),
+    [contextOpen, setContextOpen] = useState(
+      () => sessionValue("context", "true") === "true",
+    );
+  const [diagnostics, setDiagnostics] = useState(false);
+  const [sizes, setSizes] = useState(() => {
+    try {
+      return {
+        ...{ left: 228, right: 320, bottom: 180 },
+        ...JSON.parse(sessionStorage.getItem("qfs-sizes") || "{}"),
+      };
+    } catch {
+      return { left: 228, right: 320, bottom: 180 };
+    }
+  });
+  const [narrow, setNarrow] = useState(window.innerWidth < 1200);
+  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const editorRef = useRef<HTMLTextAreaElement>(null),
+    linesRef = useRef<HTMLPreElement>(null);
+  const lock = useRef(false);
+  const guardRef = useRef({ dirty: false, busy: false });
+  guardRef.current = {
+    dirty:
+      isDirty ||
+      Boolean(
+        createOpen &&
+          (createDraft.name ||
+            createDraft.description ||
+            createDraft.template !== "hold"),
+      ),
+    busy,
+  };
+  function canLeave() {
+    if (guardRef.current.busy) {
+      setNotice("操作进行中，请稍后再离开。");
+      return false;
+    }
+    return (
+      !guardRef.current.dirty ||
+      window.confirm("当前草稿尚未保存，确定放弃修改并离开吗？")
+    );
+  }
+  useEffect(() => {
+    try {
+      sessionStorage.setItem("qfs-sizes", JSON.stringify(sizes));
+    } catch {
+      /* Storage is optional. */
+    }
+  }, [sizes]);
+  useEffect(() => {
+    const resize = () => setNarrow(window.innerWidth < 1200);
+    window.addEventListener("resize", resize);
+    return () => window.removeEventListener("resize", resize);
+  }, []);
+  const workbenchRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = workbenchRef.current;
+    if (!el) return;
+    const resize = new ResizeObserver(([entry]) =>
+      setNarrow(
+        entry.contentRect.width < 360 + sizes.left + sizes.right + 16 ||
+          window.innerWidth < 900,
+      ),
+    );
+    resize.observe(el);
+    return () => resize.disconnect();
+  }, [sizes.left, sizes.right]);
+  useEffect(() => {
+    try {
+      for (const [k, v] of Object.entries({
+        search,
+        filter,
+        explorer,
+        context: contextOpen,
+      }))
+        sessionStorage.setItem("qfs-" + k, String(v));
+    } catch {
+      /* Storage is optional. */
+    }
+  }, [search, filter, explorer, contextOpen]);
+  const explorerVisible = narrow ? overlay === "explorer" : explorer,
+    contextVisible = narrow ? overlay === "context" : contextOpen;
+  const blocker = useBlocker(() => !canLeave());
+  useEffect(() => {
+    if (blocker.state === "blocked") blocker.reset();
+  }, [blocker]);
+  useEffect(() => {
+    const unload = (event: BeforeUnloadEvent) => {
+      if (guardRef.current.dirty || guardRef.current.busy) {
+        event.preventDefault();
+        event.returnValue = "";
+      }
+    };
+    window.addEventListener("beforeunload", unload);
+    return () => window.removeEventListener("beforeunload", unload);
+  }, []);
+  useEffect(() => {
+    const key = (e: globalThis.KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        if (!createOpen) void handleSave();
+      }
+      if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
+        if (narrow) {
+          setOverlay("");
+        } else setDiagnostics(false);
+      }
+    };
+    window.addEventListener("keydown", key);
+    return () => window.removeEventListener("keydown", key);
+  });
 
   const visibleStrategies = useMemo(() => {
     const query = search.trim().toLocaleLowerCase();
-    if (!query) return strategies;
-    return strategies.filter((item) => `${item.name} ${item.description ?? ""}`.toLocaleLowerCase().includes(query));
-  }, [search, strategies]);
+    return strategies.filter(
+      (item) =>
+        (filter === "all" || item.state === filter) &&
+        `${item.name} ${item.description ?? ""} ${item.id}`
+          .toLocaleLowerCase()
+          .includes(query),
+    );
+  }, [search, strategies, filter]);
 
-  const handleApiError = useCallback((caught: unknown, fallback: string) => {
-    if (caught instanceof StrategyApiError && caught.status === 401) {
-      logout();
-      navigate("/login", { replace: true });
-      return;
-    }
-    setError(caught instanceof Error ? caught.message : fallback);
-  }, [logout, navigate]);
+  const handleApiError = useCallback(
+    (caught: unknown, fallback: string) => {
+      if (caught instanceof StrategyApiError && caught.status === 401) {
+        logout();
+        navigate("/login", { replace: true });
+        return;
+      }
+      setError(
+        caught instanceof StrategyApiError && caught.status === 409
+          ? `版本冲突：${caught.message}。本地输入已保留，请复制需要保留的内容后刷新核对服务端版本。`
+          : caught instanceof Error
+            ? caught.message
+            : fallback,
+      );
+    },
+    [logout, navigate],
+  );
 
-  const loadStrategies = useCallback(async (background = false) => {
-    if (background) setRefreshing(true); else setLoadingList(true);
-    setError(null);
-    try {
-      const next = await listStrategies();
-      setStrategies(next);
-      if (!strategyId && next.length > 0) {
-        navigate(`/admin/strategies/${next[0].id}`, { replace: true });
-      } else if (strategyId && next.length === 0) {
-        navigate("/admin/strategies", { replace: true });
+  const loadStrategies = useCallback(
+    async (background = false) => {
+      if (background) setRefreshing(true);
+      else setLoadingList(true);
+      setError(null);
+      try {
+        const next: StrategySummary[] = [];
+        for (let offset = 0; ; offset += 100) {
+          const batch = await listStrategies(true, offset, 100);
+          next.push(...batch);
+          if (batch.length < 100) break;
+        }
+        setStrategies(next);
+        if (!strategyId && next.length > 0) {
+          navigate(`/admin/strategies/${next[0].id}`, { replace: true });
+        } else if (strategyId && next.length === 0) {
+          navigate("/admin/strategies", { replace: true });
+        }
+      } catch (caught) {
+        handleApiError(caught, "策略列表加载失败。");
+      } finally {
+        setLoadingList(false);
+        setRefreshing(false);
       }
-    } catch (caught) {
-      handleApiError(caught, "策略列表加载失败。");
-    } finally {
-      setLoadingList(false);
-      setRefreshing(false);
-    }
-  }, [handleApiError, navigate, strategyId]);
+    },
+    [handleApiError, navigate, strategyId],
+  );
 
-  const loadDetail = useCallback(async (id: string, background = false) => {
-    const requestSequence = ++detailRequestSequence.current;
-    revisionRequestSequence.current += 1;
-    setRevisionPreview(null);
-    if (!background) {
-      setLoadingDetail(true);
-      // Do not render one strategy's private source while another route is
-      // loading, even briefly. The selected record owns the editor surface.
-      setDetail(null);
-      setDraft(null);
-      setRevisions([]);
-      setValidation(null);
-    }
-    setError(null);
-    try {
-      const [nextDetail, nextRevisions] = await Promise.all([
-        getStrategy(id),
-        listStrategyRevisions(id)
-      ]);
-      if (requestSequence !== detailRequestSequence.current) return;
-      setDetail(nextDetail);
-      setDraft(editorDraftFromDetail(nextDetail));
-      setRevisions(nextRevisions);
-      setValidation(null);
-    } catch (caught) {
-      if (requestSequence === detailRequestSequence.current) {
-        handleApiError(caught, "策略详情加载失败。");
+  const loadDetail = useCallback(
+    async (id: string, background = false) => {
+      const requestSequence = ++detailRequestSequence.current;
+      revisionRequestSequence.current += 1;
+      setRevisionPreview(null);
+      setFile("sourceCode");
+      if (!background) {
+        setLoadingDetail(true);
+        // Do not render one strategy's private source while another route is
+        // loading, even briefly. The selected record owns the editor surface.
+        setDetail(null);
+        setDraft(null);
+        setRevisions([]);
+        setValidation(null);
       }
-    } finally {
-      if (requestSequence === detailRequestSequence.current) {
-        setLoadingDetail(false);
+      setError(null);
+      try {
+        const [nextDetail, nextRevisions] = await Promise.all([
+          getStrategy(id),
+          listStrategyRevisions(id),
+        ]);
+        if (requestSequence !== detailRequestSequence.current) return;
+        setDetail(nextDetail);
+        setDraft(editorDraftFromDetail(nextDetail));
+        setRevisions(nextRevisions);
+        setValidation(null);
+      } catch (caught) {
+        if (requestSequence === detailRequestSequence.current) {
+          handleApiError(caught, "策略详情加载失败。");
+        }
+      } finally {
+        if (requestSequence === detailRequestSequence.current) {
+          setLoadingDetail(false);
+        }
       }
-    }
-  }, [handleApiError]);
+    },
+    [handleApiError],
+  );
 
   useEffect(() => {
     void loadStrategies();
@@ -304,71 +454,92 @@ export function StrategiesPage() {
 
   function selectStrategy(id: string) {
     if (id === strategyId) return;
-    if (isDirty && !window.confirm("当前草稿尚未保存，确定放弃修改并切换策略吗？")) return;
     navigate(`/admin/strategies/${id}`);
   }
 
-  function updateDraftField<K extends keyof EditorDraft>(field: K, value: EditorDraft[K]) {
-    setDraft((current) => current ? { ...current, [field]: value } : current);
-    setValidation(null);
+  function updateDraftField<K extends keyof EditorDraft>(
+    field: K,
+    value: EditorDraft[K],
+  ) {
+    setDraft((current) => (current ? { ...current, [field]: value } : current));
     setNotice(null);
   }
 
   async function persistEditor(): Promise<StrategyDetail> {
     if (!detail || !draft) throw new Error("请先选择一个策略。");
-    const parameterSchema = parseJsonObject(draft.parameterSchema, "参数 Schema");
-    const defaultParameters = parseJsonObject(draft.defaultParameters, "默认参数");
+    const parameterSchema = parseJsonObject(
+      draft.parameterSchema,
+      "参数 Schema",
+    );
+    const defaultParameters = parseJsonObject(
+      draft.defaultParameters,
+      "默认参数",
+    );
     let nextDetail = detail;
 
     // Metadata and source use independent optimistic-lock versions in the API.
     // Persist them sequentially so a successful metadata save is never silently
     // discarded while the editor still reports the precise draft-save conflict.
-    const metadataChanged = detail.name !== draft.name || (detail.description ?? "") !== draft.description;
+    const metadataChanged =
+      detail.name !== draft.name ||
+      (detail.description ?? "") !== draft.description;
     if (metadataChanged) {
       const updated = await updateStrategyMetadata(detail.id, {
         version: nextDetail.version,
         name: draft.name.trim(),
-        description: draft.description.trim() || null
+        description: draft.description.trim() || null,
       });
       nextDetail = { ...nextDetail, ...updated };
-      setStrategies((current) => current.map((item) => item.id === updated.id ? updated : item));
+      setDetail(nextDetail);
+      setStrategies((current) =>
+        current.map((item) => (item.id === updated.id ? updated : item)),
+      );
     }
 
-    const draftChanged = detail.draft.source_code !== draft.sourceCode
-      || canonicalJson(detail.draft.parameter_schema) !== canonicalJson(parameterSchema)
-      || canonicalJson(detail.draft.default_parameters) !== canonicalJson(defaultParameters);
+    const draftChanged =
+      detail.draft.source_code !== draft.sourceCode ||
+      canonicalJson(detail.draft.parameter_schema) !==
+        canonicalJson(parameterSchema) ||
+      canonicalJson(detail.draft.default_parameters) !==
+        canonicalJson(defaultParameters);
     if (draftChanged) {
-      await saveStrategyDraft(detail.id, {
+      const saved = await saveStrategyDraft(detail.id, {
         version: nextDetail.draft.version,
         source_code: draft.sourceCode,
         parameter_schema: parameterSchema,
-        default_parameters: defaultParameters
+        default_parameters: defaultParameters,
       });
       // The server compares source and parameter contracts with the published
       // revision. Refresh that projection after a save, including a revert.
+      nextDetail = { ...nextDetail, draft: saved };
+      setDetail(nextDetail);
       nextDetail = await getStrategy(detail.id);
     }
 
     setDetail(nextDetail);
     setDraft(editorDraftFromDetail(nextDetail));
-    setStrategies((current) => current.map((item) => item.id === nextDetail.id
-      ? { ...item, ...nextDetail }
-      : item));
+    setStrategies((current) =>
+      current.map((item) =>
+        item.id === nextDetail.id ? { ...item, ...nextDetail } : item,
+      ),
+    );
     return nextDetail;
   }
 
   async function handleSave(event?: FormEvent) {
     event?.preventDefault();
-    if (!detail || !draft || saving || isArchived) return;
+    if (!detail || !draft || busy || lock.current || isArchived) return;
+    lock.current = true;
     setSaving(true);
     setError(null);
     setNotice(null);
     try {
       await persistEditor();
-      setNotice("草稿已保存到 PostgreSQL。");
+      setNotice("草稿已保存。");
     } catch (caught) {
       handleApiError(caught, "策略草稿保存失败。");
     } finally {
+      lock.current = false;
       setSaving(false);
     }
   }
@@ -384,7 +555,9 @@ export function StrategiesPage() {
   }
 
   async function handleValidate() {
-    if (!detail || validating || saving || isArchived) return;
+    if (!detail || busy || lock.current || isArchived) return;
+    lock.current = true;
+    setDiagnostics(true);
     setValidating(true);
     setError(null);
     setNotice(null);
@@ -394,12 +567,14 @@ export function StrategiesPage() {
     } catch (caught) {
       handleApiError(caught, "策略校验失败。");
     } finally {
+      lock.current = false;
       setValidating(false);
     }
   }
 
   async function handlePublish() {
-    if (!detail || publishing || saving || validating || isArchived) return;
+    if (!detail || busy || lock.current || isArchived) return;
+    lock.current = true;
     setPublishing(true);
     setError(null);
     setNotice(null);
@@ -408,6 +583,7 @@ export function StrategiesPage() {
       const result = await validateStrategy(current.id);
       setValidation(result);
       if (!result.valid) {
+        setDiagnostics(true);
         setError("当前草稿未通过校验，请先处理下方问题。");
         return;
       }
@@ -418,12 +594,15 @@ export function StrategiesPage() {
           revision_number: revision.revision_number,
           source_hash: revision.source_hash,
           runtime_manifest: revision.runtime_manifest,
-          published_at: revision.published_at
+          published_at: revision.published_at,
         },
-        ...currentRevisions
+        ...currentRevisions,
       ]);
       await loadDetail(current.id, true);
-      setNotice(`已发布策略版本 v${revision.revision_number}。发布版本不可修改。`);
+      setValidation(result);
+      setNotice(
+        `已发布策略版本 v${revision.revision_number}。发布版本不可修改。`,
+      );
     } catch (caught) {
       if (caught instanceof StrategyApiError) {
         const failedValidation = validationFromError(caught, detail);
@@ -431,53 +610,79 @@ export function StrategiesPage() {
       }
       handleApiError(caught, "策略发布失败。");
     } finally {
+      lock.current = false;
       setPublishing(false);
     }
   }
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    if (lock.current || busy) return;
+    if (
+      isDirty &&
+      !window.confirm("创建后将离开当前策略，确定放弃当前未保存草稿吗？")
+    )
+      return;
     if (!createDraft.name.trim()) {
       setError("请填写策略名称。");
       return;
     }
+    lock.current = true;
     setSaving(true);
     setError(null);
     try {
       const created = await createStrategy({
         name: createDraft.name.trim(),
         description: createDraft.description.trim() || undefined,
-        source_code: createDraft.sourceCode,
-        parameter_schema: EMPTY_PARAMETER_SCHEMA,
-        default_parameters: {}
+        source_code: TEMPLATES[createDraft.template].source,
+        parameter_schema: TEMPLATES[createDraft.template].schema,
+        default_parameters: TEMPLATES[createDraft.template].parameters,
       });
       setCreateOpen(false);
       setCreateDraft(EMPTY_CREATE_DRAFT);
-      setStrategies((current) => [created, ...current.filter((item) => item.id !== created.id)]);
+      setStrategies((current) => [
+        created,
+        ...current.filter((item) => item.id !== created.id),
+      ]);
+      guardRef.current = { dirty: false, busy: false };
       navigate(`/admin/strategies/${created.id}`);
       setNotice("策略已创建，当前是未发布草稿。");
     } catch (caught) {
       handleApiError(caught, "策略创建失败。");
     } finally {
+      lock.current = false;
       setSaving(false);
     }
   }
 
   async function handleArchive() {
-    if (!detail || archiving || isArchived) return;
-    if (!window.confirm("归档后将不能继续编辑或发布，但版本历史会保留。确定归档吗？")) return;
+    if (!detail || busy || lock.current || isArchived) return;
+    if (isDirty) {
+      setError("请先保存草稿或刷新放弃修改，再归档策略。");
+      return;
+    }
+    if (
+      !window.confirm(
+        "归档后将不能继续编辑或发布，但版本历史会保留。确定归档吗？",
+      )
+    )
+      return;
+    lock.current = true;
     setArchiving(true);
     setError(null);
     try {
       await archiveStrategy(detail);
-      const next = strategies.filter((item) => item.id !== detail.id);
-      setStrategies(next);
-      if (next.length > 0) navigate(`/admin/strategies/${next[0].id}`, { replace: true });
-      else navigate("/admin/strategies", { replace: true });
+      setStrategies((current) =>
+        current.map((item) =>
+          item.id === detail.id ? { ...item, state: "archived" } : item,
+        ),
+      );
+      await loadDetail(detail.id, true);
       setNotice("策略已归档，源码和版本历史仍保留在数据库中。");
     } catch (caught) {
       handleApiError(caught, "策略归档失败。");
     } finally {
+      lock.current = false;
       setArchiving(false);
     }
   }
@@ -488,7 +693,10 @@ export function StrategiesPage() {
     setRevisionLoading(true);
     setError(null);
     try {
-      const nextRevision = await getStrategyRevision(detail.id, revision.revision_number);
+      const nextRevision = await getStrategyRevision(
+        detail.id,
+        revision.revision_number,
+      );
       if (requestSequence === revisionRequestSequence.current) {
         setRevisionPreview(nextRevision);
       }
@@ -504,6 +712,7 @@ export function StrategiesPage() {
   }
 
   async function refreshPage() {
+    if (!canLeave()) return;
     setRefreshing(true);
     try {
       await loadStrategies(true);
@@ -513,262 +722,771 @@ export function StrategiesPage() {
     }
   }
 
-  const currentRevisionNumber = detail?.current_revision?.revision_number ?? null;
+  const currentRevisionNumber =
+    detail?.current_revision?.revision_number ?? null;
 
+  const stale = Boolean(
+    validation &&
+      (isDirty || validation.draft_version !== detail?.draft.version),
+  );
+  const checkLabel = stale ? "检查已过期" : statusText(validation);
+  const editorValue = draft?.[file] || "";
+  function closeCreate() {
+    if (busy) return;
+    if (
+      (createDraft.name ||
+        createDraft.description ||
+        createDraft.template !== "hold") &&
+      !window.confirm("放弃尚未创建的策略信息吗？")
+    )
+      return;
+    setCreateOpen(false);
+    setCreateDraft(EMPTY_CREATE_DRAFT);
+  }
+  function showCreate() {
+    if (busy) return;
+    setCreateOpen(true);
+  }
+  function updateCursor() {
+    const e = editorRef.current;
+    if (!e) return;
+    const before = e.value.slice(0, e.selectionStart);
+    setCursor({
+      line: before.split("\n").length,
+      column: before.length - before.lastIndexOf("\n"),
+    });
+  }
+  function formatSchema() {
+    try {
+      updateDraftField(
+        "parameterSchema",
+        prettyJson(
+          parseJsonObject(draft?.parameterSchema || "", "参数 Schema"),
+        ),
+      );
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  }
+  let parameters: Record<string, unknown> | null = null;
+  try {
+    parameters = parseJsonObject(draft?.defaultParameters || "", "默认参数");
+  } catch {
+    /* Keep malformed JSON in the editor. */
+  }
+  const controlsDisabled =
+    busy || Boolean(isArchived) || !draft || detail?.id !== strategyId;
   return (
-    <section className="strategies-page" aria-labelledby="strategies-title">
-      <div className="page-heading strategies-page__heading">
-        <div>
-          <span className="workbench-eyebrow">PRIVATE STRATEGY WORKBENCH</span>
-          <h2 id="strategies-title">策略工作台</h2>
-          <p>在 Web 中编辑私有策略，源码直接保存到 PostgreSQL，不进入项目目录。</p>
-        </div>
-        <div className="strategies-page__actions">
-          <button className="toolbar-button" type="button" disabled={refreshing} onClick={() => void refreshPage()}>
-            <RefreshCw className={refreshing ? "spin" : ""} aria-hidden="true" />刷新
-          </button>
-          <button className="task-create-button" type="button" onClick={() => { setCreateOpen(true); setError(null); }}>
-            <Plus aria-hidden="true" />新建策略
-          </button>
-        </div>
-      </div>
-
-      {error && <div className="page-error" role="alert"><CircleAlert aria-hidden="true" />{error}</div>}
-      {notice && <div className="strategy-message strategy-message--success" role="status"><CircleCheck aria-hidden="true" />{notice}</div>}
-
-      <div className="strategy-stats" aria-label="策略概览">
-        <article><span>策略总数</span><strong>{loadingList ? "—" : strategies.length}</strong><small>当前部署中的私有策略</small></article>
-        <article><span>已发布</span><strong>{loadingList ? "—" : publishedCount}</strong><small>至少存在一个不可变版本</small></article>
-        <article><span>仅草稿</span><strong>{loadingList ? "—" : draftCount}</strong><small>尚未发布可执行版本</small></article>
-        <article className="strategy-stat--focus"><span>当前版本</span><strong>{currentRevisionNumber ? `v${currentRevisionNumber}` : "—"}</strong><small>{selectedSummary?.name ?? "尚未选择策略"}</small></article>
-      </div>
-
-      <div className="strategies-layout">
-        <aside className="strategy-board" aria-label="策略列表">
-          <div className="strategy-board__heading">
-            <div><span className="workbench-eyebrow">STRATEGIES</span><h3>私有策略</h3></div>
-            <span>{strategies.length} 项</span>
+    <OverviewShell
+      title="策略工作台"
+      section="RESEARCH / 01"
+      className="qfs-root"
+      workspace
+      beforeNavigate={() => {
+        const ok = canLeave();
+        if (ok) guardRef.current = { dirty: false, busy: false };
+        return ok;
+      }}
+    >
+      <section className="qfs-page" aria-labelledby="strategies-title">
+        <header className="qfs-heading">
+          <div>
+            <small>PRIVATE STRATEGY</small>
+            <h1 id="strategies-title">策略工作台</h1>
+            <p>编辑策略代码、参数与版本。</p>
           </div>
-          <label className="strategy-search">
-            <Code2 aria-hidden="true" />
-            <input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索策略名称…" aria-label="搜索策略名称" />
-          </label>
-          <div className="strategy-list">
-            {loadingList ? <div className="strategy-empty"><LoaderCircle className="spin" aria-hidden="true" />正在加载策略…</div>
-              : visibleStrategies.length > 0 ? visibleStrategies.map((item) => (
-                <button
-                  className={`strategy-list__item${item.id === strategyId ? " strategy-list__item--selected" : ""}`}
-                  key={item.id}
-                  type="button"
-                  onClick={() => selectStrategy(item.id)}
-                >
-                  <span className={`strategy-list__dot${item.current_revision_id ? " strategy-list__dot--published" : ""}`} aria-hidden="true" />
-                  <span className="strategy-list__copy"><strong>{item.name}</strong><small>{item.description || "尚未填写说明"}</small></span>
-                  <span className="strategy-list__meta">{item.current_revision_id ? "已发布" : "草稿"}<br /><time>{formatTimestamp(item.updated_at)}</time></span>
-                </button>
-              )) : <div className="strategy-empty"><FileCode2 aria-hidden="true" /><strong>{search ? "没有匹配策略" : "还没有策略"}</strong><span>{search ? "换个关键词试试。" : "点击右上角新建第一条私有策略。"}</span></div>}
+          <div className="qfs-actions">
+            <button
+              aria-expanded={explorerVisible}
+              onClick={() => {
+                if (narrow)
+                  setOverlay(overlay === "explorer" ? "" : "explorer");
+                else setExplorer(!explorer);
+              }}
+            >
+              策略目录
+            </button>
+            <button
+              aria-expanded={contextVisible}
+              onClick={() => {
+                if (narrow) setOverlay(overlay === "context" ? "" : "context");
+                else setContextOpen(!contextOpen);
+              }}
+            >
+              参数面板
+            </button>
+            <button disabled={busy} onClick={showCreate}>
+              <Plus />
+              新建策略
+            </button>
+            <button
+              className="qfs-primary"
+              disabled={controlsDisabled}
+              onClick={() => void handlePublish()}
+            >
+              <Rocket />
+              {publishing ? "发布中…" : "发布版本"}
+            </button>
           </div>
-        </aside>
-
-        <main className="strategy-editor" aria-label="策略编辑器">
-          {!strategyId ? <StrategyWelcome onCreate={() => setCreateOpen(true)} />
-            : loadingDetail || !detail || !draft ? <div className="strategy-editor__loading"><LoaderCircle className="spin" aria-hidden="true" />正在加载策略详情…</div>
-              : <>
-                <div className="strategy-editor__header">
-                  <div className="strategy-editor__title">
-                    <span className={`strategy-state strategy-state--${detail.state}`}><i aria-hidden="true" />{stateLabel(detail, validation, isDirty)}</span>
-                    <h3>{detail.name}</h3>
-                    <p>{detail.current_revision ? `当前发布版本 v${detail.current_revision.revision_number}` : "尚未发布版本"} · 草稿 v{detail.draft.version}</p>
-                  </div>
-                  <div className="strategy-editor__actions">
-                    <button className="toolbar-button" type="button" disabled={refreshing} onClick={() => void loadDetail(detail.id)} title="放弃本地未保存修改并重新读取"><RefreshCw aria-hidden="true" />重载</button>
-                    <button className="toolbar-button" type="button" disabled={!isDirty || saving || isArchived} onClick={() => void handleSave()}><Save aria-hidden="true" />{saving ? "保存中" : "保存草稿"}</button>
-                    <button className="toolbar-button toolbar-button--validate" type="button" disabled={validating || saving || isArchived} onClick={() => void handleValidate()}><ShieldCheck aria-hidden="true" />{validating ? "校验中" : "校验"}</button>
-                    <button className="task-create-button" type="button" disabled={publishing || saving || validating || isArchived} onClick={() => void handlePublish()}><Rocket aria-hidden="true" />{publishing ? "发布中" : "发布版本"}</button>
-                  </div>
-                </div>
-                <div className="strategy-editor__run-gate" role="status">
-                  {detail.current_revision
-                    ? <span>回测将绑定已发布版本 v{detail.current_revision.revision_number}（不可变）。{isDirty || detail.draft_changed_since_revision ? "当前草稿有未发布修改，回测不会使用这些修改。" : ""} <Link className="strategy-open-backtest" to={`/admin/strategies/${detail.id}/backtests`}>进入回测工作台</Link></span>
-                    : <span>请先发布策略，未发布草稿不能进入回测。</span>}
-                </div>
-
-                <form className="strategy-editor__form" onSubmit={(event) => void handleSave(event)}>
-                  <div className="strategy-metadata-grid">
-                    <label><span>策略名称</span><input value={draft.name} disabled={isArchived} onChange={(event) => updateDraftField("name", event.target.value)} maxLength={100} /></label>
-                    <label><span>说明</span><input value={draft.description} disabled={isArchived} onChange={(event) => updateDraftField("description", event.target.value)} maxLength={10_000} placeholder="描述策略用途和预期行为" /></label>
-                  </div>
-
-                  <div className="strategy-code-panel">
-                    <div className="strategy-panel__heading">
-                      <div><span className="workbench-eyebrow">SOURCE MODULE</span><h4><FileCode2 aria-hidden="true" />strategy.py</h4></div>
-                      <span>{sourceLineCount(draft.sourceCode)} 行 · {new TextEncoder().encode(draft.sourceCode).length.toLocaleString("zh-CN")} bytes</span>
-                    </div>
-                    <textarea
-                      className="strategy-source-editor"
-                      value={draft.sourceCode}
-                      disabled={isArchived}
-                      onChange={(event) => updateDraftField("sourceCode", event.target.value)}
-                      onKeyDown={(event) => handleEditorKeyDown(event, draft.sourceCode, (value) => updateDraftField("sourceCode", value))}
-                      spellCheck={false}
-                      wrap="off"
-                      aria-label="策略 Python 源码"
-                    />
-                    <div className="strategy-editor__hint"><Code2 aria-hidden="true" />必须提供同步的 <code>run(context, parameters)</code> 入口。当前校验只解析源码，不会在 API 进程中执行它。</div>
-                  </div>
-
-                  <div className="strategy-contract-grid">
-                    <JsonEditor
-                      label="参数 Schema"
-                      eyebrow="PARAMETER CONTRACT"
-                      value={draft.parameterSchema}
-                      disabled={isArchived}
-                      onChange={(value) => updateDraftField("parameterSchema", value)}
-                      hint="顶层应为 object；用于描述策略可配置参数。"
-                    />
-                    <JsonEditor
-                      label="默认参数"
-                      eyebrow="DEFAULT VALUES"
-                      value={draft.defaultParameters}
-                      disabled={isArchived}
-                      onChange={(value) => updateDraftField("defaultParameters", value)}
-                      hint="运行任务未覆盖时使用的 JSON 对象。"
-                    />
-                  </div>
-                </form>
-
-                <div className="strategy-editor__footer">
-                  <div className={`strategy-save-state${isDirty ? " strategy-save-state--dirty" : ""}`}><span aria-hidden="true" />{isDirty ? "有未保存修改" : `已保存 · ${formatTimestamp(detail.draft.updated_at)}`}<small>{shortHash(detail.draft.source_hash)}</small></div>
-                  <div className="strategy-editor__footer-actions">
-                    <Link className="toolbar-button" to="/admin/tasks"><ExternalLink aria-hidden="true" />任务调度</Link>
-                    <button className="danger-text-button" type="button" disabled={archiving || isArchived} onClick={() => void handleArchive()}><Archive aria-hidden="true" />归档策略</button>
+        </header>
+        {error && (
+          <div className="qfs-message qfs-error" role="alert">
+            {error}
+            <button onClick={() => setError(null)} aria-label="关闭错误">
+              <X />
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div className="qfs-message" role="status">
+            {notice}
+            <button onClick={() => setNotice(null)} aria-label="关闭提示">
+              <X />
+            </button>
+          </div>
+        )}
+        <div
+          ref={workbenchRef}
+          className={`qfs-workbench ${narrow ? "qfs-narrow" : ""}`}
+        >
+          {narrow && (explorerVisible || contextVisible) && (
+            <button
+              className="qfs-scrim"
+              aria-label="关闭辅助面板"
+              onClick={() => setOverlay("")}
+            />
+          )}
+          {explorerVisible && (
+            <>
+              <aside
+                className="qfs-explorer"
+                style={{ width: sizes.left }}
+                aria-label="策略目录"
+              >
+                <header>
+                  <strong>策略目录</strong>
+                  <span>{visibleStrategies.length} 项</span>
+                  <button
+                    disabled={busy}
+                    onClick={() => void refreshPage()}
+                    aria-label="刷新策略"
+                  >
+                    <RefreshCw />
+                  </button>
+                </header>
+                <div className="qfs-search">
+                  <input
+                    aria-label="搜索策略"
+                    placeholder="搜索名称、说明或 ID"
+                    value={search}
+                    onChange={(e) => setSearch(e.target.value)}
+                  />
+                  <div className="qfs-filters">
+                    {[
+                      ["all", "全部"],
+                      ["active", "使用中"],
+                      ["archived", "已归档"],
+                    ].map(([key, label]) => (
+                      <button
+                        key={key}
+                        aria-pressed={filter === key}
+                        onClick={() => setFilter(key)}
+                      >
+                        {label}
+                      </button>
+                    ))}
                   </div>
                 </div>
-
-                <ValidationPanel validation={validation} status={statusText(validation)} />
-
-                <section className="strategy-revisions" aria-labelledby="strategy-revisions-title">
-                  <div className="strategy-section-heading"><div><span className="workbench-eyebrow">IMMUTABLE HISTORY</span><h4 id="strategy-revisions-title"><History aria-hidden="true" />版本历史</h4></div><span>{revisions.length} 个已发布版本</span></div>
-                  {revisions.length > 0 ? <div className="strategy-revision-list">{revisions.map((revision) => (
-                    <button className={`strategy-revision-row${revision.revision_number === currentRevisionNumber ? " strategy-revision-row--current" : ""}`} type="button" key={revision.id} onClick={() => void openRevision(revision)}>
-                      <span className="strategy-revision-row__version"><GitBranch aria-hidden="true" />v{revision.revision_number}</span>
-                      <span><strong>{revision.revision_number === currentRevisionNumber ? "当前发布版本" : "已发布版本"}</strong><small>{shortHash(revision.source_hash)}</small></span>
-                      <time>{formatTimestamp(revision.published_at)}</time>
-                      <ExternalLink aria-hidden="true" />
+                <div className="qfs-list">
+                  {loadingList ? (
+                    <p role="status">加载策略…</p>
+                  ) : !visibleStrategies.length ? (
+                    <p>暂无匹配策略</p>
+                  ) : (
+                    visibleStrategies.map((item) => (
+                      <button
+                        disabled={busy}
+                        key={item.id}
+                        aria-current={
+                          item.id === strategyId ? "true" : undefined
+                        }
+                        className={item.id === strategyId ? "qfs-selected" : ""}
+                        onClick={() => {
+                          selectStrategy(item.id);
+                          if (narrow) setOverlay("");
+                        }}
+                      >
+                        <strong>{item.name}</strong>
+                        <span className="qfs-badge">
+                          {item.state === "archived"
+                            ? "已归档"
+                            : item.current_revision_id
+                              ? "已发布"
+                              : "未发布"}
+                        </span>
+                        <small>{item.description || "暂无说明"}</small>
+                        <small>{formatTimestamp(item.updated_at)}</small>
+                      </button>
+                    ))
+                  )}
+                </div>
+              </aside>
+              {!narrow && (
+                <ResizeHandle
+                  label="策略目录宽度"
+                  value={sizes.left}
+                  min={196}
+                  max={320}
+                  onChange={(left) => setSizes({ ...sizes, left })}
+                />
+              )}
+            </>
+          )}
+          <section className="qfs-editor-panel" aria-label="策略编辑区">
+            {loadingDetail || (detail && detail.id !== strategyId) ? (
+              <div className="qfs-empty" role="status">
+                加载策略内容…
+              </div>
+            ) : !detail || !draft ? (
+              <div className="qfs-empty">
+                <Code2 />
+                <h2>选择或创建策略</h2>
+                <p>源码、参数与版本将在这里显示。</p>
+                <button onClick={showCreate}>新建策略</button>
+              </div>
+            ) : (
+              <>
+                <header className="qfs-object">
+                  <div>
+                    <strong>{detail.name}</strong>
+                    <span className="qfs-badge">
+                      {stateLabel(detail, stale ? null : validation, isDirty)}
+                      {currentRevisionNumber
+                        ? ` · v${currentRevisionNumber}`
+                        : ""}
+                    </span>
+                    <small title={detail.id}>{detail.id}</small>
+                  </div>
+                  <div className="qfs-actions">
+                    <button
+                      disabled={controlsDisabled}
+                      onClick={() => void handleValidate()}
+                    >
+                      <ShieldCheck />
+                      {validating ? "检查中…" : "静态检查"}
                     </button>
-                  ))}</div> : <div className="strategy-history-empty"><Clock3 aria-hidden="true" /><span>发布后会在这里保留不可变版本，便于审计和回溯。</span></div>}
-                </section>
-
-                <section className="strategy-scheduling-note" aria-label="调度绑定状态">
-                  <div><Clock3 aria-hidden="true" /><span><strong>调度绑定</strong><small>当前阶段先完成策略编写、校验和版本发布；执行阶段将让任务调度引用指定策略版本。</small></span></div>
-                  <Link to="/admin/tasks">查看任务调度 <ExternalLink aria-hidden="true" /></Link>
-                </section>
-              </>}
-        </main>
-      </div>
-
-      {createOpen && <CreateStrategyDialog draft={createDraft} saving={saving} onChange={setCreateDraft} onClose={() => setCreateOpen(false)} onSubmit={handleCreate} />}
-      {revisionPreview && <RevisionPreviewDialog revision={revisionPreview} loading={revisionLoading} onClose={() => setRevisionPreview(null)} />}
-      {revisionLoading && !revisionPreview && <div className="strategy-toast"><LoaderCircle className="spin" aria-hidden="true" />正在读取版本…</div>}
-    </section>
+                    <button
+                      disabled={controlsDisabled}
+                      onClick={() => void handleSave()}
+                    >
+                      <Save />
+                      {saving ? "保存中…" : "保存草稿"}
+                    </button>
+                    <button
+                      disabled={busy || !currentRevisionNumber}
+                      title={
+                        !currentRevisionNumber
+                          ? "请先发布策略"
+                          : `使用已发布 v${currentRevisionNumber}`
+                      }
+                      onClick={() =>
+                        navigate(`/admin/strategies/${detail.id}/backtests`)
+                      }
+                    >
+                      <ExternalLink />
+                      创建回测
+                    </button>
+                  </div>
+                </header>
+                {(isDirty || detail.draft_changed_since_revision) &&
+                  currentRevisionNumber && (
+                    <div className="qfs-version-note">
+                      创建回测使用已发布 v{currentRevisionNumber}
+                      ，不包含未发布修改。
+                    </div>
+                  )}
+                {!currentRevisionNumber && (
+                  <div className="qfs-version-note">
+                    当前策略尚未发布，发布后可以创建回测。
+                  </div>
+                )}
+                <div
+                  className="qfs-file-tabs"
+                  role="tablist"
+                  aria-label="草稿内容"
+                >
+                  {(
+                    [
+                      ["sourceCode", "strategy.py"],
+                      ["defaultParameters", "params.json"],
+                      ["description", "策略说明"],
+                    ] as const
+                  ).map(([key, label]) => (
+                    <button
+                      key={key}
+                      role="tab"
+                      aria-selected={file === key}
+                      onClick={() => {
+                        setFile(key);
+                        setCursor({ line: 1, column: 1 });
+                      }}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                  <span>
+                    {isDirty ? "未保存" : isArchived ? "只读" : "已保存"} ·
+                    UTF-8
+                  </span>
+                </div>
+                {file === "description" && (
+                  <div className="qfs-description-head">
+                    <label>
+                      策略名称
+                      <input
+                        maxLength={100}
+                        disabled={controlsDisabled}
+                        value={draft.name}
+                        onChange={(e) =>
+                          updateDraftField("name", e.target.value)
+                        }
+                      />
+                    </label>
+                    <p>策略说明不随发布版本冻结。</p>
+                  </div>
+                )}
+                <div className="qfs-code" role="tabpanel">
+                  <pre ref={linesRef} aria-hidden="true">
+                    {Array.from(
+                      { length: sourceLineCount(editorValue) },
+                      (_, i) => i + 1,
+                    ).join("\n")}
+                  </pre>
+                  <textarea
+                    ref={editorRef}
+                    aria-label={
+                      file === "sourceCode"
+                        ? "策略源码"
+                        : file === "defaultParameters"
+                          ? "默认参数 JSON"
+                          : "策略说明"
+                    }
+                    value={editorValue}
+                    readOnly={controlsDisabled}
+                    maxLength={file === "description" ? 10000 : undefined}
+                    wrap="off"
+                    spellCheck={false}
+                    onChange={(e) => {
+                      updateDraftField(file, e.target.value);
+                      updateCursor();
+                    }}
+                    onClick={updateCursor}
+                    onKeyUp={updateCursor}
+                    onScroll={(e) => {
+                      if (linesRef.current)
+                        linesRef.current.scrollTop = e.currentTarget.scrollTop;
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Tab" && !controlsDisabled) {
+                        e.preventDefault();
+                        const t = e.currentTarget,
+                          start = t.selectionStart,
+                          end = t.selectionEnd;
+                        updateDraftField(
+                          file,
+                          editorValue.slice(0, start) +
+                            "    " +
+                            editorValue.slice(end),
+                        );
+                        requestAnimationFrame(() => {
+                          t.selectionStart = t.selectionEnd = start + 4;
+                          updateCursor();
+                        });
+                      }
+                    }}
+                  />
+                </div>
+                <footer className="qfs-status">
+                  <button
+                    onClick={() => setDiagnostics(!diagnostics)}
+                    aria-expanded={diagnostics}
+                  >
+                    {checkLabel}
+                  </button>
+                  <span>
+                    Ln {cursor.line}, Col {cursor.column}　
+                    {file === "sourceCode"
+                      ? "Python"
+                      : file === "defaultParameters"
+                        ? "JSON"
+                        : "文本"}{" "}
+                    · Spaces: 4
+                  </span>
+                </footer>
+                {diagnostics && (
+                  <>
+                    <ResizeHandle
+                      horizontal
+                      reverse
+                      label="诊断面板高度"
+                      value={sizes.bottom}
+                      min={120}
+                      max={320}
+                      onChange={(bottom) => setSizes({ ...sizes, bottom })}
+                    />
+                    <section
+                      className="qfs-diagnostics"
+                      style={{ height: sizes.bottom }}
+                    >
+                      <header>
+                        <strong>静态检查 · {checkLabel}</strong>
+                        <button
+                          onClick={() => setDiagnostics(false)}
+                          aria-label="关闭诊断"
+                        >
+                          <X />
+                        </button>
+                      </header>
+                      <p>检查 Python 语法、入口签名与参数契约，不执行策略。</p>
+                      {validation?.issues.map((issue, i) => (
+                        <button
+                          className="qfs-issue"
+                          key={i}
+                          onClick={() => {
+                            setFile("sourceCode");
+                            requestAnimationFrame(() => {
+                              const e = editorRef.current;
+                              if (!e) return;
+                              const pos =
+                                draft.sourceCode
+                                  .split("\n")
+                                  .slice(0, Math.max(0, (issue.line || 1) - 1))
+                                  .join("\n").length +
+                                (issue.line && issue.line > 1 ? 1 : 0);
+                              e.focus();
+                              e.setSelectionRange(pos, pos);
+                              e.scrollTop = Math.max(
+                                0,
+                                ((issue.line || 1) - 3) * 22,
+                              );
+                              updateCursor();
+                            });
+                          }}
+                        >
+                          {issueLocation(issue)} · {issue.message}
+                        </button>
+                      ))}
+                    </section>
+                  </>
+                )}
+              </>
+            )}
+          </section>
+          {contextVisible && (
+            <>
+              {!narrow && (
+                <ResizeHandle
+                  reverse
+                  label="上下文面板宽度"
+                  value={sizes.right}
+                  min={280}
+                  max={420}
+                  onChange={(right) => setSizes({ ...sizes, right })}
+                />
+              )}
+              <aside
+                className="qfs-context"
+                style={{ width: sizes.right }}
+                aria-label="策略上下文"
+              >
+                <header>
+                  <strong>策略上下文</strong>
+                  <span>当前对象</span>
+                </header>
+                <div
+                  className="qfs-context-tabs"
+                  role="tablist"
+                  aria-label="上下文"
+                >
+                  {[
+                    ["parameters", "参数"],
+                    ["check", "检查"],
+                    ["history", "版本"],
+                    ["links", "关联"],
+                  ].map(([key, label]) => (
+                    <button
+                      role="tab"
+                      aria-selected={panel === key}
+                      key={key}
+                      onClick={() => setPanel(key)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </div>
+                <div className="qfs-context-body" role="tabpanel">
+                  {!detail || detail.id !== strategyId ? (
+                    <p>请选择策略</p>
+                  ) : panel === "parameters" ? (
+                    <>
+                      <h3>默认参数</h3>
+                      {parameters && Object.keys(parameters).length ? (
+                        Object.entries(parameters).map(([key, value]) => (
+                          <label className="qfs-parameter" key={key}>
+                            <span>{key}</span>
+                            {typeof value === "boolean" ? (
+                              <input
+                                type="checkbox"
+                                checked={value}
+                                disabled={controlsDisabled}
+                                onChange={(e) =>
+                                  updateDraftField(
+                                    "defaultParameters",
+                                    prettyJson({
+                                      ...parameters,
+                                      [key]: e.target.checked,
+                                    }),
+                                  )
+                                }
+                              />
+                            ) : typeof value === "string" ? (
+                              <input
+                                value={value}
+                                disabled={controlsDisabled}
+                                onChange={(e) =>
+                                  updateDraftField(
+                                    "defaultParameters",
+                                    prettyJson({
+                                      ...parameters,
+                                      [key]: e.target.value,
+                                    }),
+                                  )
+                                }
+                              />
+                            ) : typeof value === "number" ? (
+                              <input
+                                type="number"
+                                value={value}
+                                disabled={controlsDisabled}
+                                onChange={(e) => {
+                                  if (
+                                    e.target.value !== "" &&
+                                    Number.isFinite(e.target.valueAsNumber)
+                                  )
+                                    updateDraftField(
+                                      "defaultParameters",
+                                      prettyJson({
+                                        ...parameters,
+                                        [key]: e.target.valueAsNumber,
+                                      }),
+                                    );
+                                }}
+                              />
+                            ) : (
+                              <button
+                                onClick={() => setFile("defaultParameters")}
+                              >
+                                在 JSON 中编辑
+                              </button>
+                            )}
+                          </label>
+                        ))
+                      ) : (
+                        <p className="qfs-muted">
+                          {parameters
+                            ? "暂无默认参数，可在 params.json 中添加。"
+                            : "JSON 尚未有效，请在 params.json 中修正。"}
+                        </p>
+                      )}
+                      <div className="qfs-section-head">
+                        <h3>参数 Schema</h3>
+                        <button
+                          disabled={controlsDisabled}
+                          onClick={formatSchema}
+                        >
+                          格式化
+                        </button>
+                      </div>
+                      <textarea
+                        className="qfs-schema"
+                        aria-label="参数 Schema"
+                        value={draft?.parameterSchema || ""}
+                        readOnly={controlsDisabled}
+                        spellCheck={false}
+                        onChange={(e) =>
+                          updateDraftField("parameterSchema", e.target.value)
+                        }
+                      />
+                      <p className="qfs-muted">
+                        复杂结构保留在 JSON 中编辑，保存时校验格式。
+                      </p>
+                    </>
+                  ) : panel === "check" ? (
+                    <>
+                      <h3>{checkLabel}</h3>
+                      <p>语法、入口签名、默认参数与 Schema 契约。</p>
+                      <p className="qfs-muted">
+                        静态检查不代表策略运行或回测已通过。
+                      </p>
+                      <button onClick={() => setDiagnostics(true)}>
+                        查看检查详情
+                      </button>
+                    </>
+                  ) : panel === "history" ? (
+                    <>
+                      <h3>发布版本</h3>
+                      {revisionLoading && <p role="status">加载版本…</p>}
+                      {!revisions.length ? (
+                        <p>暂无发布版本</p>
+                      ) : (
+                        revisions.map((r) => (
+                          <button
+                            disabled={busy}
+                            className="qfs-record"
+                            key={r.id}
+                            onClick={() => void openRevision(r)}
+                          >
+                            <strong>
+                              v{r.revision_number}
+                              {r.id === detail.current_revision_id
+                                ? " · 当前发布版本"
+                                : ""}
+                            </strong>
+                            <small>{formatTimestamp(r.published_at)}</small>
+                            <code>{shortHash(r.source_hash)}</code>
+                          </button>
+                        ))
+                      )}
+                      <div className="qfs-record">
+                        <strong>当前草稿</strong>
+                        <small>
+                          最后保存 {formatTimestamp(detail.draft.updated_at)}
+                        </small>
+                      </div>
+                      <button
+                        disabled={controlsDisabled}
+                        onClick={() => void handleArchive()}
+                      >
+                        <Archive />
+                        归档策略
+                      </button>
+                    </>
+                  ) : (
+                    <RecentRuns strategyId={detail.id} />
+                  )}
+                </div>
+              </aside>
+            </>
+          )}
+        </div>
+      </section>
+      {createOpen && (
+        <Drawer title="创建策略" onClose={closeCreate}>
+          <form onSubmit={handleCreate}>
+            <p>填写基本信息并选择初始模板，创建后进入编辑器。</p>
+            {error && (
+              <p role="alert" className="qfs-error">
+                {error}
+              </p>
+            )}
+            <label>
+              策略名称
+              <input
+                autoFocus
+                required
+                maxLength={100}
+                disabled={busy}
+                value={createDraft.name}
+                onChange={(e) =>
+                  setCreateDraft({ ...createDraft, name: e.target.value })
+                }
+              />
+            </label>
+            <label>
+              初始模板
+              <select
+                disabled={busy}
+                value={createDraft.template}
+                onChange={(e) =>
+                  setCreateDraft({
+                    ...createDraft,
+                    template: e.target.value as TemplateKey,
+                  })
+                }
+              >
+                {Object.entries(TEMPLATES).map(([key, t]) => (
+                  <option value={key} key={key}>
+                    {t.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label>
+              说明（可选）
+              <textarea
+                maxLength={10000}
+                disabled={busy}
+                value={createDraft.description}
+                onChange={(e) =>
+                  setCreateDraft({
+                    ...createDraft,
+                    description: e.target.value,
+                  })
+                }
+              />
+            </label>
+            <p className="qfs-muted">
+              {createDraft.template === "blank"
+                ? "空白模板需要实现策略逻辑后再发布。"
+                : createDraft.template === "rotation"
+                  ? "使用原始收盘价计算动量；回测前核对回看窗口与数据范围。"
+                  : "保留当前持仓，不产生新的交易意图。"}
+            </p>
+            <footer>
+              <button type="button" disabled={busy} onClick={closeCreate}>
+                取消
+              </button>
+              <button
+                className="qfs-primary"
+                disabled={busy || !createDraft.name.trim()}
+              >
+                {busy ? "创建中…" : "创建并进入编辑器"}
+              </button>
+            </footer>
+          </form>
+        </Drawer>
+      )}
+      {revisionPreview && (
+        <Drawer
+          title={`发布版本 v${revisionPreview.revision_number}`}
+          onClose={() => setRevisionPreview(null)}
+        >
+          <p>
+            发布于 {formatTimestamp(revisionPreview.published_at)} · 只读快照
+          </p>
+          <h3>strategy.py</h3>
+          <pre>{revisionPreview.source_code}</pre>
+          <h3>参数 Schema</h3>
+          <pre>{prettyJson(revisionPreview.parameter_schema)}</pre>
+          <h3>默认参数</h3>
+          <pre>{prettyJson(revisionPreview.default_parameters)}</pre>
+        </Drawer>
+      )}
+    </OverviewShell>
   );
 }
-
-function isSameEditorDraftSafe(detail: StrategyDetail, draft: EditorDraft): boolean {
+function isSameEditorDraftSafe(detail: StrategyDetail, draft: EditorDraft) {
   try {
     return isSameEditorDraft(detail, draft);
   } catch {
-    // Invalid local JSON is necessarily a pending edit and should never be lost.
     return false;
   }
 }
 
-function handleEditorKeyDown(
-  event: KeyboardEvent<HTMLTextAreaElement>,
-  source: string,
-  setSource: (value: string) => void
-) {
-  if (event.key !== "Tab") return;
-  event.preventDefault();
-  const target = event.currentTarget;
-  const start = target.selectionStart;
-  const end = target.selectionEnd;
-  const next = `${source.slice(0, start)}    ${source.slice(end)}`;
-  setSource(next);
-  requestAnimationFrame(() => {
-    target.selectionStart = start + 4;
-    target.selectionEnd = start + 4;
-  });
-}
-
-function StrategyWelcome({ onCreate }: { onCreate: () => void }) {
-  return <div className="strategy-welcome"><div className="strategy-welcome__mark"><Code2 aria-hidden="true" /></div><span className="workbench-eyebrow">PRIVATE BY DESIGN</span><h3>把策略留在你的部署里</h3><p>源码和因子只保存在当前部署的 PostgreSQL。先创建一条策略，再从草稿开始编写；发布后每个版本都会被完整保留。</p><button className="task-create-button" type="button" onClick={onCreate}><Plus aria-hidden="true" />新建第一条策略</button></div>;
-}
-
-function JsonEditor({
-  label,
-  eyebrow,
-  value,
-  disabled,
-  onChange,
-  hint
-}: {
-  label: string;
-  eyebrow: string;
-  value: string;
-  disabled: boolean;
-  onChange: (value: string) => void;
-  hint: string;
-}) {
-  return <label className="strategy-json-editor"><div className="strategy-panel__heading"><div><span className="workbench-eyebrow">{eyebrow}</span><h4>{label}</h4></div><Copy aria-hidden="true" /></div><textarea value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} spellCheck={false} wrap="off" aria-label={label} /><small>{hint}</small></label>;
-}
-
-function ValidationPanel({ validation, status }: { validation: StrategyValidationResult | null; status: string }) {
-  return <section className={`strategy-validation${validation?.valid ? " strategy-validation--valid" : validation ? " strategy-validation--invalid" : ""}`} aria-labelledby="strategy-validation-title">
-    <div className="strategy-section-heading"><div><span className="workbench-eyebrow">STATIC CHECK</span><h4 id="strategy-validation-title"><ShieldCheck aria-hidden="true" />发布前校验</h4></div><span>{status}</span></div>
-    {!validation ? <div className="strategy-validation__empty"><ShieldCheck aria-hidden="true" /><span>保存草稿后点击“校验”，确认入口和参数契约可用于发布。</span></div>
-      : validation.valid ? <div className="strategy-validation__result"><CircleCheck aria-hidden="true" /><span><strong>校验通过</strong><small>当前草稿满足首期静态策略契约，可以发布为不可变版本。</small></span></div>
-        : <div className="strategy-issues">{validation.issues.map((issue, index) => <div className="strategy-issue" key={`${issue.code}-${index}`}><CircleAlert aria-hidden="true" /><span><strong>{issue.message}</strong><small>{issueLocation(issue)} · {issue.code}</small></span></div>)}</div>}
-  </section>;
-}
-
-function CreateStrategyDialog({
-  draft,
-  saving,
-  onChange,
-  onClose,
-  onSubmit
-}: {
-  draft: CreateDraft;
-  saving: boolean;
-  onChange: (draft: CreateDraft) => void;
-  onClose: () => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
-  function setField<K extends keyof CreateDraft>(field: K, value: CreateDraft[K]) {
-    onChange({ ...draft, [field]: value });
+function sessionValue(key: string, fallback: string) {
+  try {
+    return sessionStorage.getItem("qfs-" + key) ?? fallback;
+  } catch {
+    return fallback;
   }
-
-  return <div className="prototype-modal strategy-modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <form className="prototype-modal__dialog strategy-create-dialog" onSubmit={onSubmit} onMouseDown={(event) => event.stopPropagation()}>
-      <div className="prototype-modal__heading"><div><span>NEW PRIVATE STRATEGY</span><h3>创建策略</h3></div><button className="icon-button" type="button" onClick={onClose} aria-label="关闭创建策略对话框"><X aria-hidden="true" /></button></div>
-      <p className="strategy-modal__notice"><ShieldCheck aria-hidden="true" />源码会直接写入 PostgreSQL，不会创建本地策略文件。</p>
-      <label><span>策略名称</span><input autoFocus value={draft.name} onChange={(event) => setField("name", event.target.value)} placeholder="例如：ETF 趋势策略" maxLength={100} /></label>
-      <label><span>说明（可选）</span><input value={draft.description} onChange={(event) => setField("description", event.target.value)} placeholder="描述策略用途" maxLength={10_000} /></label>
-      <label><span>初始源码</span><textarea className="strategy-create-source" value={draft.sourceCode} onChange={(event) => setField("sourceCode", event.target.value)} spellCheck={false} wrap="off" /></label>
-      <div className="prototype-modal__actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="task-create-button" type="submit" disabled={saving || !draft.name.trim()}>{saving && <LoaderCircle className="spin" aria-hidden="true" />}{saving ? "创建中" : "创建并编辑"}</button></div>
-    </form>
-  </div>;
-}
-
-function RevisionPreviewDialog({ revision, loading, onClose }: { revision: StrategyRevision; loading: boolean; onClose: () => void }) {
-  return <div className="prototype-modal strategy-modal-backdrop" role="presentation" onMouseDown={onClose}>
-    <section className="prototype-modal__dialog strategy-revision-dialog" role="dialog" aria-modal="true" aria-labelledby="revision-preview-title" onMouseDown={(event) => event.stopPropagation()}>
-      <div className="prototype-modal__heading"><div><span>IMMUTABLE REVISION · v{revision.revision_number}</span><h3 id="revision-preview-title">版本源码快照</h3></div><button className="icon-button" type="button" onClick={onClose} aria-label="关闭版本预览"><X aria-hidden="true" /></button></div>
-      <div className="strategy-revision-dialog__facts"><span>发布于 {formatTimestamp(revision.published_at)}</span><code>{revision.source_hash}</code></div>
-      <pre><code>{revision.source_code}</code></pre>
-      {loading && <span className="strategy-revision-dialog__loading"><LoaderCircle className="spin" aria-hidden="true" />加载中</span>}
-      <div className="prototype-modal__actions"><button className="secondary-button" type="button" onClick={onClose}>关闭</button></div>
-    </section>
-  </div>;
 }
