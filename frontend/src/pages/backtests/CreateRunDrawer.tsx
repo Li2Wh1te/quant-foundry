@@ -21,6 +21,7 @@ type JsonSchemaProperty = {
 type PublishedRevision = {
   id: string;
   revision_number: number;
+  alias?: string | null;
   source_hash: string;
   parameter_schema?: { properties?: Record<string, JsonSchemaProperty> };
   default_parameters?: Record<string, unknown>;
@@ -249,6 +250,11 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
       setMessage("请选择有效的回测起止日期。");
       return null;
     }
+    // Copied configurations must obey the same date boundary as the calendar.
+    if (startDate > todayKey() || endDate > todayKey()) {
+      setMessage("回测日期不能晚于今天（北京时间）。");
+      return null;
+    }
     if (!initialCash.trim()) {
       setMessage("请填写初始资金。");
       return null;
@@ -418,7 +424,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
             <option value="">请选择版本</option>
             {revisions.map((revision) => (
               <option key={revision.id} value={revision.id}>
-                版本 {revision.revision_number} · {revision.source_hash.slice(0, 12)}
+                v{revision.revision_number} · {revision.alias || "未命名版本"}
               </option>
             ))}
           </Select>
@@ -481,11 +487,11 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
         <legend>日期、资金与数据范围</legend>
         <label>
           开始日期
-          <DatePicker label="开始日期" value={startDate} onChange={value => { setStartDate(value); setDirty(true); resetAdmission(); }} />
+          <DatePicker maxDate={todayKey()} label="开始日期" value={startDate} onChange={value => { setStartDate(value); setDirty(true); resetAdmission(); }} />
         </label>
         <label>
           结束日期
-          <DatePicker label="结束日期" value={endDate} onChange={value => { setEndDate(value); setDirty(true); resetAdmission(); }} />
+          <DatePicker maxDate={todayKey()} label="结束日期" value={endDate} onChange={value => { setEndDate(value); setDirty(true); resetAdmission(); }} />
         </label>
         <label>
           初始资金（CNY）
@@ -605,7 +611,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
       <fieldset disabled={busy || loading} hidden={step !== 1}><legend>系统执行配置</legend>{Object.entries(componentOptions).map(([kind, options]) => <label key={kind}>{({ data_provider: "数据来源", rule_package: "交易规则", calendar_axis_policy: "日历策略", time_axis: "时间轴", timing_policy: "运行时序", execution_model: "成交模型", decision_interpreter: "决策解释", accounting_policy: "账户会计", corporate_action_timing: "公司行动时序" } as Record<string, string>)[kind] || "执行组件"}<Select value={`${componentSelections[kind]?.key}@${componentSelections[kind]?.version}`} onChange={(event) => { const item = options.find((option) => `${option.key}@${option.version}` === event.target.value)!; setComponentSelections((current) => ({ ...current, [kind]: { key: item.key, version: item.version, parameters: item.parameters } })); resetAdmission(); }}>{options.map((item) => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · v{item.version}</option>)}</Select></label>)}</fieldset>
 
       {step === 2 && <section className="qfb-check">
-        <h3>运行配置确认</h3><dl><dt>策略版本</dt><dd>{strategies.find(s => s.id === strategyId)?.name} · 版本 {revisions.find(r => r.id === revisionId)?.revision_number}</dd><dt>回测区间</dt><dd>{startDate} — {endDate}</dd><dt>初始资金</dt><dd>{initialCash} CNY</dd><dt>回测账户</dt><dd>{accounts.find(a => a.id === accountProfileId)?.name || "账户不可用"} · v{accountVersion}</dd></dl>
+        <h3>运行配置确认</h3><dl><dt>策略版本</dt><dd>{strategies.find(s => s.id === strategyId)?.name} · 版本 {revisions.find(r => r.id === revisionId)?.revision_number} · {revisions.find(r => r.id === revisionId)?.alias || "未命名版本"}</dd><dt>回测区间</dt><dd>{startDate} — {endDate}</dd><dt>初始资金</dt><dd>{initialCash} CNY</dd><dt>回测账户</dt><dd>{accounts.find(a => a.id === accountProfileId)?.name || "账户不可用"} · v{accountVersion}</dd></dl>
         <p>检查覆盖数据、策略、账户和执行配置。修改任何配置后都需要重新检查。</p>
         {!preflight && <p>尚未检查当前配置。</p>}
         {preflight && <><h3>{gate?.allowed ? "检查通过" : preflight.status === "degraded" ? "需要确认降级情况" : "检查未通过"}</h3>

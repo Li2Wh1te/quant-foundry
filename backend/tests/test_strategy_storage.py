@@ -207,9 +207,11 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
             strategy.id,
             expected_draft_version=5,
             runtime_manifest=manifest,
+            alias=" 优化止损逻辑 ",
         )
 
         self.assertEqual(revision.strategy_id, strategy.id)
+        self.assertEqual(revision.alias, "优化止损逻辑")
         self.assertEqual(revision.revision_number, 3)
         self.assertEqual(revision.source_code, draft.source_code)
         self.assertEqual(revision.source_hash, draft.source_hash)
@@ -249,6 +251,7 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
             id=uuid4(),
             strategy_id=strategy.id,
             revision_number=7,
+            alias="优化止损逻辑",
             source_code=draft.source_code,
             source_hash=draft.source_hash,
             parameter_schema=deepcopy(draft.parameter_schema),
@@ -260,7 +263,7 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
         self.session.scalar.return_value = latest
 
         revision = self.service.publish_revision(
-            strategy.id, expected_draft_version=4
+            strategy.id, expected_draft_version=4, alias="优化止损逻辑"
         )
 
         self.assertIs(revision, latest)

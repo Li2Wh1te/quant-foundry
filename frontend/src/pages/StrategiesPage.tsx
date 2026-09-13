@@ -214,6 +214,8 @@ export function StrategiesPage() {
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [publishOpen, setPublishOpen] = useState(false);
+  const [publishAlias, setPublishAlias] = useState("");
   const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -600,7 +602,7 @@ export function StrategiesPage() {
   }
 
   async function handlePublish() {
-    if (!detail || busy || lock.current || isArchived) return;
+    if (!detail || busy || lock.current || isArchived || !publishAlias.trim()) return;
     lock.current = true;
     setPublishing(true);
     setError(null);
@@ -614,11 +616,12 @@ export function StrategiesPage() {
         setError("当前草稿未通过校验，请先处理下方问题。");
         return;
       }
-      const revision = await publishStrategy(current.id, current.draft.version);
+      const revision = await publishStrategy(current.id, current.draft.version, publishAlias.trim());
       setRevisions((currentRevisions) => [
         {
           id: revision.id,
           revision_number: revision.revision_number,
+          alias: revision.alias,
           source_hash: revision.source_hash,
           runtime_manifest: revision.runtime_manifest,
           published_at: revision.published_at,
@@ -626,6 +629,8 @@ export function StrategiesPage() {
         ...currentRevisions,
       ]);
       await loadDetail(current.id, true);
+      setPublishOpen(false);
+      setPublishAlias("");
       setValidation(result);
       setNotice(
         `已发布策略版本 v${revision.revision_number}。发布版本不可修改。`,
@@ -867,7 +872,7 @@ export function StrategiesPage() {
               className="qfs-primary"
               disabled={controlsDisabled}
               aria-disabled={controlsDisabled || switchingStrategy}
-              onClick={() => { if (!switchingStrategy) void handlePublish(); }}
+              onClick={() => { if (!switchingStrategy) { setPublishAlias(""); setPublishOpen(true); } }}
             >
               <Rocket />
               {publishing ? "发布中…" : "发布版本"}
@@ -1363,7 +1368,7 @@ export function StrategiesPage() {
                             onClick={() => void openRevision(r)}
                           >
                             <strong>
-                              v{r.revision_number}
+                              v{r.revision_number} · {r.alias || "未命名版本"}
                               {r.id === detail.current_revision_id
                                 ? " · 当前发布版本"
                                 : ""}
@@ -1484,9 +1489,19 @@ export function StrategiesPage() {
           </form>
         </Drawer>
       )}
+      {publishOpen && (
+        <Drawer title="发布策略版本" onClose={() => { if (!publishing) setPublishOpen(false); }}>
+          <form className="qfs-form" onSubmit={e => { e.preventDefault(); void handlePublish(); }}>
+            <label>版本别名<input autoFocus required maxLength={100} value={publishAlias} disabled={publishing} placeholder="例如：优化止损逻辑" onChange={e => setPublishAlias(e.target.value)} /></label>
+            <p>用于辨认本次优化内容，发布后不可修改。当前草稿将保存并校验后发布。</p>
+            {error && <p role="alert">{error}</p>}
+            <button className="qfs-primary" disabled={busy || !publishAlias.trim()} type="submit">{publishing ? "发布中…" : "确认发布"}</button>
+          </form>
+        </Drawer>
+      )}
       {revisionPreview && (
         <Drawer
-          title={`发布版本 v${revisionPreview.revision_number}`}
+          title={`发布版本 v${revisionPreview.revision_number} · ${revisionPreview.alias || "未命名版本"}`}
           onClose={() => setRevisionPreview(null)}
         >
           <p>

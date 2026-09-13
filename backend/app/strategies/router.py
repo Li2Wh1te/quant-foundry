@@ -101,7 +101,7 @@ def strategy_backtest_workspace(
             "draft_changed_since_revision": _draft_changed_since_revision(draft, current),
         },
         published_revisions=[{
-            "id": r.id, "revision_number": r.revision_number, "source_hash": r.source_hash,
+            "id": r.id, "revision_number": r.revision_number, "alias": r.alias, "source_hash": r.source_hash,
             "parameter_schema": r.parameter_schema, "default_parameters": r.default_parameters,
             "runtime_manifest": r.runtime_manifest, "published_at": r.published_at,
         } for r in revisions],
@@ -261,6 +261,7 @@ def publish_strategy_revision(
         revision = service.publish_revision(
             strategy_id,
             expected_draft_version=payload.draft_version,
+            alias=payload.alias,
         )
         session.commit()
         session.refresh(revision)
