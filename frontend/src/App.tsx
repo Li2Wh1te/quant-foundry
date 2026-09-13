@@ -91,7 +91,7 @@ export function App() {
       />
       <Route
         path="/admin/backtest-accounts"
-        element={<RequireAuth><AdminPage><AccountProfilesPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><OverviewShell title="回测账户" section="RESEARCH / 03" className="qfac-root"><AccountProfilesPage /></OverviewShell></RequireAuth>}
       />
       <Route
         path="/admin/backtest-preflight"
