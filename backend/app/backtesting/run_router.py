@@ -669,6 +669,12 @@ def _create(
         if existing is not None:
             return _response(existing)
         if kind == INTERNAL_KIND:
+            if payload.account_profile_id is not None:
+                # Internal submissions with an explicit catalogue reference
+                # share the formal resolver's deletion lock and existence check.
+                from .service import AccountProfileService
+                if AccountProfileService(session).repository.get(payload.account_profile_id, for_update=True) is None:
+                    raise ValueError("selected account profile does not exist")
             binding = _admit_internal_binding(binding)
         row = repository.create(
             binding,

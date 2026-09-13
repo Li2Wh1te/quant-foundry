@@ -1401,6 +1401,11 @@ def _account_snapshot(session: Session, profile_id: UUID | None, version: int | 
     if profile_id is None:
         raise ValueError("account_profile_id is required for a formal run")
     service = AccountProfileService(session)
+    # Hold the same catalogue lock as permanent deletion through run insertion
+    # and commit. A concurrent delete either sees this run or wins first and
+    # causes resolution to fail, never leaving a newly created orphan binding.
+    if service.repository.get(profile_id, for_update=True) is None:
+        raise ValueError("selected account profile does not exist")
     if version is None:
         version = int(service.get(profile_id).version)
     record = service.get_version(profile_id, version)
