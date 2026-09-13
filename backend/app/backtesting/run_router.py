@@ -831,6 +831,16 @@ def preflight(
     payload: RunCreateRequest,
     session: Session = Depends(get_db_session),
 ) -> dict[str, Any]:
+    """Normalize frozen evidence before FastAPI's typed JSON serializer.
+
+    Admission deliberately freezes nested mappings, including issue details.
+    Pydantic cannot serialize MappingProxyType nested inside dict[str, Any];
+    normalize every success and rejection branch at the HTTP boundary.
+    """
+    return _wire_value(_preflight_evidence(payload, session))
+
+
+def _preflight_evidence(payload: RunCreateRequest, session: Session) -> dict[str, Any]:
     """Run the same side-effect-free formal admission used by creation."""
 
     try:
