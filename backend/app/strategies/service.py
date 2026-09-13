@@ -51,6 +51,10 @@ class StrategyDraftNotFoundError(StrategyStorageError):
     """Raised when a strategy has no mutable draft to save or publish."""
 
 
+class StrategyDeletionBlockedError(StrategyStorageError):
+    """Published history prevents permanent removal."""
+
+
 class StrategyArchivedError(StrategyStorageError):
     """Raised when a lifecycle write targets an archived strategy."""
 
@@ -266,6 +270,28 @@ class StrategyStorageService:
         strategy.version += 1
         self.session.flush()
         return strategy
+
+    def delete_unpublished_strategy(self, strategy_id: UUID, *, expected_version: int, expected_draft_version: int) -> None:
+        """Delete only an unreferenced draft under the same lock as publication.
+
+        Formal runs bind immutable revisions, so rejecting every revision also
+        protects all formal run history. The revision FK remains a final guard
+        against writers outside the service; no revision trigger is bypassed.
+        """
+        strategy = self.repository.get_strategy(strategy_id, for_update=True)
+        if strategy is None:
+            raise StrategyNotFoundError(str(strategy_id))
+        _assert_expected_strategy_version(strategy.version, expected_version)
+        if strategy.current_revision_id is not None or self.repository.list_revisions(strategy_id):
+            raise StrategyDeletionBlockedError(str(strategy_id))
+        draft = self.repository.get_draft(strategy_id, for_update=True)
+        if draft is None:
+            raise StrategyDraftNotFoundError(str(strategy_id))
+        _assert_expected_draft_version(draft.version, expected_draft_version)
+        self.session.delete(draft)
+        self.session.flush()
+        self.session.delete(strategy)
+        self.session.flush()
 
     def archive_strategy(
         self, strategy_id: UUID, *, expected_version: int

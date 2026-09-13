@@ -246,3 +246,8 @@ export function archiveStrategy(strategy: StrategySummary): Promise<void> {
     { method: "DELETE" },
   );
 }
+
+/** Both tokens protect against deleting another editor's newly saved work. */
+export function deleteUnpublishedStrategy(strategy: StrategyDetail): Promise<void> {
+  return request<void>(`/api/admin/strategies/${encodeURIComponent(strategy.id)}/permanent?version=${strategy.version}&draft_version=${strategy.draft.version}`, { method: "DELETE" });
+}

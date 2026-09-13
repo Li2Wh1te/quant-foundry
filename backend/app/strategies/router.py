@@ -32,6 +32,7 @@ from app.backtesting.result_router import _cursor_signing_key
 from app.strategies.service import (
     StrategyAlreadyArchivedError,
     StrategyArchivedError,
+    StrategyDeletionBlockedError,
     StrategyDraftConflictError,
     StrategyDraftIntegrityError,
     StrategyDraftNotFoundError,
@@ -305,6 +306,25 @@ def get_strategy_revision(
     return StrategyRevisionResponse.model_validate(revision)
 
 
+@router.delete("/{strategy_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+def delete_unpublished_strategy(
+    strategy_id: UUID,
+    version: Annotated[int, Query(ge=1)],
+    draft_version: Annotated[int, Query(ge=1)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> Response:
+    """Permanently remove only an unpublished draft with fresh version tokens."""
+    try:
+        StrategyStorageService(session).delete_unpublished_strategy(
+            strategy_id, expected_version=version, expected_draft_version=draft_version,
+        )
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise _http_error(exc) from exc
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.delete("/{strategy_id}", status_code=status.HTTP_204_NO_CONTENT)
 def archive_strategy(
     strategy_id: UUID,
@@ -392,6 +412,8 @@ def _validation_issue_response(
 
 def _http_error(exc: Exception) -> HTTPException:
     """Map expected lifecycle failures to safe, user-facing Chinese API errors."""
+    if isinstance(exc, StrategyDeletionBlockedError):
+        return HTTPException(status_code=409, detail="策略已有发布版本或回测历史，不能永久删除，请使用归档。")
     if isinstance(exc, StrategyNotFoundError):
         return HTTPException(status_code=404, detail="策略不存在。")
     if isinstance(exc, StrategyDraftNotFoundError):

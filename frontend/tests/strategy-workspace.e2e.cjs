@@ -22,17 +22,17 @@ const assert=require('node:assert/strict');
     if(conflict){status=409;body={detail:'draft version conflict'};conflict=false;}
     else{const payload=request.postDataJSON();assert.equal(payload.version,row.draft.version);row.draft={...row.draft,...payload,version:row.draft.version+1};body=row.draft;}
    }else if(parts[5]==='validate')body={valid:true,draft_version:row.draft.version,source_hash:row.draft.source_hash,issues:[]};
-   else if(parts[5]==='publish'){const r={id:'rev-'+id,revision_number:1,source_hash:'abcdef',runtime_manifest:{},published_at:'2026-09-12T08:01:00Z',...row.draft};revisions[id]=r;row.current_revision=r;row.current_revision_id=r.id;row.draft_changed_since_revision=false;body=r;status=201;}
+   else if(parts[5]==='publish'){const r={id:'rev-'+id,revision_number:1,alias:request.postDataJSON().alias,source_hash:'abcdef',runtime_manifest:{},published_at:'2026-09-12T08:01:00Z',...row.draft};revisions[id]=r;row.current_revision=r;row.current_revision_id=r.id;row.draft_changed_since_revision=false;body=r;status=201;}
    else if(parts[5]==='revisions')body=parts[6]?revisions[id]:(revisions[id]?[revisions[id]]:[]);
    else if(parts[5]==='backtests')body={runs:{items:[],has_more:false},published_revisions:[],strategy:row};
    else if(method==='PATCH'){metadataCount++;const payload=request.postDataJSON();assert.equal(payload.version,row.version);Object.assign(row,payload,{version:row.version+1});body=row;}
-   else if(method==='DELETE'){row.state='archived';status=204;}
+   else if(method==='DELETE'){if(parts[5]==='permanent'){assert.equal(url.searchParams.get('draft_version'),String(row.draft.version));delete rows[id];}else row.state='archived';status=204;}
    else body=row;
   }else if(path.includes('auth')){status=204;}else if(path.includes('version'))body={version:'0.2.0'};
   await route.fulfill({status,contentType:'application/json',body:status===204?'':JSON.stringify(body)});
  });
  try {
-  await page.goto('http://127.0.0.1:5179/admin/strategies/one');await page.getByRole('textbox',{name:'策略源码',exact:true}).waitFor();
+  await page.goto((process.env.FRONTEND_URL||'http://127.0.0.1:5174')+'/admin/strategies/one');await page.getByRole('textbox',{name:'策略源码',exact:true}).waitFor();
   const code=()=>page.getByRole('textbox',{name:'策略源码',exact:true});
   await code().fill(source+'# unsaved\n');
   await page.getByRole('tab',{name:'params.json',exact:true}).click();
@@ -51,11 +51,11 @@ const assert=require('node:assert/strict');
   await page.getByRole('status').filter({hasText:'草稿已保存'}).waitFor();assert.equal(metadataCount,1);assert.equal(rows.one.draft.default_parameters.nested.keep,true);
   await page.getByRole('button',{name:'静态检查',exact:true}).click();await page.getByRole('status').filter({hasText:'静态校验通过'}).waitFor();
   await page.getByRole('tab',{name:'strategy.py',exact:true}).click();await code().fill(source+'# edit again\n');
-  assert.match(await page.locator('.qfs-status').innerText(),/检查已过期/);
+  assert.match(await page.locator('.qfs-editor-status').innerText(),/检查已过期/);
   await page.locator('.qfs-list button').filter({hasText:'策略 two'}).click();await page.getByRole('dialog',{name:'放弃未保存的修改？'}).waitFor();assert.match(page.url(),/one$/);assert.match(await code().inputValue(),/edit again/);await page.getByRole('button',{name:'继续编辑',exact:true}).click();
   delaySave=true;await page.getByRole('button',{name:'保存草稿',exact:true}).click();assert.equal(await code().getAttribute('readonly'),'');await page.getByRole('status').filter({hasText:'草稿已保存'}).waitFor();delaySave=false;
-  await page.getByRole('button',{name:'发布版本',exact:true}).click();await page.getByRole('status').filter({hasText:'已发布策略版本'}).waitFor();
-  await page.getByRole('tab',{name:'版本',exact:true}).click();await page.getByRole('button',{name:/v1 · 当前发布版本/}).click();await page.getByRole('dialog',{name:'发布版本 v1'}).waitFor();assert.match(await page.getByRole('dialog').innerText(),/默认参数/);await page.getByRole('button',{name:'关闭发布版本 v1',exact:true}).click();
+  await page.getByRole('button',{name:'发布版本',exact:true}).click();await page.getByRole('textbox',{name:'版本别名'}).fill('优化止损');await page.getByRole('button',{name:'确认发布',exact:true}).click();await page.getByRole('status').filter({hasText:'已发布策略版本'}).waitFor();
+  await page.getByRole('tab',{name:'版本',exact:true}).click();await page.getByRole('button',{name:/v1 · 优化止损 · 当前发布版本/}).click();await page.getByRole('dialog',{name:'发布版本 v1 · 优化止损'}).waitFor();assert.match(await page.getByRole('dialog').innerText(),/默认参数/);await page.getByRole('button',{name:'关闭发布版本 v1 · 优化止损',exact:true}).click();
   await page.locator('.qfs-list button').filter({hasText:'策略 two'}).click();await page.waitForURL('**/two');await page.locator('.qfs-object strong').filter({hasText:'策略 two'}).waitFor();await code().fill(source+'# protect back\n');await page.locator('.qfs-file-tabs').filter({hasText:'未保存'}).waitFor();
   await page.evaluate(()=>history.back());await page.getByRole('dialog',{name:'放弃未保存的修改？'}).waitFor();await page.waitForTimeout(500);assert.equal(await page.getByRole('dialog',{name:'放弃未保存的修改？'}).isVisible(),true);assert.match(page.url(),/two$/);assert.match(await code().inputValue(),/protect back/);await page.getByRole('button',{name:'继续编辑',exact:true}).click();
   await page.evaluate(()=>history.back());await page.getByRole('button',{name:'放弃修改并切换',exact:true}).click();await page.waitForURL('**/one');
@@ -68,6 +68,7 @@ const assert=require('node:assert/strict');
    assert.equal(await page.getByRole('button',{name:'新建策略',exact:true}).isVisible(),true);
    if(width<900){await page.getByRole('button',{name:'参数面板',exact:true}).click();assert.equal(await page.getByRole('complementary',{name:'策略上下文'}).isVisible(),true);await page.keyboard.press('Escape');}
   }
+  await page.setViewportSize({width:1440,height:960});await page.getByRole('button',{name:'删除策略',exact:true}).click();await page.getByRole('dialog',{name:'删除策略',exact:true}).waitFor();assert.match(await page.getByRole('dialog').innerText(),/新模板/);await page.getByRole('button',{name:'取消',exact:true}).click();assert(rows.new);await page.getByRole('button',{name:'删除策略',exact:true}).click();await page.getByRole('button',{name:'确认永久删除',exact:true}).click();await page.waitForURL('**/admin/strategies');assert.equal(rows.new,undefined);
   assert.deepEqual(errors,[]);console.log('PASS: dirty tabs, malformed JSON, partial-save conflict retry, stale checks, locked saves, publish/snapshot, navigation/back protection, create/archive, responsive panels.');
  } catch(e) {console.error('PAGE',page.url(),errors,await page.locator('body').innerText());throw e;} finally {await context.close();await browser.close();}
 })().catch(e=>{console.error(e);process.exitCode=1;});

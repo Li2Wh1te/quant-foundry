@@ -23,6 +23,7 @@ import { useBlocker, useNavigate, useParams } from "react-router-dom";
 
 import {
   archiveStrategy,
+  deleteUnpublishedStrategy,
   createStrategy,
   getStrategy,
   getStrategyRevision,
@@ -214,6 +215,7 @@ export function StrategiesPage() {
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishAlias, setPublishAlias] = useState("");
   const [archiving, setArchiving] = useState(false);
@@ -687,6 +689,27 @@ export function StrategiesPage() {
     }
   }
 
+  async function handleDelete() {
+    if (!detail || busy || lock.current || detail.current_revision_id || revisions.length) return;
+    lock.current = true;
+    setArchiving(true);
+    setError(null);
+    try {
+      await deleteUnpublishedStrategy(detail);
+      setStrategies(items => items.filter(item => item.id !== detail.id));
+      setDeleteOpen(false);
+      // Deletion explicitly discards this draft, including any local edits.
+      guardRef.current = { dirty: false, busy: false };
+      navigate("/admin/strategies", { replace: true });
+      setNotice("策略已永久删除。");
+    } catch (caught) {
+      handleApiError(caught, "策略删除失败，请刷新后确认当前状态。");
+    } finally {
+      lock.current = false;
+      setArchiving(false);
+    }
+  }
+
   async function handleArchive() {
     if (!detail || busy || lock.current || isArchived) return;
     if (isDirty) {
@@ -1122,7 +1145,7 @@ export function StrategiesPage() {
                   updateDraftField={updateDraftField}
                   updateCursor={updateCursor}
                 />
-                <footer className="qfs-status">
+                <footer className="qfs-editor-status">
                   <button
                     onClick={() => setDiagnostics(!diagnostics)}
                     aria-expanded={diagnostics}
@@ -1391,6 +1414,7 @@ export function StrategiesPage() {
                         <Archive />
                         归档策略
                       </button>
+                      {!detail.current_revision_id && !revisions.length ? <button className="qfs-danger" disabled={busy || switchingStrategy} onClick={() => { setError(null); setDeleteOpen(true); }}>删除策略</button> : <p className="qfs-muted">已有发布版本，支持归档并保留历史。</p>}
                     </>
                   ) : (
                     <RecentRuns strategyId={detail.id} />
@@ -1487,6 +1511,14 @@ export function StrategiesPage() {
               </button>
             </footer>
           </form>
+        </Drawer>
+      )}
+      {deleteOpen && detail && (
+        <Drawer title="删除策略" onClose={() => { if (!busy) setDeleteOpen(false); }}>
+          <p>确定永久删除“{detail.name}”吗？</p>
+          <p>此策略尚未发布。删除后草稿及未保存的修改将无法恢复。</p>
+          {error && <p role="alert" className="qfs-error">{error}</p>}
+          <footer><button disabled={busy} onClick={() => setDeleteOpen(false)}>取消</button><button className="qfs-danger" disabled={busy} onClick={() => void handleDelete()}>{busy ? "删除中…" : "确认永久删除"}</button></footer>
         </Drawer>
       )}
       {publishOpen && (
