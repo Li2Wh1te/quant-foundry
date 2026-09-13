@@ -97,12 +97,12 @@ export function App() {
         path="/admin/backtest-preflight"
         element={<RequireAuth><AdminPage><BacktestPreflightPage /></AdminPage></RequireAuth>}
       />
-      <Route path="/admin/backtest-runs" element={<RequireAuth><AdminPage><BacktestRunsPage /></AdminPage></RequireAuth>} />
+      <Route path="/admin/backtest-runs" element={<RequireAuth><OverviewShell title="回测工作台" section="RESEARCH / 04" className="qfb-root"><BacktestRunsPage /></OverviewShell></RequireAuth>} />
       <Route
         path="/admin/strategies/:strategyId"
         element={<RequireAuth><StrategiesPage /></RequireAuth>}
       />
-      <Route path="/admin/strategies/:strategyId/backtests" element={<RequireAuth><AdminPage><StrategyBacktestsPage /></AdminPage></RequireAuth>} />
+      <Route path="/admin/strategies/:strategyId/backtests" element={<RequireAuth><OverviewShell title="回测工作台" section="RESEARCH / 04" className="qfb-root"><StrategyBacktestsPage /></OverviewShell></RequireAuth>} />
       <Route path="*" element={<Navigate to="/admin" replace />} />
     </Routes>
   );

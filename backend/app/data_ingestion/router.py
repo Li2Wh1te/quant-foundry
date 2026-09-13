@@ -3,9 +3,10 @@
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
 from app.data_ingestion.repositories.trading_calendar_query import (
@@ -63,6 +64,9 @@ class EtfCodeResponse(BaseModel):
 
     model_config = ConfigDict(from_attributes=True)
 
+    # Return the persisted stable identity, never infer one from a mutable code.
+    # This current catalogue label does not replace point-in-time preflight.
+    instrument_id: UUID = Field(validation_alias="etf_id")
     ts_code: str
     csname: str | None
     extname: str | None
@@ -213,6 +217,7 @@ def list_etfs(
     list_status: str | None = Query(default=None, min_length=1, max_length=8),
     limit: Annotated[int, Query(ge=1, le=200)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    instrument_id: UUID | None = None,
 ) -> EtfPageResponse:
     """List ETF basic records with server-side filters and stable pagination."""
     items, total = EtfQueryRepository(session).list_codes(
@@ -221,6 +226,7 @@ def list_etfs(
         list_status=list_status,
         limit=limit,
         offset=offset,
+        instrument_id=instrument_id,
     )
     return EtfPageResponse(
         items=[EtfCodeResponse.model_validate(item) for item in items],

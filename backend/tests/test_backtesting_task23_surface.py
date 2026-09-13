@@ -121,11 +121,15 @@ def test_frontend_declares_visibility_polling_and_all_terminal_stops() -> None:
     assert "document.visibilityState" in source
     assert 'document.addEventListener("visibilitychange"' in source
     assert "FOREGROUND_POLL_INTERVAL_MS" in source
-    assert "pollInFlightRef" in source
-    assert "pollAbortRef" in source
-    assert "listInFlightRef" in source
-    assert "detailInFlightRef" in source
-    assert "activeRunsRef.current" in source
+    # The workbench now shares one cancellation controller for list and selected
+    # detail refreshes. Check the lifecycle contract instead of obsolete refs
+    # from the previous page's independent polling implementation.
+    assert "new AbortController()" in source
+    assert "controller.current?.abort()" in source
+    assert "generation !== sequence.current" in source
+    assert "pageRef.current?.items.some" in source
+    assert "isTerminalBacktestStatus" in source
+    assert "stopped || polling" in source
     for terminal in ("succeeded", "failed", "cancelled", "timed_out", "indeterminate"):
         assert f'"{terminal}"' in api_source
     for event in (

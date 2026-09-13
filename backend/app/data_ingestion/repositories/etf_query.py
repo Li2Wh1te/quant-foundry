@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from datetime import date, datetime
+from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -52,6 +53,7 @@ class EtfQueryRepository:
         list_status: str | None,
         limit: int,
         offset: int,
+        instrument_id: UUID | None = None,
     ) -> tuple[list[EtfCode], int]:
         """Return a stable page and the exact count for the same ETF predicates."""
         filters = self._filters(
@@ -59,6 +61,8 @@ class EtfQueryRepository:
             exchange=exchange,
             list_status=list_status,
         )
+        if instrument_id is not None:
+            filters.append(EtfCode.etf_id == instrument_id)
         items = self.session.scalars(
             select(EtfCode)
             .where(*filters)

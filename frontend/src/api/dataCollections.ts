@@ -39,6 +39,7 @@ export interface TradingCalendarFilters {
 }
 
 export interface EtfCode {
+  instrument_id?: string;
   ts_code: string;
   csname: string | null;
   extname: string | null;
@@ -73,6 +74,7 @@ export interface EtfOverview {
 }
 
 export interface EtfFilters {
+  instrumentId?: string;
   keyword?: string;
   exchange?: string;
   listStatus?: string;
@@ -168,6 +170,7 @@ export function getEtfOverview(signal?: AbortSignal): Promise<EtfOverview> {
 
 export function listEtfs(filters: EtfFilters, signal?: AbortSignal): Promise<EtfPage> {
   const params = new URLSearchParams();
+  if (filters.instrumentId) params.set("instrument_id", filters.instrumentId);
   if (filters.keyword) params.set("keyword", filters.keyword);
   if (filters.exchange) params.set("exchange", filters.exchange);
   if (filters.listStatus) params.set("list_status", filters.listStatus);

@@ -208,7 +208,7 @@ export async function fetchBacktestResult<T = Record<string, unknown>>(runId: st
   return request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/${kind}?${params}`, {}, signal) as Promise<BacktestResultPage<T>>;
 }
 
-export const rerunBacktest = (run: BacktestRun, idempotencyKey = crypto.randomUUID()) =>
+export const rerunBacktest = (run: BacktestRun, idempotencyKey: string = crypto.randomUUID()) =>
   request(`/api/admin/backtests/${encodeURIComponent(run.run_id)}/rerun`, {
     method: "POST",
     headers: { "Idempotency-Key": idempotencyKey }
@@ -216,3 +216,13 @@ export const rerunBacktest = (run: BacktestRun, idempotencyKey = crypto.randomUU
 
 export interface FeeCatalogVersion { key: string; version: number; display_name: string; snapshot_hash: string; }
 export const listFeeSchedules = (signal?: AbortSignal) => request("/api/admin/backtest-fee-schedules", {}, signal) as Promise<FeeCatalogVersion[]>;
+
+export type WorkbenchRun = BacktestRun & { strategy_id: string | null; strategy_name: string | null; revision_number: number | null; created_at?: string | null; started_at?: string | null; finished_at?: string | null };
+export type WorkbenchPage = { items: WorkbenchRun[]; total: number; limit: number; offset: number; has_more: boolean };
+export function fetchRunWorkbench(filters: { search: string; status: string; offset: number; strategy_id?: string }, signal?: AbortSignal): Promise<WorkbenchPage> {
+  const params = new URLSearchParams({ limit: "20", offset: String(filters.offset) });
+  if (filters.search) params.set("search", filters.search);
+  if (filters.status) params.set("status", filters.status);
+  if (filters.strategy_id) params.set("strategy_id", filters.strategy_id);
+  return request(`/api/admin/backtest-runs/workspace?${params}`, {}, signal) as Promise<WorkbenchPage>;
+}
