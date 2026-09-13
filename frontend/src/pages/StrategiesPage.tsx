@@ -215,6 +215,7 @@ export function StrategiesPage() {
   const [saving, setSaving] = useState(false);
   const [validating, setValidating] = useState(false);
   const [publishing, setPublishing] = useState(false);
+  const [createDiscard, setCreateDiscard] = useState(false);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [publishOpen, setPublishOpen] = useState(false);
   const [publishAlias, setPublishAlias] = useState("");
@@ -788,14 +789,12 @@ export function StrategiesPage() {
   const editorValue = draft?.[file] || "";
   function closeCreate() {
     if (busy) return;
-    if (
-      (createDraft.name ||
-        createDraft.description ||
-        createDraft.template !== "hold") &&
-      !window.confirm("放弃尚未创建的策略信息吗？")
-    )
+    if (createDraft.name || createDraft.description || createDraft.template !== "hold") {
+      setCreateDiscard(true);
       return;
+    }
     setCreateOpen(false);
+    setCreateDiscard(false);
     setCreateDraft(EMPTY_CREATE_DRAFT);
   }
   function showCreate() {
@@ -1438,8 +1437,9 @@ export function StrategiesPage() {
         />
       )}
       {createOpen && (
-        <Drawer title="创建策略" onClose={closeCreate}>
-          <form onSubmit={handleCreate}>
+        <Drawer title="创建策略" creation onClose={closeCreate}>
+          {createDiscard ? <div className="qf-discard"><h3>放弃尚未创建的策略信息？</h3><p>关闭后，本次填写的内容不会保存。</p><div><button autoFocus onClick={() => setCreateDiscard(false)}>继续编辑</button><button className="qfs-primary" onClick={() => { setCreateDiscard(false); setCreateOpen(false); setCreateDraft(EMPTY_CREATE_DRAFT); }}>放弃并关闭</button></div></div> : <form onSubmit={handleCreate}>
+            <div className="qf-create-fields">
             <p>填写基本信息并选择初始模板，创建后进入编辑器。</p>
             {error && (
               <p role="alert" className="qfs-error">
@@ -1499,6 +1499,7 @@ export function StrategiesPage() {
                   ? "使用原始收盘价计算动量；回测前核对回看窗口与数据范围。"
                   : "保留当前持仓，不产生新的交易意图。"}
             </p>
+            </div>
             <footer>
               <button type="button" disabled={busy} onClick={closeCreate}>
                 取消
@@ -1510,11 +1511,11 @@ export function StrategiesPage() {
                 {busy ? "创建中…" : "创建并进入编辑器"}
               </button>
             </footer>
-          </form>
+          </form>}
         </Drawer>
       )}
       {deleteOpen && detail && (
-        <Drawer title="删除策略" onClose={() => { if (!busy) setDeleteOpen(false); }}>
+        <Drawer title="删除策略" centered onClose={() => { if (!busy) setDeleteOpen(false); }}>
           <p>确定永久删除“{detail.name}”吗？</p>
           <p>此策略尚未发布。删除后草稿及未保存的修改将无法恢复。</p>
           {error && <p role="alert" className="qfs-error">{error}</p>}

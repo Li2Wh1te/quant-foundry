@@ -81,7 +81,7 @@ export function AccountWizard({ source: initial, copy, onClose, onSaved }: { sou
     } finally { busyRef.current = false; setBusy(false); }
   }
   const inputProps = (field: string) => ({ id: `qfac-${field}`, "aria-invalid": issue?.field === field || undefined });
-  return <dialog ref={dialog} className="qfac-dialog" aria-labelledby="qfac-wizard-title" aria-modal="true" onKeyDown={event => {
+  return <dialog ref={dialog} className="qfac-dialog qf-create-drawer qf-create-wide" aria-labelledby="qfac-wizard-title" aria-modal="true" onKeyDown={event => {
       // Keep boundary Tab navigation inside the dialog even when Chromium
       // would otherwise move focus to browser chrome from the first control.
       if (event.key !== "Tab") return;
