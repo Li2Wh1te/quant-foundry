@@ -1,0 +1,177 @@
+/* Page-09 approved baseline: designer composition, specification typography,
+ * and a four-step centered dialog exception scoped exclusively to accounts. */
+.qfac-root .qfo-main{overflow:hidden;padding:18px 24px 20px}
+.qfac-page{height:100%;min-height:0;max-width:1580px;margin:auto;display:flex;flex-direction:column;gap:12px}
+.qfac-page *{min-width:0}
+.qfac-page h1{font-size:32px;line-height:40px;margin:0;font-weight:700}
+.qfac-page h2{font-size:20px;line-height:28px;margin:0}
+.qfac-page h3{font-size:14px;line-height:22px;margin:0;font-weight:650}
+.qfac-page p{line-height:22px}
+.qfac-page code,.qfac-page pre{font:12px/18px "Geist Mono","SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}
+.qfac-eyebrow{font:650 12px/18px "Geist Mono",monospace;letter-spacing:.12em;color:var(--orange);margin-bottom:6px}
+.qfac-page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
+.qfac-page-head p{margin:6px 0 0;color:var(--muted)}
+.qfac-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.qfac-page .qfac-button,.qfac-page .qfac-icon{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:6px 12px;border:1px solid var(--border);background:var(--surface);border-radius:8px;font-size:13px;line-height:20px;font-weight:650;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s}
+.qfac-page .qfac-icon{width:36px;padding:6px;flex-shrink:0}
+.qfac-button svg,.qfac-icon svg{width:16px;height:16px;flex-shrink:0}
+.qfac-page .qfac-button:hover,.qfac-page .qfac-icon:hover{background:var(--surface-2);border-color:var(--border-strong)}
+.qfac-page .qfac-primary{background:var(--orange);border-color:var(--orange);color:white}
+.qfac-page .qfac-primary:hover{background:var(--orange-600);border-color:var(--orange-600)}
+.qfac-page button:disabled{opacity:.5;cursor:not-allowed}
+.qfac-page :is(button,input,select,textarea,[tabindex]):focus-visible{outline:2px solid var(--orange);outline-offset:-2px}
+.qfac-metrics{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));border:1px solid var(--border);border-radius:10px;background:var(--surface);flex-shrink:0;overflow:hidden}
+.qfac-metrics>div{padding:12px 16px;display:grid;gap:3px}
+.qfac-metrics>div+div{border-left:1px solid var(--border)}
+.qfac-metrics span{font-size:13px;color:var(--muted)}
+.qfac-metrics strong{font-size:26px;line-height:32px;font-weight:700}
+.qfac-metrics small{font-size:12px;line-height:18px;color:var(--muted)}
+.qfac-workspace{display:grid;grid-template-columns:360px minmax(0,1fr);gap:12px;min-height:0;flex:1}
+.qfac-sheet{border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;min-height:0}
+.qfac-catalog{display:grid;grid-template-rows:48px auto minmax(0,1fr) auto}
+.qfac-sheet-head{padding:0 14px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)}
+.qfac-sheet-head h2{font-size:16px;line-height:24px}
+.qfac-sheet-head>span{color:var(--muted);font-size:12px}
+.qfac-filter-row{display:grid;grid-template-columns:minmax(0,1fr) 102px;gap:8px;padding:10px;border-bottom:1px solid var(--border)}
+.qfac-search{display:flex;align-items:center;gap:7px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);padding:0 9px}
+.qfac-search svg{width:14px;height:14px;flex-shrink:0;color:var(--muted)}
+.qfac-page .qfac-search input{width:100%;height:36px;border:0;background:transparent;box-shadow:none;padding:0;font-size:13px;color:var(--text)}
+.qfac-search:focus-within{outline:2px solid var(--orange);outline-offset:-2px}
+.qfac-page select{height:36px;border:1px solid var(--border);border-radius:8px;padding:0 8px;background:var(--surface-2);color:var(--text);font-family:inherit;font-size:13px;line-height:20px}
+.qfac-catalog-scroll{overflow:auto;min-height:0;padding:8px}
+.qfac-page .qfac-account-row{width:100%;display:grid;grid-template-columns:minmax(0,1fr) auto;gap:8px;padding:12px 10px;border:1px solid transparent;border-radius:8px;background:transparent;text-align:left;cursor:pointer}
+.qfac-account-row:hover{background:var(--surface-2)}
+.qfac-page .qfac-selected{background:var(--orange-50);border-color:#F1C8B7}
+.qfac-account-row strong{display:block;font-size:14px;line-height:22px;overflow-wrap:anywhere}
+.qfac-account-row small{display:block;font-size:12px;line-height:18px;color:var(--muted);margin-top:4px;overflow-wrap:anywhere}
+.qfac-account-row>div:last-child{text-align:right}
+.qfac-account-row time{display:block;font-size:12px;line-height:18px;color:var(--muted);margin-top:6px}
+.qfac-badge{display:inline-flex;align-items:center;gap:5px;padding:2px 7px;border-radius:999px;font-size:12px;line-height:18px;white-space:nowrap}
+.qfac-badge:before{content:"";width:5px;height:5px;border-radius:50%;background:currentColor}
+.qfac-badge-active{background:var(--green-bg);color:var(--green)}
+.qfac-badge-inactive{background:var(--blue-bg);color:var(--blue)}
+.qfac-badge-retired{background:var(--surface-3);color:var(--muted)}
+.qfac-pager{display:flex;justify-content:flex-end;align-items:center;gap:6px;padding:8px 10px;border-top:1px solid var(--border);font-size:12px}
+.qfac-pager>span{margin-right:auto;color:var(--muted)}
+.qfac-pager .qfac-button{font-size:12px;padding:6px 8px}
+.qfac-detail{display:flex;flex-direction:column}
+.qfac-detail-head{padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:12px;border-bottom:1px solid var(--border)}
+.qfac-object-title{display:flex;align-items:center;gap:8px;flex-wrap:wrap;overflow-wrap:anywhere}
+.qfac-object-title code{color:var(--muted)}
+.qfac-tabs{display:flex;gap:3px;min-height:44px;padding:0 12px;background:var(--surface-2);border-bottom:1px solid var(--border)}
+.qfac-page .qfac-tabs button{padding:0 12px;border:0;border-bottom:2px solid transparent;background:transparent;font-size:14px;color:var(--muted);cursor:pointer}
+.qfac-page .qfac-tabs button[aria-selected=true]{border-bottom-color:var(--orange);color:var(--text)}
+.qfac-detail-body{overflow:auto;min-height:0;padding:14px;flex:1}
+.qfac-overview-grid{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,.85fr);gap:12px;align-items:start}
+.qfac-overview-side,.qfac-fee-list{display:grid;gap:12px}
+.qfac-card{border:1px solid var(--border);border-radius:9px;overflow:hidden;background:var(--surface)}
+.qfac-card>header{display:flex;align-items:center;gap:8px;justify-content:space-between;min-height:42px;padding:8px 12px;background:var(--surface-2);border-bottom:1px solid var(--border);flex-wrap:wrap}
+.qfac-card>header>span{font-size:12px;color:var(--muted)}
+.qfac-properties{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));margin:0}
+.qfac-properties>div{padding:11px 12px;border-bottom:1px solid var(--border)}
+.qfac-properties>div:nth-child(odd){border-right:1px solid var(--border)}
+.qfac-properties dt{font-size:12px;line-height:18px;color:var(--muted);margin-bottom:6px;overflow-wrap:anywhere}
+.qfac-properties dd{font-size:14px;line-height:22px;margin:0;overflow-wrap:anywhere}
+.qfac-card-message{padding:14px 12px;margin:0;color:var(--muted);font-size:13px}
+.qfac-note{padding:10px 12px;background:var(--amber-bg);color:var(--amber);font-size:12px;line-height:20px;margin:0;overflow-wrap:anywhere}
+.qfac-usage-list{padding:0 12px}
+.qfac-usage-list article{padding:12px 0}
+.qfac-usage-list article+article{border-top:1px solid var(--border)}
+.qfac-usage-list strong{font-size:13px;overflow-wrap:anywhere}
+.qfac-usage-list p,.qfac-usage-list small{font-size:12px;line-height:20px;color:var(--muted);margin:4px 0 0;display:block}
+.qfac-tag{border-radius:999px;padding:2px 7px;background:var(--orange-50);font-size:12px;color:var(--orange)}
+.qfac-fee-card .qfac-properties{grid-template-columns:repeat(4,minmax(0,1fr))}
+.qfac-fee-conditions{padding:12px;font-size:12px;color:var(--muted)}
+.qfac-fee-conditions p{margin:4px 0 0;color:var(--text);overflow-wrap:anywhere}
+.qfac-metadata-table{width:100%;border-collapse:collapse;table-layout:fixed}
+.qfac-metadata-table th,.qfac-metadata-table td{padding:11px 12px;text-align:left;border-bottom:1px solid var(--border);font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.qfac-metadata-table thead{background:var(--surface-2);color:var(--muted)}
+.qfac-empty{padding:36px 16px;display:flex;flex-direction:column;align-items:center;text-align:center;color:var(--muted);gap:8px}
+.qfac-empty svg{width:20px;height:20px}
+.qfac-empty p{margin:0}
+.qfac-error,.qfac-notice{padding:10px 12px;font-size:13px;line-height:20px;border-radius:8px;overflow-wrap:anywhere;flex-shrink:0}
+.qfac-error{background:var(--red-bg);color:var(--red)}
+.qfac-notice{background:var(--green-bg);color:var(--green)}
+/* Native modal supplies focus containment and makes the shell inert. Only the
+ * body scrolls, keeping the step indicator and save controls reachable. */
+.qfac-dialog{width:min(640px,calc(100vw - 28px));height:min(760px,calc(100dvh - 28px));max-width:none;max-height:none;padding:0;border:1px solid var(--border-strong);border-radius:12px;background:var(--surface);color:var(--text);box-shadow:0 30px 90px #17212f33;overflow:hidden}
+.qfac-dialog::backdrop{background:#17212f2e;backdrop-filter:blur(6px)}
+.qfac-dialog form{height:100%;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto}
+.qfac-modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
+.qfac-modal-head h2{font-size:20px;line-height:28px}
+.qfac-summary{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface-2)}
+.qfac-summary span{display:block;color:var(--muted);font-size:12px;line-height:18px;margin-bottom:3px}
+.qfac-summary strong{display:block;font-size:13px;line-height:20px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
+.qfac-steps{margin:0;list-style:none;padding:12px 14px;display:grid;grid-template-columns:repeat(4,minmax(0,1fr));border-bottom:1px solid var(--border);gap:6px}
+.qfac-steps li{display:flex;align-items:center;gap:6px;color:var(--muted);font-size:12px;line-height:18px}
+.qfac-steps b{border:1px solid var(--border);border-radius:50%;width:24px;height:24px;display:grid;place-items:center;flex-shrink:0;font-size:12px}
+.qfac-steps [aria-current=step]{color:var(--text)}
+.qfac-steps [aria-current=step] b{color:var(--orange);background:var(--orange-50);border-color:var(--orange)}
+.qfac-steps .qfac-done{color:var(--green)}
+.qfac-modal-body{padding:16px;min-height:0;overflow:auto;scroll-padding:16px}
+.qfac-modal-body fieldset{padding:0;margin:0;border:0}
+.qfac-modal-body h3{margin:0 0 12px}
+.qfac-modal-body h3:not(:first-child){margin-top:20px}
+.qfac-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
+.qfac-field{display:grid;gap:6px;align-content:start}
+.qfac-field>label,.qfac-pair label>span{font-size:13px;line-height:20px;font-weight:650}
+.qfac-field small,.qfac-help{font-size:12px;line-height:20px;color:var(--muted)}
+.qfac-dialog input:not([type=radio]),.qfac-dialog select{display:block;width:100%;height:36px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;box-shadow:none}
+.qfac-dialog input[aria-invalid=true]{border-color:var(--red)}
+.qfac-field .qfac-field-error,.qfac-field-error{color:var(--red);font-size:12px;line-height:20px}
+.qfac-choices{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.qfac-choices label{display:grid;grid-template-columns:auto 1fr;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;cursor:pointer}
+.qfac-choices input{accent-color:var(--orange);margin:3px 0 0}
+.qfac-choices strong{font-size:13px}
+.qfac-choices small{grid-column:1/-1;color:var(--muted);font-size:12px;line-height:20px}
+.qfac-fee-editor{display:grid;grid-template-columns:180px minmax(0,1fr);gap:14px;align-items:start}
+.qfac-rule-nav{display:grid;gap:6px}
+.qfac-page .qfac-rule-nav button{border:1px solid var(--border);border-radius:8px;background:var(--surface);text-align:left;padding:10px;cursor:pointer}
+.qfac-page .qfac-rule-nav button[aria-pressed=true]{background:var(--orange-50);border-color:#F1C8B7}
+.qfac-rule-nav strong{display:block;font-size:13px;line-height:20px;overflow-wrap:anywhere}
+.qfac-rule-nav small{display:block;color:var(--muted);font-size:12px;line-height:18px;margin-top:4px}
+.qfac-rule-nav .qfac-add-rule{display:flex;align-items:center;gap:5px;font-size:12px}
+.qfac-add-rule svg{width:14px;height:14px;flex-shrink:0}
+.qfac-rule-form>header{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:12px}
+.qfac-rule-form>header h3{margin:0}
+.qfac-pairs{display:grid;gap:12px}
+.qfac-pairs .qfac-help{margin:0}
+.qfac-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr) 36px;gap:8px;align-items:end}
+.qfac-pair label{display:grid;gap:6px}
+.qfac-pairs>.qfac-button{justify-self:start}
+.qfac-review-rule{border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;overflow-wrap:anywhere}
+.qfac-review-rule strong{font-size:13px}
+.qfac-review-rule p{font-size:12px;margin:5px 0 0;color:var(--muted)}
+.qfac-modal-footer{border-top:1px solid var(--border);padding:12px 16px;background:var(--surface)}
+.qfac-footer-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.qfac-footer-row>span{font-size:12px;color:var(--muted)}
+.qfac-modal-footer .qfac-error{margin-bottom:10px}
+.qfac-error .qfac-button{margin-left:8px}
+.qfac-break{overflow-wrap:anywhere}
+.qfac-discard p{font-size:14px;color:var(--muted)}
+@media(max-width:1100px){.qfac-overview-grid{grid-template-columns:1fr}.qfac-detail-head{align-items:flex-start;flex-wrap:wrap}}
+@media(max-width:980px){.qfac-root .qfo-app,.qfac-root .qfo-shell{height:auto;min-height:100dvh;overflow:visible}.qfac-root .qfo-main{overflow:visible}.qfac-page{height:auto}.qfac-workspace{grid-template-columns:1fr;flex:auto}.qfac-catalog-scroll{max-height:340px;min-height:120px}.qfac-detail-body{overflow:visible}.qfac-overview-grid{grid-template-columns:1.15fr .85fr}.qfac-detail{min-height:420px}.qfac-page-head{align-items:flex-start;flex-wrap:wrap}}
+@media(max-width:640px){.qfac-root .qfo-main{padding:16px 12px}.qfac-page-head h1{font-size:28px;line-height:36px}.qfac-metrics>div{padding:10px 8px}.qfac-metrics small{font-size:12px}.qfac-overview-grid{grid-template-columns:1fr}.qfac-detail-head{padding:12px}.qfac-detail-body{padding:10px}.qfac-filter-row{grid-template-columns:minmax(0,1fr) 96px}.qfac-fee-card .qfac-properties{grid-template-columns:repeat(2,minmax(0,1fr))}.qfac-dialog{width:calc(100vw - 16px);height:calc(100dvh - 16px)}.qfac-fee-editor,.qfac-form-grid{grid-template-columns:1fr}.qfac-rule-nav{grid-template-columns:repeat(2,minmax(0,1fr))}.qfac-rule-nav .qfac-add-rule{grid-column:1/-1}.qfac-pair{grid-template-columns:minmax(0,1fr) 36px}.qfac-pair label{grid-column:1}.qfac-pair .qfac-icon{grid-column:2;grid-row:1/3}.qfac-modal-body{padding:14px}.qfac-steps{gap:4px;padding:10px}.qfac-steps li{flex-direction:column;gap:4px;text-align:center}.qfac-choices{grid-template-columns:1fr}.qfac-summary{padding:10px}.qfac-tabs{padding:0 4px}.qfac-page .qfac-tabs button{padding:0 9px;font-size:13px}.qfac-metadata-table th,.qfac-metadata-table td{padding:9px 7px}.qfac-footer-row{flex-wrap:wrap}.qfac-footer-row .qfac-actions{margin-left:auto}}
+@media(prefers-reduced-motion:reduce){.qfac-page *{transition:none!important}.qfac-page .spin{animation:none}}
+/* Shared shell styles are imported by other routes too. Win specificity here
+ * so their desktop grid cannot reopen the sidebar on this reviewed page. */
+@media(max-width:980px){.qfo-root.qfac-root{height:auto;min-height:100dvh;overflow:visible}.qfo-root.qfac-root .qfo-app,.qfo-root.qfac-root .qfo-app.qfo-sidebar-collapsed{grid-template-columns:74px minmax(0,1fr);height:auto;min-height:100dvh;overflow:visible}.qfo-root.qfac-root .qfo-shell{height:auto;min-height:100dvh;overflow:visible}.qfo-root.qfac-root .qfo-sidebar{height:100dvh;width:74px}.qfo-root.qfac-root .qfo-main{overflow:visible}}
+
+/* Transient success feedback must never insert a row into the flex layout. */
+.qfac-toast{position:fixed;right:24px;top:70px;z-index:80;max-width:min(480px,calc(100vw - 32px));display:flex;align-items:center;gap:12px;border:1px solid #CFE2D4;box-shadow:0 8px 24px #17212f14}
+.qfac-toast>span{flex:1}
+.qfac-toast .qfac-icon{background:transparent;border-color:transparent;color:var(--green)}
+.qfac-page .qfac-account-row:disabled{opacity:1;cursor:wait}
+@media(max-width:640px){.qfac-toast{right:12px;top:64px}}
+
+.qfac-page .qfac-delete-action{color:var(--red)}
+.qfac-delete-dialog{height:auto;max-height:calc(100dvh - 28px);width:min(480px,calc(100vw - 28px))}
+.qfac-delete-dialog[open]{display:flex;flex-direction:column}
+.qfac-delete-dialog .qfac-modal-body{flex:1}
+.qfac-delete-dialog .qfac-modal-footer{justify-content:flex-end;flex-wrap:wrap}
+.qfac-delete-name{font-size:16px;font-weight:650;overflow-wrap:anywhere;margin-top:0}
+.qfac-page .qfac-danger{background:var(--red);border-color:var(--red);color:white}
+.qfac-page .qfac-danger:hover{background:#A44C45;border-color:#A44C45}
+.qfac-detail-head>.qfac-actions{flex-wrap:wrap}
+.qfac-page .qfac-delete-dialog{height:fit-content;margin:auto}
+.qfac-delete-dialog .qfac-modal-body{flex:0 1 auto}
