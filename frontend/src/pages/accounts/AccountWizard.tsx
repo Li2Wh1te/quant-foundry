@@ -1,3 +1,4 @@
+import { isDialogBackdropClick } from "../../components/controls/dialogBackdrop";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { LoaderCircle, Plus, Trash2, X } from "lucide-react";
 import { AccountProfileApiError, createAccountProfile, getAccountProfile, updateAccountProfile, type AccountProfile, type AccountProfileStatus, type FeeRule } from "../../api/accountProfiles";
@@ -89,13 +90,13 @@ export function AccountWizard({ source: initial, copy, onClose, onSaved }: { sou
       const first = controls[0], last = controls[controls.length - 1];
       if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
       else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-    }} onCancel={e => { e.preventDefault(); close(); }} onClick={e => { if (e.target === e.currentTarget) { const rect = e.currentTarget.getBoundingClientRect(); if (e.clientX < rect.left || e.clientX > rect.right || e.clientY < rect.top || e.clientY > rect.bottom) close(); } }}>
+    }} onCancel={e => { e.preventDefault(); close(); }} onClick={e => { if (isDialogBackdropClick(e)) close(); }}>
     <form onSubmit={e => { e.preventDefault(); void next(); }} noValidate>
       <header className="qfac-modal-head"><div><div className="qfac-eyebrow">{isEdit ? "EDIT ACCOUNT" : copy ? "COPY ACCOUNT" : "NEW ACCOUNT"}</div><h2 id="qfac-wizard-title">{isEdit ? "编辑回测账户" : copy ? "复制回测账户" : "新建回测账户"}</h2></div><button className="qfac-icon" type="button" disabled={busy} onClick={close} aria-label="关闭账户向导"><X /></button></header>
       <div className="qfac-summary"><div><span>账户名称</span><strong title={draft.name}>{draft.name || "未命名账户"}</strong></div><div><span>费用方案标识</span><strong title={draft.scheduleKey}>{draft.scheduleKey || "—"}</strong></div><div><span>状态</span><strong>{STATUS[draft.status]}</strong></div></div>
       <ol className="qfac-steps">{STEPS.map((label, index) => <li key={label} aria-current={index === step ? "step" : undefined} className={index < step ? "qfac-done" : ""}><b>{index + 1}</b><span>{label}</span></li>)}</ol>
       <div className="qfac-modal-body" ref={body}>
-        {confirmation ? <section className="qfac-discard"><h3>{confirmation === "close" ? "放弃未保存的修改？" : "载入最新账户配置？"}</h3><p>{confirmation === "close" ? "关闭后，本次填写的内容不会保存。" : "当前填写的内容将被最新版本替换。"}</p><div className="qfac-actions"><button data-keep-editing className="qfac-button" type="button" disabled={busy} onClick={() => setConfirmation(null)}>继续编辑</button><button className="qfac-button qfac-primary" type="button" disabled={busy} onClick={() => confirmation === "close" ? onClose() : void reload()}>{confirmation === "close" ? "放弃修改" : "载入最新版本"}</button></div></section> : <fieldset disabled={busy}>
+        {confirmation ? <section className="qfac-discard"><h3>{confirmation === "close" ? "放弃未保存的修改？" : "载入最新账户配置？"}</h3><p>{confirmation === "close" ? "关闭后，本次填写的内容不会保存。" : "当前填写的内容将被最新版本替换。"}</p><div className="qfac-actions"><button data-keep-editing className="qfac-button" type="button" disabled={busy} onClick={() => setConfirmation(null)}>继续编辑</button><button className="qfac-button qfac-primary" type="button" disabled={busy} onClick={() => confirmation === "close" ? onClose() : void reload()}>{confirmation === "close" ? "放弃并关闭" : "载入最新版本"}</button></div></section> : <fieldset disabled={busy}>
         {step === 0 && <>
           <h3>账户标识</h3><div className="qfac-form-grid">
             <Field label="账户名称" id="name" issue={issue} help="用于账户列表和回测选择器。"><input {...inputProps("name")} maxLength={100} value={draft.name} onChange={e => change({ name: e.target.value })} placeholder="例如：ETF 研究账户" /></Field>

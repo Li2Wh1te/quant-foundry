@@ -1,3 +1,4 @@
+import { isDialogBackdropClick } from "../../components/controls/dialogBackdrop";
 import { useEffect, useRef, useState } from "react";
 import { X, Trash2, Plus } from "lucide-react";
 import { getAccountPage, listAccountProfileVersions, type AccountProfile } from "../../api/accountProfiles";
@@ -402,7 +403,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
   >;
 
   return (
-    <dialog ref={dialog} className="qfb-drawer qf-create-drawer qf-create-wide" aria-labelledby="qfb-create-title" onCancel={event => { event.preventDefault(); close(); }}>
+    <dialog ref={dialog} className="qfb-drawer qf-create-drawer qf-create-wide" aria-labelledby="qfb-create-title" onClick={event => { if (isDialogBackdropClick(event)) close(); }} onCancel={event => { event.preventDefault(); close(); }}>
       <header><div><small>CREATE BACKTEST</small><h2 id="qfb-create-title">{source ? "复制配置" : "创建回测"}</h2></div><button aria-label="关闭创建回测" onClick={close} disabled={busy}><X size={18} /></button></header>
       {discard ? <div className="qfb-discard"><h3>放弃尚未提交的配置？</h3><p>关闭后，本次填写的内容不会保存。</p><button autoFocus onClick={() => setDiscard(false)}>继续编辑</button><button onClick={onClose}>放弃并关闭</button></div> : <>
       <ol className="qfb-steps">{["策略与版本", "账户与执行配置", "运行检查与确认"].map((name,index) => <li key={name} aria-current={index === step ? "step" : undefined}><span>{index+1}</span>{name}</li>)}</ol>

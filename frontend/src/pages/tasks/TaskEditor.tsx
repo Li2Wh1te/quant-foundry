@@ -1,3 +1,4 @@
+import { isDialogBackdropClick } from "../../components/controls/dialogBackdrop";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { X } from "lucide-react";
@@ -67,7 +68,7 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
   }
   const frequency = draft.scheduleKind === "cron" ? draft.cronMode : draft.scheduleKind;
   const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return <dialog ref={dialog} className="qft-editor qf-create-drawer qf-create-wide" aria-labelledby="qft-editor-title" onCancel={event => { event.preventDefault(); close(); }}>
+  return <dialog ref={dialog} className="qft-editor qf-create-drawer qf-create-wide" aria-labelledby="qft-editor-title" onClick={event => { if (isDialogBackdropClick(event)) close(); }} onCancel={event => { event.preventDefault(); close(); }}>
     <form onSubmit={submit}>
       <header className="qft-editor-head"><h2 id="qft-editor-title">{task ? "编辑采集任务" : "新建采集任务"}</h2><button type="button" className="qfo-icon-btn" aria-label="关闭任务表单" aria-disabled={busy} onClick={close}><X aria-hidden="true" /></button></header>
       {discard ? <div className="qft-editor-body qf-discard"><h3>放弃尚未保存的任务配置？</h3><p>关闭后，本次修改不会保存。</p><div><button data-keep-editing type="button" className="qfo-secondary-btn" onClick={() => setDiscard(false)}>继续编辑</button><button type="button" className="qfo-primary-btn" onClick={onClose}>放弃并关闭</button></div></div> : <>

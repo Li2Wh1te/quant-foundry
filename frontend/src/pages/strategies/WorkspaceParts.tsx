@@ -1,3 +1,4 @@
+import { isDialogBackdropClick } from "../../components/controls/dialogBackdrop";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
@@ -111,10 +112,7 @@ export function Drawer({
         onClose();
       }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) {
-          const r = e.currentTarget.getBoundingClientRect();
-          if (e.clientX < r.left || e.clientX > r.right) onClose();
-        }
+        if (isDialogBackdropClick(e)) onClose();
       }}
     >
       <header>
