@@ -288,6 +288,7 @@ class StrategyStorageService:
         *,
         expected_draft_version: int,
         runtime_manifest: Mapping[str, Any] | None = None,
+        alias: str | None = None,
     ) -> StrategyRevision:
         """Snapshot the current draft as the next immutable executable revision.
 
@@ -298,6 +299,10 @@ class StrategyStorageService:
         """
         # This flag is consumed by the HTTP adapter to expose 200 for an
         # idempotent replay and 201 for a newly-created immutable revision.
+        if alias is not None:
+            alias = alias.strip()
+            if not alias or len(alias) > 100:
+                raise StrategyStorageValidationError("版本别名须为 1–100 个字符")
         self.last_publish_reused = False
         strategy = self._require_editable_strategy(strategy_id)
         draft = self.repository.get_draft(strategy.id, for_update=True)
@@ -347,7 +352,8 @@ class StrategyStorageService:
             .limit(1)
         )
         if latest is not None and (
-            latest.source_hash == computed_hash
+            latest.alias == alias
+            and latest.source_hash == computed_hash
             and latest.source_code == draft.source_code
             and (latest.parameter_schema or {}) == (draft.parameter_schema or {})
             and (latest.default_parameters or {}) == (draft.default_parameters or {})
@@ -362,6 +368,7 @@ class StrategyStorageService:
             id=uuid4(),
             strategy_id=strategy.id,
             revision_number=self.repository.next_revision_number(strategy.id),
+            alias=alias,
             source_code=draft.source_code,
             source_hash=computed_hash,
             parameter_schema=deepcopy(draft.parameter_schema),

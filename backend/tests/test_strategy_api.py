@@ -107,6 +107,13 @@ class StrategyApiSchemaTestCase(unittest.TestCase):
         with self.assertRaises(ValidationError):
             StrategyPublishRequest.model_validate({"draft_version": 0})
 
+    def test_publication_alias_is_required_trimmed_and_bounded(self) -> None:
+        payload = StrategyPublishRequest.model_validate({"draft_version": 1, "alias": " 优化止损逻辑 "})
+        self.assertEqual(payload.alias, "优化止损逻辑")
+        for values in ({}, {"alias": " "}, {"alias": "x" * 101}):
+            with self.assertRaises(ValidationError):
+                StrategyPublishRequest.model_validate({"draft_version": 1, **values})
+
     def test_metadata_update_allows_explicit_description_clear_but_not_noop(self) -> None:
         payload = StrategyMetadataUpdateRequest.model_validate(
             {"version": 3, "description": None}

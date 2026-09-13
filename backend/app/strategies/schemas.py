@@ -77,6 +77,14 @@ class StrategyPublishRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     draft_version: int = Field(ge=1)
+    alias: str = Field(min_length=1, max_length=100)
+
+    @model_validator(mode="after")
+    def normalize_alias(self):
+        self.alias = self.alias.strip()
+        if not self.alias:
+            raise ValueError("版本别名不能为空")
+        return self
 
 
 class StrategyRevisionSummaryResponse(BaseModel):
@@ -86,6 +94,7 @@ class StrategyRevisionSummaryResponse(BaseModel):
 
     id: UUID
     revision_number: int
+    alias: str | None = None
     source_hash: str
     runtime_manifest: dict[str, Any]
     published_at: datetime

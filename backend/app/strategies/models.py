@@ -175,6 +175,8 @@ class StrategyRevision(Base):
     strategy_id: Mapped[UUID] = mapped_column(
         Uuid, ForeignKey("strategies.id", ondelete="RESTRICT"), nullable=False
     )
+    # Nullable only for historical revisions published before aliases existed.
+    alias: Mapped[str | None] = mapped_column(String(100), nullable=True)
     revision_number: Mapped[int] = mapped_column(Integer)
     source_code: Mapped[str] = mapped_column(Text)
     source_hash: Mapped[str] = mapped_column(String(64))

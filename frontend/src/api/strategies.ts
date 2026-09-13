@@ -26,6 +26,7 @@ export interface StrategyDraft {
 export interface StrategyRevisionSummary {
   id: string;
   revision_number: number;
+  alias?: string | null;
   source_hash: string;
   runtime_manifest: Record<string, unknown>;
   published_at: string;
@@ -211,12 +212,13 @@ export function validateStrategy(
 export function publishStrategy(
   strategyId: string,
   draftVersion: number,
+  alias: string,
 ): Promise<StrategyRevision> {
   return request<StrategyRevision>(
     `/api/admin/strategies/${encodeURIComponent(strategyId)}/publish`,
     {
       method: "POST",
-      body: JSON.stringify({ draft_version: draftVersion }),
+      body: JSON.stringify({ draft_version: draftVersion, alias }),
     },
   );
 }
