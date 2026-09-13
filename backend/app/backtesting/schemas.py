@@ -61,10 +61,11 @@ class AccountProfileCreateRequest(BaseModel):
 
 
 class AccountProfileUpdateRequest(BaseModel):
-    """Replace selected account configuration fields without a version number."""
+    """Replace configuration, optionally checking the version read by the editor."""
 
     model_config = ConfigDict(extra="forbid")
 
+    expected_version: int | None = Field(default=None, ge=1, strict=True)
     name: str | None = Field(default=None, min_length=1, max_length=100)
     status: AccountProfileStatus | None = None
     fee_schedule: FeeScheduleRequest | None = None
@@ -74,7 +75,7 @@ class AccountProfileUpdateRequest(BaseModel):
     def require_a_change(self) -> "AccountProfileUpdateRequest":
         """Reject empty patches and explicit nulls for selected fields."""
 
-        if not self.model_fields_set:
+        if not (self.model_fields_set - {"expected_version"}):
             raise ValueError("至少提供一个账户档案字段")
         for field_name in self.model_fields_set:
             if getattr(self, field_name) is None:
@@ -109,3 +110,49 @@ class AccountProfileResponse(BaseModel):
     metadata: dict[str, Any]
     created_at: datetime
     updated_at: datetime
+
+
+class AccountProfilePageResponse(BaseModel):
+    """Filtered catalogue page; total is independent of the page size."""
+
+    items: list[AccountProfileResponse]
+    total: int
+    limit: int
+    offset: int
+
+
+class AccountProfileOverviewResponse(BaseModel):
+    """Global catalogue counts and owner-scoped formal-run references."""
+
+    total_accounts: int
+    active_accounts: int
+    inactive_accounts: int
+    retired_accounts: int
+    total_fee_rules: int
+    related_strategy_versions: int
+    used_accounts: int
+
+
+class AccountProfileUsageItem(BaseModel):
+    """Historical run group, retaining textual legacy binding identifiers."""
+
+    account_profile_version: str | None
+    strategy_revision_id: str | None
+    strategy_id: UUID | None
+    strategy_name: str | None
+    revision_number: int | None
+    run_count: int
+    latest_run_id: UUID
+    latest_run_at: datetime
+    latest_run_status: str
+
+
+class AccountProfileUsageResponse(BaseModel):
+    """Groups are account-version/revision pairs, not active bindings."""
+
+    items: list[AccountProfileUsageItem]
+    total: int
+    total_runs: int
+    related_strategy_versions: int
+    limit: int
+    offset: int
