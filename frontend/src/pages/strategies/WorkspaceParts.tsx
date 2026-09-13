@@ -79,24 +79,31 @@ export function ResizeHandle({
 }
 export function Drawer({
   title,
+  creation = false,
+  centered = false,
   onClose,
   children,
 }: {
   title: string;
+  creation?: boolean;
+  centered?: boolean;
   onClose: () => void;
   children: ReactNode;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   useEffect(() => {
     const prior = document.activeElement as HTMLElement;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     ref.current?.showModal();
     return () => {
+      document.body.style.overflow = previousOverflow;
       if (prior?.isConnected) prior.focus();
     };
   }, []);
   return (
     <dialog
-      className="qfs-drawer"
+      className={`qfs-drawer${creation ? " qf-create-drawer" : ""}${centered ? " qfs-confirm-dialog" : ""}`}
       ref={ref}
       aria-label={title}
       onCancel={(e) => {

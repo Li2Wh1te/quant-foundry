@@ -15,6 +15,17 @@ interface Props {
 export function TaskEditor({ task, types, sources, initialType, busy, error, blocked, onClose, onSave }: Props) {
   const dialog = useRef<HTMLDialogElement>(null);
   const [draft, setDraft] = useState(() => task ? draftFromTask(task) : newTaskDraft(initialType ? types.filter(type => type.key === initialType) : types));
+  const initialDraft = useRef(JSON.stringify(draft));
+  const dirty = JSON.stringify(draft) !== initialDraft.current;
+  const [discard, setDiscard] = useState(false);
+  function close() { if (!busy) dirty ? setDiscard(true) : onClose(); }
+  useEffect(() => {
+    if (!dirty) return;
+    const prevent = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", prevent);
+    return () => window.removeEventListener("beforeunload", prevent);
+  }, [dirty]);
+  useEffect(() => { if (discard) dialog.current?.querySelector<HTMLButtonElement>("[data-keep-editing]")?.focus(); }, [discard]);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const type = types.find(type => type.key === draft.taskType);
   const fields = parameterFields(type);
@@ -24,8 +35,10 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
   useEffect(() => {
     const node = dialog.current;
     const previous = document.activeElement as HTMLElement | null;
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
     node?.showModal();
-    return () => { node?.close(); if (previous?.isConnected) previous.focus(); };
+    return () => { node?.close(); document.body.style.overflow = previousOverflow; if (previous?.isConnected) previous.focus(); };
   }, []);
   useEffect(() => {
     if (error || Object.keys(errors).length) {
@@ -54,9 +67,10 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
   }
   const frequency = draft.scheduleKind === "cron" ? draft.cronMode : draft.scheduleKind;
   const localZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  return <dialog ref={dialog} className="qft-editor" aria-labelledby="qft-editor-title" onCancel={event => { event.preventDefault(); if (!busy) onClose(); }}>
+  return <dialog ref={dialog} className="qft-editor qf-create-drawer qf-create-wide" aria-labelledby="qft-editor-title" onCancel={event => { event.preventDefault(); close(); }}>
     <form onSubmit={submit}>
-      <header className="qft-editor-head"><h2 id="qft-editor-title">{task ? "编辑采集任务" : "新建采集任务"}</h2><button type="button" className="qfo-icon-btn" aria-label="关闭任务表单" aria-disabled={busy} onClick={() => !busy && onClose()}><X aria-hidden="true" /></button></header>
+      <header className="qft-editor-head"><h2 id="qft-editor-title">{task ? "编辑采集任务" : "新建采集任务"}</h2><button type="button" className="qfo-icon-btn" aria-label="关闭任务表单" aria-disabled={busy} onClick={close}><X aria-hidden="true" /></button></header>
+      {discard ? <div className="qft-editor-body qf-discard"><h3>放弃尚未保存的任务配置？</h3><p>关闭后，本次修改不会保存。</p><div><button data-keep-editing type="button" className="qfo-secondary-btn" onClick={() => setDiscard(false)}>继续编辑</button><button type="button" className="qfo-primary-btn" onClick={onClose}>放弃并关闭</button></div></div> : <>
       <div className="qft-editor-body">
         {(error || errors.form) && <div className="qft-error" role="alert" tabIndex={-1}>{error || errors.form}{blocked && <p>请关闭表单，刷新列表并核对现有任务后再编辑。</p>}</div>}
         {source && (!source.enabled || !source.configured) && <p className="qft-notice">{source.name} 当前{source.enabled ? "尚未配置" : "已停用"}。可以保存任务计划；数据源恢复可用后，后续计划才会执行，停用期间不补跑。</p>}
@@ -110,7 +124,8 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
           </div></details>
         </fieldset>
       </div>
-      <footer className="qft-editor-foot"><span>{busy ? "正在保存，请稍候…" : "保存计划，不触发立即运行"}</span><button type="button" className="qfo-secondary-btn" aria-disabled={busy} onClick={() => !busy && onClose()}>取消</button><button className="qfo-primary-btn" type="submit" aria-disabled={busy || blocked}>保存任务</button></footer>
+      <footer className="qft-editor-foot"><span>{busy ? "正在保存，请稍候…" : "保存计划，不触发立即运行"}</span><button type="button" className="qfo-secondary-btn" aria-disabled={busy} onClick={close}>取消</button><button className="qfo-primary-btn" type="submit" aria-disabled={busy || blocked}>保存任务</button></footer>
+      </>}
     </form>
   </dialog>;
 }

@@ -1,0 +1,21 @@
+/* Shared creation shell: content-specific fields remain owned by each page. */
+.qfo-root .qf-create-drawer.qf-create-drawer{position:fixed;inset:0;margin:0 0 0 auto;width:480px;max-width:100vw;height:100dvh;max-height:100dvh;padding:0;border:0;border-left:1px solid var(--border-strong,#d8d0c5);border-radius:0;box-sizing:border-box;overflow:hidden;box-shadow:-12px 0 40px #20262b22}
+.qfo-root .qf-create-drawer.qf-create-wide{width:780px}
+.qfo-root .qf-create-drawer::backdrop{background:#20262b3d;backdrop-filter:none}
+.qfo-root .qft-editor.qf-create-drawer form{height:100%;max-height:none}
+.qfo-root .qft-editor.qf-create-drawer .qft-editor-body{flex:1}
+.qfo-root .qf-create-drawer .qft-editor-head,.qfo-root .qf-create-drawer .qfac-modal-head{padding:16px 24px}
+.qfo-root .qf-create-drawer .qft-editor-head h2{font-size:22px;line-height:30px}
+.qfo-root .qf-create-drawer .qft-editor-foot,.qfo-root .qf-create-drawer .qfac-modal-footer{padding:16px 24px;flex-shrink:0}
+.qfo-root .qfs-drawer.qf-create-drawer[open]{display:flex;flex-direction:column}
+.qfo-root .qfs-drawer.qf-create-drawer>header{padding:16px 24px;margin:0;border-bottom:1px solid var(--border,#d8d0c5);flex-shrink:0}
+.qfo-root .qfs-drawer.qf-create-drawer>form{display:flex;flex-direction:column;flex:1;min-height:0}
+.qfo-root .qf-create-fields{padding:16px 24px;overflow:auto;flex:1;min-height:0}
+.qfo-root .qfs-drawer.qf-create-drawer footer{margin:0;padding:16px 24px;border-top:1px solid var(--border,#d8d0c5);flex-shrink:0}
+.qfo-root .qf-discard{padding:24px;overflow:auto}.qf-discard>div{display:flex;gap:8px;flex-wrap:wrap;margin-top:20px}
+@media(max-width:600px){.qfo-root .qf-create-drawer.qf-create-drawer{width:100vw;border-left:0}.qfo-root .qf-create-drawer .qft-editor-head,.qfo-root .qf-create-drawer .qfac-modal-head,.qfo-root .qfs-drawer.qf-create-drawer>header,.qfo-root .qf-create-fields{padding:14px 16px}.qfo-root .qf-create-drawer .qft-editor-foot,.qfo-root .qf-create-drawer .qfac-modal-footer,.qfo-root .qfs-drawer.qf-create-drawer footer{padding:14px 16px;padding-bottom:max(14px,env(safe-area-inset-bottom));flex-wrap:wrap}}
+
+.qfo-root .qf-create-drawer>header h2,.qfo-root .qf-create-drawer .qfac-modal-head h2{font-size:22px;line-height:30px}
+.qfo-root .qf-create-drawer .qfac-steps li[aria-current=step] b{background:var(--orange);border-color:var(--orange);color:white}
+/* Short destructive confirmations remain centered, outside the creation shell. */
+.qfo-root .qfs-confirm-dialog{inset:0;margin:auto;width:min(480px,calc(100vw - 32px));height:fit-content;max-height:calc(100dvh - 32px);border:1px solid var(--border-strong,#d8d0c5);border-radius:12px}
