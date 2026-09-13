@@ -1,284 +1,126 @@
-import { BacktestRunFilters } from "../components/BacktestRunFilters";
-import type { BacktestRunFilters as RunFilters } from "../api/backtestRuns";
-import { BacktestReport } from "../components/BacktestReport";
-import { useCallback, useEffect, useRef, useState } from "react";
-
-import {
-  cancelBacktestRun,
-  FOREGROUND_POLL_INTERVAL_MS,
-  FOREGROUND_POLLING_PROTOCOL,
-  getBacktestRun,
-  isTerminalBacktestStatus,
-  listBacktestRuns,
-  type BacktestRun
-} from "../api/backtestRuns";
-
-const statusLabel: Record<string, string> = {
-  queued: "排队中",
-  starting: "启动中",
-  running: "运行中",
-  cancel_requested: "取消处理中",
-  succeeded: "已成功",
-  failed: "失败",
-  cancelled: "已取消",
-  timed_out: "已超时",
-  indeterminate: "结果待判定"
-};
-
-function formatStatus(status: string): string {
-  // Never expose a new internal status key as the primary operator-facing
-  // text. Technical evidence remains available in the expanded details.
-  return statusLabel[status] || "运行状态（待识别）";
-}
-
-function percent(progress: string | number | undefined): number {
-  return Math.round(Math.max(0, Math.min(1, Number(progress ?? 0))) * 100);
-}
-
-function evidence(run: BacktestRun): Record<string, unknown> {
-  return {
-    run_id: run.run_id,
-    status: run.status,
-    child_exit_code: run.child_exit_code,
-    child_exit_code_protocol: run.child_exit_code_protocol,
-    runner_exit_category: run.runner_exit_category,
-    completion_marker: run.completion_marker,
-    completion_marker_protocol: run.completion_marker_protocol,
-    completion_marker_validation: run.completion_marker_validation,
-    result_integrity_status: run.result_integrity_status,
-    result_integrity_evidence: run.result_integrity_evidence,
-    result_counts: run.result_counts,
-    terminal_decision_reason: run.terminal_decision_reason,
-    failure_phase: run.failure_phase,
-    failure_step: run.failure_step,
-    failure_type: run.failure_type,
-    source_line: run.source_line,
-    technical_detail: run.technical_detail,
-    error_message: run.error_message,
-    failure_evidence: run.failure_evidence,
-    stdout_evidence: run.stdout_evidence,
-    forced_termination: run.forced_termination,
-    recovery_action: run.recovery_action,
-    recovery_process_state: run.recovery_process_state,
-    runner_exit_report: run.runner_exit_report,
-    resource_limit_evidence: run.resource_limit_evidence
-  };
-}
+import { useEffect, useRef, useState } from "react";
+import { useParams } from "react-router-dom";
+import { Plus, RefreshCw, Search, X } from "lucide-react";
+import { cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
+import { compareBacktestRuns } from "../api/backtestPreflight";
+import { BacktestComparisonView } from "../components/BacktestReport";
+import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
+import { RunResults } from "./backtests/RunResults";
+import { RunPreview, dateText } from "./backtests/RunPreview";
+import { copyConfiguration, STATUS } from "./backtests/workbench";
+import "./backtests/Workbench.css";
 
 export function BacktestRunsPage() {
-  const [filters, setFilters] = useState<RunFilters>({});
-  const [runs, setRuns] = useState<BacktestRun[]>([]);
-  const [selected, setSelected] = useState<BacktestRun | null>(null);
-  const [message, setMessage] = useState("");
-
-  // Refs keep the polling loop stable while allowing it to observe the latest
-  // list/detail state without restarting the interval after every response.
-  const selectedRef = useRef<BacktestRun | null>(null);
-  const activeRunsRef = useRef(false);
-  const pollInFlightRef = useRef(false);
-  const mountedRef = useRef(true);
-  const pollAbortRef = useRef<AbortController | null>(null);
-  const pollGenerationRef = useRef(0);
-  const listInFlightRef = useRef(false);
-  const detailInFlightRef = useRef(false);
-  const listRequestGenerationRef = useRef(0);
-  const detailRequestGenerationRef = useRef(0);
-
-  useEffect(() => {
-    selectedRef.current = selected;
-  }, [selected]);
-
-  useEffect(() => {
-    activeRunsRef.current = runs.some((run) => !isTerminalBacktestStatus(run.status));
-  }, [runs]);
-
-  const refresh = useCallback(async (signal?: AbortSignal): Promise<BacktestRun[]> => {
-    if (listInFlightRef.current) return [];
-    listInFlightRef.current = true;
-    const requestGeneration = ++listRequestGenerationRef.current;
+  const { strategyId } = useParams();
+  const [page, setPage] = useState<WorkbenchPage | null>(null), [selected, setSelected] = useState<WorkbenchRun | null>(null);
+  const [search, setSearch] = useState(""), [query, setQuery] = useState({ search: "", status: "", offset: 0 });
+  const [loading, setLoading] = useState(false), [error, setError] = useState(""), [toast, setToast] = useState("");
+  const [drawer, setDrawer] = useState<{ source?: BacktestRun; strategyId?: string } | null>(null);
+  const [compareMode, setCompareMode] = useState(false), [compareIds, setCompareIds] = useState<string[]>([]);
+  const [result, setResult] = useState<{ kind: "report"; run: WorkbenchRun } | { kind: "compare"; value: any } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const pageRef = useRef(page), selectedRef = useRef(selected), sequence = useRef(0), detailSequence = useRef(0), controller = useRef<AbortController | null>(null), actionBusy = useRef(false);
+  const rerunKey = useRef<{ id: string; key: string } | null>(null);
+  pageRef.current = page; selectedRef.current = selected;
+  useEffect(() => { const timer = window.setTimeout(() => setQuery(q => q.search === search.trim() ? q : { ...q, search: search.trim(), offset: 0 }), 300); return () => clearTimeout(timer); }, [search]);
+  useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(""), 4000); return () => clearTimeout(timer); }, [toast]);
+  async function refresh() {
+    const generation = ++sequence.current;
+    controller.current?.abort(); const request = new AbortController(); controller.current = request;
+    setLoading(true); setError("");
     try {
-      const data = await listBacktestRuns(signal, undefined, filters);
-      const items = (data.items || []).filter((run) => run.run_kind !== "internal_link_acceptance");
-      activeRunsRef.current = items.some((run) => !isTerminalBacktestStatus(run.status));
-      if (mountedRef.current) setRuns(items);
-      return items;
-    } catch (error) {
-      if (signal?.aborted) return [];
-      if (mountedRef.current) setMessage(error instanceof Error ? error.message : "回测列表加载失败。");
-      return [];
-    } finally {
-      if (listRequestGenerationRef.current === requestGeneration) {
-        listInFlightRef.current = false;
+      const fresh = await fetchRunWorkbench({ ...query, strategy_id: strategyId }, request.signal);
+      if (generation !== sequence.current) return;
+      if (query.offset > 0 && !fresh.items.length && fresh.total <= query.offset) { setQuery(q => ({ ...q, offset: Math.max(0, Math.ceil(fresh.total/20)*20-20) })); return; }
+      setPage(fresh);
+      const previous = selectedRef.current;
+      const current = fresh.items.find(r => r.run_id === previous?.run_id);
+      if (current) { selectedRef.current = current; setSelected(current); }
+      else if (!previous && fresh.items.length) { selectedRef.current = fresh.items[0]; setSelected(fresh.items[0]); }
+      else if (previous && !isTerminalBacktestStatus(previous.status)) {
+        const detail = await getBacktestRun(previous.run_id, request.signal);
+        if (generation === sequence.current && selectedRef.current?.run_id === previous.run_id) { const updated = { ...previous, ...detail }; selectedRef.current = updated; setSelected(updated); }
       }
-    }
-  }, [filters]);
-
-  const refreshDetail = useCallback(async (id: string, signal?: AbortSignal): Promise<void> => {
-    if (!id || detailInFlightRef.current) return;
-    detailInFlightRef.current = true;
-    const requestGeneration = ++detailRequestGenerationRef.current;
-    try {
-      const detail = await getBacktestRun(id, signal);
-      // A user may select another run while this request is in flight. Do
-      // not let the stale response replace that newer selection.
-      const selectedId = selectedRef.current?.run_id;
-      if (selectedId === undefined || selectedId === id) {
-        selectedRef.current = detail;
-        if (mountedRef.current) setSelected(detail);
-      }
-    } catch (error) {
-      if (signal?.aborted) return;
-      if (mountedRef.current) setMessage(error instanceof Error ? error.message : "回测详情加载失败。");
-    } finally {
-      if (detailRequestGenerationRef.current === requestGeneration) {
-        detailInFlightRef.current = false;
-      }
-    }
-  }, []);
-
-  const poll = useCallback(async (force = false): Promise<void> => {
-    // Visibility is checked immediately before scheduling network work. The
-    // in-flight guard prevents list/detail requests from overlapping when a
-    // slow response crosses a timer boundary.
-    if (document.visibilityState !== "visible" || pollInFlightRef.current) return;
-    if (!force && !activeRunsRef.current && !selectedRef.current) return;
-    pollInFlightRef.current = true;
-    const generation = ++pollGenerationRef.current;
-    const controller = new AbortController();
-    pollAbortRef.current = controller;
-    try {
-      const items = await refresh(controller.signal);
-      if (controller.signal.aborted) return;
-      const selectedRun = selectedRef.current;
-      if (!selectedRun || isTerminalBacktestStatus(selectedRun.status)) return;
-      // Refresh the detail only while it is live. Once a terminal response is
-      // observed, the list response also stops the foreground loop.
-      if (items.some((run) => run.run_id === selectedRun.run_id)) {
-        await refreshDetail(selectedRun.run_id, controller.signal);
-      }
-    } finally {
-      if (pollAbortRef.current === controller) pollAbortRef.current = null;
-      if (pollGenerationRef.current === generation) pollInFlightRef.current = false;
-    }
-  }, [refresh, refreshDetail]);
-
+    } catch (caught) { if (!request.signal.aborted) setError(caught instanceof Error ? caught.message : "运行历史加载失败。"); }
+    finally { if (generation === sequence.current) setLoading(false); }
+  }
   useEffect(() => {
-    mountedRef.current = true;
-    let timer: number | undefined;
-
-    const hasLiveSelection = () => {
-      const current = selectedRef.current;
-      return current !== null && !isTerminalBacktestStatus(current.status);
+    // Query changes select from the new result set, while manual refresh retains
+    // both empty and populated content until the response is ready.
+    selectedRef.current = null; setSelected(null); detailSequence.current += 1;
+    void refresh();
+    return () => { sequence.current += 1; controller.current?.abort(); };
+  }, [query, strategyId]);
+  useEffect(() => {
+    let stopped = false, timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      if (stopped || document.visibilityState !== "visible") return;
+      const active = pageRef.current?.items.some(r => !isTerminalBacktestStatus(r.status)) || selectedRef.current && !isTerminalBacktestStatus(selectedRef.current.status);
+      if (active) await refresh();
+      if (!stopped) timer = setTimeout(poll, 5000);
     };
-
-    const stop = () => {
-      if (timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
+    const visible = () => { clearTimeout(timer); if (document.visibilityState === "visible") void poll(); };
+    timer = setTimeout(poll, 5000); document.addEventListener("visibilitychange", visible);
+    return () => { stopped = true; clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
+  }, [query, strategyId]);
+  function select(run: WorkbenchRun) {
+    // The workspace row already contains the full run projection. Selecting it
+    // requires no second request that could overwrite a newer polling response.
+    selectedRef.current = run; setSelected(run);
+  }
+  function toggle(id: string) { setCompareIds(ids => ids.includes(id) ? ids.filter(value => value !== id) : ids.length < 10 ? [...ids, id] : ids); }
+  async function action(kind: "cancel" | "rerun") {
+    if (!selected || actionBusy.current) return;
+    actionBusy.current = true; setBusy(true); setError("");
+    try {
+      // An uncertain network response must not turn a retry into another run.
+      if (kind === "rerun" && rerunKey.current?.id !== selected.run_id) rerunKey.current = { id: selected.run_id, key: crypto.randomUUID() };
+      const fresh = kind === "cancel" ? await cancelBacktestRun(selected.run_id) : await rerunBacktest(selected, rerunKey.current!.key);
+      if (kind === "rerun") rerunKey.current = null;
+      if (selectedRef.current?.run_id === selected.run_id) {
+        const updated = { ...selected, ...(fresh as BacktestRun) }; selectedRef.current = updated; setSelected(updated);
       }
-      // Invalidate an in-flight poll before aborting it, so a foreground
-      // transition can issue its required immediate request without waiting
-      // for an aborted fetch's microtask to settle.
-      pollGenerationRef.current += 1;
-      pollInFlightRef.current = false;
-      // Release request gates synchronously after aborting ownership. The
-      // generation checks in each request's finally block prevent the old
-      // aborted promise from clearing a newer request's gate.
-      listRequestGenerationRef.current += 1;
-      detailRequestGenerationRef.current += 1;
-      listInFlightRef.current = false;
-      detailInFlightRef.current = false;
-      pollAbortRef.current?.abort();
-    };
-
-    const start = () => {
-      if (document.visibilityState !== "visible" || timer !== undefined) return;
-      // Initial entry into the foreground is an immediate request; subsequent
-      // requests occur at the fixed five-second protocol interval.
-      const tick = async (immediate = false) => {
-        await poll(immediate);
-        // Terminal status is authoritative from the API. Once no live run is
-        // left, clear the timer instead of continuing no-op requests.
-        if (!activeRunsRef.current && !hasLiveSelection()) stop();
-      };
-      void tick(true);
-      timer = window.setInterval(() => void tick(), FOREGROUND_POLL_INTERVAL_MS);
-    };
-
-    const onVisibilityChange = () => {
-      stop();
-      if (document.visibilityState === "visible") start();
-    };
-
-    if (document.visibilityState === "visible") start();
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      mountedRef.current = false;
-      stop();
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, [poll]);
-
-  const openDetail = (run: BacktestRun) => {
-    selectedRef.current = run;
-    setSelected(run);
-    void refreshDetail(run.run_id);
-  };
-
-  return (
-    <section data-polling-protocol={FOREGROUND_POLLING_PROTOCOL}>
-      <h1>回测运行</h1>
-      <BacktestRunFilters onApply={setFilters} />
-      <p>新运行请从对应策略的回测工作台创建，以完整选择账户、数据范围和执行配置。</p>
-      {message && <p role="status">{message}</p>}
-
-      {runs.map((run) => (
-        <article key={run.run_id}>
-          <button type="button" onClick={() => openDetail(run)}>
-            <div>{run.label || (run.run_kind === "internal_link_acceptance" ? "内部链路验收" : "正式回测")} · {run.run_id}</div>
-            <div>{formatStatus(run.status)} {percent(run.progress_ratio)}%</div>
-            <div>{run.current_trading_date || ""}</div>
-          </button>
-          {["queued", "starting", "running", "cancel_requested"].includes(run.status) && (
-            <button
-              type="button"
-              onClick={() => void cancelBacktestRun(run.run_id).then(() => refresh()).catch((error: unknown) => setMessage(error instanceof Error ? error.message : "取消失败。"))}
-            >取消</button>
-          )}
-        </article>
-      ))}
-
-      {selected && (
-        <aside aria-label="回测详情">
-          <h2>回测详情</h2>
-          <BacktestReport run={selected} />
-          <p>状态：{formatStatus(selected.status)}；当前交易日：{selected.current_trading_date || "—"}；步骤：{selected.current_step ?? "—"}</p>
-          <p>完成比例：{percent(selected.progress_ratio)}%；最后心跳：{selected.last_heartbeat_at || "—"}</p>
-          {selected.error_message && <p role="alert">错误：{selected.error_message}</p>}
-          {selected.failure_evidence && (
-            <details open>
-              <summary>失败诊断</summary>
-              <p>
-                阶段：{String(selected.failure_evidence.failure_phase ?? selected.failure_phase ?? "—")}；
-                步骤：{String(selected.failure_evidence.failure_step ?? selected.failure_step ?? "—")}；
-                错误类型：{String(selected.failure_evidence.error_type ?? selected.failure_type ?? "—")}；
-                源码行：{String(selected.failure_evidence.source_line ?? selected.source_line ?? "—")}
-              </p>
-              <pre>{String(selected.failure_evidence.technical_detail ?? selected.technical_detail ?? "暂无脱敏技术详情")}</pre>
-            </details>
-          )}
-          {selected.stdout_evidence && (
-            <details>
-              <summary>标准输出证据</summary>
-              <pre>{JSON.stringify(selected.stdout_evidence, null, 2)}</pre>
-            </details>
-          )}
-          <details>
-            <summary>技术详情</summary>
-            <pre>{JSON.stringify(evidence(selected), null, 2)}</pre>
-          </details>
-        </aside>
-      )}
-    </section>
-  );
+      setToast(kind === "cancel" ? "取消请求已提交。" : "已按原冻结配置加入回测队列。");
+      await refresh();
+    } catch (caught) { setError(caught instanceof Error ? caught.message : "操作失败。"); }
+    finally { actionBusy.current = false; setBusy(false); }
+  }
+  async function compare() {
+    if (actionBusy.current || compareIds.length < 2) return;
+    actionBusy.current = true; setBusy(true); setError("");
+    try { setResult({ kind: "compare", value: await compareBacktestRuns(compareIds) }); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "对比加载失败。"); }
+    finally { actionBusy.current = false; setBusy(false); }
+  }
+  function copy() {
+    if (!selected) return;
+    try { copyConfiguration(selected); if (!selected.strategy_id) throw new Error("无法定位原策略，请创建新的回测。"); setDrawer({ source: selected, strategyId: selected.strategy_id }); }
+    catch (caught) { setError(caught instanceof Error ? caught.message : "无法复制配置。"); }
+  }
+  return <div className="qfb-page" data-polling-protocol="foreground_polling@1">
+    <div className="qfb-heading"><div><div className="qfb-eyebrow">BACKTEST WORKBENCH</div><h1>回测工作台</h1><p>创建回测、跟踪运行，并查看真实策略表现。</p></div><div className="qfb-actions">
+      <button onClick={() => void refresh()} disabled={loading}><RefreshCw size={16} />刷新</button>
+      <button onClick={() => setCompareMode(value => !value)}>{compareMode ? "退出选择" : "选择对比"}</button>
+      <button className="qfb-primary" onClick={() => setDrawer({ strategyId })}><Plus size={16} />创建回测</button>
+    </div></div>
+    {toast && <div className="qfb-toast" role="status">{toast}<button aria-label="关闭提示" onClick={() => setToast("")}><X size={16}/></button></div>}
+    {error && <div className="qfb-error" role="alert">{error}<button aria-label="关闭错误" onClick={() => setError("")}><X size={16}/></button></div>}
+    {result ? <section className="qfb-results"><button onClick={() => setResult(null)}>返回回测工作台</button><h2>{result.kind === "report" ? "完整回测结果" : "回测对比"}</h2>{result.kind === "report" ? <RunResults key={result.run.run_id} run={selected?.run_id === result.run.run_id ? selected : result.run} /> : <BacktestComparisonView result={result.value} />}</section> : <div className="qfb-workspace">
+      <aside className="qfb-history"><header><h2>运行历史</h2><span>{page ? `${page.total} 次运行` : "—"}</span></header>
+        <div className="qfb-filters"><label className="qfb-search"><Search size={15}/><input aria-label="搜索运行 ID 或策略" placeholder="搜索运行 ID / 策略" value={search} maxLength={200} onChange={e => setSearch(e.target.value)} /></label><select aria-label="运行状态" value={query.status} onChange={e => setQuery(q => ({ ...q, status: e.target.value, offset: 0 }))}><option value="">全部状态</option>{Object.entries(STATUS).map(([key,label]) => <option value={key} key={key}>{label}</option>)}</select></div>
+        <div className="qfb-history-scroll">{!page ? <div className="qfb-empty">{error ? "运行历史加载失败" : "正在加载运行历史…"}</div> : !page.items.length ? <div className="qfb-empty"><strong>{query.search || query.status ? "没有匹配的运行" : "还没有回测记录"}</strong><p>{query.search || query.status ? "调整搜索或筛选条件。" : "创建一次回测，开始查看策略表现。"}</p></div> : page.items.map(run => <div className={`qfb-run-row ${selected?.run_id === run.run_id ? "is-selected" : ""}`} key={run.run_id}>
+          {compareMode && <input type="checkbox" aria-label={`对比 ${run.run_id}`} checked={compareIds.includes(run.run_id)} disabled={run.status !== "succeeded" || !compareIds.includes(run.run_id) && compareIds.length >= 10} onChange={() => toggle(run.run_id)} />}
+          <button onClick={() => void select(run)} aria-pressed={selected?.run_id === run.run_id}><div><strong>{run.strategy_name || "策略信息未提供"}</strong><span className={`qfb-badge qfb-${run.status}`}>{STATUS[run.status]}</span></div><code>{run.run_id.slice(0, 8)} · {run.revision_number ? `版本 ${run.revision_number}` : "历史记录"}</code><small>{dateText(run.created_at)}</small></button>
+        </div>)}</div>
+        <footer><span>{page?.total ? `${query.offset+1}–${query.offset+page.items.length} / ${page.total}` : "0 / 0"}</span><button disabled={loading || query.offset === 0} onClick={() => setQuery(q => ({ ...q, offset: Math.max(0,q.offset-20) }))}>上一页</button><button disabled={loading || !page?.has_more} onClick={() => setQuery(q => ({ ...q, offset: q.offset+20 }))}>下一页</button></footer>
+      </aside>
+      <main className="qfb-detail">{selected ? <><header className="qfb-detail-head"><div><div className="qfb-eyebrow">BACKTEST RUN</div><h2>{selected.strategy_name || "回测运行"}</h2><code>{selected.run_id}</code></div><div className="qfb-actions"><button onClick={() => setResult({ kind: "report", run: selected })}>完整结果</button><button disabled={selected.status !== "succeeded" || !compareIds.includes(selected.run_id) && compareIds.length >= 10} onClick={() => { toggle(selected.run_id); setCompareMode(true); }}>{compareIds.includes(selected.run_id) ? "移出对比" : "加入对比"}</button><button onClick={copy}>复制配置</button>{isTerminalBacktestStatus(selected.status) ? <button disabled={busy} onClick={() => void action("rerun")}>重新运行</button> : <button disabled={busy || selected.status === "cancel_requested"} onClick={() => void action("cancel")}>{selected.status === "cancel_requested" ? "取消处理中" : "取消运行"}</button>}</div></header><div className="qfb-preview"><RunPreview run={selected} /></div></> : <div className="qfb-empty">{page ? "选择运行查看结果" : "正在加载回测工作台…"}</div>}</main>
+    </div>}
+    {compareMode && !result && <div className="qfb-compare-bar"><span>已选择 {compareIds.length} / 10 个运行</span><small>选择 2–10 个已完成运行进行对比</small><button disabled={!compareIds.length} onClick={() => setCompareIds([])}>清空</button><button className="qfb-primary" disabled={busy || compareIds.length < 2} onClick={() => void compare()}>开始对比</button></div>}
+    {drawer && <CreateRunDrawer initialStrategyId={drawer.strategyId} source={drawer.source} onClose={() => setDrawer(null)} onCreated={run => {
+      setDrawer(null); setToast("回测已创建，已加入运行队列。");
+      const selectedRun = { ...run, strategy_id: drawer.strategyId || null, strategy_name: null, revision_number: null };
+      selectedRef.current = selectedRun; setSelected(selectedRun); setQuery({ search: "", status: "", offset: 0 }); setSearch("");
+    }} />}
+  </div>;
 }
