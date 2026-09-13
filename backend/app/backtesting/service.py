@@ -11,8 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.backtesting.account_profiles import AccountProfileStatus
 from app.backtesting.fees import FeeRule, FeeSchedule
-from app.backtesting.models import BacktestAccountProfileRecord, BacktestAccountProfileVersionRecord
-from sqlalchemy import select
+from app.backtesting.models import BacktestAccountProfileRecord, BacktestAccountProfileVersionRecord, BacktestRunRecord
+from sqlalchemy import select, delete, func
 from app.backtesting.repository import BacktestAccountProfileRepository
 
 
@@ -26,6 +26,10 @@ class AccountProfileNotFoundError(AccountProfileStorageError):
 
 class AccountProfileNameConflictError(AccountProfileStorageError):
     """Raised when two profiles would share the same case-insensitive name."""
+
+
+class AccountProfileReferencedError(AccountProfileStorageError):
+    """Raised when any historical run prevents permanent account deletion."""
 
 
 class AccountProfileVersionConflictError(AccountProfileStorageError):
@@ -144,6 +148,31 @@ class AccountProfileService:
         if record is None:
             raise AccountProfileNotFoundError(str(profile_id))
         record.status = "retired"
+        self.session.flush()
+
+    def has_run_references(self, profile_id: UUID) -> bool:
+        """Deletion protection spans every owner, run kind and account version."""
+        return self.session.scalar(select(BacktestRunRecord.id).where(
+            func.lower(func.trim(BacktestRunRecord.account_profile_id)) == str(profile_id),
+        ).limit(1)) is not None
+
+    def permanently_delete(self, profile_id: UUID, *, expected_version: int) -> None:
+        """Delete only an unused catalogue and its versions in one transaction."""
+        record = self.repository.get(profile_id, for_update=True)
+        if record is None:
+            raise AccountProfileNotFoundError(str(profile_id))
+        if expected_version != int(record.version or 1):
+            raise AccountProfileVersionConflictError("账户已被更新，请刷新后重新操作。")
+        if self.has_run_references(profile_id):
+            raise AccountProfileReferencedError("账户已有回测引用，不能永久删除；可将账户退役。")
+        # The migration keeps ordinary version DELETE forbidden. Only this
+        # transaction-scoped, account-specific path can remove unused history.
+        if self.session.get_bind().dialect.name == "postgresql":
+            self.session.execute(select(func.set_config("qf.deleting_account", str(profile_id), True)))
+        self.session.execute(delete(BacktestAccountProfileVersionRecord).where(
+            BacktestAccountProfileVersionRecord.profile_id == profile_id,
+        ).execution_options(synchronize_session=False))
+        self.session.delete(record)
         self.session.flush()
 
     def _append_version(self, record) -> None:

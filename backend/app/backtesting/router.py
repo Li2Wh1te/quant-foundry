@@ -21,6 +21,7 @@ from app.backtesting.schemas import (
     FeeScheduleResponse,
 )
 from app.backtesting.service import (
+    AccountProfileReferencedError,
     AccountProfileVersionConflictError,
     AccountProfileNameConflictError,
     AccountProfileNotFoundError,
@@ -214,6 +215,41 @@ def update_account_profile(
     return _response(record)
 
 
+class AccountDeletionCheckResponse(BaseModel):
+    can_permanently_delete: bool
+    reason: str | None
+
+
+@router.get("/{profile_id}/deletion-check", response_model=AccountDeletionCheckResponse)
+def check_account_deletion(profile_id: UUID, session: Annotated[Session, Depends(get_db_session)]):
+    """Return a capability without disclosing other owners' run details."""
+    try:
+        service = AccountProfileService(session)
+        service.get(profile_id)
+        referenced = service.has_run_references(profile_id)
+        return AccountDeletionCheckResponse(
+            can_permanently_delete=not referenced,
+            reason="账户已有回测引用，只能退役并保留历史。" if referenced else None,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
+@router.delete("/{profile_id}/permanent", status_code=status.HTTP_204_NO_CONTENT)
+def permanently_delete_account_profile(
+    profile_id: UUID,
+    expected_version: Annotated[int, Query(ge=1)],
+    session: Annotated[Session, Depends(get_db_session)],
+) -> None:
+    """Explicit irreversible deletion; the legacy DELETE remains retirement."""
+    try:
+        AccountProfileService(session).permanently_delete(profile_id, expected_version=expected_version)
+        session.commit()
+    except Exception as exc:
+        session.rollback()
+        raise _http_error(exc) from exc
+
+
 @router.delete("/{profile_id}", status_code=status.HTTP_204_NO_CONTENT)
 def delete_account_profile(
     profile_id: Annotated[UUID, Path()],
@@ -286,6 +322,8 @@ def _http_error(exc: Exception) -> HTTPException:
 
     if isinstance(exc, AccountProfileNotFoundError):
         return HTTPException(status_code=404, detail="账户档案不存在。")
+    if isinstance(exc, AccountProfileReferencedError):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, AccountProfileVersionConflictError):
         return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, AccountProfileNameConflictError):

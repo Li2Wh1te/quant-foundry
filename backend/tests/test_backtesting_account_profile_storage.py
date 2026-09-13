@@ -106,6 +106,8 @@ class AccountProfileSchemaTestCase(unittest.TestCase):
                 "/api/admin/backtest-account-profiles/overview",
                 "/api/admin/backtest-account-profiles/page",
                 "/api/admin/backtest-account-profiles/{profile_id}/usage",
+                "/api/admin/backtest-account-profiles/{profile_id}/deletion-check",
+                "/api/admin/backtest-account-profiles/{profile_id}/permanent",
                 "/api/admin/backtest-account-profiles/{profile_id}",
                 "/api/admin/backtest-account-profiles/{profile_id}/versions",
                 "/api/admin/backtest-account-profiles/{profile_id}/versions/{version}",
