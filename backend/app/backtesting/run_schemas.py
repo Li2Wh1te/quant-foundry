@@ -257,6 +257,21 @@ class RunResponse(BaseModel):
         self.label = "内部链路验收" if internal else "正式回测"
         return self
 
+class RunWorkspaceItem(RunResponse):
+    # Catalogue labels are separate from the immutable execution configuration.
+    strategy_id: UUID | None = None
+    strategy_name: str | None = None
+    revision_number: int | None = None
+
+
+class RunWorkspacePage(BaseModel):
+    items: list[RunWorkspaceItem]
+    total: int
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class RunError(BaseModel):
     code: str
     message: str

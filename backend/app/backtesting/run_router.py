@@ -11,7 +11,7 @@ from dataclasses import replace
 from decimal import Decimal
 from datetime import date, datetime
 import logging
-from typing import Any, Mapping
+from typing import Any, Literal, Mapping
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
@@ -43,7 +43,7 @@ from .run_repository import (
     INTERNAL_KIND,
     TERMINAL_STATUSES,
 )
-from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse
+from .run_schemas import InternalRunCreateRequest, RunCreateRequest, RunResponse, RunWorkspaceItem, RunWorkspacePage
 from .production_runtime import build_formal_binding, default_components
 from app.instruments.rule_snapshots_repository import RunRuleSnapshotRepository
 from .data.reports import canonical_hash
@@ -1175,6 +1175,31 @@ def list_strategy_runs(
         created_after=created_after, created_before=created_before, config_summary=config_summary,
         owner_scope=_owner_scope(request),
         strategy_id=strategy_id,
+    )
+
+
+@router.get("/workspace", response_model=RunWorkspacePage)
+def run_workspace(
+    session: Session = Depends(get_db_session),
+    request: Request = None,  # type: ignore[assignment]
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None, max_length=200),
+    status: Literal["queued", "starting", "running", "cancel_requested", "succeeded",
+                    "failed", "cancelled", "timed_out", "indeterminate"] | None = None,
+    strategy_id: UUID | None = None,
+) -> RunWorkspacePage:
+    """Read the global workbench without changing legacy collection contracts."""
+    rows, total = DatabaseRunRepository(session).workspace_page(
+        owner_scope=_owner_scope(request), limit=limit, offset=offset,
+        search=search, status=status, strategy_id=strategy_id,
+    )
+    return RunWorkspacePage(
+        items=[RunWorkspaceItem(
+            **_response(row[0]).model_dump(), strategy_id=row.strategy_id,
+            strategy_name=row.strategy_name, revision_number=row.revision_number,
+        ) for row in rows],
+        total=total, limit=limit, offset=offset, has_more=offset + len(rows) < total,
     )
 
 
