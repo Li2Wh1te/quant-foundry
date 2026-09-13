@@ -7,7 +7,6 @@
   color: #253140;
 }
 .qfs-root .qfo-main {
-  padding: 16px 20px;
   overflow: hidden;
   display: flex;
   min-height: 0;
@@ -23,7 +22,7 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
-  flex: 1;
+  flex: 0 1 auto;
   min-height: 0;
   min-width: 0;
 }
@@ -641,9 +640,6 @@
     justify-content: flex-end;
     max-width: 65%;
   }
-  .qfs-root .qfo-main {
-    padding: 12px;
-  }
   .qfs-object small {
     display: none;
   }
@@ -666,9 +662,6 @@
   .qfs-root .qfs-object button {
     padding: 6px;
   }
-  .qfs-root .qfo-main {
-    padding: 8px;
-  }
   .qfs-file-tabs > span {
     width: 100%;
     margin-left: 0;
@@ -682,4 +675,57 @@
   .qfs-root .qfs-code textarea {
     padding: 12px 8px;
   }
+}
+
+/* The shell owns responsive gutters and the shared content width cap. Keep the
+ * workspace's internal scroll regions and three-panel design within that cap. */
+.qfs-root .qfs-page { padding-bottom: 0; }
+
+/* Strategy switching keeps the native editor mounted. The loading notice is an
+ * overlay, so neither the code surface nor its scroll position jumps in height. */
+.qfs-editor-panel { position: relative; }
+.qfs-editor-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+}
+.qfs-switch-status {
+  position: absolute;
+  left: 12px;
+  right: 12px;
+  bottom: 36px;
+  z-index: 4;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border: 1px solid #edb99f;
+  border-radius: 6px;
+  background: #fff4ed;
+  color: #795a28;
+  font-size: 12px;
+  pointer-events: auto;
+}
+
+/* Textareas match :focus-visible even after pointer clicks. Only show their
+ * inset focus ring for keyboard navigation, without changing editor geometry. */
+.qfs-root .qfs-code textarea:focus,
+.qfs-root .qfs-code textarea:focus-visible { outline: none; box-shadow: none; }
+.qfs-root .qfs-page[data-keyboard-navigation="true"] .qfs-code textarea:focus-visible {
+  outline: 2px solid #8e9eae;
+  outline-offset: -2px;
+}
+
+.qfs-navigation-confirm {
+  margin: auto;
+  width: min(440px, calc(100vw - 32px));
+  height: auto;
+  max-height: calc(100dvh - 32px);
+  border: 1px solid #d8d0c5;
+  border-radius: 12px;
+  box-shadow: 0 16px 48px #0003;
 }

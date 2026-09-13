@@ -9,7 +9,15 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import type { FormEvent } from "react";
 import { useBlocker, useNavigate, useParams } from "react-router-dom";
 
@@ -34,7 +42,7 @@ import {
 } from "../api/strategies";
 import { OverviewShell } from "../components/OverviewShell";
 import { TEMPLATES, type TemplateKey } from "./strategies/templates";
-import { Drawer, ResizeHandle, RecentRuns } from "./strategies/WorkspaceParts";
+import { Drawer, ResizeHandle, RecentRuns, NavigationConfirm } from "./strategies/WorkspaceParts";
 import "./strategies/StrategyWorkspace.css";
 import { useAuth } from "../auth/AuthContext";
 
@@ -184,6 +192,8 @@ export function StrategiesPage() {
   const { strategyId } = useParams<{ strategyId?: string }>();
   const navigate = useNavigate();
   const { logout } = useAuth();
+  const routeRef = useRef({ navigate, strategyId });
+  useLayoutEffect(() => { routeRef.current = { navigate, strategyId }; }, [navigate, strategyId]);
 
   const [strategies, setStrategies] = useState<StrategySummary[]>([]);
   const [detail, setDetail] = useState<StrategyDetail | null>(null);
@@ -207,6 +217,13 @@ export function StrategiesPage() {
   const [archiving, setArchiving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    // Dismiss only the routine save confirmation. Cleanup prevents a previous
+    // save timer from clearing a newer message or surviving page unmount.
+    if (notice !== "草稿已保存。") return;
+    const timer = window.setTimeout(() => setNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [notice]);
   const [search, setSearch] = useState(() => sessionValue("search", ""));
   const detailRequestSequence = useRef(0);
   const revisionRequestSequence = useRef(0);
@@ -240,14 +257,20 @@ export function StrategiesPage() {
     }
   });
   const [narrow, setNarrow] = useState(window.innerWidth < 1200);
-  const [cursor, setCursor] = useState({ line: 1, column: 1 });
+  const cursorRef = useRef({ line: 1, column: 1 });
+  const cursorLabelRef = useRef<HTMLSpanElement>(null);
   const editorRef = useRef<HTMLTextAreaElement>(null),
     linesRef = useRef<HTMLPreElement>(null);
   const lock = useRef(false);
+  useLayoutEffect(() => {
+    const { line, column } = cursorRef.current;
+    if (cursorLabelRef.current)
+      cursorLabelRef.current.textContent = `Ln ${line}, Col ${column}`;
+  });
   const guardRef = useRef({ dirty: false, busy: false });
   guardRef.current = {
     dirty:
-      isDirty ||
+      (detail?.id === strategyId && isDirty) ||
       Boolean(
         createOpen &&
           (createDraft.name ||
@@ -256,7 +279,7 @@ export function StrategiesPage() {
       ),
     busy,
   };
-  function canLeave() {
+  const canLeave = useCallback(() => {
     if (guardRef.current.busy) {
       setNotice("操作进行中，请稍后再离开。");
       return false;
@@ -265,7 +288,7 @@ export function StrategiesPage() {
       !guardRef.current.dirty ||
       window.confirm("当前草稿尚未保存，确定放弃修改并离开吗？")
     );
-  }
+  }, []);
   useEffect(() => {
     try {
       sessionStorage.setItem("qfs-sizes", JSON.stringify(sizes));
@@ -273,23 +296,23 @@ export function StrategiesPage() {
       /* Storage is optional. */
     }
   }, [sizes]);
-  useEffect(() => {
-    const resize = () => setNarrow(window.innerWidth < 1200);
-    window.addEventListener("resize", resize);
-    return () => window.removeEventListener("resize", resize);
-  }, []);
   const workbenchRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = workbenchRef.current;
     if (!el) return;
-    const resize = new ResizeObserver(([entry]) =>
-      setNarrow(
-        entry.contentRect.width < 360 + sizes.left + sizes.right + 16 ||
-          window.innerWidth < 900,
-      ),
+    // Use one measurement rule for both viewport and shell resizing. Separate
+    // rules could alternate inline and overlay panels near their breakpoints.
+    const measure = () => setNarrow(
+      el.clientWidth < 360 + sizes.left + sizes.right + 16 || window.innerWidth < 900,
     );
+    const resize = new ResizeObserver(measure);
+    measure();
     resize.observe(el);
-    return () => resize.disconnect();
+    window.addEventListener("resize", measure);
+    return () => {
+      resize.disconnect();
+      window.removeEventListener("resize", measure);
+    };
   }, [sizes.left, sizes.right]);
   useEffect(() => {
     try {
@@ -306,9 +329,16 @@ export function StrategiesPage() {
   }, [search, filter, explorer, contextOpen]);
   const explorerVisible = narrow ? overlay === "explorer" : explorer,
     contextVisible = narrow ? overlay === "context" : contextOpen;
-  const blocker = useBlocker(() => !canLeave());
+  // A router predicate must only decide whether navigation is blocked. Opening
+  // a native confirm here can repeat as the router evaluates navigation. Keep
+  // the blocked transition pending until the user acts in one stable dialog.
+  const shouldBlock = useCallback(() => guardRef.current.dirty || guardRef.current.busy, []);
+  const blocker = useBlocker(shouldBlock);
   useEffect(() => {
-    if (blocker.state === "blocked") blocker.reset();
+    if (blocker.state === "blocked" && guardRef.current.busy) {
+      setNotice("操作进行中，请稍后再离开。");
+      blocker.reset();
+    }
   }, [blocker]);
   useEffect(() => {
     const unload = (event: BeforeUnloadEvent) => {
@@ -324,7 +354,7 @@ export function StrategiesPage() {
     const key = (e: globalThis.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s") {
         e.preventDefault();
-        if (!createOpen) void handleSave();
+        if (!createOpen && !loadingDetail && detail?.id === strategyId) void handleSave();
       }
       if (e.key === "Escape" && !document.querySelector("dialog[open]")) {
         if (narrow) {
@@ -351,7 +381,7 @@ export function StrategiesPage() {
     (caught: unknown, fallback: string) => {
       if (caught instanceof StrategyApiError && caught.status === 401) {
         logout();
-        navigate("/login", { replace: true });
+        routeRef.current.navigate("/login", { replace: true });
         return;
       }
       setError(
@@ -362,7 +392,7 @@ export function StrategiesPage() {
             : fallback,
       );
     },
-    [logout, navigate],
+    [logout],
   );
 
   const loadStrategies = useCallback(
@@ -378,10 +408,11 @@ export function StrategiesPage() {
           if (batch.length < 100) break;
         }
         setStrategies(next);
-        if (!strategyId && next.length > 0) {
-          navigate(`/admin/strategies/${next[0].id}`, { replace: true });
-        } else if (strategyId && next.length === 0) {
-          navigate("/admin/strategies", { replace: true });
+        const route = routeRef.current;
+        if (!route.strategyId && next.length > 0) {
+          route.navigate(`/admin/strategies/${next[0].id}`, { replace: true });
+        } else if (route.strategyId && next.length === 0) {
+          route.navigate("/admin/strategies", { replace: true });
         }
       } catch (caught) {
         handleApiError(caught, "策略列表加载失败。");
@@ -390,7 +421,7 @@ export function StrategiesPage() {
         setRefreshing(false);
       }
     },
-    [handleApiError, navigate, strategyId],
+    [handleApiError],
   );
 
   const loadDetail = useCallback(
@@ -398,16 +429,10 @@ export function StrategiesPage() {
       const requestSequence = ++detailRequestSequence.current;
       revisionRequestSequence.current += 1;
       setRevisionPreview(null);
-      setFile("sourceCode");
-      if (!background) {
-        setLoadingDetail(true);
-        // Do not render one strategy's private source while another route is
-        // loading, even briefly. The selected record owns the editor surface.
-        setDetail(null);
-        setDraft(null);
-        setRevisions([]);
-        setValidation(null);
-      }
+      if (!background) setLoadingDetail(true);
+      // Keep the previous draft and editor mounted during selection changes.
+      // The pending overlay names that previous record and locks its controls;
+      // the latest successful response replaces all strategy-owned state at once.
       setError(null);
       try {
         const [nextDetail, nextRevisions] = await Promise.all([
@@ -415,6 +440,7 @@ export function StrategiesPage() {
           listStrategyRevisions(id),
         ]);
         if (requestSequence !== detailRequestSequence.current) return;
+        setFile("sourceCode");
         setDetail(nextDetail);
         setDraft(editorDraftFromDetail(nextDetail));
         setRevisions(nextRevisions);
@@ -457,16 +483,17 @@ export function StrategiesPage() {
     navigate(`/admin/strategies/${id}`);
   }
 
-  function updateDraftField<K extends keyof EditorDraft>(
+  const updateDraftField = useCallback(<K extends keyof EditorDraft,>(
     field: K,
     value: EditorDraft[K],
-  ) {
+  ) => {
     setDraft((current) => (current ? { ...current, [field]: value } : current));
     setNotice(null);
-  }
+  }, []);
 
   async function persistEditor(): Promise<StrategyDetail> {
     if (!detail || !draft) throw new Error("请先选择一个策略。");
+    if (loadingDetail || detail.id !== strategyId) throw new Error("请等待所选策略加载完成后再保存。");
     const parameterSchema = parseJsonObject(
       draft.parameterSchema,
       "参数 Schema",
@@ -747,15 +774,23 @@ export function StrategiesPage() {
     if (busy) return;
     setCreateOpen(true);
   }
-  function updateCursor() {
+  const updateCursor = useCallback(() => {
     const e = editorRef.current;
     if (!e) return;
     const before = e.value.slice(0, e.selectionStart);
-    setCursor({
+    const next = {
       line: before.split("\n").length,
       column: before.length - before.lastIndexOf("\n"),
-    });
-  }
+    };
+    if (
+      next.line === cursorRef.current.line &&
+      next.column === cursorRef.current.column
+    )
+      return;
+    cursorRef.current = next;
+    if (cursorLabelRef.current)
+      cursorLabelRef.current.textContent = `Ln ${next.line}, Col ${next.column}`;
+  }, []);
   function formatSchema() {
     try {
       updateDraftField(
@@ -774,8 +809,10 @@ export function StrategiesPage() {
   } catch {
     /* Keep malformed JSON in the editor. */
   }
-  const controlsDisabled =
-    busy || Boolean(isArchived) || !draft || detail?.id !== strategyId;
+  const switchingStrategy = Boolean(strategyId && (loadingDetail || detail?.id !== strategyId));
+  // Inert containers prevent edits during selection without briefly fading
+  // every button. Persistent business restrictions still use disabled styling.
+  const controlsDisabled = busy || Boolean(isArchived) || !draft;
   return (
     <OverviewShell
       title="策略工作台"
@@ -788,7 +825,14 @@ export function StrategiesPage() {
         return ok;
       }}
     >
-      <section className="qfs-page" aria-labelledby="strategies-title">
+      <section
+        className="qfs-page qfo-content"
+        aria-labelledby="strategies-title"
+        onPointerDownCapture={(event) => { event.currentTarget.dataset.keyboardNavigation = "false"; }}
+        onKeyDownCapture={(event) => {
+          if (event.key === "Tab") event.currentTarget.dataset.keyboardNavigation = "true";
+        }}
+      >
         <header className="qfs-heading">
           <div>
             <small>PRIVATE STRATEGY</small>
@@ -822,7 +866,8 @@ export function StrategiesPage() {
             <button
               className="qfs-primary"
               disabled={controlsDisabled}
-              onClick={() => void handlePublish()}
+              aria-disabled={controlsDisabled || switchingStrategy}
+              onClick={() => { if (!switchingStrategy) void handlePublish(); }}
             >
               <Rocket />
               {publishing ? "发布中…" : "发布版本"}
@@ -942,8 +987,14 @@ export function StrategiesPage() {
               )}
             </>
           )}
-          <section className="qfs-editor-panel" aria-label="策略编辑区">
-            {loadingDetail || (detail && detail.id !== strategyId) ? (
+          <section className="qfs-editor-panel" aria-label="策略编辑区" aria-busy={loadingDetail}>
+            {switchingStrategy && !loadingDetail && error && detail && draft && (
+              <div className="qfs-switch-status" role="status">
+                <span>{`所选策略加载失败；当前暂留「${detail.name}」，不可编辑。`}</span>
+                <button onClick={() => void loadDetail(strategyId!)}>重试</button>
+              </div>
+            )}
+            {loadingDetail && (!detail || !draft) ? (
               <div className="qfs-empty" role="status">
                 加载策略内容…
               </div>
@@ -955,7 +1006,7 @@ export function StrategiesPage() {
                 <button onClick={showCreate}>新建策略</button>
               </div>
             ) : (
-              <>
+              <div className="qfs-editor-content" inert={switchingStrategy}>
                 <header className="qfs-object">
                   <div>
                     <strong>{detail.name}</strong>
@@ -1028,7 +1079,9 @@ export function StrategiesPage() {
                       aria-selected={file === key}
                       onClick={() => {
                         setFile(key);
-                        setCursor({ line: 1, column: 1 });
+                        cursorRef.current = { line: 1, column: 1 };
+                        if (cursorLabelRef.current)
+                          cursorLabelRef.current.textContent = "Ln 1, Col 1";
                       }}
                     >
                       {label}
@@ -1055,57 +1108,15 @@ export function StrategiesPage() {
                     <p>策略说明不随发布版本冻结。</p>
                   </div>
                 )}
-                <div className="qfs-code" role="tabpanel">
-                  <pre ref={linesRef} aria-hidden="true">
-                    {Array.from(
-                      { length: sourceLineCount(editorValue) },
-                      (_, i) => i + 1,
-                    ).join("\n")}
-                  </pre>
-                  <textarea
-                    ref={editorRef}
-                    aria-label={
-                      file === "sourceCode"
-                        ? "策略源码"
-                        : file === "defaultParameters"
-                          ? "默认参数 JSON"
-                          : "策略说明"
-                    }
-                    value={editorValue}
-                    readOnly={controlsDisabled}
-                    maxLength={file === "description" ? 10000 : undefined}
-                    wrap="off"
-                    spellCheck={false}
-                    onChange={(e) => {
-                      updateDraftField(file, e.target.value);
-                      updateCursor();
-                    }}
-                    onClick={updateCursor}
-                    onKeyUp={updateCursor}
-                    onScroll={(e) => {
-                      if (linesRef.current)
-                        linesRef.current.scrollTop = e.currentTarget.scrollTop;
-                    }}
-                    onKeyDown={(e) => {
-                      if (e.key === "Tab" && !controlsDisabled) {
-                        e.preventDefault();
-                        const t = e.currentTarget,
-                          start = t.selectionStart,
-                          end = t.selectionEnd;
-                        updateDraftField(
-                          file,
-                          editorValue.slice(0, start) +
-                            "    " +
-                            editorValue.slice(end),
-                        );
-                        requestAnimationFrame(() => {
-                          t.selectionStart = t.selectionEnd = start + 4;
-                          updateCursor();
-                        });
-                      }
-                    }}
-                  />
-                </div>
+                <StrategyCodeEditor
+                  editorValue={editorValue}
+                  file={file}
+                  controlsDisabled={controlsDisabled}
+                  editorRef={editorRef}
+                  linesRef={linesRef}
+                  updateDraftField={updateDraftField}
+                  updateCursor={updateCursor}
+                />
                 <footer className="qfs-status">
                   <button
                     onClick={() => setDiagnostics(!diagnostics)}
@@ -1114,7 +1125,7 @@ export function StrategiesPage() {
                     {checkLabel}
                   </button>
                   <span>
-                    Ln {cursor.line}, Col {cursor.column}　
+                    <span ref={cursorLabelRef} />　
                     {file === "sourceCode"
                       ? "Python"
                       : file === "defaultParameters"
@@ -1179,7 +1190,7 @@ export function StrategiesPage() {
                     </section>
                   </>
                 )}
-              </>
+              </div>
             )}
           </section>
           {contextVisible && (
@@ -1198,6 +1209,8 @@ export function StrategiesPage() {
                 className="qfs-context"
                 style={{ width: sizes.right }}
                 aria-label="策略上下文"
+                aria-busy={loadingDetail}
+                inert={switchingStrategy}
               >
                 <header>
                   <strong>策略上下文</strong>
@@ -1225,8 +1238,11 @@ export function StrategiesPage() {
                   ))}
                 </div>
                 <div className="qfs-context-body" role="tabpanel">
-                  {!detail || detail.id !== strategyId ? (
-                    <p>请选择策略</p>
+                  {/* Keep the previous context mounted while a selection loads.
+                      The parent is inert until detail, draft and revisions are
+                      replaced together, preserving field and schema scroll state. */}
+                  {!detail ? (
+                    <p>{loadingDetail ? "加载策略上下文…" : "请选择策略"}</p>
                   ) : panel === "parameters" ? (
                     <>
                       <h3>默认参数</h3>
@@ -1380,6 +1396,18 @@ export function StrategiesPage() {
           )}
         </div>
       </section>
+      {blocker.state === "blocked" && !guardRef.current.busy && (
+        <NavigationConfirm
+          onCancel={() => blocker.reset()}
+          onConfirm={() => {
+            // Proceed resumes the exact blocked destination once. While the
+            // next strategy loads, its retained predecessor is no longer dirty
+            // for navigation purposes because it does not own the new route.
+            guardRef.current = { dirty: false, busy: false };
+            blocker.proceed();
+          }}
+        />
+      )}
       {createOpen && (
         <Drawer title="创建策略" onClose={closeCreate}>
           <form onSubmit={handleCreate}>
@@ -1490,3 +1518,73 @@ function sessionValue(key: string, fallback: string) {
     return fallback;
   }
 }
+
+// Panel visibility and splitter changes must not re-render the controlled
+// textarea. Stable callbacks let React preserve its selection, scroll position,
+// and native editing surface while the surrounding workspace changes size.
+const StrategyCodeEditor = memo(function StrategyCodeEditor({
+  editorValue, file, controlsDisabled, editorRef, linesRef,
+  updateDraftField, updateCursor,
+}: {
+  editorValue: string;
+  file: "sourceCode" | "defaultParameters" | "description";
+  controlsDisabled: boolean;
+  editorRef: React.RefObject<HTMLTextAreaElement | null>;
+  linesRef: React.RefObject<HTMLPreElement | null>;
+  updateDraftField: <K extends keyof EditorDraft>(field: K, value: EditorDraft[K]) => void;
+  updateCursor: () => void;
+}) {
+  return (
+<div className="qfs-code" role="tabpanel">
+                  <pre ref={linesRef} aria-hidden="true">
+                    {Array.from(
+                      { length: sourceLineCount(editorValue) },
+                      (_, i) => i + 1,
+                    ).join("\n")}
+                  </pre>
+                  <textarea
+                    ref={editorRef}
+                    aria-label={
+                      file === "sourceCode"
+                        ? "策略源码"
+                        : file === "defaultParameters"
+                          ? "默认参数 JSON"
+                          : "策略说明"
+                    }
+                    value={editorValue}
+                    readOnly={controlsDisabled}
+                    maxLength={file === "description" ? 10000 : undefined}
+                    wrap="off"
+                    spellCheck={false}
+                    onChange={(e) => {
+                      updateDraftField(file, e.target.value);
+                      updateCursor();
+                    }}
+                    onClick={updateCursor}
+                    onKeyUp={updateCursor}
+                    onScroll={(e) => {
+                      if (linesRef.current)
+                        linesRef.current.scrollTop = e.currentTarget.scrollTop;
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === "Tab" && !controlsDisabled) {
+                        e.preventDefault();
+                        const t = e.currentTarget,
+                          start = t.selectionStart,
+                          end = t.selectionEnd;
+                        updateDraftField(
+                          file,
+                          editorValue.slice(0, start) +
+                            "    " +
+                            editorValue.slice(end),
+                        );
+                        requestAnimationFrame(() => {
+                          t.selectionStart = t.selectionEnd = start + 4;
+                          updateCursor();
+                        });
+                      }
+                    }}
+                  />
+                </div>
+  );
+});

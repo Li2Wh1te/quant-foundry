@@ -212,3 +212,35 @@ export function RecentRuns({ strategyId }: { strategyId: string }) {
     </>
   );
 }
+
+/** Keep unsaved-change confirmation mounted until an explicit user decision.
+ * Native modal focus containment also prevents repeated background clicks from
+ * replacing the blocked destination while the user reads the message. */
+export function NavigationConfirm({ onCancel, onConfirm }: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const prior = document.activeElement as HTMLElement | null;
+    dialogRef.current?.showModal();
+    return () => {
+      dialogRef.current?.close();
+      if (prior?.isConnected) prior.focus();
+    };
+  }, []);
+  return <dialog
+    ref={dialogRef}
+    className="qfs-drawer qfs-navigation-confirm"
+    aria-labelledby="qfs-navigation-confirm-title"
+    aria-describedby="qfs-navigation-confirm-description"
+    onCancel={(event) => { event.preventDefault(); onCancel(); }}
+  >
+    <h2 id="qfs-navigation-confirm-title">放弃未保存的修改？</h2>
+    <p id="qfs-navigation-confirm-description">当前草稿尚未保存。继续编辑可保留修改，放弃后将前往你选择的页面。</p>
+    <footer>
+      <button type="button" autoFocus onClick={onCancel}>继续编辑</button>
+      <button type="button" className="qfs-primary" onClick={onConfirm}>放弃修改并切换</button>
+    </footer>
+  </dialog>;
+}

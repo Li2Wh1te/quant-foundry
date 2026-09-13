@@ -38,7 +38,15 @@ export function OverviewShell({ children, title = "数据运营总览", section 
   const { logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
-  const [collapsed, setCollapsed] = useState(() => { if (workspace) { try { return localStorage.getItem("qfs-sidebar") !== "expanded"; } catch { return true; } } return window.innerWidth <= 1240; });
+  // All modules use the same sidebar state and responsive default so navigation
+  // does not unexpectedly change the available content width.
+  const [collapsed, setCollapsed] = useState(() => {
+    try {
+      const saved = localStorage.getItem("qfo-sidebar");
+      if (saved) return saved === "collapsed";
+    } catch { /* Storage is optional. */ }
+    return window.innerWidth <= 1240;
+  });
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState(0);
@@ -97,7 +105,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
       </aside>
       <section className="qfo-shell">
         <header className="qfo-topbar">
-          <button className="qfo-icon-btn qfo-sidebar-toggle" type="button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} aria-controls="overview-navigation" onClick={() => setCollapsed(value => { if (workspace) { try { localStorage.setItem("qfs-sidebar", value ? "expanded" : "collapsed"); } catch { /* Storage is optional. */ } } return !value; })}><Menu aria-hidden="true" /></button>
+          <button className="qfo-icon-btn qfo-sidebar-toggle" type="button" aria-label={collapsed ? "展开侧栏" : "收起侧栏"} title={collapsed ? "展开侧栏" : "收起侧栏"} aria-expanded={!collapsed} aria-controls="overview-navigation" onClick={() => setCollapsed(value => { try { localStorage.setItem("qfo-sidebar", value ? "expanded" : "collapsed"); } catch { /* Storage is optional. */ } return !value; })}><Menu aria-hidden="true" /></button>
           <div className="qfo-crumb"><span className="qfo-crumb-index">{section}</span><span className="qfo-crumb-sep">/</span><span className="qfo-crumb-title">{title}</span></div>
           <div className="qfo-top-actions"><button className="qfo-quick" type="button" aria-label="快速跳转" aria-haspopup="dialog" onClick={show}><Search aria-hidden="true" /><span>快速跳转</span><span className="qfo-kbd">⌘ K</span></button></div>
         </header>
