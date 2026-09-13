@@ -14,6 +14,7 @@ from app.strategies.repository import StrategyRepository
 from app.strategies.service import (
     DEFAULT_RUNTIME_MANIFEST,
     StrategyArchivedError,
+    StrategyDeletionBlockedError,
     StrategyDraftConflictError,
     StrategyDraftIntegrityError,
     StrategyDraftValidationError,
@@ -101,6 +102,33 @@ class StrategyStorageServiceTestCase(unittest.TestCase):
         self.session = Mock()
         self.service = StrategyStorageService(self.session)
         self.service.repository = Mock()
+
+    def test_delete_unpublished_draft_uses_both_locks_and_removes_child_first(self):
+        strategy, draft = self._strategy_with_draft(version=5)
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.get_draft.return_value = draft
+        self.service.repository.list_revisions.return_value = []
+        self.service.delete_unpublished_strategy(strategy.id, expected_version=strategy.version, expected_draft_version=5)
+        self.service.repository.get_strategy.assert_called_once_with(strategy.id, for_update=True)
+        self.service.repository.get_draft.assert_called_once_with(strategy.id, for_update=True)
+        self.assertEqual([call.args[0] for call in self.session.delete.call_args_list], [draft, strategy])
+
+    def test_delete_rejects_any_published_history_even_without_current_pointer(self):
+        strategy, draft = self._strategy_with_draft(version=5)
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.list_revisions.return_value = [object()]
+        with self.assertRaises(StrategyDeletionBlockedError):
+            self.service.delete_unpublished_strategy(strategy.id, expected_version=strategy.version, expected_draft_version=5)
+        self.session.delete.assert_not_called()
+
+    def test_delete_rejects_stale_draft_without_removing_anything(self):
+        strategy, draft = self._strategy_with_draft(version=5)
+        self.service.repository.get_strategy.return_value = strategy
+        self.service.repository.get_draft.return_value = draft
+        self.service.repository.list_revisions.return_value = []
+        with self.assertRaises(StrategyDraftConflictError):
+            self.service.delete_unpublished_strategy(strategy.id, expected_version=strategy.version, expected_draft_version=4)
+        self.session.delete.assert_not_called()
 
     def test_create_strategy_creates_only_a_mutable_database_draft(self) -> None:
         schema = {"type": "object", "properties": {"window": {"type": "integer"}}}
