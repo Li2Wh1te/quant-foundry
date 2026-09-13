@@ -67,7 +67,10 @@ def test_catalogue_counts_history_scope_and_literal_pagination():
                     id=run_id, run_kind=kind, profile="formal@1" if kind == "backtest_run" else "internal_link_acceptance@1",
                     status=state, terminal_status=state if terminal else None,
                     finished_at=now + timedelta(seconds=index) if terminal else None,
-                    created_at=now + timedelta(seconds=index), idempotency_key=str(run_id), config_hash="a" * 64,
+                    # PostgreSQL now() is fixed at transaction start, so both
+                    # timestamps must be explicit for deliberately ordered rows.
+                    created_at=now + timedelta(seconds=index), updated_at=now + timedelta(seconds=index),
+                    idempotency_key=str(run_id), config_hash="a" * 64,
                     tenant_id=scope, idempotency_scope=scope, strategy_revision_id=rid,
                     account_profile_id=str(aid), account_profile_version=version,
                 ))
