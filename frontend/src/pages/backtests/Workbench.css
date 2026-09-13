@@ -20,3 +20,17 @@
 .qfb-position-card{display:flex;flex-direction:column;gap:14px;padding:14px;background:var(--surface-2);border:1px solid var(--border);border-radius:8px}
 .qfb-position-card>header{display:flex;align-items:center;justify-content:space-between;gap:12px}.qfb-position-card h4{margin:0;font-size:13px;font-weight:650}.qfb-position-values{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}.qfb-position-values input{background:var(--surface)!important}.qfb-position-instrument .qfc-trigger{background:var(--surface)}.qfb-page .qfb-remove{background:transparent;border-color:transparent;padding:4px 6px;color:var(--muted);font-size:12px;min-height:30px;flex-shrink:0}.qfb-page .qfb-remove:hover{background:var(--red-bg);color:var(--red)}.qfb-position-empty{margin:0;color:var(--muted);font-size:13px}.qfb-page .qfb-add-position{border-style:dashed;background:transparent;width:100%;color:var(--orange)}.qfb-instrument-row{display:flex;align-items:center;gap:8px}.qfb-instrument-row>.qfc-control{flex:1}.qfb-instruments small{font-size:12px;line-height:18px;color:var(--muted)}.qfb-field-label{font-size:13px;line-height:22px}.qfb-drawer .qfb-instruments .qfc-control{flex-direction:initial}
 @media(max-width:600px){.qfb-position-values{grid-template-columns:1fr}.qfb-position-card{padding:12px}.qfb-drawer>footer{padding-bottom:max(14px,env(safe-area-inset-bottom))}}
+
+/* Keep async feedback in a stable heading slot so strategy selection never moves. */
+.qfb-step-heading{display:flex;align-items:center;justify-content:space-between;gap:12px;min-height:44px;margin-bottom:12px}
+.qfb-step-heading h3{margin:0}.qfb-config-loading{font-size:12px;color:var(--muted);white-space:nowrap;min-height:18px}
+.qfb-instruments-heading{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.qfb-instruments .qfb-instrument-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px}
+.qfb-instrument-grid:empty{display:none}
+.qfb-instrument-grid .qfb-instrument-row{border:1px solid var(--border);border-radius:8px;background:var(--surface);gap:0;padding-right:4px}
+.qfb-page .qfb-instrument-grid .qfc-trigger{background:transparent;border-color:transparent;padding:10px;min-height:62px;box-shadow:none}
+.qfb-page .qfb-instrument-grid .qfc-trigger:focus-visible{outline:2px solid var(--orange);outline-offset:-2px}
+.qfc-selected-instrument{display:flex;flex-direction:column;gap:3px;text-align:left;overflow:hidden}
+.qfc-selected-instrument>span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.qfc-selected-instrument small{font-variant-numeric:tabular-nums}
+@media(max-width:600px){.qfb-instruments .qfb-instrument-grid{grid-template-columns:1fr}.qfb-step-heading{gap:6px}.qfb-config-loading{font-size:11px}}

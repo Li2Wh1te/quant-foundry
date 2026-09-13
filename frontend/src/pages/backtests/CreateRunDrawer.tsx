@@ -407,8 +407,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
       {discard ? <div className="qfb-discard"><h3>放弃尚未提交的配置？</h3><p>关闭后，本次填写的内容不会保存。</p><button autoFocus onClick={() => setDiscard(false)}>继续编辑</button><button onClick={onClose}>放弃并关闭</button></div> : <>
       <ol className="qfb-steps">{["策略与版本", "账户与执行配置", "运行检查与确认"].map((name,index) => <li key={name} aria-current={index === step ? "step" : undefined}><span>{index+1}</span>{name}</li>)}</ol>
       <div className="qfb-drawer-body" ref={body} onChange={() => setDirty(true)} onClick={event => { if ((event.target as Element).closest("[role=option]")) setDirty(true); }}>
-      <h3 data-step-title tabIndex={-1}>{["选择策略与版本", "配置账户、数据与执行", "运行检查与确认"][step]}</h3>
-      {loading && <p role="status">正在加载可用配置…</p>}
+      <div className="qfb-step-heading"><h3 data-step-title tabIndex={-1}>{["选择策略与版本", "配置账户、数据与执行", "运行检查与确认"][step]}</h3><span role="status" className="qfb-config-loading" style={{visibility: loading ? "visible" : "hidden"}}>{loading ? "正在加载配置…" : ""}</span></div>
       {step === 0 && <label>策略<Select aria-label="策略" disabled={!!initialStrategyId || busy} value={strategyId} onChange={e => { copy.current = null; setStrategyId(e.target.value); }}><option value="">请选择策略</option>{strategies.map(s => <option key={s.id} value={s.id}>{s.name}{s.state === "archived" ? "（已归档）" : ""}</option>)}</Select></label>}
       {!loading && step === 0 && strategyId && !revisions.length && <p>此策略尚未发布版本，请先前往策略工作台发布。</p>}
       {!loading && step === 1 && !accounts.some(a => a.status === "active") && <p role="alert">暂无可选择的回测账户。请先在回测账户页面创建账户。</p>}
@@ -503,12 +502,14 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
         </label>
         <p>选择本次回测使用的固定标的范围。</p>
         <div className="qfb-instruments">
-          <span className="qfb-field-label">固定标的范围</span>
-          {instrumentIds.split(/[\s,，]+/).filter(Boolean).map((id,index) => <div className="qfb-instrument-row" key={`${index}-${id}`}>
-            <InstrumentPicker label={`固定标的 ${index+1}`} value={id} exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value => { setInstrumentIds(instrumentIds.split(/[\s,，]+/).filter(Boolean).map((item,i)=>i===index?value:item).join("\n")); setDirty(true); resetAdmission(); }}/>
+          <div className="qfb-instruments-heading"><span className="qfb-field-label">固定标的范围</span><small>已选 {instrumentIds.split(/[\s,，]+/).filter(Boolean).length} 个</small></div>
+          <InstrumentPicker label="添加固定标的" value="" exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value=>{setInstrumentIds(current=>[...current.split(/[\s,，]+/).filter(Boolean),value].join("\n"));setDirty(true);resetAdmission();}}/>
+          <div className="qfb-instrument-grid">
+          {instrumentIds.split(/[\s,，]+/).filter(Boolean).map((id,index) => <div className="qfb-instrument-row" key={id}>
+            <InstrumentPicker compact label={`固定标的 ${index+1}`} value={id} exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value => { setInstrumentIds(instrumentIds.split(/[\s,，]+/).filter(Boolean).map((item,i)=>i===index?value:item).join("\n")); setDirty(true); resetAdmission(); }}/>
             <button type="button" className="qfb-remove" aria-label={`移除固定标的 ${index+1}`} onClick={()=>{setInstrumentIds(instrumentIds.split(/[\s,，]+/).filter(Boolean).filter((_,i)=>i!==index).join("\n"));setDirty(true);resetAdmission();}}><X size={16}/></button>
           </div>)}
-          <InstrumentPicker label="添加固定标的" value="" exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value=>{setInstrumentIds(current=>[...current.split(/[\s,，]+/).filter(Boolean),value].join("\n"));setDirty(true);resetAdmission();}}/>
+          </div>
           <small>可按名称或代码搜索多个标的。历史数据和交易规则将在运行检查时验证。</small>
         </div>
         <div>
