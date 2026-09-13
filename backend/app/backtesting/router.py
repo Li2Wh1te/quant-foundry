@@ -3,7 +3,7 @@
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
@@ -11,6 +11,9 @@ from app.backtesting.account_profiles import AccountProfileStatus
 
 from app.backtesting.models import BacktestAccountProfileRecord
 from app.backtesting.schemas import (
+    AccountProfileOverviewResponse,
+    AccountProfilePageResponse,
+    AccountProfileUsageResponse,
     AccountProfileCreateRequest,
     AccountProfileResponse,
     AccountProfileUpdateRequest,
@@ -18,6 +21,7 @@ from app.backtesting.schemas import (
     FeeScheduleResponse,
 )
 from app.backtesting.service import (
+    AccountProfileVersionConflictError,
     AccountProfileNameConflictError,
     AccountProfileNotFoundError,
     AccountProfileService,
@@ -25,6 +29,8 @@ from app.backtesting.service import (
     fee_schedule_from_record,
 )
 from app.db.session import get_db_session
+from app.core.auth import AuthenticatedPrincipal
+from app.backtesting.account_queries import AccountProfileQueries
 
 
 router = APIRouter(
@@ -116,6 +122,55 @@ def create_account_profile(
     return _response(record)
 
 
+def _usage_owner(request: Request) -> str:
+    """Use the authenticated principal, never a client-supplied owner header."""
+
+    principal = getattr(request.state, "authenticated_principal", None)
+    return principal.owner_scope if isinstance(principal, AuthenticatedPrincipal) else "default"
+
+
+@router.get("/overview", response_model=AccountProfileOverviewResponse)
+def account_overview(request: Request, session: Annotated[Session, Depends(get_db_session)]):
+    """Count the full catalogue and references visible to this owner."""
+
+    return AccountProfileQueries(session).overview(owner_scope=_usage_owner(request))
+
+
+@router.get("/page", response_model=AccountProfilePageResponse)
+def account_page(
+    session: Annotated[Session, Depends(get_db_session)],
+    status_filter: Annotated[AccountProfileStatus | None, Query(alias="status")] = None,
+    keyword: Annotated[str | None, Query(min_length=1, max_length=100)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Search names and fee schedule identifiers while retaining legacy GET."""
+
+    records, total = AccountProfileQueries(session).page(
+        status=status_filter.value if status_filter else None,
+        keyword=keyword, limit=limit, offset=offset,
+    )
+    return dict(items=[_response(row) for row in records], total=total, limit=limit, offset=offset)
+
+
+@router.get("/{profile_id}/usage", response_model=AccountProfileUsageResponse)
+def account_usage(
+    profile_id: UUID, request: Request,
+    session: Annotated[Session, Depends(get_db_session)],
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Expose formal submissions across all historical account versions."""
+
+    try:
+        AccountProfileService(session).get(profile_id)
+        return AccountProfileQueries(session).usage(
+            profile_id, owner_scope=_usage_owner(request), limit=limit, offset=offset,
+        )
+    except Exception as exc:
+        raise _http_error(exc) from exc
+
+
 @router.get("/{profile_id}", response_model=AccountProfileResponse)
 def get_account_profile(
     profile_id: Annotated[UUID, Path()],
@@ -141,6 +196,7 @@ def update_account_profile(
     try:
         record = AccountProfileService(session).update(
             profile_id,
+            expected_version=payload.expected_version,
             name=payload.name if "name" in fields else None,
             status=payload.status if "status" in fields else None,
             fee_schedule=(
@@ -230,6 +286,8 @@ def _http_error(exc: Exception) -> HTTPException:
 
     if isinstance(exc, AccountProfileNotFoundError):
         return HTTPException(status_code=404, detail="账户档案不存在。")
+    if isinstance(exc, AccountProfileVersionConflictError):
+        return HTTPException(status_code=409, detail=str(exc))
     if isinstance(exc, AccountProfileNameConflictError):
         return HTTPException(status_code=409, detail="账户名称已存在。")
     if isinstance(exc, AccountProfileValidationError):

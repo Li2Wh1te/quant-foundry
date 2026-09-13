@@ -103,6 +103,9 @@ class AccountProfileSchemaTestCase(unittest.TestCase):
             set(path for path in paths if path.startswith("/api/admin/backtest-account-profiles")),
             {
                 "/api/admin/backtest-account-profiles",
+                "/api/admin/backtest-account-profiles/overview",
+                "/api/admin/backtest-account-profiles/page",
+                "/api/admin/backtest-account-profiles/{profile_id}/usage",
                 "/api/admin/backtest-account-profiles/{profile_id}",
                 "/api/admin/backtest-account-profiles/{profile_id}/versions",
                 "/api/admin/backtest-account-profiles/{profile_id}/versions/{version}",

@@ -28,6 +28,10 @@ class AccountProfileNameConflictError(AccountProfileStorageError):
     """Raised when two profiles would share the same case-insensitive name."""
 
 
+class AccountProfileVersionConflictError(AccountProfileStorageError):
+    """Raised before mutation when an editor holds a stale version."""
+
+
 class AccountProfileValidationError(AccountProfileStorageError, ValueError):
     """Raised when profile or fee configuration is invalid for storage."""
 
@@ -79,6 +83,7 @@ class AccountProfileService:
         self,
         profile_id: UUID,
         *,
+        expected_version: int | None = None,
         name: str | None = None,
         status: AccountProfileStatus | None = None,
         fee_schedule: Mapping[str, Any] | None = None,
@@ -89,6 +94,10 @@ class AccountProfileService:
         record = self.repository.get(profile_id, for_update=True)
         if record is None:
             raise AccountProfileNotFoundError(str(profile_id))
+        # Compare only after acquiring the row lock so concurrent editors cannot
+        # both validate against the same version and overwrite each other.
+        if expected_version is not None and expected_version != int(record.version or 1):
+            raise AccountProfileVersionConflictError("账户已被更新，请刷新后重新编辑。")
         changed = False
         if record.fee_schedule_version is None:
             record.fee_schedule_version = 1
