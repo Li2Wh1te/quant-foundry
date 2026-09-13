@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useParams } from "react-router-dom";
 import { Plus, RefreshCw, Search, X } from "lucide-react";
-import { cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
+import { FOREGROUND_POLL_INTERVAL_MS, cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
 import { compareBacktestRuns } from "../api/backtestPreflight";
 import { BacktestComparisonView } from "../components/BacktestReport";
 import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
@@ -20,11 +20,13 @@ export function BacktestRunsPage() {
   const [result, setResult] = useState<{ kind: "report"; run: WorkbenchRun } | { kind: "compare"; value: any } | null>(null);
   const [busy, setBusy] = useState(false);
   const pageRef = useRef(page), selectedRef = useRef(selected), sequence = useRef(0), detailSequence = useRef(0), controller = useRef<AbortController | null>(null), actionBusy = useRef(false);
+  const requestNeeded = useRef(true);
   const rerunKey = useRef<{ id: string; key: string } | null>(null);
   pageRef.current = page; selectedRef.current = selected;
   useEffect(() => { const timer = window.setTimeout(() => setQuery(q => q.search === search.trim() ? q : { ...q, search: search.trim(), offset: 0 }), 300); return () => clearTimeout(timer); }, [search]);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(""), 4000); return () => clearTimeout(timer); }, [toast]);
   async function refresh() {
+    requestNeeded.current = true;
     const generation = ++sequence.current;
     controller.current?.abort(); const request = new AbortController(); controller.current = request;
     setLoading(true); setError("");
@@ -32,6 +34,7 @@ export function BacktestRunsPage() {
       const fresh = await fetchRunWorkbench({ ...query, strategy_id: strategyId }, request.signal);
       if (generation !== sequence.current) return;
       if (query.offset > 0 && !fresh.items.length && fresh.total <= query.offset) { setQuery(q => ({ ...q, offset: Math.max(0, Math.ceil(fresh.total/20)*20-20) })); return; }
+      requestNeeded.current = false;
       setPage(fresh);
       const previous = selectedRef.current;
       const current = fresh.items.find(r => r.run_id === previous?.run_id);
@@ -52,15 +55,23 @@ export function BacktestRunsPage() {
     return () => { sequence.current += 1; controller.current?.abort(); };
   }, [query, strategyId]);
   useEffect(() => {
-    let stopped = false, timer: ReturnType<typeof setTimeout>;
+    let stopped = false, polling = false, timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
-      if (stopped || document.visibilityState !== "visible") return;
-      const active = pageRef.current?.items.some(r => !isTerminalBacktestStatus(r.status)) || selectedRef.current && !isTerminalBacktestStatus(selectedRef.current.status);
-      if (active) await refresh();
-      if (!stopped) timer = setTimeout(poll, 5000);
+      if (stopped || polling || document.visibilityState !== "visible") return;
+      polling = true;
+      const active = requestNeeded.current || pageRef.current?.items.some(r => !isTerminalBacktestStatus(r.status)) || selectedRef.current && !isTerminalBacktestStatus(selectedRef.current.status);
+      try { if (active) await refresh(); }
+      finally {
+        polling = false;
+        if (!stopped && document.visibilityState === "visible") timer = setTimeout(poll, FOREGROUND_POLL_INTERVAL_MS);
+      }
     };
-    const visible = () => { clearTimeout(timer); if (document.visibilityState === "visible") void poll(); };
-    timer = setTimeout(poll, 5000); document.addEventListener("visibilitychange", visible);
+    const visible = () => {
+      clearTimeout(timer);
+      if (document.visibilityState === "visible") void poll();
+      else { sequence.current += 1; controller.current?.abort(); setLoading(false); }
+    };
+    timer = setTimeout(poll, FOREGROUND_POLL_INTERVAL_MS); document.addEventListener("visibilitychange", visible);
     return () => { stopped = true; clearTimeout(timer); document.removeEventListener("visibilitychange", visible); };
   }, [query, strategyId]);
   function select(run: WorkbenchRun) {
