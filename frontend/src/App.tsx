@@ -83,7 +83,7 @@ export function App() {
       />
       <Route
         path="/admin/strategy-data"
-        element={<RequireAuth><AdminPage><StrategyDataApiPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><OverviewShell title="策略数据接口" section="RESEARCH / 02" className="qfa-root"><StrategyDataApiPage /></OverviewShell></RequireAuth>}
       />
       <Route
         path="/admin/strategies"
