@@ -82,7 +82,7 @@ export class StrategyApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
-    readonly issues: StrategyValidationIssue[] = []
+    readonly issues: StrategyValidationIssue[] = [],
   ) {
     super(message);
     this.name = "StrategyApiError";
@@ -94,7 +94,7 @@ function headers(): HeadersInit {
   return token
     ? {
         Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
       }
     : { "Content-Type": "application/json" };
 }
@@ -105,27 +105,35 @@ function isValidationIssue(value: unknown): value is StrategyValidationIssue {
   return typeof issue.code === "string" && typeof issue.message === "string";
 }
 
-function parseErrorDetail(detail: unknown): { message: string; issues: StrategyValidationIssue[] } {
+function parseErrorDetail(detail: unknown): {
+  message: string;
+  issues: StrategyValidationIssue[];
+} {
   if (typeof detail === "string") return { message: detail, issues: [] };
-  if (!detail || typeof detail !== "object") return { message: "策略请求失败。", issues: [] };
+  if (!detail || typeof detail !== "object")
+    return { message: "策略请求失败。", issues: [] };
 
   const body = detail as Record<string, unknown>;
-  const issues = Array.isArray(body.issues) ? body.issues.filter(isValidationIssue) : [];
-  if (typeof body.message === "string") return { message: body.message, issues };
+  const issues = Array.isArray(body.issues)
+    ? body.issues.filter(isValidationIssue)
+    : [];
+  if (typeof body.message === "string")
+    return { message: body.message, issues };
   return { message: "策略请求校验失败。", issues };
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(path, {
+    cache: "no-store",
     ...init,
-    headers: { ...headers(), ...init?.headers }
+    headers: { ...headers(), ...init?.headers },
   });
 
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）。`;
     let issues: StrategyValidationIssue[] = [];
     try {
-      const body = await response.json() as { detail?: unknown };
+      const body = (await response.json()) as { detail?: unknown };
       ({ message, issues } = parseErrorDetail(body.detail));
     } catch {
       // Keep the HTTP fallback when the response is not JSON.
@@ -137,77 +145,102 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function listStrategies(includeArchived = false): Promise<StrategySummary[]> {
-  const params = new URLSearchParams({ include_archived: String(includeArchived) });
+export function listStrategies(
+  includeArchived = false,
+  offset = 0,
+  limit = 100,
+): Promise<StrategySummary[]> {
+  const params = new URLSearchParams({
+    include_archived: String(includeArchived),
+    offset: String(offset),
+    limit: String(limit),
+  });
   return request<StrategySummary[]>(`/api/admin/strategies?${params}`);
 }
 
 export function getStrategy(strategyId: string): Promise<StrategyDetail> {
-  return request<StrategyDetail>(`/api/admin/strategies/${encodeURIComponent(strategyId)}`);
+  return request<StrategyDetail>(
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}`,
+  );
 }
 
-export function createStrategy(payload: StrategyCreatePayload): Promise<StrategyDetail> {
+export function createStrategy(
+  payload: StrategyCreatePayload,
+): Promise<StrategyDetail> {
   return request<StrategyDetail>("/api/admin/strategies", {
     method: "POST",
-    body: JSON.stringify(payload)
+    body: JSON.stringify(payload),
   });
 }
 
 export function updateStrategyMetadata(
   strategyId: string,
-  payload: StrategyMetadataPayload
+  payload: StrategyMetadataPayload,
 ): Promise<StrategySummary> {
-  return request<StrategySummary>(`/api/admin/strategies/${encodeURIComponent(strategyId)}`, {
-    method: "PATCH",
-    body: JSON.stringify(payload)
-  });
+  return request<StrategySummary>(
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
 export function saveStrategyDraft(
   strategyId: string,
-  payload: StrategyDraftPayload
+  payload: StrategyDraftPayload,
 ): Promise<StrategyDraft> {
-  return request<StrategyDraft>(`/api/admin/strategies/${encodeURIComponent(strategyId)}/draft`, {
-    method: "PATCH",
-    body: JSON.stringify(payload)
-  });
+  return request<StrategyDraft>(
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}/draft`,
+    {
+      method: "PATCH",
+      body: JSON.stringify(payload),
+    },
+  );
 }
 
-export function validateStrategy(strategyId: string): Promise<StrategyValidationResult> {
+export function validateStrategy(
+  strategyId: string,
+): Promise<StrategyValidationResult> {
   return request<StrategyValidationResult>(
     `/api/admin/strategies/${encodeURIComponent(strategyId)}/validate`,
-    { method: "POST" }
+    { method: "POST" },
   );
 }
 
 export function publishStrategy(
   strategyId: string,
-  draftVersion: number
+  draftVersion: number,
 ): Promise<StrategyRevision> {
-  return request<StrategyRevision>(`/api/admin/strategies/${encodeURIComponent(strategyId)}/publish`, {
-    method: "POST",
-    body: JSON.stringify({ draft_version: draftVersion })
-  });
+  return request<StrategyRevision>(
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}/publish`,
+    {
+      method: "POST",
+      body: JSON.stringify({ draft_version: draftVersion }),
+    },
+  );
 }
 
-export function listStrategyRevisions(strategyId: string): Promise<StrategyRevisionSummary[]> {
+export function listStrategyRevisions(
+  strategyId: string,
+): Promise<StrategyRevisionSummary[]> {
   return request<StrategyRevisionSummary[]>(
-    `/api/admin/strategies/${encodeURIComponent(strategyId)}/revisions`
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}/revisions`,
   );
 }
 
 export function getStrategyRevision(
   strategyId: string,
-  revisionNumber: number
+  revisionNumber: number,
 ): Promise<StrategyRevision> {
   return request<StrategyRevision>(
-    `/api/admin/strategies/${encodeURIComponent(strategyId)}/revisions/${revisionNumber}`
+    `/api/admin/strategies/${encodeURIComponent(strategyId)}/revisions/${revisionNumber}`,
   );
 }
 
 export function archiveStrategy(strategy: StrategySummary): Promise<void> {
   return request<void>(
     `/api/admin/strategies/${encodeURIComponent(strategy.id)}?version=${strategy.version}`,
-    { method: "DELETE" }
+    { method: "DELETE" },
   );
 }

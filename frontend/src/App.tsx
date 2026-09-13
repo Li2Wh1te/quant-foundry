@@ -87,7 +87,7 @@ export function App() {
       />
       <Route
         path="/admin/strategies"
-        element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><StrategiesPage /></RequireAuth>}
       />
       <Route
         path="/admin/backtest-accounts"
@@ -100,7 +100,7 @@ export function App() {
       <Route path="/admin/backtest-runs" element={<RequireAuth><AdminPage><BacktestRunsPage /></AdminPage></RequireAuth>} />
       <Route
         path="/admin/strategies/:strategyId"
-        element={<RequireAuth><AdminPage><StrategiesPage /></AdminPage></RequireAuth>}
+        element={<RequireAuth><StrategiesPage /></RequireAuth>}
       />
       <Route path="/admin/strategies/:strategyId/backtests" element={<RequireAuth><AdminPage><StrategyBacktestsPage /></AdminPage></RequireAuth>} />
       <Route path="*" element={<Navigate to="/admin" replace />} />
