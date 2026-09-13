@@ -31,7 +31,7 @@ from .pagination import (
 from .supervisor_lock import assert_supervisor_lock_held
 
 from .models import BacktestQueueGuardRecord, BacktestRunRecord
-from app.strategies.models import StrategyRevision
+from app.strategies.models import Strategy, StrategyRevision
 from .run_binding import BacktestRun, IdempotencyKeyReusedError, QueueFullError
 from .run_execution import InvalidRunTransition, RunStateMachine
 
@@ -739,6 +739,47 @@ class DatabaseRunRepository:
             .offset(offset)
         )
         return list(self.session.scalars(statement))
+
+    def workspace_page(
+        self, *, owner_scope: str, limit: int = 20, offset: int = 0,
+        search: str | None = None, status: str | None = None,
+        strategy_id: UUID | None = None,
+    ) -> tuple[list[Any], int]:
+        """Return newest formal runs with names and a fully filtered count.
+
+        Outer joins retain legacy bindings even when their revision cannot be
+        resolved. Cast only trusted UUID columns, never historical text. Names
+        are current catalogue labels; they do not replace frozen run evidence.
+        Ownership and filters apply before both counting and pagination.
+        """
+        if not 1 <= limit <= 100 or offset < 0:
+            raise ValueError("invalid workspace pagination")
+        statement = select(
+            BacktestRunRecord, Strategy.id.label("strategy_id"),
+            Strategy.name.label("strategy_name"),
+            StrategyRevision.revision_number.label("revision_number"),
+        ).outerjoin(
+            StrategyRevision,
+            cast(StrategyRevision.id, String) == BacktestRunRecord.strategy_revision_id,
+        ).outerjoin(Strategy, Strategy.id == StrategyRevision.strategy_id).where(
+            BacktestRunRecord.run_kind == FORMAL_KIND,
+            BacktestRunRecord.idempotency_scope == owner_scope,
+        )
+        if status:
+            statement = statement.where(BacktestRunRecord.status == status)
+        if strategy_id is not None:
+            statement = statement.where(Strategy.id == strategy_id)
+        if search and search.strip():
+            term = search.strip()
+            statement = statement.where(or_(
+                cast(BacktestRunRecord.id, String).icontains(term, autoescape=True),
+                Strategy.name.icontains(term, autoescape=True),
+            ))
+        total = self.session.scalar(select(func.count()).select_from(statement.subquery())) or 0
+        rows = self.session.execute(statement.order_by(
+            BacktestRunRecord.created_at.desc(), BacktestRunRecord.id.desc(),
+        ).limit(limit).offset(offset)).all()
+        return list(rows), total
 
     def list_page(
         self,
