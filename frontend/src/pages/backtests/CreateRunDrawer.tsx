@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { X, Trash2, Plus } from "lucide-react";
 import { getAccountPage, listAccountProfileVersions, type AccountProfile } from "../../api/accountProfiles";
 import { createBacktestRun, fetchStrategyBacktestWorkspace, listFeeSchedules, type FeeCatalogVersion, type BacktestRun, type BacktestRunCreateInput, type ComponentDescriptor, type ComponentSelectionInput } from "../../api/backtestRuns";
 import { listStrategies, type StrategySummary } from "../../api/strategies";
 import { preflightBacktest } from "../../api/backtestPreflight";
 import { admissionAllowsCreation } from "../../components/backtestAdmission";
 import { copyConfiguration, configurationFingerprint } from "./workbench";
-const today = new Date().toISOString().slice(0, 10);
+import { Select } from "../../components/controls/Select";
+import { DatePicker } from "../../components/controls/DatePicker";
+import { InstrumentPicker } from "../../components/controls/InstrumentPicker";
+import { todayKey } from "../../components/controls/calendar";
+const today = todayKey();
 type PriceBasis = "raw" | "qfq" | "hfq";
 type JsonSchemaProperty = {
   title?: string;
@@ -396,17 +400,17 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
       <header><div><small>CREATE BACKTEST</small><h2 id="qfb-create-title">{source ? "复制配置" : "创建回测"}</h2></div><button aria-label="关闭创建回测" onClick={close} disabled={busy}><X size={18} /></button></header>
       {discard ? <div className="qfb-discard"><h3>放弃尚未提交的配置？</h3><p>关闭后，本次填写的内容不会保存。</p><button autoFocus onClick={() => setDiscard(false)}>继续编辑</button><button onClick={onClose}>放弃并关闭</button></div> : <>
       <ol className="qfb-steps">{["策略与版本", "账户与执行配置", "运行检查与确认"].map((name,index) => <li key={name} aria-current={index === step ? "step" : undefined}><span>{index+1}</span>{name}</li>)}</ol>
-      <div className="qfb-drawer-body" ref={body} onChange={() => setDirty(true)}>
+      <div className="qfb-drawer-body" ref={body} onChange={() => setDirty(true)} onClick={event => { if ((event.target as Element).closest("[role=option]")) setDirty(true); }}>
       <h3 data-step-title tabIndex={-1}>{["选择策略与版本", "配置账户、数据与执行", "运行检查与确认"][step]}</h3>
       {loading && <p role="status">正在加载可用配置…</p>}
-      {step === 0 && <label>策略<select aria-label="策略" disabled={!!initialStrategyId || busy} value={strategyId} onChange={e => { copy.current = null; setStrategyId(e.target.value); }}><option value="">请选择策略</option>{strategies.map(s => <option key={s.id} value={s.id}>{s.name}{s.state === "archived" ? "（已归档）" : ""}</option>)}</select></label>}
+      {step === 0 && <label>策略<Select aria-label="策略" disabled={!!initialStrategyId || busy} value={strategyId} onChange={e => { copy.current = null; setStrategyId(e.target.value); }}><option value="">请选择策略</option>{strategies.map(s => <option key={s.id} value={s.id}>{s.name}{s.state === "archived" ? "（已归档）" : ""}</option>)}</Select></label>}
       {!loading && step === 0 && strategyId && !revisions.length && <p>此策略尚未发布版本，请先前往策略工作台发布。</p>}
       {!loading && step === 1 && !accounts.some(a => a.status === "active") && <p role="alert">暂无可选择的回测账户。请先在回测账户页面创建账户。</p>}
       <fieldset disabled={busy || loading} hidden={step !== 0}>
         <legend>策略与参数</legend>
         <label>
           已发布版本
-          <select
+          <Select
             aria-label="已发布策略版本"
             value={revisionId}
             onChange={(event) => selectRevision(event.target.value)}
@@ -417,7 +421,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
                 版本 {revision.revision_number} · {revision.source_hash.slice(0, 12)}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         {Object.entries(strategyProperties).map(([key, definition]) => {
           const value = parameters[key];
@@ -425,7 +429,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
             return (
               <label key={key}>
                 {String(definition.title || key)}
-                <select
+                <Select
                   value={String(value ?? "")}
                   onChange={(event) => {
                     setParameters((current) => ({
@@ -444,7 +448,7 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
                       {String(option)}
                     </option>
                   ))}
-                </select>
+                </Select>
               </label>
             );
           }
@@ -477,11 +481,11 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
         <legend>日期、资金与数据范围</legend>
         <label>
           开始日期
-          <input type="date" value={startDate} onChange={(event) => { setStartDate(event.target.value); resetAdmission(); }} />
+          <DatePicker label="开始日期" value={startDate} onChange={value => { setStartDate(value); setDirty(true); resetAdmission(); }} />
         </label>
         <label>
           结束日期
-          <input type="date" value={endDate} onChange={(event) => { setEndDate(event.target.value); resetAdmission(); }} />
+          <DatePicker label="结束日期" value={endDate} onChange={value => { setEndDate(value); setDirty(true); resetAdmission(); }} />
         </label>
         <label>
           初始资金（CNY）
@@ -492,10 +496,15 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
           <input type="number" min="0" max="512" value={warmupSessions} onChange={(event) => { setWarmupSessions(event.target.value); resetAdmission(); }} />
         </label>
         <p>选择本次回测使用的固定标的范围。</p>
-        <label>
-          固定标的 UUID（逗号或换行分隔）
-          <textarea value={instrumentIds} onChange={(event) => { setInstrumentIds(event.target.value); resetAdmission(); }} />
-        </label>
+        <div className="qfb-instruments">
+          <span className="qfb-field-label">固定标的范围</span>
+          {instrumentIds.split(/[\s,，]+/).filter(Boolean).map((id,index) => <div className="qfb-instrument-row" key={`${index}-${id}`}>
+            <InstrumentPicker label={`固定标的 ${index+1}`} value={id} exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value => { setInstrumentIds(instrumentIds.split(/[\s,，]+/).filter(Boolean).map((item,i)=>i===index?value:item).join("\n")); setDirty(true); resetAdmission(); }}/>
+            <button type="button" className="qfb-remove" aria-label={`移除固定标的 ${index+1}`} onClick={()=>{setInstrumentIds(instrumentIds.split(/[\s,，]+/).filter(Boolean).filter((_,i)=>i!==index).join("\n"));setDirty(true);resetAdmission();}}><X size={16}/></button>
+          </div>)}
+          <InstrumentPicker label="添加固定标的" value="" exclude={instrumentIds.split(/[\s,，]+/).filter(Boolean)} onChange={value=>{setInstrumentIds(current=>[...current.split(/[\s,，]+/).filter(Boolean),value].join("\n"));setDirty(true);resetAdmission();}}/>
+          <small>可按名称或代码搜索多个标的。历史数据和交易规则将在运行检查时验证。</small>
+        </div>
         <div>
           交易日历：
           {["SSE", "SZSE"].map((exchange) => (
@@ -518,67 +527,50 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
         </div>
         <label>
           策略查询价格口径
-          <select value={priceBasis} onChange={(event) => { setPriceBasis(event.target.value as PriceBasis); resetAdmission(); }}>
+          <Select value={priceBasis} onChange={(event) => { setPriceBasis(event.target.value as PriceBasis); resetAdmission(); }}>
             <option value="raw">原始价（raw）</option>
             <option value="qfq">前复权（qfq）</option>
             <option value="hfq">后复权（hfq）</option>
-          </select>
+          </Select>
         </label>
       </fieldset>
 
       <fieldset disabled={busy || loading} hidden={step !== 1}>
         <legend>初始持仓</legend>
-        {positions.map((position, index) => (
-          <div key={index}>
-            <label>
-              标的 UUID
-              <input value={position.instrument_id} onChange={(event) => { setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, instrument_id: event.target.value } : item)); resetAdmission(); }} />
-            </label>
-            <label>
-              数量
-              <input inputMode="decimal" value={position.quantity} onChange={(event) => { setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, quantity: event.target.value } : item)); resetAdmission(); }} />
-            </label>
-            <label>
-              可用数量
-              <input inputMode="decimal" value={position.available_quantity} onChange={(event) => { setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, available_quantity: event.target.value } : item)); resetAdmission(); }} />
-            </label>
-            <label>
-              平均成本
-              <input inputMode="decimal" value={position.average_price} onChange={(event) => { setPositions((current) => current.map((item, itemIndex) => itemIndex === index ? { ...item, average_price: event.target.value } : item)); resetAdmission(); }} />
-            </label>
-            <button type="button" onClick={() => { setPositions((current) => current.filter((_, itemIndex) => itemIndex !== index)); resetAdmission(); }}>
-              删除持仓
-            </button>
-          </div>
-        ))}
-        <button type="button" onClick={() => { setPositions((current) => [...current, emptyPosition()]); resetAdmission(); }}>
-          添加初始持仓
-        </button>
+        <div className="qfb-position-list">
+          {!positions.length && <p className="qfb-position-empty">暂无初始持仓。若从现金开始回测，可保持为空。</p>}
+          {positions.map((position,index) => <section className="qfb-position-card" key={index}>
+            <header><h4>持仓 {index+1}</h4><button type="button" className="qfb-remove" aria-label={`删除持仓 ${index+1}`} onClick={()=>{setPositions(current=>current.filter((_,i)=>i!==index));setDirty(true);resetAdmission();}}><Trash2 size={15}/>移除</button></header>
+            <label className="qfb-position-instrument">标的<InstrumentPicker label={`持仓标的 ${index+1}`} value={position.instrument_id} exclude={positions.map(p=>p.instrument_id)} onChange={value=>{setPositions(current=>current.map((item,i)=>i===index?{...item,instrument_id:value}:item));setDirty(true);resetAdmission();}}/></label>
+            <div className="qfb-position-values">{([['quantity','持仓数量'],['available_quantity','可用数量'],['average_price','平均成本（元）']] as const).map(([field,label])=><label key={field}>{label}<input inputMode="decimal" aria-label={`${label} ${index+1}`} value={position[field]} onChange={event=>{setPositions(current=>current.map((item,i)=>i===index?{...item,[field]:event.target.value}:item));resetAdmission();}}/></label>)}</div>
+          </section>)}
+          <button type="button" className="qfb-add-position" onClick={()=>{setPositions(current=>[...current,emptyPosition()]);setDirty(true);resetAdmission();}}><Plus size={16}/>添加初始持仓</button>
+        </div>
       </fieldset>
 
       <fieldset disabled={busy || loading} hidden={step !== 1}>
         <legend>账户与执行</legend>
         <label>
           回测账户
-          <select value={accountProfileId} onChange={(event) => { setAccountProfileId(event.target.value); resetAdmission(); }}>
+          <Select value={accountProfileId} onChange={(event) => { setAccountProfileId(event.target.value); resetAdmission(); }}>
             <option value="">请选择账户</option>
             {accounts.map((account) => (
               <option key={account.id} value={account.id} disabled={account.status !== "active"}>
                 {account.name}（v{account.version} · 费用 v{account.fee_schedule_version}）
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         <label>
           滑点模型
-          <select value={slippageIdentity} onChange={(event) => selectSlippage(event.target.value)}>
+          <Select value={slippageIdentity} onChange={(event) => selectSlippage(event.target.value)}>
             <option value="">请选择滑点模型</option>
             {slippageModels.map((model) => (
               <option key={`${model.key}@${model.version}`} value={`${model.key}@${model.version}`}>
                 {model.display_name}
               </option>
             ))}
-          </select>
+          </Select>
         </label>
         {Object.entries(slippageProperties).map(([key, definition]) => (
           <label key={key}>
@@ -601,16 +593,16 @@ export function CreateRunDrawer({ initialStrategyId, source, onClose, onCreated 
       </fieldset>
 
       <fieldset disabled={busy || loading} hidden={step !== 1}><legend>账户版本与分析口径</legend>
-        <label>费用方案<select value={feeIdentity} onChange={event => { setFeeIdentity(event.target.value); resetAdmission(); }}>
+        <label>费用方案<Select value={feeIdentity} onChange={event => { setFeeIdentity(event.target.value); resetAdmission(); }}>
           <option value="">使用所选账户版本绑定的费用方案</option>
           {feeVersions.map(item => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · 版本 {item.version}</option>)}
-        </select></label>
-        <label>账户历史版本<select value={accountVersion} onChange={(event) => { setAccountVersion(event.target.value); resetAdmission(); }}><option value="">请选择版本</option>{accountVersions.map((item) => <option key={item.version} value={item.version} disabled={item.status !== "active"}>{item.name} · 版本 {item.version} · 费用版本 {item.fee_schedule_version}{item.status !== "active" ? "（不可用）" : ""}</option>)}</select></label>
-        <label>夏普口径<select value={sharpeMode} onChange={(event) => { setSharpeMode(event.target.value); resetAdmission(); }}><option value="sharpe_simple">不扣无风险利率</option><option value="sharpe_config_rf">冻结年化无风险利率</option><option value="sharpe_pit_rf">PIT 日利率（当前数据源未提供，仅禁用夏普）</option></select></label>
+        </Select></label>
+        <label>账户历史版本<Select value={accountVersion} onChange={(event) => { setAccountVersion(event.target.value); resetAdmission(); }}><option value="">请选择版本</option>{accountVersions.map((item) => <option key={item.version} value={item.version} disabled={item.status !== "active"}>{item.name} · 版本 {item.version} · 费用版本 {item.fee_schedule_version}{item.status !== "active" ? "（不可用）" : ""}</option>)}</Select></label>
+        <label>夏普口径<Select value={sharpeMode} onChange={(event) => { setSharpeMode(event.target.value); resetAdmission(); }}><option value="sharpe_simple">不扣无风险利率</option><option value="sharpe_config_rf">冻结年化无风险利率</option><option value="sharpe_pit_rf">PIT 日利率（当前数据源未提供，仅禁用夏普）</option></Select></label>
         {sharpeMode === "sharpe_config_rf" && <><label>年化利率<input value={riskFreeRate} onChange={(event) => { setRiskFreeRate(event.target.value); resetAdmission(); }} /></label><label>利率来源说明<input value={riskFreeNote} onChange={(event) => { setRiskFreeNote(event.target.value); resetAdmission(); }} /></label></>}
         <p>同时计算收益、年化收益、最大回撤、波动率、换手率和费用摘要。</p>
       </fieldset>
-      <fieldset disabled={busy || loading} hidden={step !== 1}><legend>系统执行配置</legend>{Object.entries(componentOptions).map(([kind, options]) => <label key={kind}>{({ data_provider: "数据来源", rule_package: "交易规则", calendar_axis_policy: "日历策略", time_axis: "时间轴", timing_policy: "运行时序", execution_model: "成交模型", decision_interpreter: "决策解释", accounting_policy: "账户会计", corporate_action_timing: "公司行动时序" } as Record<string, string>)[kind] || "执行组件"}<select value={`${componentSelections[kind]?.key}@${componentSelections[kind]?.version}`} onChange={(event) => { const item = options.find((option) => `${option.key}@${option.version}` === event.target.value)!; setComponentSelections((current) => ({ ...current, [kind]: { key: item.key, version: item.version, parameters: item.parameters } })); resetAdmission(); }}>{options.map((item) => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · v{item.version}</option>)}</select></label>)}</fieldset>
+      <fieldset disabled={busy || loading} hidden={step !== 1}><legend>系统执行配置</legend>{Object.entries(componentOptions).map(([kind, options]) => <label key={kind}>{({ data_provider: "数据来源", rule_package: "交易规则", calendar_axis_policy: "日历策略", time_axis: "时间轴", timing_policy: "运行时序", execution_model: "成交模型", decision_interpreter: "决策解释", accounting_policy: "账户会计", corporate_action_timing: "公司行动时序" } as Record<string, string>)[kind] || "执行组件"}<Select value={`${componentSelections[kind]?.key}@${componentSelections[kind]?.version}`} onChange={(event) => { const item = options.find((option) => `${option.key}@${option.version}` === event.target.value)!; setComponentSelections((current) => ({ ...current, [kind]: { key: item.key, version: item.version, parameters: item.parameters } })); resetAdmission(); }}>{options.map((item) => <option key={`${item.key}@${item.version}`} value={`${item.key}@${item.version}`}>{item.display_name} · v{item.version}</option>)}</Select></label>)}</fieldset>
 
       {step === 2 && <section className="qfb-check">
         <h3>运行配置确认</h3><dl><dt>策略版本</dt><dd>{strategies.find(s => s.id === strategyId)?.name} · 版本 {revisions.find(r => r.id === revisionId)?.revision_number}</dd><dt>回测区间</dt><dd>{startDate} — {endDate}</dd><dt>初始资金</dt><dd>{initialCash} CNY</dd><dt>回测账户</dt><dd>{accounts.find(a => a.id === accountProfileId)?.name || "账户不可用"} · v{accountVersion}</dd></dl>

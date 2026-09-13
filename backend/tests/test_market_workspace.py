@@ -93,6 +93,19 @@ class MarketWorkspaceTest(unittest.TestCase):
     def detail(self, day):
         return get_trading_calendar_day(self.exchange, day, self.session)
 
+    def test_picker_returns_persisted_identity_and_filters_without_cross_source_leaks(self):
+        first = self.etf("510001.SH", csname="沪深300ETF")
+        self.etf("510002.SH", csname="其他ETF")
+        self.etf("510003.SH", etf_id=first.etf_id, source=self.source + "x")
+        page = self.query(instrument_id=first.etf_id)
+        self.assertEqual(page.total, 1)
+        self.assertEqual(page.items[0].instrument_id, first.etf_id)
+        wire = page.model_dump(mode="json")
+        self.assertEqual(wire["items"][0]["instrument_id"], str(first.etf_id))
+        self.assertNotIn("etf_id", wire["items"][0])
+        self.assertEqual(self.query(instrument_id=first.etf_id, keyword="不存在").total, 0)
+        self.assertEqual(self.query(instrument_id=uuid4()).total, 0)
+
     def test_search_matches_index_manager_and_existing_name_fields(self):
         self.etf("510001.SH", csname="基金简称", extname="扩展名称", cname="基金完整名称",
                  index_name="红利质量", index_code="CSI.DIV", mgr_name="测试管理人")
