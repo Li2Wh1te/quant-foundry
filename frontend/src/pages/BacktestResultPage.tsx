@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { ArrowLeft, Copy, Download, RefreshCw, X } from "lucide-react";
 import { fetchBacktestAnalysisSummary, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, type WorkbenchRun } from "../api/backtestRuns";
 import { listStrategyRevisions } from "../api/strategies";
-import { EvidenceTable } from "../components/BacktestReport";
+import { EvidenceTable } from "../components/EvidenceTable";
 import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
 import { ResultChart } from "./backtests/ResultChart";
 import { ResultTables } from "./backtests/ResultTables";

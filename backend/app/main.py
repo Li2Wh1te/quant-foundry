@@ -26,7 +26,6 @@ from app.backtesting.result_router import (
 )
 from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session, get_engine
-from app.logging.router import router as log_router
 from app.overview.router import router as overview_router
 from app.scheduling.router import router as scheduling_router
 from app.scheduling.runtime import SchedulerRuntime
@@ -71,7 +70,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.middleware("http")(log_request)
 
     protected_router = APIRouter(dependencies=[Depends(require_api_token)])
-    protected_router.include_router(log_router)
     protected_router.include_router(overview_router)
     protected_router.include_router(scheduling_router)
     protected_router.include_router(data_ingestion_router)
@@ -95,10 +93,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
     def verify_api_token() -> Response:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-
-    @protected_router.get("/api")
-    def read_root() -> dict[str, str]:
-        return {"message": "Hello World"}
 
     @protected_router.get("/api/system/version")
     def read_system_version() -> dict[str, str]:

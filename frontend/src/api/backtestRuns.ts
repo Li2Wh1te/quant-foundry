@@ -190,8 +190,6 @@ function runQuery(filters: BacktestRunFilters, cursor?: string): string {
   if (cursor) query.set("cursor", cursor);
   return query.size ? `?${query}` : "";
 }
-export const listBacktestRuns = (signal?: AbortSignal, strategyId?: string, filters: BacktestRunFilters = {}): Promise<BacktestRunListResponse> =>
-  request((strategyId ? `/api/admin/backtest-runs/strategies/${encodeURIComponent(strategyId)}/backtests` : "/api/admin/backtest-runs") + runQuery(filters), {}, signal) as Promise<BacktestRunListResponse>;
 export const fetchStrategyBacktestWorkspace = (strategyId: string, signal?: AbortSignal, cursor?: string, filters: BacktestRunFilters = {}): Promise<StrategyBacktestWorkspace> =>
   request(`/api/admin/strategies/${encodeURIComponent(strategyId)}/backtests${runQuery(filters, cursor)}`, {}, signal) as Promise<StrategyBacktestWorkspace>;
 export const createBacktestRun=(payload:BacktestRunCreateInput, idempotencyKey?: string)=>{
@@ -200,7 +198,6 @@ export const createBacktestRun=(payload:BacktestRunCreateInput, idempotencyKey?:
 };
 export const getBacktestRun=(id:string, signal?: AbortSignal)=>request(`/api/admin/backtest-runs/${id}`, {}, signal) as Promise<BacktestRun>;
 export const cancelBacktestRun=(id:string)=>request(`/api/admin/backtest-runs/${id}/cancel`,{method:"POST"});
-export const compareBacktestRuns=(run_ids:string[])=>request(`/api/admin/backtest-runs/compare`,{method:"POST",body:JSON.stringify({run_ids})});
 
 export async function fetchBacktestResult<T = Record<string, unknown>>(runId: string, kind: string, cursor?: string, signal?: AbortSignal, filters: Record<string, string> = {}): Promise<BacktestResultPage<T>> {
   const params = new URLSearchParams({ limit: "100", ...filters });

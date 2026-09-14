@@ -1,0 +1,14 @@
+/* Removed destinations must not survive in menus, shortcuts or old page bundles. */
+const assert=require('node:assert/strict');const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
+(async()=>{const browser=await chromium.connectOverCDP(process.env.CDP_URL||'http://127.0.0.1:9421');const context=await browser.newContext({viewport:{width:1440,height:1000}});await context.addInitScript(()=>sessionStorage.setItem('quant-foundry.api-token','navigation-fixture'));const page=await context.newPage(),requests=[],errors=[];page.on('pageerror',e=>errors.push(e.message));
+await context.route(url=>url.pathname.startsWith('/api/'),async route=>{const path=new URL(route.request().url()).pathname;requests.push(path);const auth=path==='/api/auth/verify',version=path==='/api/system/version',workspace=path.endsWith('/workspace');await route.fulfill({status:auth?204:version||workspace?200:503,contentType:'application/json',body:auth?'':JSON.stringify(version?{version:'0.2.0'}:workspace?{items:[],total:0,has_more:false}:{detail:'isolated unavailable data fixture'})})});
+const base=process.env.FRONTEND_URL||'http://127.0.0.1:5174';try{
+ await page.goto(base+'/admin/backtest-compare');await page.getByRole('heading',{name:'回测对比',exact:true}).waitFor();
+ for(const name of ['运行日志','日线行情','API 文档'])assert.equal(await page.getByRole('link',{name,exact:true}).count(),0);
+ await page.getByRole('button',{name:'快速跳转',exact:true}).click();for(const name of ['运行日志','日线行情','API 文档','回测预检']){await page.getByRole('dialog').getByRole('combobox').fill(name);await page.getByText('没有匹配的页面',{exact:true}).waitFor()}
+ await page.getByRole('button',{name:'关闭快速跳转'}).click();await page.screenshot({path:'/tmp/qf-clean-navigation-desktop.png'});
+ for(const old of ['/admin/logs','/admin/data/daily-quotes','/admin/backtest-preflight']){await page.goto(base+old);await page.waitForURL(base+(old.includes('preflight')?'/admin/backtest-runs':'/admin'));await page.locator('.qfo-root').waitFor();assert.equal(await page.locator('.admin-layout,.log-page,.collection-page').count(),0)}
+ await page.goto(base+'/admin/backtest-compare');await page.setViewportSize({width:390,height:844});await page.waitForTimeout(350);await page.screenshot({path:'/tmp/qf-clean-navigation-mobile.png'});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth+1),false);
+ await page.getByRole('button',{name:'退出登录',exact:true}).click();await page.waitForURL(base+'/login');assert.equal(await page.evaluate(()=>sessionStorage.getItem('quant-foundry.api-token')),null);
+ assert.equal(requests.some(p=>p.startsWith('/api/admin/logs')),false);assert.deepEqual(errors,[]);console.log('PASS: removed menu/search destinations, retired route fallback, preflight redirect, retained logout, mobile, no retired API calls');
+}finally{await context.close();await browser.close()}})().catch(e=>{console.error(e);process.exitCode=1});

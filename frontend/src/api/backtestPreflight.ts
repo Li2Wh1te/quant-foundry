@@ -1,7 +1,5 @@
 import { readApiToken } from "../auth/tokenStorage";
 
-export type PreflightSection = "calendar" | "sessions";
-
 export interface PreflightIssue {
   code: string;
   title: string;
@@ -25,7 +23,7 @@ export interface BacktestPreflightItem {
   status: string;
   report_hash: string;
   hash_schema_version: number;
-  section?: PreflightSection | null;
+  section?: "calendar" | "sessions" | null;
   capabilities?: Record<string, unknown> | null;
   calendar_summary?: Record<string, unknown> | null;
   session_summary?: Record<string, unknown> | null;
@@ -50,65 +48,6 @@ export interface BacktestPreflightItem {
   failure_phase?: string | null;
   title?: string;
   message?: string;
-}
-
-/**
- * The deliberately small set of revision evidence that may be compared
- * between runs.  Keep this projection explicit: report hashes, raw source
- * revision maps, and unrelated capability details are not functional
- * revision fields and must never leak into the comparison result.
- */
-export interface DataRevisionComparisonFields {
-  revision_vector_hash: unknown;
-  source: unknown;
-  accepted_at_range: unknown;
-  affected_range: unknown;
-  non_strict_pit_capabilities: unknown;
-  non_strict_pit: unknown;
-}
-
-function revisionCapability(item: BacktestPreflightItem): Record<string, unknown> | null {
-  const summary = item.data_revision_summary;
-  if (!summary || typeof summary !== "object") return null;
-  const capabilities = summary.capabilities;
-  if (!capabilities || typeof capabilities !== "object") return null;
-  const bars = (capabilities as Record<string, unknown>).bars;
-  return bars && typeof bars === "object" ? bars as Record<string, unknown> : null;
-}
-
-export function compareDataRevisionFields(left: BacktestPreflightItem, right: BacktestPreflightItem) {
-  const leftBars = revisionCapability(left);
-  const rightBars = revisionCapability(right);
-  const leftFields: DataRevisionComparisonFields = {
-    revision_vector_hash: left.data_revision_summary?.revision_vector_hash ?? leftBars?.revision_vector_hash ?? null,
-    source: leftBars?.source ?? null,
-    accepted_at_range: leftBars?.accepted_at_range ?? null,
-    affected_range: leftBars?.affected_range ?? null,
-    non_strict_pit_capabilities: left.non_strict_pit_capabilities ?? null,
-    non_strict_pit: left.non_strict_pit ?? null,
-  };
-  const rightFields: DataRevisionComparisonFields = {
-    revision_vector_hash: right.data_revision_summary?.revision_vector_hash ?? rightBars?.revision_vector_hash ?? null,
-    source: rightBars?.source ?? null,
-    accepted_at_range: rightBars?.accepted_at_range ?? null,
-    affected_range: rightBars?.affected_range ?? null,
-    non_strict_pit_capabilities: right.non_strict_pit_capabilities ?? null,
-    non_strict_pit: right.non_strict_pit ?? null,
-  };
-  const fields = Object.keys(leftFields) as (keyof DataRevisionComparisonFields)[];
-  return fields.reduce<Record<string, { left: unknown; right: unknown }>>((diff, field) => {
-    const a = leftFields[field];
-    const b = rightFields[field];
-    if (JSON.stringify(a) !== JSON.stringify(b)) diff[field] = { left: a, right: b };
-    return diff;
-  }, {});
-}
-
-export interface BacktestPreflightPage {
-  items: BacktestPreflightItem[];
-  next_cursor: string | null;
-  has_more: boolean;
-  truncated: boolean;
 }
 
 export class BacktestPreflightError extends Error {
@@ -149,37 +88,4 @@ async function checkResponse(response: Response): Promise<void> {
     // Preserve the stable HTTP fallback for non-JSON responses.
   }
   throw new BacktestPreflightError(message, response.status);
-}
-
-/**
- * Fetch the canonical persisted preflight resource.  The old `/backtests`
- * alias is intentionally not used: it is only a server-side migration
- * redirect and is sunset in API version 4.
- */
-export async function fetchBacktestPreflight(
-  runId: string,
-  options: { section?: PreflightSection; limit?: number; cursor?: string } = {},
-  signal?: AbortSignal
-): Promise<BacktestPreflightPage> {
-  const params = new URLSearchParams();
-  if (options.section) params.set("section", options.section);
-  if (options.limit !== undefined) params.set("limit", String(options.limit));
-  if (options.cursor) params.set("cursor", options.cursor);
-  const query = params.toString();
-  const url = `/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/data-preflight${query ? `?${query}` : ""}`;
-  const response = await fetch(url, { headers: headers(), signal });
-  await checkResponse(response);
-  return response.json() as Promise<BacktestPreflightPage>;
-}
-
-/** Fetch persisted formal-run comparison from the canonical compare route. */
-export async function compareBacktestRuns(runIds: string[], signal?: AbortSignal): Promise<unknown> {
-  const response = await fetch("/api/admin/backtests/compare", {
-    method: "POST",
-    headers: { ...headers(), "Content-Type": "application/json" },
-    body: JSON.stringify({ run_ids: runIds }),
-    signal,
-  });
-  await checkResponse(response);
-  return response.json();
 }

@@ -34,7 +34,6 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.log_level, "INFO")
         self.assertEqual(settings.log_retention_days, 30)
         self.assertEqual(settings.log_queue_size, 10_000)
-        self.assertEqual(settings.log_query_max_files, 32)
         self.assertTrue(settings.scheduler_enabled)
         self.assertEqual(settings.scheduler_max_workers, 4)
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 500)
@@ -71,7 +70,6 @@ class SettingsTestCase(unittest.TestCase):
             "QF_LOG_LEVEL": "WARNING",
             "QF_LOG_RETENTION_DAYS": "14",
             "QF_LOG_QUEUE_SIZE": "5000",
-            "QF_LOG_QUERY_MAX_FILES": "16",
             "QF_SCHEDULER_ENABLED": "false",
             "QF_SCHEDULER_MAX_WORKERS": "8",
             "QF_SCHEDULER_DISPATCH_INTERVAL_MS": "1000",
@@ -111,7 +109,6 @@ class SettingsTestCase(unittest.TestCase):
         self.assertEqual(settings.log_level, "WARNING")
         self.assertEqual(settings.log_retention_days, 14)
         self.assertEqual(settings.log_queue_size, 5000)
-        self.assertEqual(settings.log_query_max_files, 16)
         self.assertFalse(settings.scheduler_enabled)
         self.assertEqual(settings.scheduler_max_workers, 8)
         self.assertEqual(settings.scheduler_dispatch_interval_ms, 1000)
@@ -134,6 +131,14 @@ class SettingsTestCase(unittest.TestCase):
             settings.database_url.render_as_string(hide_password=False),
             "postgresql+psycopg://app:secret@db:5433/quant_test",
         )
+
+    def test_retired_log_query_setting_does_not_break_existing_environment(self) -> None:
+        # Existing installations may retain this obsolete non-secret key.
+        # Settings must ignore it without changing active logging behavior.
+        with patch.dict(os.environ, {"QF_LOG_QUERY_MAX_FILES": "16"}, clear=True):
+            settings = Settings(api_token=API_TOKEN, cursor_signing_key=CURSOR_SIGNING_KEY, database_password="test-secret", _env_file=None)
+        self.assertEqual(settings.log_retention_days, 30)
+        self.assertFalse(hasattr(settings, "log_query_max_files"))
 
     def test_invalid_environment_is_rejected(self) -> None:
         with patch.dict(

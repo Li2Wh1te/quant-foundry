@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { Select } from "../components/controls/Select";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Plus, RefreshCw, Search, X } from "lucide-react";
-import { FOREGROUND_POLL_INTERVAL_MS, cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
+import { FOREGROUND_POLLING_PROTOCOL, FOREGROUND_POLL_INTERVAL_MS, cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
 import { comparisonUrl } from "./backtests/comparisonData";
 import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
 import { RunPreview, dateText } from "./backtests/RunPreview";
@@ -107,7 +107,7 @@ export function BacktestRunsPage() {
     try { copyConfiguration(selected); if (!selected.strategy_id) throw new Error("无法定位原策略，请创建新的回测。"); setDrawer({ source: selected, strategyId: selected.strategy_id }); }
     catch (caught) { setError(caught instanceof Error ? caught.message : "无法复制配置。"); }
   }
-  return <div className="qfb-page" data-polling-protocol="foreground_polling@1">
+  return <div className="qfb-page" data-polling-protocol={FOREGROUND_POLLING_PROTOCOL}>
     <div className="qfb-heading"><div><div className="qfb-eyebrow">BACKTEST WORKBENCH</div><h1>回测工作台</h1><p>创建回测、跟踪运行，并查看真实策略表现。</p></div><div className="qfb-actions">
       <button onClick={() => void refresh()} disabled={loading}><RefreshCw size={16} />刷新</button>
       <button onClick={() => setCompareMode(value => !value)}>{compareMode ? "退出选择" : "选择对比"}</button>

@@ -1,4 +1,4 @@
-import { BookOpen, ChartNoAxesColumn, Clock3, Code2, Database, FileSearch, LayoutDashboard, LineChart, LogOut, Menu, Search, WalletCards, X } from "lucide-react";
+import { BookOpen, ChartNoAxesColumn, Clock3, Code2, Database, LayoutDashboard, LogOut, Menu, Search, WalletCards, X } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
@@ -20,20 +20,15 @@ const groups = [
   ] }
 ];
 const toolItems = [
-  { label: "运行日志", to: "/admin/logs", icon: FileSearch },
-  { label: "日线行情", to: "/admin/data/daily-quotes", icon: LineChart },
-  { label: "API 文档", to: "/docs", icon: Code2 },
   { label: "退出登录", to: "logout", icon: LogOut }
 ];
 const destinations = [
   ...groups.flatMap(group => group.items.filter(item => item.to).map(item => ({ ...item, group: group.label }))),
   { label: "交易日历", to: "/admin/data/trading-calendar", group: "数据资产" },
-  { label: "回测预检", to: "/admin/backtest-preflight", group: "策略研究" },
-  ...toolItems.map(item => ({ ...item, group: "运行与工具" }))
+  ...toolItems.map(item => ({ ...item, group: "账户操作" }))
 ];
 
-/** Reviewed overview, source and collection-task pages share this shell. Legacy routes retain their
- * existing theme setting until each page is reviewed and accepted separately. */
+/** All accepted workspaces share this shell and its navigation state. */
 export function OverviewShell({ children, title = "数据运营总览", section = "WORKBENCH", className = "", workspace = false, beforeNavigate }: { children: React.ReactNode; title?: string; section?: string; className?: string; workspace?: boolean; beforeNavigate?: () => boolean }) {
   const { logout } = useAuth();
   const navigate = useNavigate();
@@ -82,7 +77,6 @@ export function OverviewShell({ children, title = "数据运营总览", section 
     if (to === "logout" && beforeNavigate && !beforeNavigate()) return;
     close();
     if (to === "logout") { logout(); navigate("/login", { replace: true }); }
-    else if (to === "/docs") window.open("/docs", "_blank", "noopener,noreferrer");
     else navigate(to);
   }
   function navItem(item: typeof toolItems[number], tool = false) {
@@ -93,7 +87,6 @@ export function OverviewShell({ children, title = "数据运营总览", section 
     const content = <><Icon aria-hidden="true" /><span>{item.label}</span></>;
     if (!item.to) return <button key={item.label} type="button" className={className} aria-disabled="true" aria-label={label} title={label}>{content}</button>;
     if (item.to === "logout") return <button key={item.label} type="button" className={className} aria-label={label} title={label} onClick={() => go(item.to)}>{content}</button>;
-    if (item.to === "/docs") return <a key={item.label} className={className} aria-label={label} title={label} href="/docs" target="_blank" rel="noreferrer">{content}</a>;
     return <Link key={item.label} className={className} aria-label={label} title={label} to={item.to} aria-current={active ? "page" : undefined}>{content}</Link>;
   }
   return <div className={`qfo-root ${className}`}>
@@ -101,7 +94,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
       <aside className="qfo-sidebar" aria-label="工作区侧栏">
         <div className="qfo-brand"><div className="qfo-mark">QF</div><div className="qfo-brand-copy"><div className="qfo-brand-name">Quant Foundry</div><div className="qfo-brand-meta">RESEARCH SYSTEM</div></div></div>
         <nav className="qfo-nav" id="overview-navigation" aria-label="主导航">{groups.map(group => <div className="qfo-nav-group" key={group.label}><div className="qfo-nav-label">{group.label}</div>{group.items.map(item => navItem(item))}</div>)}</nav>
-        <div className="qfo-side-bottom"><nav className="qfo-nav-group" aria-label="运行与工具"><div className="qfo-nav-label">运行与工具</div>{toolItems.map(item => navItem(item, true))}</nav><div className="qfo-build">BUILD · v{FRONTEND_VERSION}</div></div>
+        <div className="qfo-side-bottom"><nav className="qfo-nav-group" aria-label="账户操作">{toolItems.map(item => navItem(item, true))}</nav><div className="qfo-build">BUILD · v{FRONTEND_VERSION}</div></div>
       </aside>
       <section className="qfo-shell">
         <header className="qfo-topbar">
