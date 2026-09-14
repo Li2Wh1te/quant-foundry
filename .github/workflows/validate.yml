@@ -80,4 +80,31 @@ jobs:
       - name: Verify backend container Parquet runtime
         run: |
           docker build --file backend/Dockerfile --tag quant-foundry-backend:ci .
-          docker run --rm --entrypoint python quant-foundry-backend:ci -c "import tempfile; import pyarrow as pa; import pyarrow.parquet as pq; f = tempfile.TemporaryFile(); pq.write_table(pa.table({'value': [1]}), f); f.seek(0); assert pq.read_table(f).to_pydict() == {'value': [1]}"
+          docker run --rm -i --entrypoint python quant-foundry-backend:ci - <<'PYTHON'
+          import json
+          import tempfile
+          from datetime import datetime, timezone
+          from decimal import Decimal
+          from pathlib import Path
+          import pyarrow as pa
+          import pyarrow.parquet as pq
+          from app.data_ingestion.tonghuashun.dump_service import validate_file
+
+          # Exercise the production streaming validator, including resource cleanup.
+          price = Decimal("1.234567890123456789")
+          row = dict(thscode="000001.SZ", currency="CNY", interval="1d", adjusted="none",
+                     date_ms=1757520000000, open_price=price, high_price=price,
+                     low_price=price, close_price=price, volume=100, turnover=Decimal("100.2"))
+          with tempfile.TemporaryDirectory() as directory:
+              path = Path(directory) / "sample.parquet"
+              pq.write_table(pa.Table.from_pylist([row]), path)
+              disk, metadata = validate_file(path, "stock_recent_dump", directory,
+                                             datetime(2026, 9, 14, tzinfo=timezone.utc))
+              try:
+                  assert metadata["rows"] == 1
+                  stored = json.loads(disk.execute("SELECT payload FROM records").fetchone()[0],
+                                      parse_float=Decimal)
+                  assert stored == row
+              finally:
+                  disk.close()
+          PYTHON

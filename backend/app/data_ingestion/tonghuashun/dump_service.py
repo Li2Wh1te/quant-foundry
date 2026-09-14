@@ -107,50 +107,51 @@ def validate_file(path, dataset, directory, now):
     disk = sqlite3.connect(str(Path(directory)/'rows.sqlite'))
     disk.execute('CREATE TABLE records (code TEXT, day INTEGER, payload TEXT, PRIMARY KEY(code,day))')
     try:
-        file = pq.ParquetFile(path)
-        count = file.metadata.num_rows
-        if not 0 < count <= MAX_ROWS:
-            raise CollectionError('批量文件为空或超过记录数上限。')
-        required = {'thscode','currency',date_key}
-        required |= ({'interval','adjusted','open_price','high_price','low_price','close_price','volume','turnover'}
-            if date_key=='date_ms' else {'ticker','dividend_per_share','per_share_bonus','allotment_ratio','allotment_price'})
-        if len(file.schema_arrow.names) != len(set(file.schema_arrow.names)) or not required <= set(file.schema_arrow.names):
-            raise CollectionError('Parquet 字段与官方日线或复权事件结构不一致。')
-        expanded, observed_min, observed_max = 0, None, None
-        for batch in file.iter_batches(batch_size=4096):
-            payloads = []
-            for row in batch.to_pylist():
-                code = row.get('thscode')
-                if not isinstance(code,str) or not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code) or row.get('currency')!='CNY':
-                    raise CollectionError('批量文件包含非法代码或币种。')
-                day = provider_date(row.get(date_key))
-                if day > now.astimezone(SHANGHAI).date():
-                    raise CollectionError('批量文件包含未来日期。')
-                if row[date_key] != int(datetime.combine(day,datetime.min.time(),SHANGHAI).timestamp()*1000):
-                    raise CollectionError('批量文件日期不是上海时区零点。')
-                # Arrow decimals retain precision. Binary floats retain their
-                # shortest round-trip representation, without invented digits.
-                row = json.loads(exact_json(row),parse_float=Decimal)
-                if date_key=='date_ms':
-                    if row['interval']!='1d' or row['adjusted']!='none':
-                        raise CollectionError('批量日线不是未复权日线口径。')
-                    validate_bars([row],day,day)
-                else:
-                    for key in ('dividend_per_share','per_share_bonus','allotment_ratio','allotment_price'):
-                        value = row[key]
-                        if value is not None and (isinstance(value,bool) or not isinstance(value,(int,Decimal)) or value<0):
-                            raise CollectionError('复权事件包含非法数值。')
-                encoded = exact_json(row)
-                expanded += len(encoded)
-                if expanded > 8*1024**3:
-                    raise CollectionError('批量文件解码后超过8GiB暂存上限。')
-                payloads.append((code,row[date_key],encoded))
-                observed_min = min(observed_min or day,day)
-                observed_max = max(observed_max or day,day)
-            disk.executemany('INSERT INTO records VALUES (?,?,?)',payloads)
-            disk.commit()
-        return disk, {'rows':count,'observed_start':observed_min.isoformat(),'observed_end':observed_max.isoformat(),
-            'columns':file.schema_arrow.names, 'numeric_encoding':'provider_decimal_or_float_roundtrip'}
+        # Keep decoding synchronous and close Arrow resources before the worker exits.
+        with pq.ParquetFile(path) as file:
+            count = file.metadata.num_rows
+            if not 0 < count <= MAX_ROWS:
+                raise CollectionError('批量文件为空或超过记录数上限。')
+            required = {'thscode','currency',date_key}
+            required |= ({'interval','adjusted','open_price','high_price','low_price','close_price','volume','turnover'}
+                if date_key=='date_ms' else {'ticker','dividend_per_share','per_share_bonus','allotment_ratio','allotment_price'})
+            if len(file.schema_arrow.names) != len(set(file.schema_arrow.names)) or not required <= set(file.schema_arrow.names):
+                raise CollectionError('Parquet 字段与官方日线或复权事件结构不一致。')
+            expanded, observed_min, observed_max = 0, None, None
+            for batch in file.iter_batches(batch_size=4096, use_threads=False):
+                payloads = []
+                for row in batch.to_pylist():
+                    code = row.get('thscode')
+                    if not isinstance(code,str) or not re.fullmatch(r'\d{6}\.(SH|SZ|BJ)',code) or row.get('currency')!='CNY':
+                        raise CollectionError('批量文件包含非法代码或币种。')
+                    day = provider_date(row.get(date_key))
+                    if day > now.astimezone(SHANGHAI).date():
+                        raise CollectionError('批量文件包含未来日期。')
+                    if row[date_key] != int(datetime.combine(day,datetime.min.time(),SHANGHAI).timestamp()*1000):
+                        raise CollectionError('批量文件日期不是上海时区零点。')
+                    # Arrow decimals retain precision. Binary floats retain their
+                    # shortest round-trip representation, without invented digits.
+                    row = json.loads(exact_json(row),parse_float=Decimal)
+                    if date_key=='date_ms':
+                        if row['interval']!='1d' or row['adjusted']!='none':
+                            raise CollectionError('批量日线不是未复权日线口径。')
+                        validate_bars([row],day,day)
+                    else:
+                        for key in ('dividend_per_share','per_share_bonus','allotment_ratio','allotment_price'):
+                            value = row[key]
+                            if value is not None and (isinstance(value,bool) or not isinstance(value,(int,Decimal)) or value<0):
+                                raise CollectionError('复权事件包含非法数值。')
+                    encoded = exact_json(row)
+                    expanded += len(encoded)
+                    if expanded > 8*1024**3:
+                        raise CollectionError('批量文件解码后超过8GiB暂存上限。')
+                    payloads.append((code,row[date_key],encoded))
+                    observed_min = min(observed_min or day,day)
+                    observed_max = max(observed_max or day,day)
+                disk.executemany('INSERT INTO records VALUES (?,?,?)',payloads)
+                disk.commit()
+            return disk, {'rows':count,'observed_start':observed_min.isoformat(),'observed_end':observed_max.isoformat(),
+                'columns':file.schema_arrow.names, 'numeric_encoding':'provider_decimal_or_float_roundtrip'}
     except CollectionError:
         disk.close()
         raise
