@@ -30,7 +30,7 @@
 > [!NOTE]
 > Quant Foundry is in early development. It currently integrates Tushare Pro and provides ETF data
 > management, a Python strategy workbench, and local daily ETF backtesting. Tonghuashun connection
-> management is available; its ingestion tasks are not implemented yet. A-share stocks, futures,
+> management and independent fund, A-share and index ingestion are available. A-share backtesting, futures,
 > paper trading, risk controls, and live execution are planned.
 > This README describes its code branch; consult the matching README when using an older version.
 
@@ -199,10 +199,40 @@ Tonghuashun (同花顺) has independent API URL (default `https://fuyao.aicubes.
 settings on the same page, using the existing encrypted database storage without additional
 environment credentials. Apply database migrations and restart the service when upgrading.
 Its connection test reads one ETF catalog entry; this does not prove access to all endpoints or
-local data coverage. Tonghuashun has no ingestion tasks yet and cannot supply local backtest bars.
+local data coverage. Tonghuashun collections remain source-local and cannot yet supply local backtest bars.
 The authenticated `GET /api/data-sources/tonghuashun/interfaces` endpoint lists 94 documented
-interfaces, explicitly marked as unverified and without ingestion adapters; listing them does
+interfaces, with separate implementation and live-verification status; listing them does
 not start collection.
+
+Milestone two registers 30 independently configurable collection tasks covering ticker catalogs,
+fund profiles/companies/managers, ETF forward-adjusted bars, NAV, dividends, portfolios, holders,
+fund financials, A-share raw bars/actions/statements/indicators/valuations, the trading calendar,
+and index catalogs/bars/current constituents/quotes. Tasks are not automatically created or enabled.
+After migration, collect ticker catalogs first, then fund profiles before related company/manager
+records. Verify a few subjects in the deployment environment before enabling full-market schedules.
+
+Authenticated inspection lives under `/api/admin/data-collections/tonghuashun`: `/datasets`
+includes scheduler templates; `/tickers` and `/states` expose inventory and progress;
+`/{dataset}/{subject}` reads the latest saved default scope, `/{dataset}/{subject}/versions`
+lists versions, and `/versions/{version_id}` pins a read to an immutable version. Explicit date
+backfills have independent scope heads discoverable through `/states`. Decimal values are
+returned as strings; provider fields, units, nulls and disclosure dates are preserved.
+Time-series versions use bounded delta chains with periodic full anchors rather than copying
+the complete history daily. Fixed-version reads reconstruct and verify the content digest.
+
+Templates check bounded batches every ten minutes without refetching completed subjects. Daily
+cutoffs are 20:00 Shanghai time, 20:30 for bars, and 22:30 plus a 09:00 follow-up for NAV.
+Reference resources refresh weekly. ETF history reconciles from Sunday 03:00; other historical
+collections reconcile monthly from the first day at 03:00. Bootstrap jobs use separate lower
+priority schedules. A completed batch is not proof of complete market coverage. Missing reports
+remain retryable, failed refreshes retain saved versions, and forward-adjustment changes require
+a complete subject refetch. Current index constituents are never backdated. NAV reconciliation
+is limited to the provider's rolling five-year window; older versions remain separately readable.
+
+A-share bars currently use per-symbol REST requests; the Parquet bulk-import optimization remains
+unimplemented and is labelled accordingly in the interface catalog. Live provider acceptance is
+performed after deployment. Tushare storage, the existing ETF market page and backtesting adapters
+retain their original source; cross-source identity and unified data APIs are deferred.
 
 ### 2. Ingest and inspect local data
 
@@ -266,7 +296,7 @@ These are development directions, not promised dates or a fixed delivery sequenc
 
 | Direction | Current state | Planned work |
 | --- | --- | --- |
-| Data sources | Tushare ETF/calendar ingestion; Tonghuashun connection management, interface catalog and REST transport | Add Tonghuashun ingestion adapters in stages and expand multi-source coverage |
+| Data sources | Tushare ETF/calendar ingestion; independent Tonghuashun fund/A-share/index collection and version inspection | Live acceptance, bulk import optimization, then a unified data foundation |
 | Asset coverage | ETF data management and daily backtesting are implemented | Add A-share stocks, futures, and their corresponding data and trading rules |
 | Research and backtesting | Strategy revisions, preflight, fixed-instrument runs, and result analysis are implemented | Improve data quality, adjusted research prices, dynamic instruments, and research capabilities |
 | Paper trading | Planned | Validate continuously running strategies and trading workflows |

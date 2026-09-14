@@ -1,6 +1,9 @@
 """Import SQLAlchemy model modules here so Alembic can discover them."""
 
 from app.data_sources.models import DataSourceConfig
+from app.data_ingestion.models.tonghuashun import (
+    TonghuashunTicker, TonghuashunObservation, TonghuashunCollectionState, TonghuashunRequestBudget,
+)
 from app.data_ingestion.models.etf_watchlist import EtfWatchlistEntry
 
 from app.data_ingestion.models import (
@@ -65,6 +68,7 @@ from app.backtesting.result_records import (
 
 
 __all__ = [
+    "TonghuashunTicker", "TonghuashunObservation", "TonghuashunCollectionState", "TonghuashunRequestBudget",
     "EtfWatchlistEntry",
     "DataSourceConfig",
     "DataSyncCheckpoint",

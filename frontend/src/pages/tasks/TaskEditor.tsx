@@ -4,8 +4,8 @@ import type { FormEvent } from "react";
 import { X } from "lucide-react";
 import type { DataSource } from "../../api/dataSources";
 import type { SchedulerTask, TaskPayload, TaskType } from "../../api/scheduler";
-import { cronPreview, draftFromTask, newTaskDraft, parameterFields, parameterInput, parametersTemplate,
-  payloadFromDraft, taskPatch, taskTypeLabel, validateParameters, WEEKDAYS } from "./taskDraft";
+import { cronPreview, draftFromTask, newTaskDraft, parameterFields, parameterInput, parameterOptionLabel, parametersTemplate,
+  payloadFromDraft, sourceScheduleDefaults, taskPatch, taskTypeLabel, validateParameters, WEEKDAYS } from "./taskDraft";
 import type { TaskDraft } from "./taskDraft";
 
 interface Props {
@@ -63,7 +63,7 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
   }
   function chooseType(key: string) {
     // Switching a script resets only its parameter template, never the schedule.
-    setDraft(current => ({ ...current, taskType: key, parameters: parametersTemplate(types.find(type => type.key === key)) }));
+    setDraft(current => ({ ...current, ...(!task ? sourceScheduleDefaults(key) : {}), taskType: key, parameters: parametersTemplate(types.find(type => type.key === key)) }));
     setErrors({});
   }
   const frequency = draft.scheduleKind === "cron" ? draft.cronMode : draft.scheduleKind;
@@ -92,7 +92,9 @@ export function TaskEditor({ task, types, sources, initialType, busy, error, blo
               return <div className={`qft-field${field.type === "boolean" ? " qft-wide" : ""}`} key={field.key}>
                 {field.type === "boolean" ? <label className="qft-checkbox"><input type="checkbox" checked={value === true} onChange={e => set(e.target.checked)} aria-describedby={`${id}-help`} />{field.label}</label> : <><label htmlFor={id}>{field.label}{field.required && " *"}</label>
                   {field.key === "exchange" ? <select id={id} required value={String(value ?? "")} onChange={e => set(e.target.value)} aria-describedby={`${id}-help`}><option value="">请选择交易所</option><option value="SSE">上交所（SSE）</option><option value="SZSE">深交所（SZSE）</option>{!!value && !["SSE", "SZSE"].includes(String(value)) && <option value={String(value)}>{String(value)}</option>}</select>
-                    : field.enum ? <select id={id} value={String(value ?? "")} onChange={e => set(e.target.value)}>{field.enum.map(item => <option key={String(item)} value={String(item)}>{String(item)}</option>)}</select>
+                    : field.enum ? <select id={id} value={String(value ?? "")} onChange={e => set(e.target.value)}>{field.enum.map(item => <option key={String(item)} value={String(item)}>{parameterOptionLabel(item)}</option>)}</select>
+                    : field.type === "array" && field.itemEnum ? <div id={id} role="group" aria-label={field.label} aria-describedby={`${id}-help`}>{field.itemEnum.map(item => <label className="qft-checkbox" key={String(item)}><input type="checkbox" checked={Array.isArray(value) && value.includes(item)} onChange={e => { const values = Array.isArray(value) ? value : []; set(e.target.checked ? [...values, item] : values.filter(v => v !== item)); }} />{parameterOptionLabel(item)}</label>)}</div>
+                    : field.type === "array" ? <input id={id} type="text" value={Array.isArray(value) ? value.join(",") : ""} placeholder="留空采集所有适用对象" aria-invalid={!!errors[field.key]} aria-describedby={`${id}-help`} onChange={e => { const values = e.target.value.split(/[,，]/).map(v => v.trim()); set(e.target.value.trim() ? values : null); }} />
                     : ["integer", "number", "date", "string"].includes(field.type) ? <input id={id} type={field.type === "date" ? "date" : ["integer", "number"].includes(field.type) ? "number" : "text"} required={field.required || !field.nullable && field.default !== undefined} min={field.minimum} max={field.maximum} maxLength={field.maxLength} step={field.type === "integer" ? 1 : "any"} value={parameterInput(value, field)} placeholder={field.nullable ? "留空使用默认规则" : undefined} aria-invalid={!!errors[field.key]} aria-describedby={`${id}-help`} onInput={field.type === "date" ? e => set(e.currentTarget.value || (field.nullable ? null : "")) : undefined} onChange={e => set(e.target.value === "" ? field.nullable ? null : "" : ["integer", "number"].includes(field.type) ? Number(e.target.value) : e.target.value)} />
                       : <p className="qft-help">此参数使用已有配置，当前不支持在表单中编辑。</p>}</>}
                 <small id={`${id}-help`}>{field.key === "request_interval_ms" && !field.nullable ? "每次请求之间的等待时间。" : field.help}</small>{errors[field.key] && <small role="alert" className="qft-invalid">{errors[field.key]}</small>}

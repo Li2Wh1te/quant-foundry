@@ -137,8 +137,19 @@ export function newTaskDraft(types: TaskType[]): TaskDraft {
     scheduleKind: "cron", cronExpression: "0 18 * * 0-4", timezone: "Asia/Shanghai",
     cronMode: "weekdays", cronTime: "18:00", cronWeekdays: ["0", "1", "2", "3", "4"], cronMonthDay: "1",
     intervalSeconds: "900", startAt: localDateTimeValue(), runAt: localDateTimeValue(),
-    concurrencyLimit: "1", overlapPolicy: "skip", queueLimit: "1", priority: "0"
+    concurrencyLimit: "1", overlapPolicy: "skip", queueLimit: "1", priority: "0",
+    ...sourceScheduleDefaults(selectedType?.key ?? ""),
   };
+}
+
+/** Polling schedules drain bounded batches; the collector owns daily/weekly
+ * freshness boundaries. Existing saved schedules are never rewritten here. */
+export function sourceScheduleDefaults(key: string): Partial<TaskDraft> {
+  if (!key.startsWith("data.ths.")) return {};
+  const catalog = ["data.ths.tickers", "data.ths.calendar", "data.ths.index_catalog"].includes(key);
+  return { scheduleKind: "cron", cronMode: catalog ? "daily" : "advanced",
+    cronTime: "20:00", cronExpression: catalog ? "0 20 * * *" : "*/10 * * * *",
+    timezone: "Asia/Shanghai", priority: "10" };
 }
 
 export function draftFromTask(task: SchedulerTask): TaskDraft {
@@ -179,8 +190,21 @@ export function payloadFromDraft(draft: TaskDraft): TaskPayload {
 export interface ParameterField {
   key: string; label: string; help: string; type: string; required: boolean; nullable: boolean;
   minimum?: number; maximum?: number; maxLength?: number; enum?: unknown[]; default?: unknown;
+  itemEnum?: unknown[]; minItems?: number; maxItems?: number;
+}
+const PARAMETER_OPTION_COPY: Record<string, string> = {
+  "fund-etf": "ETF", "fund-lof": "LOF", "fund-reits": "公募 REITs", "fund-otc": "场外基金",
+  "a-share": "A 股", "a-share-index": "指数与板块", incremental: "日常更新", reconcile: "历史核对", backfill: "首次回补与失败补采",
+};
+export function parameterOptionLabel(value: unknown): string {
+  return PARAMETER_OPTION_COPY[String(value)] ?? String(value);
 }
 const PARAMETER_COPY: Record<string, [string, string]> = {
+  asset_types: ["资产类型", "仅采集当前接口支持的已选类型；不同来源的数据独立保存。"],
+  subjects: ["指定标的或关联对象", "可用英文逗号分隔完整代码或公司、经理 ID；留空采集所有适用对象。"],
+  mode: ["采集方式", "日常更新会补采新增及失败对象；历史核对会复查接口可用历史。"],
+  batch_size: ["每批对象数", "每次最多处理这些对象，后续运行继续未完成范围；首次回补建议使用较低优先级并定期运行。"],
+  refresh_today: ["再次检查本期已完成对象", "用于净值补查或手动复查；已有成功版本会保留。"],
   exchange: ["交易所", "上交所使用 SSE，深交所使用 SZSE。"],
   initial_start_date: ["首次采集起始日期", "已有采集进度时，从保存的进度继续执行。"],
   request_interval_ms: ["请求间隔（毫秒）", "留空沿用数据源配置；0 表示不额外等待。"],
@@ -198,17 +222,22 @@ export function parameterFields(type?: TaskType): ParameterField[] {
   return Object.entries((schema.properties ?? {}) as Record<string, JsonSchema>).map(([key, spec]) => {
     const alternatives = (spec.anyOf ?? []) as JsonSchema[];
     const shape = alternatives.find(item => item.type !== "null") ?? spec;
+    const itemShape = shape.items as JsonSchema | undefined;
     const copy = PARAMETER_COPY[key];
     return { key, label: copy?.[0] ?? "扩展采集参数", help: copy?.[1] ?? "此参数由当前脚本定义。",
       type: shape.format === "date" ? "date" : String(shape.type ?? "unsupported"),
       required: required.includes(key), nullable: alternatives.some(item => item.type === "null"),
       minimum: shape.minimum as number | undefined, maximum: shape.maximum as number | undefined,
       maxLength: shape.maxLength as number | undefined, enum: shape.enum as unknown[] | undefined,
+      itemEnum: itemShape && Object.hasOwn(itemShape, "const") ? [itemShape.const] : itemShape?.enum as unknown[] | undefined,
+      minItems: shape.minItems as number | undefined, maxItems: shape.maxItems as number | undefined,
       default: spec.default };
   });
 }
 export function parameterInput(value: unknown, field: ParameterField): string {
   if (value == null) return "";
+  if (Array.isArray(value)) return value.map(parameterOptionLabel).join(", ");
+  if (field.enum) return parameterOptionLabel(value);
   if (field.type === "date" && /^\d{8}$/.test(String(value))) return String(value).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
   return String(value);
 }
@@ -225,6 +254,16 @@ export function validateParameters(parameters: Record<string, unknown>, type?: T
       if (!Number.isFinite(number) || field.type === "integer" && !Number.isInteger(number)
         || field.minimum !== undefined && number < field.minimum || field.maximum !== undefined && number > field.maximum)
         errors[field.key] = `请填写有效的${field.label}${field.minimum !== undefined ? `（${field.minimum}–${field.maximum ?? "不限"}）` : ""}。`;
+    }
+    if (field.type === "array" && (!Array.isArray(value)
+      || field.minItems !== undefined && value.length < field.minItems
+      || field.maxItems !== undefined && value.length > field.maxItems
+      || field.itemEnum && value.some(item => !field.itemEnum!.includes(item)))) {
+      errors[field.key] = `请选择或填写有效的${field.label}。`;
+    }
+    if (field.key === "subjects" && Array.isArray(value) && value.some(item =>
+      typeof item !== "string" || !/^[A-Za-z0-9_.-]{1,64}$/.test(item))) {
+      errors[field.key] = "请用逗号分隔有效的完整代码或关联对象 ID，不要留空项。";
     }
   }
   if (parameters.start_date && parameters.end_date && String(parameters.start_date) > String(parameters.end_date)) errors.end_date = "结束日期不能早于开始日期。";
