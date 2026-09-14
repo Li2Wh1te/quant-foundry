@@ -49,10 +49,22 @@ self-hosting. The long-term goal is to support a broader range of individual inv
 sources and asset classes, and eventually paper trading, risk controls, and live execution. ETFs are
 the starting point of the implementation.
 
+## v0.3.0
+
+This release unifies workspace layouts, typography, controls, and creation flows, and extends the research workflow:
+
+- Configure encrypted data-source credentials in the UI and inspect ingestion tasks and coverage.
+- Name published strategy revisions, search instruments by name or code, and create checked backtests in a stepped Drawer.
+- Explore dedicated result pages, positions, fills, and diagnostics; export all paginated results as JSON.
+- Compare 2–10 completed runs and persist comparison names, run order, and reference runs on the server.
+- Permanently delete unpublished, unreferenced strategies and unreferenced accounts; preserve historical objects through archiving or retirement.
+
+See the [CHANGELOG](./CHANGELOG.md) and [v0.3.0 Release](https://github.com/Li2Wh1te/quant-foundry/releases/tag/v0.3.0).
+
 ## Screenshots
 
 **ETF market data:** browse locally stored daily bars and switch between daily, weekly, monthly, and
-yearly candles, moving averages, and adjusted chart views. The screenshot shows the full-screen chart.
+yearly candles, moving averages, and adjusted chart views. The screenshot shows the new workspace with isolated, generated example bars, not actual market data.
 
 ![ETF market data: candles, moving averages, and adjustment views](./assets/readme/etf-market.jpg)
 
@@ -65,13 +77,11 @@ and sample records.
 
 ![Strategy workbench: source, parameters, validation, and revisions](./assets/readme/strategy-workbench.jpg)
 
-**Backtest analysis:** inspect equity, drawdown, and performance metrics. The screenshot below uses
-synthetic acceptance-test data computed by the actual backtesting engine and rendered in a standalone
-preview of the project's existing report component. It demonstrates the interface, not real ETF historical performance, and
-has not passed through the deployed Runner persistence workflow. See the
-[in-memory engine acceptance test](./backend/tests/test_backtesting_memory_engine_acceptance.py) for the data-generation entry point.
+**Backtest analysis:** explore returns, drawdown, monthly performance, positions, fills, and diagnostics
+in a dedicated result page. This screenshot uses isolated UI test fixtures to demonstrate layout and
+interaction; it does not represent an actual engine run or investment performance.
 
-![Backtest analysis: synthetic acceptance data computed by the real engine](./assets/readme/backtest-report.jpg)
+![Backtest analysis: isolated UI test data](./assets/readme/backtest-report.jpg)
 
 </details>
 
@@ -80,12 +90,12 @@ has not passed through the deployed Runner persistence workflow. See the
 | Area | Implemented capabilities |
 | --- | --- |
 | Data ingestion | Tushare trading calendars, ETF reference data, daily bars, adjustment factors, cash dividends, and suspension/trading status; full, incremental, or recent reconciliation workflows depending on task type |
-| Data exploration | ETF search and filters, reference details, candles and moving averages, forward/backward adjusted charts, adjustment-factor records, calendar coverage, and synchronization status |
-| Strategy management | Python source and parameter editing, draft saving, static validation, immutable revision publishing, history, and archiving; private source is stored in PostgreSQL |
-| Accounts and execution configuration | Backtest accounts, fee schedules and their versions, initial cash and positions, slippage models, and execution component selection |
+| Data exploration | ETF search and filters, persistent watchlists, reference details, candles and moving averages, forward/backward adjusted charts, adjustment-factor records, calendar coverage, and synchronization status |
+| Strategy management | Python source and parameter editing, draft saving, static validation, named immutable revisions, history, archiving, and safe deletion of unpublished strategies; private source is stored in PostgreSQL |
+| Accounts and execution configuration | Backtest accounts, fee schedules and their versions, usage history and safe deletion, initial cash and positions, slippage models, and execution component selection |
 | Local backtesting | Bind a published strategy and fixed instruments, check local data and configuration, queue runs, inspect progress, cancel, rerun, and investigate failures |
-| Result analysis | Equity and drawdown, cash and market value, performance and fee metrics, position and fill details, run comparison, configuration differences, and data evidence |
-| Tasks and operations | Persistent ingestion scheduling, manual execution and history, Chinese operational log summaries, light/dark themes, and Docker Compose self-hosting |
+| Result analysis | Equity and drawdown, cash and market value, performance and fee metrics, position and fill details, server-saved run comparisons, configuration differences, data evidence, and JSON export |
+| Tasks and operations | Persistent ingestion scheduling, manual execution and history, a consistent workspace UI, structured service logs, and Docker Compose self-hosting |
 
 ### Ingest first, then backtest locally
 
@@ -128,7 +138,7 @@ Install Git, Docker, Docker Compose v2, and `make`. Keep Docker running and allo
 images and install build dependencies. Self-hosting does not require Python or Node.js on the host.
 
 ```bash
-git clone https://github.com/Li2Wh1te/quant-foundry.git
+git clone --branch v0.3.0 https://github.com/Li2Wh1te/quant-foundry.git
 cd quant-foundry
 make selfhost
 ```
@@ -141,7 +151,7 @@ preserve valid credentials and configured values, and receive template defaults 
 
 Open [http://127.0.0.1:8080](http://127.0.0.1:8080). Copy the value of `QF_API_TOKEN` from the root `.env`
 into the login page's **API Token** field. This credential grants workbench access; it serves a different
-purpose from `QF_TUSHARE_TOKEN`.
+purpose from the Tushare token configured on the Data Sources page.
 
 **Success check:** you can enter the console and open **策略工作台 (Strategy Workbench)**. Empty data
 lists are expected on a fresh deployment. The current interface uses Chinese labels; this guide includes
@@ -150,8 +160,9 @@ them so the instructions match what you see.
 ### 3. Publish your first strategy
 
 Open **策略工作台 → 新建策略 (New Strategy)**, enter a name, and keep the default Python template,
-empty parameter schema, and default parameters. Choose **创建并编辑 (Create and Edit)**, then
-**保存草稿 → 校验 → 发布版本 (Save Draft → Validate → Publish Revision)**.
+empty parameter schema, and default parameters. Choose **创建并进入编辑器 (Create and Open Editor)**, then
+**保存草稿 → 静态检查 → 发布版本 (Save Draft → Static Check → Publish Revision)**.
+Give the revision an alias describing the change so it is recognizable when selecting a backtest version.
 
 The default strategy's core behavior is:
 
@@ -169,11 +180,15 @@ market data or generating trades.
 
 ### 1. Configure ingestion credentials
 
-Set your `QF_TUSHARE_TOKEN` in the root `.env`, then reload the service configuration:
+Open **数据源 (Data Sources)**, select Tushare, and configure its API URL and token. Testing validates
+the form; saving validates it before replacing the stored settings. Leave an existing token blank to retain it.
+The page never displays the stored token.
 
-```bash
-make selfhost-deploy-backend
-```
+`make selfhost` supplies a missing `QF_DATA_SOURCE_ENCRYPTION_KEY`. On first startup, legacy Tushare
+settings are migrated from environment variables into the database without changing the original file.
+Later environment changes do not overwrite UI-managed settings. Back up the encryption key with the
+database and retain it once encrypted credentials exist. Source-only deployments must configure a
+64-character random hexadecimal key and apply migrations themselves.
 
 Your Tushare account also needs access to the relevant endpoints. Having a token, endpoint permissions,
 and adequate local data coverage are separate prerequisites. The project does not include a data-source
@@ -181,14 +196,14 @@ account or a ready-to-run offline market-data bundle.
 
 ### 2. Ingest and inspect local data
 
-Create tasks in **任务调度 (Task Scheduler)** in the order below. Select task types by their displayed
+Create tasks in **采集任务 (Ingestion Tasks)** in the order below. Select task types by their displayed
 Chinese/English names. You can run a task manually after creation and configure future incremental runs.
 
 | Order | Task type | What to check afterward |
 | --- | --- | --- |
 | 1 | 交易日历采集（Sync Tushare trade calendar） | Configure each required exchange, such as `SSE` and `SZSE`, with a start date covering research and warmup; inspect coverage in 交易日历 (Trading Calendar) |
-| 2 | ETF基础信息采集（Sync Tushare ETF basics） | Find the target ETF in ETF 基础信息 (ETF Reference Data) and inspect its details |
-| 3 | ETF日线全量采集（Full Tushare ETF daily bars） | Establish history, inspect the actual date range in the ETF's 日线 K 线 (Daily Candles) tab, then schedule incremental daily-bar ingestion |
+| 2 | ETF基础信息采集（Sync Tushare ETF basics） | Find the target ETF in A 股市场 (A-share Market), in the ETF list and inspect its details |
+| 3 | ETF日线全量采集（Full Tushare ETF daily bars） | Establish history, inspect the actual date range in the ETF market-detail workspace, then schedule incremental daily-bar ingestion |
 | 4 | 停牌交易状态采集（Trading status and suspension ingestion）、ETF现金分红全量采集（Full Tushare ETF cash dividends） | Fill the applicable instrument/date coverage, check run records, and use backtest preflight to determine whether the evidence is sufficient |
 
 For the first historical trading-status collection, explicitly set `start_date` and `end_date` to cover
@@ -212,44 +227,28 @@ window. Creating a schedule or seeing a chart alone does not establish backtest 
   [strategy protocol implementation](./backend/app/strategy_protocol/), then validate and publish your strategy.
 - Create an available account in **回测账户 (Backtest Accounts)**, configure the fee schedule and rules,
   save it, and select its corresponding version in the backtest workspace.
-- Identify the target ETF's **instrument UUID** in the local instrument catalog. The fixed-instrument
-  input requires a UUID, not a trading code such as `510300.SH`.
+- Search and select ETFs by name or code in **固定标的范围 (Fixed Instruments)**. Initial positions use
+  the same searchable selector. The system resolves UUIDs; you do not enter them manually. Missing
+  identity mappings must be repaired before proceeding, and preflight remains authoritative.
 
-<details>
-<summary><strong>How do I find an instrument UUID?</strong></summary>
+### 4. Check and run
 
-The current workflow requires checking local code mappings. Run `make selfhost-psql`, replace the
-example code below with your target ETF, and execute this read-only query:
+Open **回测工作台 → 创建回测 (Backtest Workspace → Create Backtest)**, or enter from a strategy:
 
-```sql
-SELECT instrument_id, source_code, valid_from, valid_to, known_at
-FROM instrument_code_mappings
-WHERE source = 'tushare' AND source_code = '510300.SH'
-ORDER BY valid_from, known_at;
-```
+1. **策略与版本 (Strategy and Revision):** select a published version by number and alias and set parameters.
+2. **账户与执行配置 (Account and Execution):** select an account version, dates, cash, instruments,
+   exchange calendars, slippage, warmup sessions, and initial positions. Dates cannot be in the future; start with raw prices.
+3. **运行检查与确认 (Check and Confirm):** click **检查当前配置 (Check Current Configuration)**.
+   Resolve missing data, account, or rule issues. Review and confirm permitted degradations; resolve
+   blockers before continuing. Every configuration change requires a fresh check. Then click **创建回测 (Create Backtest)**.
 
-Check the mapping's effective interval against the backtest window, then enter the corresponding
-`instrument_id`. If historical mappings produce multiple rows, inspect their validity and knowledge
-times; preflight remains authoritative. If the query is empty, check ingestion and identity mappings
-instead of supplying an arbitrary UUID. Enter `\q` to leave psql.
+The independent Runner executes against the local database. Open **完整结果 (Full Results)** to inspect
+metrics, curves, details, and diagnostics. Copy configuration for another run, export JSON, or add the
+run to a comparison and save the comparison on the server.
 
-</details>
-
-### 4. Run preflight, then execute
-
-Enter the strategy's **回测工作台 (Backtest Workspace)**. Select the published revision and account
-version; set dates, cash, fixed instrument UUIDs, matching exchange calendars, and a slippage model.
-Start with raw prices and set warmup sessions and initial positions as required by your strategy.
-
-Click **预检当前配置 (Preflight Current Configuration)**. Address missing data, account settings, and
-rule issues listed in the report. For confirmable degradations, review the consequences, confirm as
-instructed, and rerun preflight. Blocking issues must be resolved. Any configuration change also requires
-fresh preflight. Once admitted, click **创建正式回测 (Create Formal Backtest)**; the independent Runner
-executes against data in the local database.
-
-**Success check:** the run finishes and you can inspect its status, result integrity, and report.
-A successful `hold` example with no initial positions may have no fills and a flat equity curve. Use
-run details, preflight evidence, and operational logs to investigate failures.
+**Success check:** inspect the run status, result integrity, and result page. A successful empty `hold`
+example may have no fills and a flat curve. Use diagnostics, preflight evidence, and `make selfhost-logs`
+to investigate failures.
 
 ## Roadmap
 
@@ -267,6 +266,28 @@ These are development directions, not promised dates or a fixed delivery sequenc
 
 Use [Issues](https://github.com/Li2Wh1te/quant-foundry/issues) to discuss use cases, data requirements,
 and design tradeoffs.
+
+## Upgrade from an older version
+
+Back up PostgreSQL and the root `.env`, including the data-source encryption key. Retain existing
+configuration and volumes. In your deployment checkout, run:
+
+```bash
+git fetch origin --tags
+git checkout v0.3.0
+make selfhost
+```
+
+Preserve local code changes first. This builds both services, applies migrations, and updates Runner.
+Upgrade the complete stack: a frontend/backend version mismatch blocks login. Refresh the browser
+and check service status afterward.
+
+Legacy Tushare environment settings migrate into the database on first startup; maintain them through
+**数据源 (Data Sources)** afterward. Keep `QF_DATA_SOURCE_ENCRYPTION_KEY` with the database.
+This release removes the operational-log, standalone daily-quote, and API-documentation navigation
+entries, the `/api/admin/logs`, `/api/admin/logs/clear`, and sample `/api` endpoints, and support for
+`QF_LOG_QUERY_MAX_FILES`. ETF market queries, structured log writing, and developer documentation
+at `/docs` and `/redoc` remain available.
 
 ## Development and operations
 
@@ -362,13 +383,13 @@ the root `.env`; source development uses `backend/.env`. Relevant services must 
 | `QF_API_TOKEN` | Shared Web and business API access credential |
 | `QF_CURSOR_SIGNING_KEY` | Server-only signing key for backtest result cursors |
 | `QF_BACKTEST_INTERNAL_TOKEN` | Internal acceptance endpoint credential; unnecessary for ordinary onboarding |
-| `QF_TUSHARE_TOKEN` / `QF_TUSHARE_API_URL` | Ingestion token and Tushare request URL |
+| `QF_DATA_SOURCE_ENCRYPTION_KEY` | Data-source credential encryption key; keep with the database backup |
 | `QF_INGESTION_REQUEST_INTERVAL_MS` | Minimum interval between external ingestion requests; task settings can only increase it |
 | `QF_DATABASE_*` | PostgreSQL connection settings |
 | `QF_SERVER_*` / `QF_WEB_*` | Backend listeners and self-hosted Web addresses/ports |
 | `QF_SCHEDULER_*` | Ingestion scheduler enablement, concurrency, queuing, and misfire settings |
 | `QF_BACKTEST_*` | Independent Runner concurrency, queue, timeout, memory, heartbeat, and progress persistence settings |
-| `QF_LOG_*` | Log directory, level, retention, and query limits |
+| `QF_LOG_*` | Log directory, level, retention, and queue capacity |
 | `QF_ENVIRONMENT` / `QF_DEBUG` | Environment and debugging settings |
 
 Self-hosted initialization generates deployment secrets when missing or known to be invalid, and sets
@@ -446,10 +467,10 @@ provide full parameters, response schemas, and interactive API exploration.
 | --- | --- |
 | Authentication and version | Validate an access token and query the deployed version |
 | Data queries | Read locally stored trading calendars, ETF reference data, daily bars, and adjustment factors |
-| Strategies | Manage drafts, static validation, published revisions, and archiving |
+| Strategies | Manage drafts, static validation, revision aliases, publishing, archiving, and safe deletion |
 | Backtest accounts and configuration | Manage account/fee versions and query available execution components |
-| Backtest runs and results | Preflight, create, inspect, cancel, rerun, view report details, and compare runs |
-| Scheduling and logs | Task types, schedules, execution history, and structured log queries |
+| Backtest runs and results | Preflight, create, inspect, cancel, rerun, view report details, and manage saved comparisons |
+| Ingestion scheduling | Task types, schedules, execution history, and status counts |
 
 Business APIs use `Authorization: Bearer <QF_API_TOKEN>`:
 

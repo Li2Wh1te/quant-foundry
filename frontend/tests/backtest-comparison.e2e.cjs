@@ -19,7 +19,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
     else if(req.method()==='DELETE'){assert.equal(Number(u.searchParams.get('version')),saved.version);deletes++;saved=null;status=204}else body=saved;
   }else if(path.endsWith('/workspace')){workspaceQueries.push(u.search);assert.equal(u.searchParams.get('status')||'succeeded','succeeded');const offset=Number(u.searchParams.get('offset')||0);const items=u.searchParams.get('search')?ids.filter(id=>run(id).strategy_name.includes(u.searchParams.get('search'))||id.includes(u.searchParams.get('search'))):ids;body={items:items.slice(offset,offset+20).map(run),total:items.length,offset,limit:20,has_more:offset+20<items.length}}
   else if(path.endsWith('/revisions'))body=[{id:'revision',revision_number:8,alias:'优化止损逻辑'}];
-  else if(path.includes('/results/'))body={items:[]};else if(path.includes('/backtest-runs/'))body=run(path.split('/').at(-1));else if(path.includes('auth'))status=204;else if(path.includes('version'))body={version:'0.2.0'};
+  else if(path.includes('/results/'))body={items:[]};else if(path.includes('/backtest-runs/'))body=run(path.split('/').at(-1));else if(path.includes('auth'))status=204;else if(path.includes('version'))body={version:require('../package.json').version};
   await route.fulfill({status,contentType:'application/json',body:status===204?'':JSON.stringify(body)});
  });
  const choose=async locator=>{await locator.click();await page.waitForFunction(label=>document.querySelector(`input[aria-label="${label}"]`)?.checked,await locator.getAttribute('aria-label'));};
