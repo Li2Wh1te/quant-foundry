@@ -21,6 +21,7 @@ from app.data_ingestion.tonghuashun.contracts import CollectionError, content_ha
 SERIES_KEYS = {"etf_daily": "date_ms", "stock_daily": "date_ms", "index_daily": "date_ms",
     "fund_nav": "nav_date", "stock_income": "period_end_ms", "stock_balance": "period_end_ms",
     "stock_cash_flow": "period_end_ms", "stock_indicators": "report",
+    "fund_performance_history": "date_ms", "rank_trend": "date_ms", "fund_news": "id",
     "fund_stock_history": "report_key", "fund_bond_history": "report_key"}
 
 
@@ -80,6 +81,7 @@ class Previous:
     succeeded_at: datetime | None
     status: str
     reconciled_at: datetime | None = None
+    attempted_at: datetime | None = None
 
 
 class CollectionRepository:
@@ -92,7 +94,7 @@ class CollectionRepository:
         return Previous(state.revision if state else 0,
             materialize(self.session, observation) if observation else {} if state and state.observation_id else None,
             state.succeeded_at if state else None, state.status if state else "pending",
-            state.reconciled_at if state else None)
+            state.reconciled_at if state else None, state.attempted_at if state else None)
 
     def _lock(self, dataset: str, subject: str, variant: str, expected: int, now: datetime):
         insert = pg_insert if self.session.bind.dialect.name == "postgresql" else sqlite_insert

@@ -4,8 +4,7 @@ This inventory is not the scheduler registry and does not claim account access,
 verified payload contracts, local datasets, or backtest compatibility. There
 are 91 individually documented GET endpoints plus 3 API-key dump URL endpoints.
 Planned stock basics, historical index membership/weights and reverse index
-membership have no public route and are deliberately excluded. AI-client-only
-"coming soon" notices do not disable their documented REST endpoints.
+membership have no public route and are deliberately excluded. Pages explicitly marked unavailable are distinguished from public REST routes.
 """
 
 from dataclasses import asdict, dataclass
@@ -138,5 +137,15 @@ def list_interfaces() -> list[dict]:
 
     implemented = {spec.interface for spec in DATASETS.values()}
     implemented.update({"fund.portfolio.stock-report-dates", "fund.portfolio.bond-report-dates"})
-    return [{**asdict(item), "ingestion_status": "implemented" if item.key in implemented else "not_implemented"}
+    unavailable_documents = {"capital-flow", "high-frequency", "futures-contracts-extended",
+        "futures-fundamentals", "futures-session-timeline", "options-session-timeline"}
+    excluded = {"meta.tickers.search", "fund.diagnostics.detail", "fund.indicators.line",
+        "fund.indicators.table", "fund.backtest.result", "fund.backtest.indicators"}
+    def scope(item):
+        if item.documentation_url.rstrip("/").split("/")[-1] in unavailable_documents:
+            return "not_public", "官方文档明确暂未开放外部接入。"
+        if item.group in ("futures", "options") or item.key in excluded:
+            return "excluded", "本次研究数据采集范围不接入此能力。"
+        return "included", "已纳入本地研究数据采集；实际可用性需部署验收。"
+    return [{**asdict(item), "integration_scope": scope(item)[0], "scope_message": scope(item)[1], "ingestion_status": "implemented" if item.key in implemented else "not_implemented"}
             for item in INTERFACES.values()]

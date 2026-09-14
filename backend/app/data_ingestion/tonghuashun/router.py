@@ -28,6 +28,9 @@ def require_dataset(key):
 
 def schedule_templates(spec):
     """Templates use the existing scheduler API; reads never create jobs."""
+    if spec.kind.startswith("m3_") or spec.kind == "dump":
+        from app.data_ingestion.tonghuashun.milestone_three import templates
+        return templates(spec)
     clock = "30 22" if spec.kind == "nav" else "30 20" if spec.kind == "bars" else "0 20"
     # Weekly resources are checked daily for new/failed subjects; the handler
     # refreshes existing successful subjects only after the weekly boundary.
@@ -53,6 +56,18 @@ def datasets():
         "task_type": f"data.ths.{spec.key}", "schedule_templates": schedule_templates(spec),
         "storage": "source_observations", "cross_source_identity": False,
         "backtest_ready": False} for spec in DATASETS.values()]}
+
+
+@router.get("/imports")
+def imports(session: Session = Depends(get_db_session)):
+    from app.data_ingestion.models.tonghuashun import TonghuashunDumpImport
+    return {"source": "tonghuashun", "items": [{"dataset": r.dataset, "status": r.status,
+        "generation": r.generation, "started_at": r.started_at, "completed_at": r.completed_at,
+        "total_subjects": r.total_subjects, "imported_subjects": r.imported_subjects,
+        "pending_subjects": r.total_subjects-r.imported_subjects,
+        "superseded_subjects": r.superseded_subjects,
+        "artifact": json.loads(r.metadata_json)} for r in session.scalars(
+            select(TonghuashunDumpImport).order_by(TonghuashunDumpImport.dataset))]}
 
 
 @router.get("/tickers")

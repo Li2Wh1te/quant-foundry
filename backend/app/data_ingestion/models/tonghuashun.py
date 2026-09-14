@@ -73,3 +73,29 @@ class TonghuashunRequestBudget(Base):
     __tablename__ = "tonghuashun_request_budget"
     key: Mapped[str] = mapped_column(String(16), primary_key=True)
     next_allowed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class TonghuashunDumpImport(Base):
+    """A leased, resumable staging slot; never a credential or signed URL store."""
+
+    __tablename__ = 'tonghuashun_dump_imports'
+    dataset: Mapped[str] = mapped_column(String(80), primary_key=True)
+    generation: Mapped[UUID] = mapped_column(default=uuid4)
+    status: Mapped[str] = mapped_column(String(24))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    lease_until: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    digest: Mapped[str | None] = mapped_column(String(64))
+    metadata_json: Mapped[str] = mapped_column(Text, default='{}')
+    total_subjects: Mapped[int] = mapped_column(Integer, default=0)
+    imported_subjects: Mapped[int] = mapped_column(Integer, default=0)
+    superseded_subjects: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class TonghuashunDumpStage(Base):
+    """Validated rows grouped on disk first, then stored for worker restarts."""
+
+    __tablename__ = 'tonghuashun_dump_stages'
+    dataset: Mapped[str] = mapped_column(ForeignKey('tonghuashun_dump_imports.dataset'), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(64), primary_key=True)
+    data_json: Mapped[str] = mapped_column(Text)

@@ -200,6 +200,7 @@ export function parameterOptionLabel(value: unknown): string {
   return PARAMETER_OPTION_COPY[String(value)] ?? String(value);
 }
 const PARAMETER_COPY: Record<string, [string, string]> = {
+  quota_tabs: ["QDII 分类代码", "填写已明确的官方分类代码，以逗号分隔。默认仅覆盖文档示例 nazhi100、remen，不代表全部分类。"],
   asset_types: ["资产类型", "仅采集当前接口支持的已选类型；不同来源的数据独立保存。"],
   subjects: ["指定标的或关联对象", "可用英文逗号分隔完整代码或公司、经理 ID；留空采集所有适用对象。"],
   mode: ["采集方式", "日常更新会补采新增及失败对象；历史核对会复查接口可用历史。"],
@@ -223,7 +224,9 @@ export function parameterFields(type?: TaskType): ParameterField[] {
     const alternatives = (spec.anyOf ?? []) as JsonSchema[];
     const shape = alternatives.find(item => item.type !== "null") ?? spec;
     const itemShape = shape.items as JsonSchema | undefined;
-    const copy = PARAMETER_COPY[key];
+    const copy = key === "subjects" && ["data.ths.anomaly_stock", "data.ths.rank_trend"].includes(type?.key ?? "")
+      ? ["指定标的或关联对象", "此任务必须指定股票，使用逗号分隔完整代码；不会默认采集全市场。"]
+      : PARAMETER_COPY[key];
     return { key, label: copy?.[0] ?? "扩展采集参数", help: copy?.[1] ?? "此参数由当前脚本定义。",
       type: shape.format === "date" ? "date" : String(shape.type ?? "unsupported"),
       required: required.includes(key), nullable: alternatives.some(item => item.type === "null"),

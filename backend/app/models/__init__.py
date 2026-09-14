@@ -3,6 +3,7 @@
 from app.data_sources.models import DataSourceConfig
 from app.data_ingestion.models.tonghuashun import (
     TonghuashunTicker, TonghuashunObservation, TonghuashunCollectionState, TonghuashunRequestBudget,
+    TonghuashunDumpImport, TonghuashunDumpStage,
 )
 from app.data_ingestion.models.etf_watchlist import EtfWatchlistEntry
 
@@ -69,6 +70,7 @@ from app.backtesting.result_records import (
 
 __all__ = [
     "TonghuashunTicker", "TonghuashunObservation", "TonghuashunCollectionState", "TonghuashunRequestBudget",
+    "TonghuashunDumpImport", "TonghuashunDumpStage",
     "EtfWatchlistEntry",
     "DataSourceConfig",
     "DataSyncCheckpoint",

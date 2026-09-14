@@ -12,6 +12,7 @@ dependencies = [
     "cryptography>=46,<47",
     "fastapi>=0.141.1,<1.0",
     "psycopg[binary]>=3.2,<4.0",
+    "pyarrow>=19,<24",
     "pydantic-settings>=2.15.0,<3.0",
     "requests>=2.32.4,<3",
     "sqlalchemy>=2.0,<3.0",
