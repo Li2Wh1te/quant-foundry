@@ -49,7 +49,7 @@
 .qcmp-note{font-size:13px;color:var(--muted);margin:12px 20px;line-height:22px}
 .qcmp-plot{padding:16px 18px;min-width:0}.qcmp-plot svg{display:block;width:100%;height:286px;overflow:visible}.qcmp-plot svg text{font-size:12px;fill:var(--muted)}
 .qcmp-legend{display:flex;gap:6px 18px;flex-wrap:wrap;font-size:12px;color:var(--muted);margin-bottom:12px}.qcmp-legend span{overflow-wrap:anywhere}.qcmp-legend i{display:inline-block;width:12px;height:3px;vertical-align:middle;margin-right:6px}
-.qcmp-readout{min-height:46px;display:flex;flex-wrap:wrap;gap:4px 16px;font-size:12px;color:var(--muted)}.qcmp-readout small{font-size:12px}
+.qcmp-readout{min-height:46px;display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:4px 16px;font-size:12px;color:var(--muted)}.qcmp-readout>strong{grid-column:1/-1}.qcmp-readout>span{height:20px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}.qcmp-readout small{font-size:12px}
 .qcmp-slider{display:flex;align-items:center;gap:12px;font-size:12px;color:var(--muted)}.qcmp-slider input{flex:1;min-width:0;accent-color:var(--orange)}
 .qcmp-evidence{padding:4px 20px 20px}.qcmp-evidence h3{font-size:14px;margin:16px 0 8px}.qcmp-evidence .qcmp-note{margin:4px 0}.qcmp-evidence details{overflow:auto;font-size:13px}
 .qcmp-empty{text-align:center;padding:48px 18px;color:var(--muted)}
