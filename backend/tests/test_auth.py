@@ -68,9 +68,9 @@ class AuthenticationTestCase(unittest.TestCase):
         self.app.dependency_overrides[get_db_session] = lambda: Mock()
         try:
             with patch("app.core.request_logging.logger"):
-                self.assertEqual(asyncio.run(request_status(self.app, "/api")), 401)
+                self.assertEqual(asyncio.run(request_status(self.app, "/api/auth/verify")), 401)
                 self.assertEqual(
-                    asyncio.run(request_status(self.app, "/api", API_TOKEN)),
+                    asyncio.run(request_status(self.app, "/api/system/version", API_TOKEN)),
                     200,
                 )
                 self.assertEqual(
@@ -122,11 +122,8 @@ class AuthenticationTestCase(unittest.TestCase):
 
     def test_protects_business_routes_and_exempts_readiness(self) -> None:
         protected_operations = (
-            ("/api", "get"),
             ("/api/auth/verify", "get"),
             ("/api/system/version", "get"),
-            ("/api/admin/logs", "get"),
-            ("/api/admin/logs/clear", "post"),
             ("/api/admin/task-types", "get"),
             ("/api/admin/task-workspace", "get"),
             ("/api/admin/tasks", "get"),
@@ -170,6 +167,18 @@ class AuthenticationTestCase(unittest.TestCase):
         }
         self.assertNotIn(require_api_token, readiness_dependency_calls)
 
+    def test_retired_log_and_placeholder_routes_are_not_registered(self) -> None:
+        schema = self.app.openapi()
+        paths = {getattr(route, "path", "") for route in self.app.routes}
+        for path in ("/api", "/api/admin/logs", "/api/admin/logs/clear"):
+            self.assertNotIn(path, paths)
+            self.assertNotIn(path, schema["paths"])
+            self.assertEqual(asyncio.run(request_status(self.app, path, API_TOKEN)), 404)
+        # Removing the standalone log browser must leave task history and ETF
+        # price data available to the accepted workspace pages.
+        for path in ("/api/admin/task-runs", "/api/admin/data-collections/etfs/{ts_code}/daily-bars"):
+            self.assertIn(path, schema["paths"])
+
     def test_openapi_declares_bearer_authentication(self) -> None:
         schema = self.app.openapi()
 
@@ -183,7 +192,7 @@ class AuthenticationTestCase(unittest.TestCase):
             },
         )
         self.assertEqual(
-            schema["paths"]["/api/admin/logs"]["get"]["security"],
+            schema["paths"]["/api/admin/task-workspace"]["get"]["security"],
             [{"API Token": []}],
         )
 

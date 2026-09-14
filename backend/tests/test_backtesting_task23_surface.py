@@ -115,7 +115,6 @@ def test_forced_termination_cannot_become_a_determinate_result() -> None:
 def test_frontend_declares_visibility_polling_and_all_terminal_stops() -> None:
     source = (ROOT / "frontend/src/pages/BacktestRunsPage.tsx").read_text(encoding="utf-8")
     api_source = (ROOT / "frontend/src/api/backtestRuns.ts").read_text(encoding="utf-8")
-    log_source = (ROOT / "frontend/src/pages/LogPage.tsx").read_text(encoding="utf-8")
 
     assert 'FOREGROUND_POLLING_PROTOCOL = "foreground_polling@1"' in api_source
     assert "document.visibilityState" in source
@@ -132,17 +131,6 @@ def test_frontend_declares_visibility_polling_and_all_terminal_stops() -> None:
     assert "stopped || polling" in source
     for terminal in ("succeeded", "failed", "cancelled", "timed_out", "indeterminate"):
         assert f'"{terminal}"' in api_source
-    for event in (
-        "backtest_completion_marker_received",
-        "backtest_completion_marker_validated",
-        "backtest_result_integrity_checked",
-        "backtest_terminal_evidence_reconciled",
-        "backtest_terminal_state_written",
-        "backtest_heartbeat_persisted",
-        "backtest_heartbeat_lost",
-        "backtest_recovery_evidence_reconciled",
-    ):
-        assert event in log_source
 
 
 def test_launch_identity_type_remains_available_for_fault_injection_adapters() -> None:
