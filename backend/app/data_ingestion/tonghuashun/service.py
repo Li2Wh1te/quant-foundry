@@ -185,7 +185,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                 except CollectionError:
                     session.rollback()  # A newer run owns the visible state.
             summary["failed"] += 1
-            log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind)
+            log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
+                       error_message=str(exc))
             if kind in ("unauthenticated", "forbidden", "rate_limited"):
                 # Account-wide failures must not repeat thousands of times.
                 break
@@ -203,7 +204,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     return summary
 
 
-def log_result(spec, subject, parameters, data, result, succeeded, kind=None):
+def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"
@@ -212,7 +213,8 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None):
     checkpoint_message = ("已推进至版本 " + result["version_id"] if succeeded else
         "完整范围未推进，已保存成功报告，失败报告待补采" if kind == "partial_reports" else
         "未推进，保留已有成功版本")
-    logger.info("tonghuashun_collection_completed" if succeeded else "tonghuashun_collection_failed",
+    write = logger.info if succeeded else logger.warning
+    write("tonghuashun_collection_completed" if succeeded else "tonghuashun_collection_failed",
         title=f"{spec.name}{'采集完成' if succeeded else '采集失败'}",
         message=(f"{spec.name}采集{'完成' if succeeded else '失败'}：标的 {subject}，日期范围 {date_label}，"
                  f"拉取 {counts['fetched_count']} 条，变更 {counts['changed_count']} 条，"
@@ -220,4 +222,5 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None):
                  f"checkpoint {checkpoint_message}。"),
         source="tonghuashun", data_type=spec.key, subject=subject,
         start_date=start, end_date=end, checkpoint_advanced=succeeded,
-        version_id=result.get("version_id"), error_type=kind, **counts)
+        version_id=result.get("version_id"), error_type=kind,
+        error_message=error_message, exc_info=error_message is not None, **counts)
