@@ -13,12 +13,7 @@
   min-height: 420px;
   display: grid;
   grid-template-rows: 50px minmax(0, 1fr);
-  font:
-    14px/1.5 "MiSans",
-    "PingFang SC",
-    "Microsoft YaHei",
-    system-ui,
-    sans-serif;
+  font: 400 14px/22px var(--qf-font-ui);
   overflow: hidden;
 }
 .qfe * {
@@ -132,7 +127,7 @@
   border-radius: 8px;
   color: #e85f32;
   background: #fffdfc;
-  font: 800 10px/1 monospace;
+  font: 800 10px/1 var(--qf-font-mono);
 }
 .qfe-crumb {
   display: flex;
@@ -171,8 +166,7 @@
 .qfe-symbol {
   white-space: nowrap;
   font:
-    700 12px/30px "Geist Mono",
-    monospace;
+    700 12px/30px var(--qf-font-mono);
   border: 1px solid #d9d5ce;
   background: #fffdfc;
   border-radius: 999px;
@@ -208,7 +202,7 @@
   color: #476dae;
 }
 .qfe-quotes strong {
-  font: 700 14px monospace;
+  font: 700 14px var(--qf-font-mono);
 }
 .qfe-workspace {
   color-scheme: dark;
@@ -273,7 +267,7 @@
   gap: 6px;
 }
 .qfe-control-label {
-  font: 700 12px/1.2 monospace;
+  font: 700 12px/1.2 var(--qf-font-mono);
   color: var(--qfe-muted);
   white-space: nowrap;
 }
@@ -306,8 +300,7 @@
   align-items: baseline;
   padding: 12px 16px 0;
   font:
-    12px/18px "Geist Mono",
-    monospace;
+    12px/18px var(--qf-font-mono);
   min-height: 30px;
   color: var(--qfe-sub);
 }
@@ -322,8 +315,7 @@
   padding: 3px 16px 6px;
   color: var(--qfe-muted);
   font:
-    12px/18px "Geist Mono",
-    monospace;
+    12px/18px var(--qf-font-mono);
 }
 .qfe-ohlc span {
   white-space: nowrap;
@@ -400,7 +392,7 @@
   max-width: calc(100% - 24px);
 }
 .qfe-replay strong {
-  font: 500 12px monospace;
+  font: 500 12px var(--qf-font-mono);
 }
 .qfe-replay-label {
   color: #ff936a;
@@ -435,8 +427,7 @@
   padding: 0 12px;
   border-top: 1px solid var(--qfe-line);
   font:
-    12px/18px "Geist Mono",
-    monospace;
+    12px/18px var(--qf-font-mono);
   color: var(--qfe-muted);
   min-width: 0;
 }
@@ -485,8 +476,7 @@
   padding: 9px 10px;
   width: 100%;
   font:
-    12px/18px "Geist Mono",
-    monospace;
+    12px/18px var(--qf-font-mono);
   text-align: right;
   border: 0;
   border-radius: 0;
@@ -559,8 +549,7 @@
   gap: 8px;
   margin: 10px 0 2px;
   font:
-    700 13px/1.5 "Geist Mono",
-    monospace;
+    700 13px/1.5 var(--qf-font-mono);
 }
 .qfe-summary-price strong {
   font-size: 22px;
@@ -871,9 +860,8 @@
   }
 }
 @media (max-width: 700px) {
-  .qfe {
-    grid-template-rows: 46px minmax(0, 1fr);
-  }
+  .qfe{
+    grid-template-rows: 46px minmax(0, 1fr); font: 400 14px/22px var(--qf-font-ui);}
   .qfe-topbar {
     padding: 0 8px;
     gap: 6px;

@@ -1,7 +1,7 @@
 /* Approved page-08 baseline: original warm surfaces and two-pane composition,
  * specification typography, and a single scrolling column below 900px.
  * Scope shell overrides to this route so accepted pages retain their behavior. */
-.qfo-root.qfa-root { --qfa-code:#111820; --qfa-code-top:#151E27; --qfa-code-border:#2C3945; --qfa-code-text:#DDE6EE; --qfa-code-muted:#A6B3BF; --qfa-selected-border:#F1C8B7; --qfa-note-border:#E5D8CA; --qfa-note-bg:#FFF9F4; --qfa-mono:"Geist Mono","SFMono-Regular",Consolas,monospace; }
+.qfo-root.qfa-root { --qfa-code:#111820; --qfa-code-top:#151E27; --qfa-code-border:#2C3945; --qfa-code-text:#DDE6EE; --qfa-code-muted:#A6B3BF; --qfa-selected-border:#F1C8B7; --qfa-note-border:#E5D8CA; --qfa-note-bg:#FFF9F4; --qfa-mono: var(--qf-font-mono); }
 .qfa-root .qfo-main { overflow:hidden; padding:18px 24px 20px; }
 .qfa-root .qfa-page { height:100%; min-height:0; width:min(100%,1580px); margin:0 auto; display:grid; grid-template-rows:auto minmax(0,1fr); gap:12px; }
 .qfa-page * { min-width:0; }
@@ -62,7 +62,7 @@
 .qfa-card { border:1px solid var(--border); border-radius:9px; background:var(--surface); overflow:hidden; }
 .qfa-full { grid-column:1/-1; }
 .qfa-card>header { min-height:40px; padding:8px 12px; display:flex; align-items:center; justify-content:space-between; gap:8px; border-bottom:1px solid var(--border); background:var(--surface-2); }
-.qfa-page .qfa-card h3 { margin:0; font-size:14px; line-height:22px; font-weight:650; }
+.qfa-page .qfa-card h3{ margin:0; font-size:16px; line-height:24px; font-weight:650; }
 .qfa-card>header>span { font-size:12px; color:var(--muted); }
 .qfa-card-body { padding:12px; }
 .qfa-properties { margin:0; }
