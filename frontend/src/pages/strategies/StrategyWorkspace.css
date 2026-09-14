@@ -4,7 +4,7 @@
   --accent: #e85f32;
   --sidebar-collapsed: 74px;
   font-size: 14px;
-  color: #253140;
+  color: var(--text);
 }
 .qfs-root .qfo-main {
   overflow: hidden;
@@ -41,10 +41,11 @@
   font-size: 12px;
   letter-spacing: 1.4px;
   color: #d44a23;
+  font: 600 12px/18px var(--qf-font-mono);
 }
 .qfs-heading p {
   margin: 2px 0 0;
-  color: #647382;
+  color: var(--muted);
   font-size: 12px;
 }
 .qfs-actions {
@@ -53,7 +54,7 @@
   align-items: center;
   flex-wrap: wrap;
 }
-.qfs-root button,
+.qfs-page button,
 .qfs-drawer button {
   display: inline-flex;
   align-items: center;
@@ -66,15 +67,22 @@
   min-height: 36px;
   font: inherit;
   font-size: 14px;
-  color: #334151;
+  font-weight: 400;
+  line-height: 20px;
+  color: var(--text);
   cursor: pointer;
 }
-.qfs-root button:hover:not(:disabled),
+/* Action emphasis must not make selectable records and their descriptions bold. */
+.qfs-page .qfs-actions button,
+.qfs-drawer button {
+  font-weight: 650;
+}
+.qfs-page button:hover:not(:disabled),
 .qfs-drawer button:hover:not(:disabled) {
   border-color: #e85f32;
   background: #fff3eb;
 }
-.qfs-root button:disabled,
+.qfs-page button:disabled,
 .qfs-drawer button:disabled {
   opacity: 0.5;
   cursor: not-allowed;
@@ -107,7 +115,7 @@
   border: 1px solid #d9d3ca;
   border-radius: 6px;
   background: #faf8f5;
-  color: #263343;
+  color: var(--text);
   padding: 9px;
 }
 .qfs-root input,
@@ -168,7 +176,7 @@
 .qfs-explorer > header span,
 .qfs-context > header span {
   margin-left: auto;
-  color: #657381;
+  color: var(--muted);
 }
 .qfs-explorer > header button {
   padding: 4px;
@@ -293,7 +301,7 @@
 }
 .qfs-object small {
   font-size: 12px;
-  color: #647382;
+  color: var(--muted);
   max-width: 180px;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -318,7 +326,7 @@
   color: #b7c5d2;
   background: transparent;
   border-color: transparent;
-  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+  font-family: var(--qf-font-mono);
   white-space: nowrap;
 }
 .qfs-root .qfs-file-tabs button[aria-selected="true"] {
@@ -346,11 +354,7 @@
   margin: 0;
   background: #0b1118;
   color: #8e9eae;
-  font:
-    13px/22px ui-monospace,
-    SFMono-Regular,
-    Consolas,
-    monospace;
+  font: 13px/22px var(--qf-font-mono);
   user-select: none;
 }
 .qfs-root .qfs-code textarea {
@@ -364,11 +368,7 @@
   background: #101720;
   color: #dbe6f0;
   padding: 12px 16px;
-  font:
-    13px/22px ui-monospace,
-    SFMono-Regular,
-    Consolas,
-    monospace;
+  font: 13px/22px var(--qf-font-mono);
   tab-size: 4;
   overflow: auto;
 }
@@ -384,7 +384,7 @@
 .qfs-description-head p {
   margin: 6px 0 0;
   font-size: 12px;
-  color: #637282;
+  color: var(--muted);
 }
 .qfs-editor-status {
   background: #151e29;
@@ -456,7 +456,7 @@
   line-height: 1.65;
 }
 .qfs-muted {
-  color: #667482;
+  color: var(--muted);
   font-size: 12px;
   line-height: 1.6;
 }
@@ -488,11 +488,7 @@
   width: 100%;
   min-height: 260px;
   resize: vertical;
-  font:
-    12px/20px ui-monospace,
-    SFMono-Regular,
-    Consolas,
-    monospace;
+  font: 12px/20px var(--qf-font-mono);
 }
 .qfs-root .qfs-record {
   display: flex;
@@ -509,7 +505,7 @@
 }
 .qfs-record small {
   font-size: 12px;
-  color: #637282;
+  color: var(--muted);
   word-break: break-all;
 }
 .qfs-record code {
@@ -525,7 +521,7 @@
   justify-content: center;
   flex-direction: column;
   background: #fffdfc;
-  color: #667482;
+  color: var(--muted);
   padding: 24px;
   text-align: center;
 }
@@ -534,7 +530,9 @@
   height: 32px;
 }
 .qfs-empty h2 {
-  font-size: 18px;
+  font-size: 16px;
+  line-height: 24px;
+  font-weight: 650;
 }
 .qfs-drawer {
   position: fixed;
@@ -548,12 +546,10 @@
   border: 0;
   border-left: 1px solid #d8d0c5;
   background: #fffdfc;
-  color: #263343;
+  color: var(--text);
   padding: 24px;
   overflow: auto;
-  font:
-    14px/1.6 system-ui,
-    sans-serif;
+  font: 400 14px/22px var(--qf-font-ui);
   box-shadow: -12px 0 40px #0002;
 }
 .qfs-drawer::backdrop {
@@ -574,12 +570,17 @@
 .qfs-drawer h2 {
   font-size: 22px;
   margin: 0;
+  font-weight: 650;
+  line-height: 30px;
 }
-.qfs-drawer label {
+.qfs-drawer label{
   display: flex;
   flex-direction: column;
   gap: 7px;
   margin: 20px 0;
+  font-size: 12px;
+  line-height: 18px;
+  font-weight: 600;
 }
 .qfs-drawer textarea {
   min-height: 120px;
@@ -597,7 +598,7 @@
   padding: 16px;
   overflow: auto;
   border-radius: 7px;
-  font: 13px/22px monospace;
+  font: 13px/22px var(--qf-font-mono);
 }
 .qfs-drawer h3 {
   font-size: 14px;
@@ -731,9 +732,12 @@
 }
 
 /* Apply the shared type scale without enlarging code, IDs, or status labels. */
-.qfs-root .qfs-heading p,.qfs-root .qfs-list>button small,.qfs-root .qfs-muted,.qfs-root .qfs-description-head p{font-size:13px;line-height:20px}
-.qfs-root .qfs-explorer>header,.qfs-root .qfs-context>header,.qfs-root .qfs-context-body h3{font-size:16px;line-height:24px}
-.qfs-root .qfs-search>input,.qfs-root .qfs-context-body p,.qfs-root .qfs-parameter,.qfs-root .qfs-parameter input:not([type=checkbox]),.qfs-drawer p,.qfs-drawer input,.qfs-drawer textarea{font-size:14px;line-height:22px}
-.qfs-root .qfs-filters{flex-wrap:wrap}
-.qfs-root .qfs-danger,.qfs-drawer .qfs-danger{color:#a73227;border-color:#d9aaa3;background:#fffdfc}
-.qfs-root .qfs-danger:hover:not(:disabled),.qfs-drawer .qfs-danger:hover:not(:disabled){background:#fff0ed;border-color:#a73227}
+.qfs-root .qfs-heading p,.qfs-root .qfs-list>button small,.qfs-root .qfs-muted,.qfs-root .qfs-description-head p {font-size:13px;line-height:20px}
+.qfs-root .qfs-explorer>header,.qfs-root .qfs-context>header,.qfs-root .qfs-context-body h3 {font-size:16px;line-height:24px}
+.qfs-root .qfs-search>input,.qfs-root .qfs-context-body p,.qfs-root .qfs-parameter,.qfs-root .qfs-parameter input:not([type=checkbox]),.qfs-drawer p,.qfs-drawer input,.qfs-drawer textarea {font-size:14px;line-height:22px}
+.qfs-root .qfs-filters {flex-wrap:wrap}
+.qfs-root .qfs-danger,.qfs-drawer .qfs-danger {color:#a73227;border-color:#d9aaa3;background:#fffdfc}
+.qfs-root .qfs-danger:hover:not(:disabled),.qfs-drawer .qfs-danger:hover:not(:disabled) {background:#fff0ed;border-color:#a73227}
+
+/* Field labels must not pass their emphasis to editable values. */
+.qfs-drawer input,.qfs-drawer select,.qfs-drawer textarea { font-weight:400; }

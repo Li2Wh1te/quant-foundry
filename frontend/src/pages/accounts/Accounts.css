@@ -4,15 +4,15 @@
 .qfac-page{height:100%;min-height:0;max-width:1580px;margin:auto;display:flex;flex-direction:column;gap:12px}
 .qfac-page *{min-width:0}
 .qfac-page h1{font-size:32px;line-height:40px;margin:0;font-weight:700}
-.qfac-page h2{font-size:20px;line-height:28px;margin:0}
-.qfac-page h3{font-size:14px;line-height:22px;margin:0;font-weight:650}
+.qfac-page h2{font-size:16px;line-height:24px;margin:0; font-weight:650;}
+.qfac-page h3{font-size:16px;line-height:24px;margin:0;font-weight:650}
 .qfac-page p{line-height:22px}
-.qfac-page code,.qfac-page pre{font:12px/18px "Geist Mono","SFMono-Regular",Consolas,monospace;overflow-wrap:anywhere;white-space:pre-wrap}
-.qfac-eyebrow{font:650 12px/18px "Geist Mono",monospace;letter-spacing:.12em;color:var(--orange);margin-bottom:6px}
+.qfac-page code,.qfac-page pre{font:12px/18px var(--qf-font-mono);overflow-wrap:anywhere;white-space:pre-wrap}
+.qfac-eyebrow{font:650 12px/18px var(--qf-font-mono);letter-spacing:.12em;color:var(--orange);margin-bottom:6px}
 .qfac-page-head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px}
 .qfac-page-head p{margin:6px 0 0;color:var(--muted)}
 .qfac-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
-.qfac-page .qfac-button,.qfac-page .qfac-icon{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:6px 12px;border:1px solid var(--border);background:var(--surface);border-radius:8px;font-size:13px;line-height:20px;font-weight:650;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s}
+.qfac-page .qfac-button,.qfac-page .qfac-icon{display:inline-flex;align-items:center;justify-content:center;gap:7px;min-height:36px;padding:6px 12px;border:1px solid var(--border);background:var(--surface);border-radius:8px;font-size:14px;line-height:20px;font-weight:650;white-space:nowrap;cursor:pointer;transition:background .12s,border-color .12s}
 .qfac-page .qfac-icon{width:36px;padding:6px;flex-shrink:0}
 .qfac-button svg,.qfac-icon svg{width:16px;height:16px;flex-shrink:0}
 .qfac-page .qfac-button:hover,.qfac-page .qfac-icon:hover{background:var(--surface-2);border-color:var(--border-strong)}
@@ -24,7 +24,7 @@
 .qfac-metrics>div{padding:12px 16px;display:grid;gap:3px}
 .qfac-metrics>div+div{border-left:1px solid var(--border)}
 .qfac-metrics span{font-size:13px;color:var(--muted)}
-.qfac-metrics strong{font-size:26px;line-height:32px;font-weight:700}
+.qfac-metrics strong{font-size:28px;line-height:34px;font-weight:650;}
 .qfac-metrics small{font-size:12px;line-height:18px;color:var(--muted)}
 .qfac-workspace{display:grid;grid-template-columns:360px minmax(0,1fr);gap:12px;min-height:0;flex:1}
 .qfac-sheet{border:1px solid var(--border);border-radius:10px;background:var(--surface);overflow:hidden;min-height:0}
@@ -73,7 +73,7 @@
 .qfac-properties dt{font-size:12px;line-height:18px;color:var(--muted);margin-bottom:6px;overflow-wrap:anywhere}
 .qfac-properties dd{font-size:14px;line-height:22px;margin:0;overflow-wrap:anywhere}
 .qfac-card-message{padding:14px 12px;margin:0;color:var(--muted);font-size:13px}
-.qfac-note{padding:10px 12px;background:var(--amber-bg);color:var(--amber);font-size:12px;line-height:20px;margin:0;overflow-wrap:anywhere}
+.qfac-note{padding:10px 12px;background:var(--amber-bg);color:var(--amber);font-size:13px;line-height:20px;margin:0;overflow-wrap:anywhere}
 .qfac-usage-list{padding:0 12px}
 .qfac-usage-list article{padding:12px 0}
 .qfac-usage-list article+article{border-top:1px solid var(--border)}
@@ -98,7 +98,7 @@
 .qfac-dialog::backdrop{background:#17212f2e;backdrop-filter:blur(6px)}
 .qfac-dialog form{height:100%;display:grid;grid-template-rows:auto auto auto minmax(0,1fr) auto}
 .qfac-modal-head{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 16px;border-bottom:1px solid var(--border)}
-.qfac-modal-head h2{font-size:20px;line-height:28px}
+.qfac-modal-head h2{font-size:22px;line-height:30px;}
 .qfac-summary{display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;padding:10px 16px;border-bottom:1px solid var(--border);background:var(--surface-2)}
 .qfac-summary span{display:block;color:var(--muted);font-size:12px;line-height:18px;margin-bottom:3px}
 .qfac-summary strong{display:block;font-size:13px;line-height:20px;white-space:nowrap;text-overflow:ellipsis;overflow:hidden}
@@ -114,8 +114,8 @@
 .qfac-modal-body h3:not(:first-child){margin-top:20px}
 .qfac-form-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px 12px}
 .qfac-field{display:grid;gap:6px;align-content:start}
-.qfac-field>label,.qfac-pair label>span{font-size:13px;line-height:20px;font-weight:650}
-.qfac-field small,.qfac-help{font-size:12px;line-height:20px;color:var(--muted)}
+.qfac-field>label,.qfac-pair label>span{font-size:12px;line-height:18px;font-weight:600;}
+.qfac-field small,.qfac-help{font-size:13px;line-height:20px;color:var(--muted)}
 .qfac-dialog input:not([type=radio]),.qfac-dialog select{display:block;width:100%;height:36px;padding:0 10px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font-size:14px;box-shadow:none}
 .qfac-dialog input[aria-invalid=true]{border-color:var(--red)}
 .qfac-field .qfac-field-error,.qfac-field-error{color:var(--red);font-size:12px;line-height:20px}
@@ -123,7 +123,7 @@
 .qfac-choices label{display:grid;grid-template-columns:auto 1fr;gap:6px;padding:10px;border:1px solid var(--border);border-radius:8px;cursor:pointer}
 .qfac-choices input{accent-color:var(--orange);margin:3px 0 0}
 .qfac-choices strong{font-size:13px}
-.qfac-choices small{grid-column:1/-1;color:var(--muted);font-size:12px;line-height:20px}
+.qfac-choices small{grid-column:1/-1;color:var(--muted);font-size:13px;line-height:20px;}
 .qfac-fee-editor{display:grid;grid-template-columns:180px minmax(0,1fr);gap:14px;align-items:start}
 .qfac-rule-nav{display:grid;gap:6px}
 .qfac-page .qfac-rule-nav button{border:1px solid var(--border);border-radius:8px;background:var(--surface);text-align:left;padding:10px;cursor:pointer}
@@ -141,7 +141,7 @@
 .qfac-pairs>.qfac-button{justify-self:start}
 .qfac-review-rule{border:1px solid var(--border);border-radius:8px;padding:12px;margin-bottom:8px;overflow-wrap:anywhere}
 .qfac-review-rule strong{font-size:13px}
-.qfac-review-rule p{font-size:12px;margin:5px 0 0;color:var(--muted)}
+.qfac-review-rule p{font-size:13px;margin:5px 0 0;color:var(--muted); line-height:20px;}
 .qfac-modal-footer{border-top:1px solid var(--border);padding:12px 16px;background:var(--surface)}
 .qfac-footer-row{display:flex;align-items:center;justify-content:space-between;gap:10px}
 .qfac-footer-row>span{font-size:12px;color:var(--muted)}

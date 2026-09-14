@@ -19,3 +19,6 @@
 .qfo-root .qf-create-drawer .qfac-steps li[aria-current=step] b{background:var(--orange);border-color:var(--orange);color:white}
 /* Short destructive confirmations remain centered, outside the creation shell. */
 .qfo-root .qfs-confirm-dialog{inset:0;margin:auto;width:min(480px,calc(100vw - 32px));height:fit-content;max-height:calc(100dvh - 32px);border:1px solid var(--border-strong,#d8d0c5);border-radius:12px}
+
+/* Dialog titles are section headings, independent of page object headings. */
+.qfo-root .qf-create-drawer h2{font-size:22px;line-height:30px;font-weight:650}

@@ -10,9 +10,9 @@
   --border: #d9d5ce;
   --border-strong: #c7c1b8;
   --orange: #e85f32;
-  --font-ui: MiSans, "PingFang SC", "Microsoft YaHei", system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-latin: Geist, Inter, system-ui, -apple-system, "Segoe UI", sans-serif;
-  --font-mono: "Geist Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  --font-ui: var(--qf-font-ui);
+  --font-latin: var(--qf-font-ui);
+  --font-mono: var(--qf-font-mono);
   min-height: 100svh;
   display: grid;
   grid-template-rows: auto 1fr auto;
@@ -20,7 +20,7 @@
   background: var(--canvas);
   color: var(--graphite);
   font-family: var(--font-ui);
-  font-synthesis: auto;
+  font-synthesis: none;
   font-variant-numeric: tabular-nums;
   isolation: isolate;
 }

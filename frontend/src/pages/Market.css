@@ -22,7 +22,7 @@
 .qfm-root .qfm-metric-value { font-size:22px; line-height:30px; font-weight:650; letter-spacing:-.02em; overflow-wrap:anywhere; }
 .qfm-root .qfm-metric-value.qfm-mono { font-size:14px; line-height:30px; letter-spacing:-.01em; }
 .qfm-root .qfm-metric-sub { font-size:12px; line-height:18px; color:var(--muted); margin-top:4px; }
-.qfm-root .qfm-mono { font-family:"Geist Mono","SFMono-Regular",monospace; font-size:12px; }
+.qfm-root .qfm-mono { font-family:var(--qf-font-mono); font-size:12px; }
 .qfm-root .qfm-muted { color:var(--muted); }
 .qfm-root .qfm-workspace { flex:1; min-height:260px; display:flex; flex-direction:column; background:var(--surface); border:1px solid var(--border); border-radius:10px; overflow:hidden; }
 .qfm-root .qfm-workspace-head { height:48px; flex-shrink:0; border-bottom:1px solid var(--border); display:flex; align-items:center; gap:14px; padding:0 16px; }
@@ -59,7 +59,7 @@
 .qfm-root .qfm-table th:last-child,.qfm-root .qfm-table td:last-child { text-align:right; }
 .qfm-root .qfm-table tbody tr[data-code] { cursor:pointer; transition:background .1s ease-out; }
 .qfm-root .qfm-table tbody tr[data-code]:hover,.qfm-root .qfm-table tr:focus-within { background:var(--orange-50); }
-.qfm-root .qfm-code { font:600 12px/18px "Geist Mono","SFMono-Regular",monospace; white-space:nowrap; }
+.qfm-root .qfm-code { font:600 12px/18px var(--qf-font-mono); white-space:nowrap; }
 .qfm-root .qfm-name { display:block; font-size:14px; line-height:22px; font-weight:500; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; color:var(--text); }
 .qfm-root a.qfm-name:hover,.qfm-root .qfm-code:hover { text-decoration:underline; }
 .qfm-root .qfm-name-sub { font-size:13px; line-height:20px; margin-top:2px; color:var(--muted); }
@@ -87,14 +87,14 @@
 .qfm-root .qfm-calendar-dialog[open] { display:grid; grid-template-rows:64px auto minmax(0,1fr); }
 .qfm-root .qfm-calendar-dialog::backdrop { background:#20262B38; }
 .qfm-root .qfm-calendar-head { display:flex; align-items:center; justify-content:space-between; padding:0 20px; border-bottom:1px solid var(--border); }
-.qfm-root .qfm-dialog-kicker { color:var(--orange); font:650 11px/16px "Geist Mono",monospace; letter-spacing:.13em; }
+.qfm-root .qfm-dialog-kicker { color:var(--orange); font:650 11px/16px var(--qf-font-mono); letter-spacing:.13em; }
 .qfm-root .qfm-calendar-head h2 { font-size:22px; line-height:30px; font-weight:650; }
 .qfm-root .qfm-calendar-toolbar { display:flex; flex-wrap:wrap; align-items:center; min-height:60px; gap:8px; padding:12px 16px; background:var(--surface-2); border-bottom:1px solid var(--border); }
 .qfm-root .qfm-month-nav { display:flex; align-items:center; margin-left:4px; border:1px solid var(--border); border-radius:8px; background:var(--surface); overflow:hidden; }
 .qfm-root .qfm-month-nav button { width:34px; height:34px; border:0; background:transparent; display:grid; place-items:center; cursor:pointer; }
 .qfm-root .qfm-month-nav button:hover { background:var(--surface-2); }
 .qfm-root .qfm-month-nav svg { width:14px; height:14px; }
-.qfm-root .qfm-month-label { min-width:104px; text-align:center; font:650 13px/18px "Geist Mono",monospace; border-left:1px solid var(--border); border-right:1px solid var(--border); }
+.qfm-root .qfm-month-label { min-width:104px; text-align:center; font:650 13px/18px var(--qf-font-mono); border-left:1px solid var(--border); border-right:1px solid var(--border); }
 .qfm-root .qfm-legend { margin-left:auto; display:flex; align-items:center; gap:12px; color:var(--muted); font-size:12px; }
 .qfm-root .qfm-legend span { display:flex; align-items:center; gap:6px; }
 .qfm-root .qfm-legend i { width:8px; height:8px; border-radius:2px; border:1px solid #BFD5C5; background:var(--green-bg); }
@@ -112,7 +112,7 @@
 .qfm-root .qfm-day.qfm-unknown { border-style:dashed; }
 .qfm-root .qfm-day.qfm-today { background:var(--orange-50); border-color:#F0A387; }
 .qfm-root .qfm-day.qfm-selected { border-color:var(--orange); box-shadow:0 0 0 2px #E85F3226; }
-.qfm-root .qfm-day-num { font:650 13px/18px "Geist Mono",monospace; }
+.qfm-root .qfm-day-num { font:650 13px/18px var(--qf-font-mono); }
 .qfm-root .qfm-day-state { display:flex; align-items:center; gap:4px; font-size:12px; color:var(--muted); }
 .qfm-root .qfm-day.qfm-open .qfm-day-state { color:var(--green); }
 .qfm-root .qfm-calendar-aside { display:flex; flex-direction:column; min-height:0; padding:16px; background:var(--surface-2); }
