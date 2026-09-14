@@ -34,7 +34,7 @@ export function OverviewContent({ snapshot, loading, errors, refreshed, onRefres
       <section className="qfo-sheet qfo-sources" aria-labelledby="overview-sources-title">
         <div className="qfo-sheet-head"><h2 className="qfo-sheet-title" id="overview-sources-title">数据源状态</h2><div className="qfo-sheet-meta">{count(metrics?.total_sources)} 个数据源 · 配置状态汇总</div><Link className="qfo-sheet-link" to="/admin/data-sources">管理数据源<ArrowRight aria-hidden="true" /></Link></div>
         <div className="qfo-source-table">{operations ? operations.sources.length ? operations.sources.map(source => <div className="qfo-source-row" key={source.key}>
-          <div className="qfo-source-main"><div className="qfo-source-mark">{source.key === "tushare" ? "TS" : "DS"}</div><div><div className="qfo-source-name">{source.name}</div><div className="qfo-source-sub">ETF 基础信息、交易日历等结构化数据</div></div></div>
+          <div className="qfo-source-main"><div className="qfo-source-mark">{source.key === "tushare" ? "TS" : "DS"}</div><div><div className="qfo-source-name">{source.name}</div><div className="qfo-source-sub">连接配置与采集运行概况</div></div></div>
           <div className="qfo-source-stat"><span>配置状态</span><div className="qfo-source-status"><i aria-hidden="true" />{source.configured ? "已配置" : "未配置"}</div></div>
           <div className="qfo-source-stat"><span>启用任务</span><b>{count(source.active_tasks)}</b></div>
           <div className="qfo-source-stat"><span>最近成功同步</span><b><Timestamp value={source.last_success_at} /></b></div>

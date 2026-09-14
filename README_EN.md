@@ -29,8 +29,9 @@
 
 > [!NOTE]
 > Quant Foundry is in early development. It currently integrates Tushare Pro and provides ETF data
-> management, a Python strategy workbench, and local daily ETF backtesting. Additional data sources,
-> A-share stocks, futures, paper trading, risk controls, and live execution are planned.
+> management, a Python strategy workbench, and local daily ETF backtesting. Tonghuashun connection
+> management is available; its ingestion tasks are not implemented yet. A-share stocks, futures,
+> paper trading, risk controls, and live execution are planned.
 > This README describes its code branch; consult the matching README when using an older version.
 
 ## Why this project
@@ -194,6 +195,15 @@ Your Tushare account also needs access to the relevant endpoints. Having a token
 and adequate local data coverage are separate prerequisites. The project does not include a data-source
 account or a ready-to-run offline market-data bundle.
 
+Tonghuashun (同花顺) has independent API URL (default `https://fuyao.aicubes.cn`) and API Key
+settings on the same page, using the existing encrypted database storage without additional
+environment credentials. Apply database migrations and restart the service when upgrading.
+Its connection test reads one ETF catalog entry; this does not prove access to all endpoints or
+local data coverage. Tonghuashun has no ingestion tasks yet and cannot supply local backtest bars.
+The authenticated `GET /api/data-sources/tonghuashun/interfaces` endpoint lists 94 documented
+interfaces, explicitly marked as unverified and without ingestion adapters; listing them does
+not start collection.
+
 ### 2. Ingest and inspect local data
 
 Create tasks in **采集任务 (Ingestion Tasks)** in the order below. Select task types by their displayed
@@ -256,7 +266,7 @@ These are development directions, not promised dates or a fixed delivery sequenc
 
 | Direction | Current state | Planned work |
 | --- | --- | --- |
-| Data sources | The Tushare ETF and calendar datasets described above are integrated | Extend Tushare coverage and integrate additional sources, including Tonghuashun (同花顺) |
+| Data sources | Tushare ETF/calendar ingestion; Tonghuashun connection management, interface catalog and REST transport | Add Tonghuashun ingestion adapters in stages and expand multi-source coverage |
 | Asset coverage | ETF data management and daily backtesting are implemented | Add A-share stocks, futures, and their corresponding data and trading rules |
 | Research and backtesting | Strategy revisions, preflight, fixed-instrument runs, and result analysis are implemented | Improve data quality, adjusted research prices, dynamic instruments, and research capabilities |
 | Paper trading | Planned | Validate continuously running strategies and trading workflows |

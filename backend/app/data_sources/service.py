@@ -36,7 +36,11 @@ def configured(row: DataSourceConfig | None) -> bool:
 
 def initialize_sources(session: Session, settings: Settings) -> None:
     """Import legacy values exactly once; never use them as runtime fallback."""
-    for key, provider in PROVIDERS.items():
+    # Match scheduler admission's lock order when several processes start or
+    # update provider state concurrently. Registry insertion order is not a
+    # safe global ordering once a second provider is installed.
+    for key in sorted(PROVIDERS):
+        provider = PROVIDERS[key]
         row = require_config(session, key, lock=True)
         if row.initialized:
             # Fail closed on key loss instead of silently starting jobs that

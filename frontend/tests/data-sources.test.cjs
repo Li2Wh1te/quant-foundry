@@ -26,6 +26,19 @@ const source = {
     last_run: { id: 'run-1', task_id: 'task-1', status: 'failed', created_at: '2026-09-08T16:00:00Z', started_at: null, finished_at: null } }]
 };
 const render = value => renderToStaticMarkup(createElement(MemoryRouter, null, createElement(SourceDetail, { source: value, busy: false, onConfigure() {}, onToggle() {} })));
+test('Tonghuashun uses its own API Key schema and has no fictitious ingestion tasks', () => {
+  const ths = { ...source, key: 'tonghuashun', name: '同花顺', fields: [
+    {key:'api_url',label:'API 地址',type:'url',required:true,default:'https://fuyao.aicubes.cn'},
+    {key:'api_key',label:'API Key',type:'secret',required:true}
+  ], values:{api_url:'https://fuyao.aicubes.cn'}, secret_fields_configured:[], configured:false, capabilities:[] };
+  const draft = api.sourceDraft(ths);
+  assert.deepEqual(draft,{api_url:'https://fuyao.aicubes.cn',api_key:''});
+  assert.match(api.validateSourceDraft(ths,draft).api_key,/API Key/);
+  const html = render(ths);
+  assert.match(html,/同花顺/);
+  assert.match(html,/此数据源尚无已注册的采集脚本/);
+  assert.doesNotMatch(html,/配置任务：|private_task_key/);
+});
 test('provider schemas preserve zero and false but never initialize a secret', () => {
   const draft = api.sourceDraft(source);
   assert.deepEqual(draft, { endpoint: 'https://example.test', credential: '', retries: 0, sandbox: false });

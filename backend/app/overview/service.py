@@ -15,6 +15,7 @@ from app.scheduling.registry import TaskRegistry
 from app.overview.schemas import (
     AttentionTask, OperationsOverview, OverviewMetrics, OverviewRun, SourceOverview,
 )
+from app.data_sources.providers import PROVIDERS
 
 
 ATTENTION_STATUSES = ("failed", "interrupted", "timed_out", "indeterminate")
@@ -34,14 +35,13 @@ def shanghai_day_bounds(now: datetime) -> tuple[datetime, datetime]:
 class OverviewService:
     def __init__(self, session: Session, registry: TaskRegistry) -> None:
         self.session = session
-        # The application currently has one implemented provider. Adding a
-        # provider requires an explicit catalog/configuration mapping here;
-        # a registry entry alone must never imply an available connection.
+        # Only configured provider registrations define the source universe;
+        # arbitrary task metadata must not create fictitious data sources.
         self.definitions = {
-            item.key: item for item in registry.list() if item.source_key == "tushare"
+            item.key: item for item in registry.list() if item.source_key in PROVIDERS
         }
 
-    def read(self, *, tushare_configured: bool, now: datetime | None = None) -> OperationsOverview:
+    def read(self, *, source_configured: dict[str, bool], now: datetime | None = None) -> OperationsOverview:
         now = now or datetime.now(UTC)
         day_start, day_end = shanghai_day_bounds(now)
         keys = tuple(self.definitions)
@@ -104,20 +104,29 @@ class OverviewService:
         recent = self.session.execute(select(TaskRun, ScheduledTask.name).join(
             ScheduledTask, ScheduledTask.id == TaskRun.task_id,
         ).where(run_scope).order_by(*order).limit(4)).all()
-        last_success = self.session.scalar(select(func.max(TaskRun.finished_at)).where(
-            run_scope, TaskRun.status == "succeeded", TaskRun.started_at.is_not(None),
-        ))
+        # Group by task type before aggregating per provider. One provider's
+        # successful run must never become another provider's refresh time.
+        active_by_type = dict(self.session.execute(select(ScheduledTask.task_type, func.count()).where(
+            task_scope, ScheduledTask.state == "active").group_by(ScheduledTask.task_type)).all())
+        success_by_type = dict(self.session.execute(select(TaskRun.task_type, func.max(TaskRun.finished_at)).where(
+            run_scope, TaskRun.status == "succeeded", TaskRun.started_at.is_not(None)
+        ).group_by(TaskRun.task_type)).all())
+        sources = []
+        for key, provider in PROVIDERS.items():
+            source_types = [item.key for item in self.definitions.values() if item.source_key == key]
+            successes = [success_by_type[item] for item in source_types if success_by_type.get(item) is not None]
+            sources.append(SourceOverview(key=key, name=provider.name,
+                configured=source_configured.get(key, False),
+                active_tasks=sum(active_by_type.get(item, 0) for item in source_types),
+                last_success_at=max(successes) if successes else None))
         return OperationsOverview(
             generated_at=now, day_start=day_start, day_end=day_end,
             metrics=OverviewMetrics(
-                configured_sources=int(tushare_configured), total_sources=1,
+                configured_sources=sum(item.configured for item in sources), total_sources=len(sources),
                 active_tasks=active_tasks, queued_runs=pending[0], running_runs=pending[1],
                 today_runs=today[0], today_succeeded=today[1], attention_tasks=attention_count,
             ),
-            sources=[SourceOverview(
-                key="tushare", name="Tushare", configured=tushare_configured,
-                active_tasks=active_tasks, last_success_at=last_success,
-            )],
+            sources=sources,
             recent_runs=[self._run(run, name) for run, name in recent],
             attention=[AttentionTask(run=self._run(run, name), retrying=run.task_id in retries)
                        for run, name in issue_rows],

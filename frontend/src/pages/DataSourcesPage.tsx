@@ -6,7 +6,9 @@ import { DataSourceApiError, listDataSources, readDataSource, saveDataSource, se
 import type { DataSource, SourceDraft, SourceProbe } from "../api/dataSources";
 import { useAuth } from "../auth/AuthContext";
 import { RUN_LABELS } from "../components/overviewPresentation";
+import { isDialogBackdropClick } from "../components/controls/dialogBackdrop";
 import "./DataSources.css";
+import "../components/controls/CreationDrawers.css";
 
 export function sourceTime(value: string | null): string {
   if (!value) return "尚未检查";
@@ -25,6 +27,7 @@ function ConnectionDialog({ source, onClose, onSaved, onUnauthorized }: {
   const dialog = useRef<HTMLDialogElement>(null);
   const form = useRef<HTMLFormElement>(null);
   const errorSummary = useRef<HTMLDivElement>(null);
+  const keepEditing = useRef<HTMLButtonElement>(null);
   const pending = useRef(false);
   const [current, setCurrent] = useState(source);
   const [draft, setDraft] = useState(() => sourceDraft(source));
@@ -33,6 +36,7 @@ function ConnectionDialog({ source, onClose, onSaved, onUnauthorized }: {
   const [error, setError] = useState("");
   const [probe, setProbe] = useState<SourceProbe | null>(null);
   const [needsRefresh, setNeedsRefresh] = useState(false);
+  const [discard, setDiscard] = useState(false);
   useEffect(() => {
     const element = dialog.current;
     element?.showModal();
@@ -41,6 +45,19 @@ function ConnectionDialog({ source, onClose, onSaved, onUnauthorized }: {
   }, []);
 
   const focusError = () => requestAnimationFrame(() => errorSummary.current?.focus());
+  function requestClose() {
+    // Every close path uses the same draft and in-flight guard. Testing a
+    // connection does not save the draft, so a successful probe stays dirty.
+    if (pending.current) return;
+    const initial = sourceDraft(current);
+    const dirty = current.fields.some(field => draft[field.key] !== initial[field.key]);
+    if (dirty) {
+      setDiscard(true);
+      requestAnimationFrame(() => keepEditing.current?.focus());
+      return;
+    }
+    onClose();
+  }
   function update(key: string, value: SourceDraft[string]) {
     setDraft(previous => ({ ...previous, [key]: value }));
     setErrors(previous => { const next = { ...previous }; delete next[key]; return next; });
@@ -75,16 +92,14 @@ function ConnectionDialog({ source, onClose, onSaved, onUnauthorized }: {
       else { setError("重新加载失败，请稍后重试。"); focusError(); }
     } finally { pending.current = false; setBusy(null); }
   }
-  return <dialog ref={dialog} className="qfs-dialog" aria-labelledby="source-dialog-title"
-    onCancel={event => { event.preventDefault(); if (!pending.current) onClose(); }}
+  return <dialog ref={dialog} className="qfs-dialog qf-create-drawer" aria-labelledby="source-dialog-title"
+    onCancel={event => { event.preventDefault(); requestClose(); }}
     onClick={event => {
-      if (event.target !== event.currentTarget || pending.current) return;
-      const rect = event.currentTarget.getBoundingClientRect();
-      if (event.clientX < rect.left || event.clientX > rect.right || event.clientY < rect.top || event.clientY > rect.bottom) onClose();
+      if (isDialogBackdropClick(event)) requestClose();
     }}>
     <form ref={form} noValidate onSubmit={event => { event.preventDefault(); void submit("save"); }}>
-      <header className="qfs-dialog-head"><h2 id="source-dialog-title">配置 {current.name} 连接</h2><button className="qfo-icon-btn" type="button" aria-label="关闭连接配置" disabled={!!busy} onClick={onClose}><X aria-hidden="true" /></button></header>
-      <div className="qfs-dialog-body">
+      <header className="qfs-dialog-head"><h2 id="source-dialog-title">配置 {current.name} 连接</h2><button className="qfo-icon-btn" type="button" aria-label="关闭连接配置" disabled={!!busy} onClick={requestClose}><X aria-hidden="true" /></button></header>
+      {discard ? <div className="qfs-dialog-body qf-discard"><h3>放弃未保存的连接配置？</h3><p>当前修改尚未保存，关闭后将丢失。</p><div><button ref={keepEditing} type="button" className="qfo-secondary-btn" onClick={() => { setDiscard(false); requestAnimationFrame(() => form.current?.querySelector<HTMLInputElement>("input")?.focus()); }}>继续编辑</button><button type="button" className="qfo-primary-btn" onClick={onClose}>放弃修改并关闭</button></div></div> : <><div className="qfs-dialog-body">
         {error && <div ref={errorSummary} className="qfs-message qfs-error" tabIndex={-1} role="alert"><strong>{error}</strong>{Object.entries(errors).length > 0 && <ul>{Object.entries(errors).map(([key, message]) => <li key={key}><a href={`#source-field-${key}`}>{message}</a></li>)}</ul>}
           {needsRefresh && <><p>重新加载会清空当前草稿，并读取已保存的配置。</p><button type="button" className="qfo-secondary-btn" disabled={!!busy} onClick={() => void reload()}>重新加载配置</button></>}
         </div>}
@@ -110,7 +125,7 @@ function ConnectionDialog({ source, onClose, onSaved, onUnauthorized }: {
         {probe && <div className={`qfs-message ${probe.ok ? "qfs-success" : "qfs-error"}`} role="status"><strong>{probe.ok ? "测试通过 · 尚未保存" : "连接测试未通过"}</strong><p>{probe.message}</p></div>}
         <span className="qfs-sr-only" role="status">{busy === "test" ? "正在测试连接" : busy === "save" ? "正在验证并保存配置" : ""}</span>
       </div>
-      <footer className="qfs-dialog-foot"><button className="qfo-secondary-btn" type="button" disabled={!!busy || needsRefresh} onClick={() => void submit("test")}>{busy === "test" && <LoaderCircle className="spin" aria-hidden="true" />}{busy === "test" ? "测试中…" : "测试连接"}</button><button className="qfo-primary-btn" type="submit" disabled={!!busy || needsRefresh}>{busy === "save" && <LoaderCircle className="spin" aria-hidden="true" />}{busy === "save" ? "验证并保存中…" : "保存配置"}</button></footer>
+      <footer className="qfs-dialog-foot"><button className="qfo-secondary-btn" type="button" disabled={!!busy} onClick={requestClose}>取消</button><button className="qfo-secondary-btn" type="button" disabled={!!busy || needsRefresh} onClick={() => void submit("test")}>{busy === "test" && <LoaderCircle className="spin" aria-hidden="true" />}{busy === "test" ? "测试中…" : "测试连接"}</button><button className="qfo-primary-btn" type="submit" disabled={!!busy || needsRefresh}>{busy === "save" && <LoaderCircle className="spin" aria-hidden="true" />}{busy === "save" ? "验证并保存中…" : "保存配置"}</button></footer></>}
     </form>
   </dialog>;
 }
@@ -158,7 +173,7 @@ export function DataSourcesPage() {
     if (!message) return;
     // Successful feedback is transient and never participates in page layout.
     // Cancel the previous expiry when another action replaces the message.
-    const timer = window.setTimeout(() => setMessage(""), 5000);
+    const timer = window.setTimeout(() => setMessage(""), 4000);
     return () => window.clearTimeout(timer);
   }, [message]);
   const [editing, setEditing] = useState<DataSource | null>(null);
