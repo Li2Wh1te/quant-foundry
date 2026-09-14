@@ -205,7 +205,7 @@ export const compareBacktestRuns=(run_ids:string[])=>request(`/api/admin/backtes
 export async function fetchBacktestResult<T = Record<string, unknown>>(runId: string, kind: string, cursor?: string, signal?: AbortSignal, filters: Record<string, string> = {}): Promise<BacktestResultPage<T>> {
   const params = new URLSearchParams({ limit: "100", ...filters });
   if (cursor) params.set("cursor", cursor);
-  return request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/${kind}?${params}`, {}, signal) as Promise<BacktestResultPage<T>>;
+  return request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/${kind === "equity" ? "equity-curve" : encodeURIComponent(kind)}?${params}`, {}, signal) as Promise<BacktestResultPage<T>>;
 }
 
 export const rerunBacktest = (run: BacktestRun, idempotencyKey: string = crypto.randomUUID()) =>
@@ -225,4 +225,11 @@ export function fetchRunWorkbench(filters: { search: string; status: string; off
   if (filters.status) params.set("status", filters.status);
   if (filters.strategy_id) params.set("strategy_id", filters.strategy_id);
   return request(`/api/admin/backtest-runs/workspace?${params}`, {}, signal) as Promise<WorkbenchPage>;
+}
+
+/** A legacy run may predate analysis summaries. Only an explicit not-found
+ * response is unavailable evidence; transport/server failures remain errors. */
+export async function fetchBacktestAnalysisSummary(runId: string, signal?: AbortSignal): Promise<Record<string, unknown> | null> {
+  try { return await request(`/api/admin/backtest-runs/${encodeURIComponent(runId)}/results/analysis-summary`, {}, signal) as Record<string, unknown>; }
+  catch (error) { if (error instanceof BacktestApiError && error.status === 404) return null; throw error; }
 }
