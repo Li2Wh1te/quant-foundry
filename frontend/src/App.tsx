@@ -9,6 +9,7 @@ import { AdminPage } from "./pages/AdminPage";
 import { AccountProfilesPage } from "./pages/AccountProfilesPage";
 import { BacktestPreflightPage } from "./pages/BacktestPreflightPage";
 import { BacktestRunsPage } from "./pages/BacktestRunsPage";
+import { BacktestComparePage } from "./pages/BacktestComparePage";
 import { BacktestResultPage } from "./pages/BacktestResultPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { DataSourcesPage } from "./pages/DataSourcesPage";
@@ -99,6 +100,7 @@ export function App() {
         path="/admin/backtest-preflight"
         element={<RequireAuth><AdminPage><BacktestPreflightPage /></AdminPage></RequireAuth>}
       />
+      <Route path="/admin/backtest-compare" element={<RequireAuth><OverviewShell title="回测对比" section="RESEARCH / 04" className="qcmp-root"><BacktestComparePage /></OverviewShell></RequireAuth>} />
       <Route path="/admin/backtest-runs/:runId/results" element={<RequireAuth><OverviewShell title="回测结果" section="RESEARCH / 04" className="qfb-root qfr-root"><BacktestResultPage /></OverviewShell></RequireAuth>} />
       <Route path="/admin/backtest-runs" element={<RequireAuth><OverviewShell title="回测工作台" section="RESEARCH / 04" className="qfb-root"><BacktestRunsPage /></OverviewShell></RequireAuth>} />
       <Route
