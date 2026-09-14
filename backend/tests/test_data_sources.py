@@ -50,13 +50,14 @@ class DataSourceTest(unittest.TestCase):
         self.transaction = self.connection.begin() if self.postgres else None
         self.session = Session(self.connection, join_transaction_mode="create_savepoint")
         self.settings = settings()
-        row = self.session.get(DataSourceConfig, "tushare")
-        if row is None:
-            self.session.add(DataSourceConfig(key="tushare"))
-        else:
-            row.initialized, row.enabled, row.version = False, True, 1
-            row.encrypted_secrets, row.values = None, {}
-            row.check_status, row.checked_at, row.check_message = "not_checked", None, None
+        for key in PROVIDERS:
+            row = self.session.get(DataSourceConfig, key)
+            if row is None:
+                self.session.add(DataSourceConfig(key=key))
+            else:
+                row.initialized, row.enabled, row.version = False, True, 1
+                row.encrypted_secrets, row.values = None, {}
+                row.check_status, row.checked_at, row.check_message = "not_checked", None, None
         self.session.commit()
         self.registry = TaskRegistry()
         self.task_type = "test." + uuid4().hex
@@ -249,6 +250,64 @@ class DataSourceTest(unittest.TestCase):
         self.assertEqual(result["values"], {"region": "eu"})
         self.assertEqual(result["secret_fields_configured"], ["access_key"])
         self.assertNotIn("token", json.dumps(result, default=str))
+
+    def test_tonghuashun_initialization_and_save_are_independent(self):
+        self.initialize(tushare_token="existing-tushare")
+        before = self.row().encrypted_secrets
+        detail = self.service.detail("tonghuashun")
+        self.assertEqual(detail["values"], {"api_url": "https://fuyao.aicubes.cn"})
+        self.assertFalse(detail["configured"])
+        self.assertEqual(detail["capabilities"], [])
+        with patch.object(PROVIDERS["tonghuashun"], "probe", return_value=SUCCESS):
+            detail = self.service.save("tonghuashun", 1, {"api_key": "private-ths"})
+            self.service.save("tonghuashun", 2, {"api_key": ""})
+        self.assertEqual(detail["secret_fields_configured"], ["api_key"])
+        self.assertNotIn("private-ths", json.dumps(detail, default=str))
+        self.initialize(tushare_token="changed-environment")
+        self.assertEqual(runtime_credentials(self.session, self.settings, "tonghuashun")[1], {"api_key": "private-ths"})
+        self.assertEqual(self.row().encrypted_secrets, before)
+        self.service.set_enabled("tonghuashun", 3, False)
+        self.assertTrue(self.row().enabled)
+
+    def test_tonghuashun_failure_and_stale_save_preserve_saved_configuration(self):
+        self.initialize()
+        with patch.object(PROVIDERS["tonghuashun"], "probe", return_value=SUCCESS):
+            self.service.save("tonghuashun", 1, {"api_key": "private-old"})
+        before = self.session.get(DataSourceConfig, "tonghuashun").encrypted_secrets
+        with patch.object(PROVIDERS["tonghuashun"], "probe", return_value=ProbeResult("forbidden", "接口权限不足。", datetime.now(UTC))):
+            with self.assertRaises(SourceError):
+                self.service.save("tonghuashun", 2, {"api_key": "private-new"})
+        self.assertEqual(self.session.get(DataSourceConfig, "tonghuashun").encrypted_secrets, before)
+        with self.assertRaisesRegex(SourceError, "已被更新"):
+            self.service.save("tonghuashun", 1, {"api_key": "private-stale"})
+
+    def test_missing_new_source_requires_migration_instead_of_partial_startup(self):
+        self.session.delete(self.session.get(DataSourceConfig, "tonghuashun"))
+        self.session.commit()
+        with self.assertRaisesRegex(SourceError, "迁移"):
+            self.initialize()
+        self.session.rollback()
+
+    def test_runtime_client_snapshots_tonghuashun_credentials_without_network_io(self):
+        from app.data_ingestion.clients.tonghuashun import TonghuashunClient
+        self.initialize()
+        with patch.object(PROVIDERS["tonghuashun"], "probe", return_value=SUCCESS):
+            self.service.save("tonghuashun", 1, {"api_key": "first-key"})
+        # Reuse the fixture transaction in PostgreSQL CI; another connection
+        # cannot see rows owned by the enclosing rollback-only test transaction.
+        with patch("app.db.session.get_engine", return_value=self.connection), patch("requests.get") as get:
+            client = TonghuashunClient.from_settings(self.settings)
+            get.assert_not_called()
+        with patch.object(PROVIDERS["tonghuashun"], "probe", return_value=SUCCESS):
+            self.service.save("tonghuashun", 2, {"api_key": "second-key"})
+        self.assertEqual(client._api_key, "first-key")
+        self.assertEqual(client.interval_ms, self.settings.ingestion_request_interval_ms)
+
+    def test_initialization_locks_providers_in_scheduler_order(self):
+        from app.data_sources.service import require_config
+        with patch("app.data_sources.service.require_config", wraps=require_config) as get:
+            self.initialize()
+        self.assertEqual([call.args[1] for call in get.call_args_list], sorted(PROVIDERS))
 
 
 class SourceProbeTest(unittest.TestCase):

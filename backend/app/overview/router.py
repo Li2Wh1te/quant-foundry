@@ -6,8 +6,8 @@ from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db_session
-from app.data_sources.models import DataSourceConfig
-from app.data_sources.service import configured
+from app.data_sources.service import configured, require_config
+from app.data_sources.providers import PROVIDERS
 from app.overview.schemas import OperationsOverview
 from app.overview.service import OverviewService
 from app.scheduling.registry import task_registry
@@ -25,5 +25,5 @@ def read_overview(request: Request, response: Response,
     # This dependency supplies a fresh session. Pin all counts and bounded
     # previews to one PostgreSQL snapshot while scheduler workers keep writing.
     session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
-    source = session.get(DataSourceConfig, "tushare")
-    return OverviewService(session, task_registry).read(tushare_configured=configured(source))
+    sources = {key: configured(require_config(session, key)) for key in PROVIDERS}
+    return OverviewService(session, task_registry).read(source_configured=sources)

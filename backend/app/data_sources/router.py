@@ -9,7 +9,7 @@ from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.orm import Session
 
-from app.data_sources.providers import PROVIDERS, SourceError
+from app.data_sources.providers import PROVIDERS, SourceError, require_provider
 from app.data_sources.service import DataSourceService
 from app.db.session import get_db_session
 from app.scheduling.registry import task_registry
@@ -62,6 +62,15 @@ def list_sources(svc: DataSourceService = Depends(service)):
 @router.get("/{key}")
 def read_source(key: str, svc: DataSourceService = Depends(service)):
     return svc.detail(key)
+
+
+@router.get("/{key}/interfaces")
+def list_source_interfaces(key: str):
+    """Documented interfaces are not runnable tasks or verified permissions."""
+    require_provider(key)
+    from app.data_sources.tonghuashun_catalog import list_interfaces
+
+    return {"source_key": key, "items": list_interfaces() if key == "tonghuashun" else []}
 
 
 @router.post("/{key}/test")

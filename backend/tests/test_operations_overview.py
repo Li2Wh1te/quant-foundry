@@ -89,7 +89,7 @@ class OverviewTest(unittest.TestCase):
         # Match a new request's database-loaded identity map. SQLite strips
         # timezone offsets on load, unlike the production PostgreSQL dialect.
         self.session.expire_all()
-        return self.service.read(tushare_configured=configured, now=NOW)
+        return self.service.read(source_configured={"tushare": configured}, now=NOW)
 
     def test_empty_and_configuration_do_not_imply_connectivity(self):
         result = self.read(True)
@@ -98,6 +98,9 @@ class OverviewTest(unittest.TestCase):
         self.assertEqual(result.metrics.attention_tasks, 0)
         self.assertEqual(result.recent_runs, [])
         self.assertEqual(result.metrics.configured_sources, 1)
+        self.assertEqual(result.metrics.total_sources, 2)
+        self.assertEqual(result.sources[1].name, "同花顺")
+        self.assertFalse(result.sources[1].configured)
         self.assertEqual(result.sources[0].connection_status, "not_checked")
         self.assertIsNone(result.sources[0].last_success_at)
 
@@ -183,6 +186,23 @@ class OverviewTest(unittest.TestCase):
         self.assertEqual(self.read().sources[0].last_success_at.replace(tzinfo=UTC),
                          successful.finished_at.replace(tzinfo=UTC))
 
+    def test_multiple_sources_keep_counts_history_and_configuration_separate(self):
+        key = "test.ths." + uuid4().hex
+        self.registry.register(TaskDefinition(key=key, name="同花顺测试采集",
+            english_name="Tonghuashun test ingestion", parameters_model=BaseModel,
+            handler=lambda *_: None, source_key="tonghuashun"))
+        self.service = OverviewService(self.session, self.registry)
+        old = self.add_run(self.task(), at=NOW-timedelta(hours=1))
+        new = self.add_run(self.task(key=key))
+        self.task(key=key)
+        result = self.service.read(source_configured={"tushare": False, "tonghuashun": True}, now=NOW)
+        self.assertEqual((result.metrics.active_tasks, result.metrics.configured_sources), (3, 1))
+        self.assertEqual([item.active_tasks for item in result.sources], [1, 2])
+        self.assertEqual([item.configured for item in result.sources], [False, True])
+        self.assertEqual(result.sources[0].last_success_at.replace(tzinfo=UTC), old.finished_at.replace(tzinfo=UTC))
+        self.assertEqual(result.sources[1].last_success_at.replace(tzinfo=UTC), new.finished_at.replace(tzinfo=UTC))
+        self.assertEqual(result.recent_runs[0].source_key, "tonghuashun")
+
 
 class OverviewContractTest(unittest.TestCase):
     def test_every_builtin_ingestion_task_has_explicit_source_metadata(self):
@@ -201,19 +221,20 @@ class OverviewContractTest(unittest.TestCase):
         self.assertEqual(operations["get"]["security"], [{"API Token": []}])
         self.assertEqual(asyncio.run(request_status(app, "/api/admin/overview")), 401)
 
+    @patch("app.overview.router.require_config")
     @patch("app.overview.router.OverviewService")
-    def test_route_passes_only_presence_and_disables_caching(self, service):
+    def test_route_passes_only_presence_and_disables_caching(self, service, config):
         response = Response()
         request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace(settings=SimpleNamespace(
             tushare_token=SecretStr("private-provider-credential")))))
         session = Mock()
-        session.get.return_value = SimpleNamespace(initialized=True, encrypted_secrets="encrypted")
+        config.return_value = SimpleNamespace(initialized=True, encrypted_secrets="encrypted")
         read_overview(request, response, session)
-        service.return_value.read.assert_called_once_with(tushare_configured=True)
+        service.return_value.read.assert_called_once_with(source_configured={"tushare": True, "tonghuashun": True})
         session.connection.assert_called_once_with(
             execution_options={"isolation_level": "REPEATABLE READ"})
         self.assertEqual(response.headers["cache-control"], "no-store")
-        session.get.return_value = None
+        config.return_value = None
         service.return_value.read.reset_mock()
         read_overview(request, response, session)
-        service.return_value.read.assert_called_once_with(tushare_configured=False)
+        service.return_value.read.assert_called_once_with(source_configured={"tushare": False, "tonghuashun": False})

@@ -9,14 +9,7 @@ from urllib.parse import urlsplit
 
 import requests
 
-
-class SourceError(Exception):
-    """Only sanitized, operator-readable messages may cross this boundary."""
-
-    def __init__(self, message: str, *, status_code: int = 422, field: str | None = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.field = field
+from app.data_sources.errors import SourceError
 
 
 @dataclass(frozen=True)
@@ -122,9 +115,58 @@ class TushareProvider:
         return ProbeResult(status, message, datetime.now(UTC))
 
 
+class TonghuashunProvider:
+    """Fuyao REST credentials are independent of the Tushare token schema."""
+
+    key = "tonghuashun"
+    name = "同花顺"
+    fields = (
+        {"key": "api_url", "label": "API 地址", "type": "url", "required": True,
+         "default": "https://fuyao.aicubes.cn",
+         "help": "同花顺金融数据 API 服务地址，不包含 /api 接口路径。"},
+        {"key": "api_key", "label": "API Key", "type": "secret", "required": True,
+         "help": "在同花顺金融数据 API 管理页创建；已有凭据时留空沿用，原值不会回显。"},
+    )
+
+    def validate(self, values: dict[str, Any], secrets: dict[str, str]) -> tuple[dict, dict]:
+        from app.data_ingestion.clients.tonghuashun import validate_connection
+
+        if set(values) - {field["key"] for field in self.fields}:
+            raise SourceError("配置包含该数据源不支持的字段。")
+        url = values.get("api_url", self.fields[0]["default"])
+        key = values.get("api_key", "")
+        if not isinstance(key, str):
+            raise SourceError("API Key 格式不正确。", field="api_key")
+        key = key.strip() or secrets.get("api_key", "")
+        url, key = validate_connection(url, key)
+        return {"api_url": url}, {"api_key": key}
+
+    def probe(self, values: dict, secrets: dict) -> ProbeResult:
+        from app.data_ingestion.clients.tonghuashun import TonghuashunClient, TonghuashunError
+
+        # One bounded metadata read proves this capability only. Do not run
+        # all endpoints, import market data, or retry during a form submission.
+        try:
+            client = TonghuashunClient(values["api_url"], secrets["api_key"],
+                max_attempts=1, deadline_seconds=12, max_response_bytes=65536)
+            result = client.request("meta.tickers.list", {"asset_type": "fund-etf", "limit": 1, "offset": 0})
+            items = result.data.get("item")
+            if (not isinstance(items, list) or len(items) != 1
+                or not isinstance(items[0], dict)
+                or not isinstance(items[0].get("thscode"), str)
+                or not items[0]["thscode"].strip()
+                or items[0].get("asset_type") != "fund-etf"):
+                raise TonghuashunError("invalid_response")
+            return ProbeResult("connected",
+                "连接测试通过，ETF 标的列表接口可用；其他接口权限和数据覆盖仍需分别验证。",
+                datetime.now(UTC))
+        except TonghuashunError as exc:
+            return ProbeResult(exc.kind, str(exc), datetime.now(UTC))
+
+
 # Adding a provider requires its own schema/validator/probe; the API and form
 # must not assume every provider authenticates with the Tushare field pair.
-PROVIDERS = {provider.key: provider for provider in (TushareProvider(),)}
+PROVIDERS = {provider.key: provider for provider in (TushareProvider(), TonghuashunProvider())}
 
 
 def require_provider(key: str):
