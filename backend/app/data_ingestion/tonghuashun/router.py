@@ -13,6 +13,8 @@ from app.data_ingestion.models.tonghuashun import (
     TonghuashunObservation as Observation,
 )
 from app.data_ingestion.tonghuashun.contracts import DATASETS
+from app.data_ingestion.tonghuashun.contracts import exact_json
+from app.data_ingestion.tonghuashun.repository import materialize
 from app.db.session import get_db_session
 
 router = APIRouter(prefix="/api/admin/data-collections/tonghuashun", tags=["tonghuashun-data"])
@@ -90,10 +92,13 @@ def states(dataset: str | None = None, subject: str | None = None,
             "reconciled_at": r.reconciled_at, "error_kind": r.error_kind} for r in rows]}
 
 
-def observation_page(row, limit, offset):
+def observation_page(row, limit, offset, session=None):
     # Floating-point JSON numbers are returned as decimal strings deliberately;
     # integral provider fields remain integers, null remains unknown.
-    data = json.loads(row.data_json, parse_float=str)
+    encoded = exact_json(materialize(session, row)) if session is not None else row.data_json
+    if row.base_observation_id is not None and session is None:
+        raise ValueError("a session is required to read a delta version")
+    data = json.loads(encoded, parse_float=str)
     records = data.pop("item", [])
     return {"source": "tonghuashun", "dataset": row.dataset, "subject": row.subject,
         "version_id": row.id, "observed_at": row.observed_at,
@@ -108,7 +113,7 @@ def version(version_id: UUID, limit: int = Query(50, ge=1, le=1000), offset: int
     row = session.get(Observation, version_id)
     if row is None:
         raise HTTPException(404, "采集版本不存在。")
-    return observation_page(row, limit, offset)
+    return observation_page(row, limit, offset, session)
 
 
 @router.get("/{dataset}/{subject}/versions")
@@ -131,5 +136,5 @@ def latest(dataset: str, subject: str, limit: int = Query(50, ge=1, le=1000), of
     state = session.get(State, (dataset, subject, "default"))
     if state is None or state.observation_id is None:
         raise HTTPException(404, "该范围尚无成功采集版本，请先查看采集状态。")
-    result = observation_page(session.get(Observation, state.observation_id), limit, offset)
+    result = observation_page(session.get(Observation, state.observation_id), limit, offset, session)
     return {**result, "latest_attempt_status": state.status, "error_kind": state.error_kind}

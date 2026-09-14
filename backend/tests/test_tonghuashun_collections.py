@@ -436,3 +436,47 @@ def test_database_budget_serializes_independent_workers(engine):
         list(executor.map(lambda _: work(), range(2)))
     assert len(starts) == 4
     assert all(b - a >= 0.02 for a, b in zip(starts, starts[1:]))
+
+
+def test_series_delta_versions_are_exact_bounded_and_readable_by_fixed_id(engine):
+    from app.data_ingestion.tonghuashun.repository import materialize
+    with Session(engine) as session:
+        repo = CollectionRepository(session)
+        rows = [bar(date(2020, 1, 1) + timedelta(days=i)) for i in range(100)]
+        first = repo.publish("etf_daily", "510300.SH", "default", expected=0,
+            data={"item": rows, "adjust": "forward"}, requests=[], now=NOW)
+        session.commit()
+        from uuid import UUID
+        first_id = UUID(first["version_id"])
+        original = materialize(session, session.get(Observation, first_id))
+        for revision in range(1, 34):
+            rows = rows + [bar(date(2020, 1, 1) + timedelta(days=99 + revision))]
+            repo.publish("etf_daily", "510300.SH", "default", expected=revision,
+                data={"item": rows, "adjust": "forward"}, requests=[], now=NOW + timedelta(seconds=revision))
+            session.commit()
+        versions = list(session.scalars(select(Observation).order_by(Observation.observed_at)))
+        assert versions[1].base_observation_id == first_id
+        assert len(versions[1].data_json) < len(versions[0].data_json) / 10
+        assert max(version.chain_depth for version in versions) == 30
+        assert versions[31].base_observation_id is None
+        assert repo.read("etf_daily", "510300.SH", "default").data["item"] == rows
+        assert materialize(session, session.get(Observation, first_id)) == original
+        page = observation_page(versions[-1], 1000, 0, session)
+        assert page["total"] == 133
+        assert page["items"][0]["open_price"] == "1.234567890123456789"
+
+
+def test_delta_preserves_decimal_representation_changes_and_removals(engine):
+    with Session(engine) as session:
+        repo = CollectionRepository(session)
+        rows = [bar(date(2020, 1, 1) + timedelta(days=i), "1.00") for i in range(100)]
+        repo.publish("etf_daily", "510300.SH", "default", expected=0,
+            data={"item": rows}, requests=[], now=NOW)
+        session.commit()
+        changed = [{**rows[0], "close_price": Decimal("1.0000")}] + rows[1:-1]
+        repo.publish("etf_daily", "510300.SH", "default", expected=1,
+            data={"item": changed}, requests=[], now=NOW + timedelta(seconds=1))
+        session.commit()
+        data = repo.read("etf_daily", "510300.SH", "default").data
+        assert str(data["item"][0]["close_price"]) == "1.0000"
+        assert len(data["item"]) == 99

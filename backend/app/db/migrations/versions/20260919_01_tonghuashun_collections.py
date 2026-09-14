@@ -27,7 +27,9 @@ def upgrade():
         sa.Column("request_json", sa.Text(), nullable=False),
         sa.Column("data_json", sa.Text(), nullable=False),
         sa.Column("content_hash", sa.String(64), nullable=False),
-        sa.Column("row_count", sa.Integer(), nullable=False))
+        sa.Column("row_count", sa.Integer(), nullable=False),
+        sa.Column("base_observation_id", sa.Uuid(), sa.ForeignKey("tonghuashun_observations.id")),
+        sa.Column("chain_depth", sa.Integer(), nullable=False))
     op.create_index("ix_tonghuashun_observations_scope_time", "tonghuashun_observations",
         ["dataset", "subject", "variant", "observed_at"])
     op.create_table("tonghuashun_collection_states",

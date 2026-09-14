@@ -43,6 +43,11 @@ class TonghuashunObservation(Base):
     data_json: Mapped[str] = mapped_column(Text)
     content_hash: Mapped[str] = mapped_column(String(64))
     row_count: Mapped[int] = mapped_column(Integer)
+    # Time-series versions may reference a short immutable delta chain. A full
+    # anchor is emitted regularly, bounding reconstruction cost without pruning
+    # old evidence or duplicating ten years of bars after each daily update.
+    base_observation_id: Mapped[UUID | None] = mapped_column(ForeignKey("tonghuashun_observations.id"))
+    chain_depth: Mapped[int] = mapped_column(Integer, default=0)
 
 
 class TonghuashunCollectionState(Base):

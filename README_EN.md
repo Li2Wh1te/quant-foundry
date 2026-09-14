@@ -217,6 +217,8 @@ includes scheduler templates; `/tickers` and `/states` expose inventory and prog
 lists versions, and `/versions/{version_id}` pins a read to an immutable version. Explicit date
 backfills have independent scope heads discoverable through `/states`. Decimal values are
 returned as strings; provider fields, units, nulls and disclosure dates are preserved.
+Time-series versions use bounded delta chains with periodic full anchors rather than copying
+the complete history daily. Fixed-version reads reconstruct and verify the content digest.
 
 Templates check bounded batches every ten minutes without refetching completed subjects. Daily
 cutoffs are 20:00 Shanghai time, 20:30 for bars, and 22:30 plus a 09:00 follow-up for NAV.

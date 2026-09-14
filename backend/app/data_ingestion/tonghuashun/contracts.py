@@ -103,10 +103,14 @@ DATASETS = {d.key: d for d in (
 
 def exact_json(value: Any) -> str:
     """Produce deterministic standard JSON without losing a decimal digit."""
+    if isinstance(value, float):
+        return exact_json(Decimal(str(value)))
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise CollectionError("响应包含非有限数值。")
-        return str(value)
+        # Keep a negative zero in the decimal JSON domain; a bare -0 would be
+        # parsed as integer zero and change the content digest on reconstruction.
+        return "-0.0" if str(value) == "-0" else str(value)
     if isinstance(value, dict):
         return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + exact_json(v)
                               for k, v in sorted(value.items())) + "}"

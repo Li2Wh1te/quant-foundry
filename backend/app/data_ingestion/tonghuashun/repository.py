@@ -18,6 +18,60 @@ from app.data_ingestion.models.tonghuashun import (
 )
 from app.data_ingestion.tonghuashun.contracts import CollectionError, content_hash, exact_json
 
+SERIES_KEYS = {"etf_daily": "date_ms", "stock_daily": "date_ms", "index_daily": "date_ms",
+    "fund_nav": "nav_date", "stock_income": "period_end_ms", "stock_balance": "period_end_ms",
+    "stock_cash_flow": "period_end_ms", "stock_indicators": "report",
+    "fund_stock_history": "report_key", "fund_bond_history": "report_key"}
+
+
+def materialize(session: Session, observation: Observation) -> dict:
+    """Reconstruct exactly one immutable version, never the current head.
+
+    Chains are bounded at publication time. Scope checks also prevent corrupt
+    references from mixing symbols, dates or source-local datasets during reads.
+    """
+    chain, seen, cursor = [], set(), observation
+    while True:
+        if cursor.id in seen or len(chain) > 30:
+            raise CollectionError("采集版本引用异常，无法还原该版本。")
+        if (cursor.dataset, cursor.subject, cursor.variant) != (observation.dataset, observation.subject, observation.variant):
+            raise CollectionError("采集版本引用了其他数据范围。")
+        seen.add(cursor.id)
+        chain.append(cursor)
+        if cursor.base_observation_id is None:
+            break
+        cursor = session.get(Observation, cursor.base_observation_id)
+        if cursor is None:
+            raise CollectionError("采集版本缺少基础快照。")
+    data = json.loads(chain.pop().data_json, parse_float=Decimal)
+    for version in reversed(chain):
+        delta = json.loads(version.data_json, parse_float=Decimal)
+        key = delta["key_field"]
+        rows = {row[key]: row for row in data["item"]}
+        for identity in delta["removed"]:
+            rows.pop(identity, None)
+        rows.update({row[key]: row for row in delta["upserts"]})
+        data = {**delta["metadata"], "item": [rows[k] for k in sorted(rows)]}
+    if content_hash(data) != observation.content_hash:
+        raise CollectionError("采集版本内容校验失败。")
+    return data
+
+
+def archive_data(dataset: str, data: dict, previous: Observation | None, old: dict | None):
+    """Use a delta only when it is materially smaller than a full anchor."""
+    full = exact_json(data)
+    key = SERIES_KEYS.get(dataset)
+    if key and previous and old and previous.chain_depth < 30:
+        old_rows = {r[key]: r for r in old["item"]}
+        new_rows = {r[key]: r for r in data["item"]}
+        delta = {"key_field": key, "metadata": {k: v for k, v in data.items() if k != "item"},
+            "upserts": [row for identity, row in new_rows.items() if identity not in old_rows or exact_json(row) != exact_json(old_rows[identity])],
+            "removed": sorted(set(old_rows) - set(new_rows))}
+        encoded = exact_json(delta)
+        if len(encoded) < len(full) * 0.7:
+            return encoded, previous.id, previous.chain_depth + 1
+    return full, None, 0
+
 
 @dataclass(frozen=True)
 class Previous:
@@ -36,7 +90,7 @@ class CollectionRepository:
         state = self.session.get(State, (dataset, subject, variant))
         observation = self.session.get(Observation, state.observation_id) if with_data and state and state.observation_id else None
         return Previous(state.revision if state else 0,
-            json.loads(observation.data_json, parse_float=Decimal) if observation else {} if state and state.observation_id else None,
+            materialize(self.session, observation) if observation else {} if state and state.observation_id else None,
             state.succeeded_at if state else None, state.status if state else "pending",
             state.reconciled_at if state else None)
 
@@ -55,16 +109,18 @@ class CollectionRepository:
                 reconcile: bool = False):
         state = self._lock(dataset, subject, variant, expected, now)
         previous = self.session.get(Observation, state.observation_id) if state.observation_id else None
+        old = materialize(self.session, previous) if previous else None
         digest = content_hash(data)
         row_count = len(data.get("item", data.get("abilities", [])))
-        old_rows = json.loads(previous.data_json, parse_float=Decimal).get("item", []) if previous else []
+        old_rows = old.get("item", []) if old else []
         old_counts = Counter(content_hash(row) for row in old_rows)
         new_counts = Counter(content_hash(row) for row in data.get("item", []))
         unchanged = sum((old_counts & new_counts).values())
         removed = sum((old_counts - new_counts).values())
+        encoded, base_id, depth = archive_data(dataset, data, previous, old)
         version = Observation(id=uuid4(), dataset=dataset, subject=subject, variant=variant,
-            observed_at=now, request_json=exact_json(requests), data_json=exact_json(data),
-            content_hash=digest, row_count=row_count)
+            observed_at=now, request_json=exact_json(requests), data_json=encoded,
+            content_hash=digest, row_count=row_count, base_observation_id=base_id, chain_depth=depth)
         self.session.add(version)
         self.session.flush()
         if ticker_rows is not None:
