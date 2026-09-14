@@ -143,7 +143,7 @@ def test_comparison_route_serializes_real_result_contract_and_owner_filter():
     from unittest.mock import Mock
     ids = [uuid4(), uuid4()]
     roots = [BacktestRunRecord(id=rid, run_kind="backtest_run", profile="formal@1", status="succeeded", terminal_status="succeeded", idempotency_scope="owner-a", config_hash="a" * 64, parameters={"risk": i}, backtest_config={"account": {"version": i + 1}}, data_request={"frequency": "1d"}, behavior_versions={}, result_summary={}, data_evidence={}) for i, rid in enumerate(ids)]
-    points = [BacktestEquityCurveRecord(run_id=rid, as_of=datetime(2026, 1, 2, tzinfo=timezone.utc), sequence=0, equity=Decimal(100), drawdown=Decimal(0), valuation_status="complete") for rid in ids]
+    points = [BacktestEquityCurveRecord(run_id=rid, as_of=datetime(2026, 1, 2, tzinfo=timezone.utc), sequence=0, equity=Decimal(100), cumulative_return=Decimal("0.125"), drawdown=Decimal(0), valuation_status="complete") for rid in ids]
     metrics = [BacktestMetricRecord(run_id=rid, metric_key="sharpe", formula_version="v1", value=Decimal(1), unit="ratio", sample_count=2, analyzer_key="sharpe_simple", analyzer_version=1, analyzer_metadata={"annualization_factor": "252"}) for rid in ids]
     reports = [BacktestDataPreflightResultRecord(run_id=rid, phase="session", status="ready", report_hash="b" * 64, hash_schema_version=2, capabilities={"__pit__": {"non_strict_pit": True, "non_strict_pit_capabilities": ["bars"]}}, calendar_summary={}, session_summary={}, coverage={}, source_revisions={}) for rid in ids]
     tables = {BacktestRunRecord: roots, BacktestEquityCurveRecord: points, BacktestMetricRecord: metrics, BacktestDataPreflightResultRecord: reports}
@@ -153,12 +153,18 @@ def test_comparison_route_serializes_real_result_contract_and_owner_filter():
         statements.append(statement)
         return tables[statement.column_descriptions[0]["entity"]]
     session.scalars.side_effect = select_rows
+    session.execute.return_value = [SimpleNamespace(id=rid, strategy_id=None, strategy_name=None, revision_number=None, alias=None) for rid in ids]
     request = SimpleNamespace(state=SimpleNamespace(authenticated_principal=AuthenticatedPrincipal("owner-a")))
     payload = BacktestComparison.model_validate(compare_runs({"run_ids": [str(rid) for rid in ids]}, session, request)).model_dump(mode="json")
     assert "owner-a" in str(statements[0].compile(compile_kwargs={"literal_binds": True}))
     assert payload["run_summaries"][0]["data_evidence"]["reports"][0]["non_strict_pit"] is True
     assert payload["run_summaries"][1]["config_diff"]["account_snapshot.version"]["current"] == 2
     assert payload["equity_curve_series"][0]["points"][0]["equity"] == "100"
+    assert payload["equity_curve_series"][0]["points"][0]["cumulative_return"] == "0.125"
+    alternate = compare_runs({"run_ids": [str(rid) for rid in ids], "baseline_run_id": str(ids[1])}, session, request)
+    assert alternate["baseline_run_id"] == str(ids[1])
+    assert alternate["run_summaries"][0]["config_diff"]["account_snapshot.version"]["baseline"] == 2
+    assert not alternate["run_summaries"][1]["config_diff"]
 
 
 def test_kernel_import_does_not_load_sqlalchemy():

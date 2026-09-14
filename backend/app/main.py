@@ -1,3 +1,4 @@
+from app.backtesting.saved_comparisons import router as saved_comparisons_router
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -85,6 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(backtest_result_router)
     protected_router.include_router(backtest_result_legacy_router)
     protected_router.include_router(backtest_compare_router)
+    protected_router.include_router(saved_comparisons_router)
     protected_router.include_router(formal_backtest_result_alias_router)
 
     @protected_router.get(

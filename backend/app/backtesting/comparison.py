@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field
 class CurvePoint(BaseModel):
     as_of: datetime
     equity: str | None = None
+    cumulative_return: str | None = None
+    valuation_reason: str | None = None
     drawdown: str | None = None
     valuation_status: str | None = None
 
@@ -34,6 +36,11 @@ class ComparisonMetric(BaseModel):
 
 class RunComparisonSummary(BaseModel):
     run_id: str
+    strategy_id: str | None = None
+    strategy_name: str | None = None
+    strategy_revision_id: str | None = None
+    revision_number: int | None = None
+    revision_alias: str | None = None
     status: str
     terminal_status: str | None = None
     config_hash: str
@@ -49,6 +56,7 @@ class RunComparisonSummary(BaseModel):
 
 
 class BacktestComparison(BaseModel):
+    baseline_run_id: str | None = None
     run_summaries: list[RunComparisonSummary]
     # Retain the existing alias while clients adopt the canonical field.
     summaries: list[RunComparisonSummary]
