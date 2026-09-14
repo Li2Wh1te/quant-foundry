@@ -9,6 +9,7 @@ import { ResultChart } from "./backtests/ResultChart";
 import { ResultTables } from "./backtests/ResultTables";
 import { displayNumber, monthlyResults, readAllResults, RESULT_KINDS, type ResultRow } from "./backtests/resultData";
 import { copyConfiguration, finite, METRICS, runConfig, STATUS } from "./backtests/workbench";
+import { comparisonUrl } from "./backtests/comparisonData";
 import "./backtests/Workbench.css";
 import "./backtests/Result.css";
 const sections = [["overview", "收益概览"], ["curve", "收益曲线"], ["risk", "风险与回撤"], ["monthly", "月度表现"], ["holding", "持仓与交易"], ["diagnostics", "运行诊断"], ["configuration", "冻结配置"]];
@@ -22,7 +23,8 @@ export function BacktestResultPage() {
 }
 function Report({ runId }: { runId: string }) {
   const location = useLocation(), navigate = useNavigate();
-  const origin = location.state as { from?: string; workbench?: any } | null;
+  const origin = location.state as { from?: string; workbench?: any; comparisonReturn?: { url: string; state?: any } } | null;
+  const comparisonReturn = origin?.comparisonReturn?.url?.match(/^\/admin\/backtest-compare(?:\?|$)/) ? origin.comparisonReturn : null;
   const back = origin?.from?.match(/^\/admin\/(backtest-runs|strategies\/[^/]+\/backtests)$/) ? origin.from : "/admin/backtest-runs";
   const [run, setRun] = useState<WorkbenchRun | null>(null), [alias, setAlias] = useState("");
   const [error, setError] = useState(""), [loading, setLoading] = useState(true), [refresh, setRefresh] = useState(0), [active, setActive] = useState("overview");
@@ -75,9 +77,11 @@ function Report({ runId }: { runId: string }) {
     return () => observer.disconnect();
   }, [!!run]);
   function returnToWorkbench(compare = false) {
+    if (comparisonReturn) { navigate(comparisonReturn.url, { state: comparisonReturn.state }); return; }
     const state = origin?.workbench || {};
     const ids: string[] = state.compareIds || [];
     if (compare && !ids.includes(runId) && ids.length >= 10) { setError("已选择 10 个运行，请先返回工作台移除一项。"); return; }
+    if (compare) { navigate(comparisonUrl([...new Set([...ids, runId])]), { state: { from: back, workbench: { ...state, selected: run || state.selected } } }); return; }
     navigate(back, { state: { workbench: { ...state, selected: run || state.selected, compareMode: compare || state.compareMode, compareIds: compare ? [...new Set([...ids, runId])] : ids } } });
   }
   async function download() {
@@ -106,7 +110,7 @@ function Report({ runId }: { runId: string }) {
   const years = [...new Set(monthlies.map(row => row.month.slice(0, 4)))];
   const currentMetrics = data.metrics || [], disabled = run?.status === "indeterminate";
   return <div className="qfr-page">
-    <div className="qfr-heading"><div><div className="qfb-eyebrow">BACKTEST RESULT</div><h1>{run?.strategy_name || "单次回测结果"}{run?.revision_number ? ` · v${run.revision_number}` : ""}</h1><p>{alias} {alias && "·"} {run ? STATUS[run.status] : "正在读取运行"}</p><code>{runId}</code></div><div className="qfr-actions"><button onClick={() => returnToWorkbench()}><ArrowLeft size={16}/>返回工作台</button><button disabled={loading || pending} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16}/>刷新</button><button disabled={!run || disabled || exporting} className="qfb-primary" onClick={() => void download()}><Download size={16}/>{exporting ? "导出中…" : "导出结果"}</button></div></div>
+    <div className="qfr-heading"><div><div className="qfb-eyebrow">BACKTEST RESULT</div><h1>{run?.strategy_name || "单次回测结果"}{run?.revision_number ? ` · v${run.revision_number}` : ""}</h1><p>{alias} {alias && "·"} {run ? STATUS[run.status] : "正在读取运行"}</p><code>{runId}</code></div><div className="qfr-actions"><button onClick={() => returnToWorkbench()}><ArrowLeft size={16}/>{comparisonReturn ? "返回对比" : "返回工作台"}</button><button disabled={loading || pending} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16}/>刷新</button><button disabled={!run || disabled || exporting} className="qfb-primary" onClick={() => void download()}><Download size={16}/>{exporting ? "导出中…" : "导出结果"}</button></div></div>
     {toast && <div className="qfb-toast" role="status">{toast}<button aria-label="关闭提示" onClick={() => setToast("")}><X size={16}/></button></div>}
     {error && <p className="qfr-error" role="alert">{error}<button onClick={() => setRefresh(v => v + 1)}>重试</button></p>}
     {exporting && <p role="status">{exportStatus}<button onClick={() => exportController.current?.abort()}>取消导出</button></p>}

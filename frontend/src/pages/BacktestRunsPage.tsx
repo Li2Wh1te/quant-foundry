@@ -3,8 +3,7 @@ import { Select } from "../components/controls/Select";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { Plus, RefreshCw, Search, X } from "lucide-react";
 import { FOREGROUND_POLL_INTERVAL_MS, cancelBacktestRun, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, rerunBacktest, type BacktestRun, type WorkbenchPage, type WorkbenchRun } from "../api/backtestRuns";
-import { compareBacktestRuns } from "../api/backtestPreflight";
-import { BacktestComparisonView } from "../components/BacktestReport";
+import { comparisonUrl } from "./backtests/comparisonData";
 import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
 import { RunPreview, dateText } from "./backtests/RunPreview";
 import { copyConfiguration, STATUS } from "./backtests/workbench";
@@ -19,7 +18,6 @@ export function BacktestRunsPage() {
   const [loading, setLoading] = useState(false), [error, setError] = useState(""), [toast, setToast] = useState("");
   const [drawer, setDrawer] = useState<{ source?: BacktestRun; strategyId?: string } | null>(null);
   const [compareMode, setCompareMode] = useState<boolean>(restored?.compareMode || false), [compareIds, setCompareIds] = useState<string[]>(restored?.compareIds || []);
-  const [result, setResult] = useState<{ kind: "compare"; value: any } | null>(null);
   const [busy, setBusy] = useState(false);
   const pageRef = useRef(page), selectedRef = useRef(selected), sequence = useRef(0), detailSequence = useRef(0), controller = useRef<AbortController | null>(null), actionBusy = useRef(false);
   const requestNeeded = useRef(true);
@@ -101,12 +99,8 @@ export function BacktestRunsPage() {
     } catch (caught) { setError(caught instanceof Error ? caught.message : "操作失败。"); }
     finally { actionBusy.current = false; setBusy(false); }
   }
-  async function compare() {
-    if (actionBusy.current || compareIds.length < 2) return;
-    actionBusy.current = true; setBusy(true); setError("");
-    try { setResult({ kind: "compare", value: await compareBacktestRuns(compareIds) }); }
-    catch (caught) { setError(caught instanceof Error ? caught.message : "对比加载失败。"); }
-    finally { actionBusy.current = false; setBusy(false); }
+  function compare() {
+    navigate(comparisonUrl(compareIds), { state: { from: location.pathname, workbench: { query, search, selected, compareIds, compareMode } } });
   }
   function copy() {
     if (!selected) return;
@@ -117,11 +111,12 @@ export function BacktestRunsPage() {
     <div className="qfb-heading"><div><div className="qfb-eyebrow">BACKTEST WORKBENCH</div><h1>回测工作台</h1><p>创建回测、跟踪运行，并查看真实策略表现。</p></div><div className="qfb-actions">
       <button onClick={() => void refresh()} disabled={loading}><RefreshCw size={16} />刷新</button>
       <button onClick={() => setCompareMode(value => !value)}>{compareMode ? "退出选择" : "选择对比"}</button>
+      <button onClick={compare}>回测对比</button>
       <button className="qfb-primary" onClick={() => setDrawer({ strategyId })}><Plus size={16} />创建回测</button>
     </div></div>
     {toast && <div className="qfb-toast" role="status">{toast}<button aria-label="关闭提示" onClick={() => setToast("")}><X size={16}/></button></div>}
     {error && <div className="qfb-error" role="alert">{error}<button aria-label="关闭错误" onClick={() => setError("")}><X size={16}/></button></div>}
-    {result ? <section className="qfb-results"><button onClick={() => setResult(null)}>返回回测工作台</button><h2>回测对比</h2><BacktestComparisonView result={result.value} /></section> : <div className="qfb-workspace">
+    <div className="qfb-workspace">
       <aside className="qfb-history"><header><h2>运行历史</h2><span>{page ? `${page.total} 次运行` : "—"}</span></header>
         <div className="qfb-filters"><label className="qfb-search"><Search size={15}/><input aria-label="搜索运行 ID 或策略" placeholder="搜索运行 ID / 策略" value={search} maxLength={200} onChange={e => setSearch(e.target.value)} /></label><Select aria-label="运行状态" value={query.status} onChange={e => setQuery(q => ({ ...q, status: e.target.value, offset: 0 }))}><option value="">全部状态</option>{Object.entries(STATUS).map(([key,label]) => <option value={key} key={key}>{label}</option>)}</Select></div>
         <div className="qfb-history-scroll">{!page ? <div className="qfb-empty">{error ? "运行历史加载失败" : "正在加载运行历史…"}</div> : !page.items.length ? <div className="qfb-empty"><strong>{query.search || query.status ? "没有匹配的运行" : "还没有回测记录"}</strong><p>{query.search || query.status ? "调整搜索或筛选条件。" : "创建一次回测，开始查看策略表现。"}</p></div> : page.items.map(run => <div className={`qfb-run-row ${selected?.run_id === run.run_id ? "is-selected" : ""}`} key={run.run_id}>
@@ -131,8 +126,8 @@ export function BacktestRunsPage() {
         <footer><span>{page?.total ? `${query.offset+1}–${query.offset+page.items.length} / ${page.total}` : "0 / 0"}</span><button disabled={loading || query.offset === 0} onClick={() => setQuery(q => ({ ...q, offset: Math.max(0,q.offset-20) }))}>上一页</button><button disabled={loading || !page?.has_more} onClick={() => setQuery(q => ({ ...q, offset: q.offset+20 }))}>下一页</button></footer>
       </aside>
       <main className="qfb-detail">{selected ? <><header className="qfb-detail-head"><div><div className="qfb-eyebrow">BACKTEST RUN</div><h2>{selected.strategy_name || "回测运行"}</h2><code>{selected.run_id}</code></div><div className="qfb-actions"><button onClick={() => navigate(`/admin/backtest-runs/${selected.run_id}/results`, { state: { from: location.pathname, workbench: { query, search, selected, compareIds, compareMode } } })}>完整结果</button><button disabled={selected.status !== "succeeded" || !compareIds.includes(selected.run_id) && compareIds.length >= 10} onClick={() => { toggle(selected.run_id); setCompareMode(true); }}>{compareIds.includes(selected.run_id) ? "移出对比" : "加入对比"}</button><button onClick={copy}>复制配置</button>{isTerminalBacktestStatus(selected.status) ? <button disabled={busy} onClick={() => void action("rerun")}>重新运行</button> : <button disabled={busy || selected.status === "cancel_requested"} onClick={() => void action("cancel")}>{selected.status === "cancel_requested" ? "取消处理中" : "取消运行"}</button>}</div></header><div className="qfb-preview"><RunPreview run={selected} /></div></> : <div className="qfb-empty">{page ? "选择运行查看结果" : "正在加载回测工作台…"}</div>}</main>
-    </div>}
-    {compareMode && !result && <div className="qfb-compare-bar"><span>已选择 {compareIds.length} / 10 个运行</span><small>选择 2–10 个已完成运行进行对比</small><button disabled={!compareIds.length} onClick={() => setCompareIds([])}>清空</button><button className="qfb-primary" disabled={busy || compareIds.length < 2} onClick={() => void compare()}>开始对比</button></div>}
+    </div>
+    {compareMode && <div className="qfb-compare-bar"><span>已选择 {compareIds.length} / 10 个运行</span><small>选择 2–10 个已完成运行进行对比</small><button disabled={!compareIds.length} onClick={() => setCompareIds([])}>清空</button><button className="qfb-primary" disabled={busy || compareIds.length < 2} onClick={() => void compare()}>开始对比</button></div>}
     {drawer && <CreateRunDrawer initialStrategyId={drawer.strategyId} source={drawer.source} onClose={() => setDrawer(null)} onCreated={run => {
       setDrawer(null); setToast("回测已创建，已加入运行队列。");
       const selectedRun = { ...run, strategy_id: drawer.strategyId || null, strategy_name: null, revision_number: null };
