@@ -4,7 +4,7 @@ import { ArrowLeft, Plus, RefreshCw, Save, X } from "lucide-react";
 import { deleteComparison, fetchComparison, getComparison, saveComparison, updateComparison, type ComparisonResult, type SavedComparison } from "../api/backtestComparisons";
 import { fetchRunWorkbench } from "../api/backtestRuns";
 import { listStrategyRevisions } from "../api/strategies";
-import { EvidenceTable } from "../components/BacktestReport";
+import { EvidenceTable } from "../components/EvidenceTable";
 import { Select } from "../components/controls/Select";
 import { AddRunsDrawer, ComparisonDrawer, NameDrawer, SavedListDrawer } from "./backtests/ComparisonDrawers";
 import { ComparisonChart, RiskScatter } from "./backtests/ComparisonCharts";

@@ -72,16 +72,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function listAccountProfiles(
-  name?: string,
-  status: AccountProfileStatus | "" = "active",
-): Promise<AccountProfile[]> {
-  const params = new URLSearchParams({ limit: "500" });
-  if (name?.trim()) params.set("name", name.trim());
-  if (status) params.set("status", status);
-  return request<AccountProfile[]>(`/api/admin/backtest-account-profiles?${params}`);
-}
-
 export function createAccountProfile(payload: AccountProfilePayload): Promise<AccountProfile> {
   return request<AccountProfile>("/api/admin/backtest-account-profiles", {
     method: "POST",
@@ -96,12 +86,6 @@ export function updateAccountProfile(
   return request<AccountProfile>(`/api/admin/backtest-account-profiles/${encodeURIComponent(id)}`, {
     method: "PATCH",
     body: JSON.stringify(payload),
-  });
-}
-
-export function deleteAccountProfile(id: string): Promise<void> {
-  return request<void>(`/api/admin/backtest-account-profiles/${encodeURIComponent(id)}`, {
-    method: "DELETE",
   });
 }
 

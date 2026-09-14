@@ -127,10 +127,6 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-export function listTasks(): Promise<SchedulerTask[]> {
-  return request<SchedulerTask[]>("/api/admin/tasks");
-}
-
 export function listTaskTypes(signal?: AbortSignal): Promise<TaskType[]> {
   return request<TaskType[]>("/api/admin/task-types", { signal });
 }
@@ -151,10 +147,6 @@ export function listTaskWorkspace(options: { query?: string; source_key?: string
   if (options.query) query.set("query", options.query);
   if (options.source_key) query.set("source_key", options.source_key);
   return request<TaskWorkspace>(`/api/admin/task-workspace?${query}`, { signal });
-}
-
-export function listRecentTaskRuns(): Promise<TaskRun[]> {
-  return request<TaskRun[]>("/api/admin/task-runs?limit=100");
 }
 
 export function createTask(payload: TaskPayload): Promise<SchedulerTask> {
