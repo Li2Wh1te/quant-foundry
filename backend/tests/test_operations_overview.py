@@ -209,7 +209,8 @@ class OverviewContractTest(unittest.TestCase):
         definitions = task_registry.list()
         self.assertTrue(definitions)
         for definition in definitions:
-            self.assertEqual(definition.source_key, "tushare")
+            self.assertEqual(definition.source_key,
+                "tonghuashun" if definition.key.startswith("data.ths.") else "tushare")
 
     def test_route_is_authenticated_and_has_no_write_methods(self):
         from app.main import create_app

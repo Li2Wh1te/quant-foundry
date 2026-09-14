@@ -215,7 +215,7 @@ class ConfigurationAndCatalogTest(unittest.TestCase):
             self.assertTrue(item["name"] and item["english_name"])
             self.assertEqual(item["method"], "GET")
             self.assertEqual(item["verification_status"], "not_verified")
-            self.assertEqual(item["ingestion_status"], "not_implemented")
+            self.assertIn(item["ingestion_status"], ("implemented", "not_implemented"))
         self.assertIn("a-share.capital-flow.snapshot", INTERFACES)
         self.assertIn("dump.market-dumps.daily-k.download-url", INTERFACES)
         items[0]["name"] = "mutated"

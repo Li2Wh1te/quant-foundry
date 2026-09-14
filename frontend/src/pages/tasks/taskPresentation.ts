@@ -1,5 +1,6 @@
 import type { TaskRun, TaskSchedule, TaskState, WorkspaceTask } from "../../api/scheduler";
 import { cronEditorValues } from "./taskDraft";
+import { collectionEvents } from "./collectionEvents";
 
 export const taskStateLabel = (state: TaskState) => ({ active: "已启用", paused: "已暂停", completed: "已完成", archived: "已归档" })[state];
 export const runStateLabel = (state: TaskRun["status"]) => ({ queued: "等待执行", running: "运行中", succeeded: "成功", failed: "失败", skipped: "已跳过", interrupted: "已中断", cancelled: "已取消", timed_out: "已超时", indeterminate: "状态不确定" })[state];
@@ -32,5 +33,12 @@ export function runSummary(run: TaskRun): string {
   // Only explicit Chinese messages are eligible as the operator summary.
   const message = run.result?.message;
   if (typeof message === "string" && /[\u4e00-\u9fff]/.test(message) && message.length < 500) return message;
+  // CollectionError is authored by the source-local collector, which records
+  // only classified errors and counts, never vendor messages or credentials.
+  if (run.task_type?.startsWith("data.ths.") && run.error_type === "CollectionError"
+    && typeof run.error_message === "string" && /[\u4e00-\u9fff]/.test(run.error_message)
+    && run.error_message.length < 500) return run.error_message;
+  const event = typeof run.result?.event === "string" ? collectionEvents[run.result.event] : undefined;
+  if (event) return `${event.title}：${event.summary}`;
   return ({ queued: "任务已进入队列，等待执行。", running: "任务正在采集数据，最终结果尚未确认。", succeeded: "本次采集执行成功。", failed: "本次采集失败，请查看日志定位原因。", skipped: "本次采集已跳过，未执行数据采集。", interrupted: "服务在采集完成前停止，本次执行已中断。", cancelled: "本次采集已取消。", timed_out: "本次采集超时，请检查运行日志。", indeterminate: "本次采集结果尚不能确认，请先核对数据和日志。" })[run.status];
 }

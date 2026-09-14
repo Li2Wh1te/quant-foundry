@@ -134,4 +134,9 @@ for path, name, document in _ROWS:
 
 def list_interfaces() -> list[dict]:
     """Return independent public metadata objects; never return credentials."""
-    return [asdict(item) for item in INTERFACES.values()]
+    from app.data_ingestion.tonghuashun.contracts import DATASETS
+
+    implemented = {spec.interface for spec in DATASETS.values()}
+    implemented.update({"fund.portfolio.stock-report-dates", "fund.portfolio.bond-report-dates"})
+    return [{**asdict(item), "ingestion_status": "implemented" if item.key in implemented else "not_implemented"}
+            for item in INTERFACES.values()]
