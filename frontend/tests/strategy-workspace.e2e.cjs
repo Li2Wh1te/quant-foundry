@@ -28,7 +28,7 @@ const assert=require('node:assert/strict');
    else if(method==='PATCH'){metadataCount++;const payload=request.postDataJSON();assert.equal(payload.version,row.version);Object.assign(row,payload,{version:row.version+1});body=row;}
    else if(method==='DELETE'){if(parts[5]==='permanent'){assert.equal(url.searchParams.get('draft_version'),String(row.draft.version));delete rows[id];}else row.state='archived';status=204;}
    else body=row;
-  }else if(path.includes('auth')){status=204;}else if(path.includes('version'))body={version:'0.2.0'};
+  }else if(path.includes('auth')){status=204;}else if(path.includes('version'))body={version:require('../package.json').version};
   await route.fulfill({status,contentType:'application/json',body:status===204?'':JSON.stringify(body)});
  });
  try {
