@@ -1,4 +1,4 @@
-"""Explicit milestone-two contracts and source-local validation.
+"""Explicit source-local contracts and source-local validation.
 
 Keep provider fields intact. Decimal JSON is serialized without converting to
 binary floats; the read API declares decimal-as-string encoding to consumers.
@@ -31,6 +31,7 @@ class CollectionParameters(BaseModel):
     subjects: list[str] | None = Field(default=None, min_length=1, max_length=10000)
     mode: Literal["incremental", "reconcile", "backfill"] = "incremental"
     batch_size: int = Field(default=100, ge=1, le=1000)
+    quota_tabs: list[str] = Field(default=["nazhi100", "remen"], min_length=1, max_length=50)
     refresh_today: bool = False
     start_date: date | None = None
     end_date: date | None = None
@@ -43,6 +44,9 @@ class CollectionParameters(BaseModel):
             # Explicit date requests must be closed days. Daily jobs resolve
             # today's availability independently from this backfill control.
             raise ValueError("手动历史回补的结束日期须早于今天。")
+        if any(not re.fullmatch(r"[A-Za-z0-9_-]{1,40}", tab) for tab in self.quota_tabs):
+            raise ValueError("QDII 分类代码格式不正确。")
+        self.quota_tabs = sorted(set(self.quota_tabs))
         self.asset_types = sorted(set(self.asset_types))
         if self.subjects is not None:
             self.subjects = sorted(set(self.subjects))
@@ -218,3 +222,8 @@ def validate_bars(rows: list[dict], start: date, end: date, date_field="date_ms"
         elif not (row["low_price"] <= min(row["open_price"], row["close_price"])
                   <= max(row["open_price"], row["close_price"]) <= row["high_price"]):
             raise CollectionError("行情最高价、最低价与开收盘价不一致。")
+
+
+# Import after the shared Dataset type is defined to avoid registry cycles.
+from app.data_ingestion.tonghuashun.milestone_three import build_specs
+DATASETS.update({spec.key: spec for spec in build_specs(Dataset, FUND_TYPES)})

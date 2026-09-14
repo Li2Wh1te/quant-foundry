@@ -96,6 +96,12 @@ def due(spec, previous, parameters, now):
 def collect(dataset: str, parameters: CollectionParameters, client, engine,
             *, now: datetime | None = None) -> dict:
     spec = DATASETS[dataset]
+    if spec.kind.startswith("m3_"):
+        from app.data_ingestion.tonghuashun.research_service import collect_research
+        return collect_research(dataset, parameters, client, engine, now=now)
+    if spec.kind == "dump":
+        from app.data_ingestion.tonghuashun.dump_service import collect_dump
+        return collect_dump(dataset, parameters, client, engine, now=now)
     now = now or datetime.now(UTC)
     # Explicit historical queries cannot mutate the default rolling collection.
     # Their independent version heads are discoverable through the states API.

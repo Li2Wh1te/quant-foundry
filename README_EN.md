@@ -229,8 +229,7 @@ remain retryable, failed refreshes retain saved versions, and forward-adjustment
 a complete subject refetch. Current index constituents are never backdated. NAV reconciliation
 is limited to the provider's rolling five-year window; older versions remain separately readable.
 
-A-share bars currently use per-symbol REST requests; the Parquet bulk-import optimization remains
-unimplemented and is labelled accordingly in the interface catalog. Live provider acceptance is
+A-share bars support per-symbol REST and Parquet imports into source-local versioned history. Live provider acceptance is
 performed after deployment. Tushare storage, the existing ETF market page and backtesting adapters
 retain their original source; cross-source identity and unified data APIs are deferred.
 
@@ -574,3 +573,32 @@ documentation are welcome. Discuss major changes to public APIs, data models, or
 Licensed under the [Apache License 2.0](./LICENSE).
 
 Copyright 2026 Quant Foundry contributors.
+
+
+### Tonghuashun milestone three: local research collections
+
+Adds 27 interfaces/tasks (57 task types and 59 implemented interfaces in total): A-share quote/auction
+snapshots, anomaly reasons, popularity histories, price-limit pools and dragon-tiger lists; ETF quotes,
+fund returns/drawdowns/performance, manager style/performance, news, offerings and QDII quotas;
+and three A-share Parquet import workflows. No diagnostics, generic indicator queries, online backtests,
+ticker search, futures or options are registered. The catalog separately identifies 12 non-public routes.
+
+New schedules are never automatically created or enabled. Ten-minute triggers process bounded pending
+batches subject to dataset-specific daily/weekly/time-slot boundaries. Selected-stock anomaly/ranking
+requests require explicit symbols. QDII defaults cover only the documented examples `nazhi100` and `remen`.
+Dated pools use the provider calendar, bounded backfill, five-day rechecks and atomic pagination.
+News bootstrap scans at most 500 entries and retains the last 90 days; subsequent catch-up resumes an
+opaque cursor after each 25-page batch. No article websites are scraped. All fields and units remain intact.
+
+Parquet files are downloaded without API credentials or redirects, with pinned public HTTPS destinations,
+and fully validated before durable per-symbol staging. Each import batch publishes up to 100 subjects;
+worker restarts resume from PostgreSQL staging. Signed URLs are never persisted or logged. Limits are
+2 GiB/15 minutes per download and 8 GiB/30 million decoded rows; provision temporary disk and database
+space. `/api/admin/data-collections/tonghuashun/imports` reports file-level progress. Full bootstrap fills
+missing dates, explicit reconciliation can update overlaps, and recent imports revise recent rows while
+preserving REST updates acquired after import start. Completed staging is removed transactionally.
+
+Configure bulk schedules before pausing or narrowing redundant full-market A-share REST schedules;
+existing saved plans are never rewritten automatically. Use `make selfhost` to apply the staging migration.
+No new environment settings or formal release tag are introduced. Live acceptance remains with the user;
+local/CI verification uses synthetic responses, Parquet fixtures and disposable PostgreSQL.

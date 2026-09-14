@@ -205,6 +205,10 @@ class TonghuashunClient:
                     raise TonghuashunError("invalid_response")
                 if body["code"] != 0:
                     raise TonghuashunError(BUSINESS_ERRORS.get(body["code"], "rejected"), retry_after=retry_after)
+                if path in ("/api/fund/quota/summary", "/api/fund/quota/list") and isinstance(body.get("data"), list):
+                    # QDII has a documented array envelope. Preserve its shape
+                    # explicitly when adapting to the collection container.
+                    body["data"] = {"item": body["data"], "provider_envelope": "array"}
                 if not isinstance(body.get("data"), dict):
                     raise TonghuashunError("invalid_response")
                 request_id = body.get("request_id")
