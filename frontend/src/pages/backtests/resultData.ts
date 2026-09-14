@@ -11,7 +11,7 @@ export async function readAllResults(runId: string, kind: string, signal: AbortS
     signal.throwIfAborted();
     const page: BacktestResultPage = await reader(runId, kind, cursor, signal);
     signal.throwIfAborted();
-    if (page.truncated) throw new Error("结果已被截断，无法作为完整结果读取或导出。");
+    if (page.truncated && !page.next_cursor) throw new Error("结果已被截断，无法作为完整结果读取或导出。");
     rows.push(...page.items); onProgress?.(rows.length);
     cursor = page.next_cursor || undefined;
     if (page.has_more && !cursor || cursor && seen.has(cursor)) throw new Error("结果分页异常，请重试。");

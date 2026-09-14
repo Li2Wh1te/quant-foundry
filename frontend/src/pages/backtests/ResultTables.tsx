@@ -24,7 +24,7 @@ export function ResultTables({ runId, dates, disabled, version }: { runId: strin
     if (disabled || kind === "positions" && !selectedDate) { setPage(null); return; }
     setLoading(true);
     fetchBacktestResult(runId, kind, cursor, controller.signal, kind === "positions" ? { start_time: selectedDate, end_time: selectedDate } : {}).then(value => {
-      if (!controller.signal.aborted) { if (value.truncated || value.has_more && !value.next_cursor || value.next_cursor && cursors.includes(value.next_cursor)) throw new Error("明细分页异常，无法继续读取。"); setPage({ ...value, scope }); }
+      if (!controller.signal.aborted) { if (value.truncated && !value.next_cursor || value.has_more && !value.next_cursor || value.next_cursor && cursors.includes(value.next_cursor)) throw new Error("明细分页异常，无法继续读取。"); setPage({ ...value, scope }); }
     }).catch(e => { if (!controller.signal.aborted) setError(e.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
     return () => controller.abort();
   }, [runId, kind, selectedDate, cursor, disabled, version, retry]);

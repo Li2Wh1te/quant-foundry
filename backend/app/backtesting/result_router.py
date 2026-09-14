@@ -15,8 +15,9 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, Body
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
-from sqlalchemy import select
+from sqlalchemy import select, cast, String
 from app.backtesting.models import BacktestRunRecord
+from app.strategies.models import Strategy, StrategyRevision
 from app.core.auth import AuthenticatedPrincipal
 from app.backtesting.result_records import BacktestEquityCurveRecord, BacktestMetricRecord, BacktestDataPreflightResultRecord
 from app.backtesting.comparison import BacktestComparison, metric_projection, evidence_projection, configuration_difference
@@ -89,6 +90,13 @@ def compare_runs(
         ids = [UUID(str(value)) for value in run_ids]
     except (TypeError, ValueError) as exc:
         raise HTTPException(status_code=422, detail="run_ids 包含无效 UUID") from exc
+    baseline_id = payload.get("baseline_run_id", str(ids[0]))
+    try:
+        baseline_id = UUID(str(baseline_id))
+    except (TypeError, ValueError) as exc:
+        raise HTTPException(422, "比较基准包含无效 UUID") from exc
+    if baseline_id not in ids:
+        raise HTTPException(422, "比较基准必须属于已选运行")
     roots = list(
         session.scalars(
             select(BacktestRunRecord).where(
@@ -128,19 +136,32 @@ def compare_runs(
     reports = list(session.scalars(select(BacktestDataPreflightResultRecord).where(
         BacktestDataPreflightResultRecord.run_id.in_(ids)
     ).order_by(BacktestDataPreflightResultRecord.run_id, BacktestDataPreflightResultRecord.phase)))
+    # Cast the immutable revision ID to text, never a legacy run binding to
+    # UUID: historical bindings may contain arbitrary strings.
+    identities = {row.id: row for row in session.execute(
+        select(BacktestRunRecord.id, Strategy.id.label("strategy_id"), Strategy.name.label("strategy_name"), StrategyRevision.revision_number, StrategyRevision.alias)
+        .outerjoin(StrategyRevision, cast(StrategyRevision.id, String) == BacktestRunRecord.strategy_revision_id)
+        .outerjoin(Strategy, Strategy.id == StrategyRevision.strategy_id)
+        .where(BacktestRunRecord.id.in_(ids))
+    )}
     summaries = []
     curves = []
     drawdowns = []
     metrics = []
     for rid in ids:
         root = by_id[rid]
-        points = [{"as_of": row.as_of, "equity": (str(row.equity) if row.equity is not None else None), "drawdown": (str(row.drawdown) if row.drawdown is not None else None), "valuation_status": row.valuation_status} for row in equity_by_run[rid]]
+        points = [{"as_of": row.as_of, "equity": (str(row.equity) if row.equity is not None else None), "drawdown": (str(row.drawdown) if row.drawdown is not None else None), "valuation_status": row.valuation_status, "valuation_reason": row.valuation_reason, "cumulative_return": str(row.cumulative_return) if row.cumulative_return is not None else None} for row in equity_by_run[rid]]
         curves.append({"run_id": str(rid), "points": points})
         drawdowns.append({"run_id": str(rid), "points": [{"as_of": p["as_of"], "drawdown": p["drawdown"], "valuation_status": p["valuation_status"]} for p in points]})
         metrics.append({"run_id": str(rid), "items": [metric_projection(row) for row in metrics_by_run[rid]]})
         result_summary = root.result_summary if isinstance(root.result_summary, dict) else {}
         summaries.append({
             "run_id": str(rid),
+            "strategy_id": str(identities[rid].strategy_id) if identities[rid].strategy_id else None,
+            "strategy_name": identities[rid].strategy_name,
+            "strategy_revision_id": root.strategy_revision_id,
+            "revision_number": identities[rid].revision_number,
+            "revision_alias": identities[rid].alias,
             "status": root.status,
             "terminal_status": root.terminal_status,
             "config_hash": root.config_hash,
@@ -155,11 +176,12 @@ def compare_runs(
         })
     # Include a compact, deterministic configuration diff for each run pair;
     # curves/metrics are fetched in batches above, never by invoking runtime.
+    baseline = next(summary for summary in summaries if summary["run_id"] == str(baseline_id))
     for summary in summaries:
-        summary["config_diff"] = configuration_difference(summaries[0], summary)
+        summary["config_diff"] = configuration_difference(baseline, summary)
     metric_matrix = [metric_projection(row) for rid in ids for row in metrics_by_run[rid]]
-    configuration_diff = [{"run_id": summary["run_id"], "baseline_run_id": summaries[0]["run_id"], "fields": summary["config_diff"]} for summary in summaries]
-    return {"run_summaries": summaries, "summaries": summaries, "equity_curves": curves, "equity_curve_series": curves, "drawdown_curve_series": drawdowns, "metrics": metrics, "metric_matrix": metric_matrix, "configuration_diff": configuration_diff}
+    configuration_diff = [{"run_id": summary["run_id"], "baseline_run_id": str(baseline_id), "fields": summary["config_diff"]} for summary in summaries]
+    return {"baseline_run_id": str(baseline_id), "run_summaries": summaries, "summaries": summaries, "equity_curves": curves, "equity_curve_series": curves, "drawdown_curve_series": drawdowns, "metrics": metrics, "metric_matrix": metric_matrix, "configuration_diff": configuration_diff}
 
 
 legacy_router = APIRouter(
