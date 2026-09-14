@@ -76,3 +76,8 @@ jobs:
 
       - name: Run the test suite
         run: make test
+
+      - name: Verify backend container Parquet runtime
+        run: |
+          docker build --file backend/Dockerfile --tag quant-foundry-backend:ci .
+          docker run --rm --entrypoint python quant-foundry-backend:ci -c "import tempfile; import pyarrow as pa; import pyarrow.parquet as pq; f = tempfile.TemporaryFile(); pq.write_table(pa.table({'value': [1]}), f); f.seek(0); assert pq.read_table(f).to_pydict() == {'value': [1]}"
