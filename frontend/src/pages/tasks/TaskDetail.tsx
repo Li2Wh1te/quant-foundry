@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { X, Play, Settings2, RefreshCw } from "lucide-react";
-import { listTaskRuns } from "../../api/scheduler";
+import { listTaskRuns, stopCollectionRun } from "../../api/scheduler";
 import type { TaskRun, TaskType, WorkspaceTask } from "../../api/scheduler";
 import { parameterFields, parameterInput, taskTypeLabel } from "./taskDraft";
 import { canRun, formatSchedule, nextRunLabel, runStateLabel, runSummary, taskStateLabel, taskTime } from "./taskPresentation";
@@ -16,6 +16,14 @@ export function TaskDetail({ task, type, sourceName, busy, revision, onClose, on
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [retry, setRetry] = useState(0);
+  const [stopping, setStopping] = useState<string | null>(null);
+  const stop = async (run: TaskRun) => {
+    if (stopping) return;
+    setStopping(run.id);
+    try { await stopCollectionRun(run.id); setRetry(value => value + 1); }
+    catch (caught) { setError("停止请求未能确认，请刷新运行记录后重试。"); onError(caught); }
+    finally { setStopping(null); }
+  };
   useEffect(() => {
     const node = dialog.current!;
     const previous = document.activeElement as HTMLElement | null;
@@ -54,7 +62,16 @@ export function TaskDetail({ task, type, sourceName, busy, revision, onClose, on
       </> : <>
         <div className="qft-history-head"><span>上海时间 · 每页 10 条</span><button className="qfo-icon-btn" type="button" aria-label="刷新运行历史" aria-disabled={loading} onClick={() => !loading && setRetry(value => value + 1)}><RefreshCw aria-hidden="true" /></button></div>
         {error && <div className="qft-error" role="alert">{error}</div>}
-        {loading && !runs.length ? <p className="qft-empty" role="status">正在加载运行记录…</p> : !runs.length ? <p className="qft-empty">此页暂无运行记录。</p> : <ol className="qft-runs" aria-busy={loading}>{runs.map(run => <li key={run.id}><div className="qft-run-head"><strong>{runStateLabel(run.status)}</strong><time>{taskTime(run.started_at ?? run.created_at)}</time></div><p>{runSummary(run)}</p><small>{run.trigger_type === "manual" ? "手动触发" : "按计划触发"}{run.status === "running" ? ` · 完成 ${Math.round(run.progress * 100)}%` : ""}{run.current_trading_date ? ` · 交易日 ${run.current_trading_date}` : ""}</small><details><summary>技术详情</summary><dl><div><dt>运行 ID</dt><dd>{run.id}</dd></div><div><dt>任务 ID</dt><dd>{run.task_id}</dd></div><div><dt>结束时间</dt><dd>{taskTime(run.finished_at)}</dd></div><div><dt>最近心跳</dt><dd>{taskTime(run.last_heartbeat_at)}</dd></div></dl><pre>{JSON.stringify({ error_type: run.error_type, error_message: run.error_message, current_step: run.current_step, worker_id: run.worker_id, exit_code: run.exit_code, failure_phase: run.failure_phase, result: run.result }, null, 2)}</pre></details></li>)}</ol>}
+        {loading && !runs.length ? <p className="qft-empty" role="status">正在加载运行记录…</p> : !runs.length ? <p className="qft-empty">此页暂无运行记录。</p> : <ol className="qft-runs" aria-busy={loading}>{runs.map(run => <li key={run.id}><div className="qft-run-head"><strong>{runStateLabel(run.status)}</strong><time>{taskTime(run.started_at ?? run.created_at)}</time></div><p>{runSummary(run)}</p><small>{run.trigger_type === "manual" ? "手动触发" : "按计划触发"}{run.status === "running" && !run.collection_progress ? " · 进度暂未上报" : ""}{run.current_trading_date ? ` · 交易日 ${run.current_trading_date}` : ""}</small>{run.collection_progress && <div className="qft-progress-detail">
+          <p>成功 {run.collection_progress.succeeded} · 失败 {run.collection_progress.failed} · 跳过 {run.collection_progress.skipped}</p>
+          <p>拉取 {run.collection_progress.fetched_rows ?? run.collection_progress.received} 条 · 入库变更 {run.collection_progress.changed} 条 · 复用断点 {run.collection_progress.reused} 次</p>
+          <p>本次检查范围：{run.collection_progress.coverage_total == null ? "总量待确认" : `${run.collection_progress.coverage_total} 个对象`}{run.collection_progress.coverage_pending != null ? ` · 待采 ${run.collection_progress.coverage_pending}` : " · 待采数量待确认"}</p>
+          {run.collection_progress.download_bytes != null && <p>已下载 {(run.collection_progress.download_bytes / 1048576).toFixed(1)} MiB{run.collection_progress.download_total ? ` / ${(run.collection_progress.download_total / 1048576).toFixed(1)} MiB` : " · 文件总大小未知"}</p>}
+          {run.collection_progress.reports_total != null && <p>当前基金已读取报告 {run.collection_progress.reports_saved ?? 0}/{run.collection_progress.reports_total} · 当前报告期 {run.collection_progress.report_period ?? "待确认"}</p>}
+          <p>最近数据推进：{taskTime(run.collection_progress.last_advanced_at)}</p>
+        </div>}
+        {run.status === "running" && run.task_type.startsWith("data.ths.") && <button type="button" className="qfo-secondary-btn" disabled={!!stopping || !!run.cancellation_requested_at} onClick={() => void stop(run)}>{run.cancellation_requested_at ? "等待安全停止" : "停止本次运行"}</button>}
+        <details><summary>技术详情</summary><dl><div><dt>运行 ID</dt><dd>{run.id}</dd></div><div><dt>任务 ID</dt><dd>{run.task_id}</dd></div><div><dt>结束时间</dt><dd>{taskTime(run.finished_at)}</dd></div><div><dt>最近心跳</dt><dd>{taskTime(run.last_heartbeat_at)}</dd></div></dl><pre>{JSON.stringify({ error_type: run.error_type, error_message: run.error_message, current_step: run.current_step, worker_id: run.worker_id, exit_code: run.exit_code, failure_phase: run.failure_phase, result: run.result }, null, 2)}</pre></details></li>)}</ol>}
         <div className="qft-pagination"><button type="button" className="qfo-secondary-btn" disabled={loading || offset === 0} onClick={() => { setRuns([]); setOffset(value => Math.max(0, value - 10)); }}>上一页</button><span>第 {offset / 10 + 1} 页</span><button type="button" className="qfo-secondary-btn" disabled={loading || runs.length < 10} onClick={() => { setRuns([]); setOffset(value => value + 10); }}>下一页</button></div>
       </>}
     </div>

@@ -29,6 +29,11 @@ export function canRun(task: WorkspaceTask): boolean {
   return task.registered && ["active", "paused"].includes(task.state) && task.source_enabled !== false && task.source_configured !== false;
 }
 export function runSummary(run: TaskRun): string {
+  const detail = run.collection_progress;
+  if (run.status === "running" && detail) {
+    const batch = detail.batch_total == null ? "本批总量待确认" : `本批已处理 ${detail.processed}/${detail.batch_total}`;
+    return `${run.cancellation_requested_at ? "正在安全停止 · " : ""}${detail.stage} · ${batch}${detail.subject ? ` · 当前 ${detail.subject}` : ""}`;
+  }
   // Vendor errors and internal steps remain in expandable technical detail.
   // Only explicit Chinese messages are eligible as the operator summary.
   const message = run.result?.message;

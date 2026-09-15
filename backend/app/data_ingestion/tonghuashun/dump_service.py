@@ -60,6 +60,9 @@ def download(url, path):
         addresses = sorted(addresses, key=lambda a: (ipaddress.ip_address(a).version, a))
     except (ValueError, TypeError, OSError):
         raise CollectionError('批量下载地址必须是合法的公网 HTTPS 对象地址。') from None
+    from app.data_ingestion.tonghuashun.control import control
+    monitor = control()
+    last_progress = 0.0
     digest, size, deadline = hashlib.sha256(), 0, time.monotonic()+900
     connection = http.client.HTTPSConnection(host,443,timeout=20,context=ssl.create_default_context())
     # Keep TLS SNI/certificate validation tied to the original hostname while
@@ -95,13 +98,20 @@ def download(url, path):
             declared = response.headers.get('Content-Length')
             if declared and (not declared.isdigit() or int(declared)>MAX_BYTES):
                 raise CollectionError('批量文件超过2GiB下载上限。')
+            if monitor:
+                monitor.emit(stage='下载 Parquet 文件', download_bytes=0, download_total=int(declared) if declared else None)
             with open(path,'wb') as file:
                 while chunk := response.read1(64*1024):
                     size += len(chunk)
+                    if monitor and time.monotonic() - last_progress >= 3:
+                        monitor.emit(download_bytes=size)
+                        last_progress = time.monotonic()
                     if size>MAX_BYTES or time.monotonic()>deadline:
                         raise CollectionError('批量文件下载超过大小或时间上限。')
                     file.write(chunk)
                     digest.update(chunk)
+            if monitor:
+                monitor.emit(download_bytes=size)
             if size == 0 or declared and size != int(declared):
                 raise CollectionError('批量文件下载不完整。')
         finally:
@@ -207,6 +217,11 @@ def stage_file(dataset,generation,client,engine,now,downloader=download):
     spec=DATASETS[dataset]
     # The transport exposes the descriptor in memory only. Do not pass it to
     # Acquisition, which would otherwise retain a signed URL in source data.
+    from app.data_ingestion.tonghuashun.control import control
+    monitor = control()
+    if monitor:
+        monitor.check()
+        monitor.emit(stage='获取文件下载信息')
     response=client.request(spec.interface,{})
     descriptor=response.data
     expected=DUMPS[dataset][0]
@@ -221,6 +236,8 @@ def stage_file(dataset,generation,client,engine,now,downloader=download):
         advertised=descriptor.get('sha256')
         if advertised is not None and advertised!=digest:
             raise CollectionError('导出文件摘要与提供方声明不一致。')
+        if monitor:
+            monitor.emit(stage="校验 Parquet 文件")
         disk,metadata=validate_file(path,dataset,directory,now)
         try:
             metadata.update({'sha256':digest,'download_bytes':size,'dump_id':expected,'request_id':response.request_id})
@@ -229,6 +246,8 @@ def stage_file(dataset,generation,client,engine,now,downloader=download):
                 slot=session.scalar(select(Import).where(Import.dataset==dataset).with_for_update())
                 if slot.generation!=generation or slot.status!='downloading':
                     raise CollectionError('批量导入租约已被替换，本次暂存未发布。')
+                if monitor:
+                    monitor.emit(stage="暂存已校验文件")
                 count=0
                 for (code,) in disk.execute('SELECT DISTINCT code FROM records ORDER BY code'):
                     payload='{"item":['+','.join(r[0] for r in disk.execute('SELECT payload FROM records WHERE code=? ORDER BY day',(code,)))+']}'
@@ -299,6 +318,10 @@ def collect_dump(dataset,params,raw_client,engine,*,now=None):
     from app.data_ingestion.tonghuashun.service import BudgetedClient, logger
     now=now or datetime.now(UTC)
     spec=DATASETS[dataset]
+    from app.data_ingestion.tonghuashun.control import control
+    monitor = control()
+    if monitor:
+        monitor.check()
     generation,needs_download=reserve(dataset,params,engine,now)
     if generation is None:
         return {'event':'tonghuashun_collection_completed','source':'tonghuashun','dataset':dataset,
@@ -306,7 +329,17 @@ def collect_dump(dataset,params,raw_client,engine,*,now=None):
     try:
         if needs_download:
             stage_file(dataset,generation,BudgetedClient(raw_client,engine),engine,now)
+        if monitor:
+            monitor.check()
+            monitor.emit(stage='分批入库')
         result=publish_batch(dataset,generation,params,engine,datetime.now(UTC))
+        if monitor:
+            with Session(engine) as session:
+                slot = session.get(Import, dataset)
+                monitor.emit(stage='本批入库完成', batch_total=result['imported'], processed=result['imported'],
+                    succeeded=result['imported'], received=result['received'], changed=result['changed'],
+                    coverage_total=slot.total_subjects, coverage_pending=result['pending'],
+                    last_advanced_at=datetime.now(UTC).isoformat())
     except Exception as exc:
         with Session(engine) as session:
             slot=session.scalar(select(Import).where(Import.dataset==dataset).with_for_update())

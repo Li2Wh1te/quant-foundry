@@ -29,7 +29,18 @@ export interface SchedulerTask {
   updated_at: string;
 }
 
+export interface CollectionProgress {
+  stage: string; subject?: string | null; batch_total: number | null;
+  processed: number; succeeded: number; failed: number; skipped: number;
+  received: number; changed: number; fetched_rows?: number; requests: number; reused: number;
+  last_advanced_at: string | null; coverage_total: number | null;
+  coverage_pending: number | null; unit_saved?: number;
+  reports_total?: number; reports_saved?: number; report_period?: string;
+  download_bytes?: number; download_total?: number | null;
+}
+
 export interface TaskRun {
+  collection_progress?: CollectionProgress | null;
   id: string;
   task_id: string;
   task_version: number;
@@ -137,6 +148,7 @@ export function listTaskRuns(taskId: string, offset = 0, signal?: AbortSignal): 
 
 export type WorkspaceStatus = "all" | "active" | "paused" | "completed" | "running" | "queued" | "attention";
 export interface WorkspaceTask extends SchedulerTask {
+  active_run?: TaskRun | null;
   registered: boolean; task_type_name: string | null; task_type_english_name: string | null;
   source_key: string | null; source_enabled: boolean | null; source_configured: boolean | null;
   running_count: number; queued_count: number;
@@ -167,4 +179,8 @@ export function changeTaskState(task: SchedulerTask): Promise<SchedulerTask> {
 
 export function runTaskNow(taskId: string): Promise<TaskRun> {
   return request<TaskRun>(`/api/admin/tasks/${taskId}/run`, { method: "POST" });
+}
+
+export function stopCollectionRun(runId: string): Promise<TaskRun> {
+  return request(`/api/admin/task-runs/${runId}/stop`, { method: "POST" });
 }

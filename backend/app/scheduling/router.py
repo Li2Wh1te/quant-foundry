@@ -229,6 +229,19 @@ def get_task_run(
     return TaskRunResponse.model_validate(run)
 
 
+@router.post("/task-runs/{run_id}/stop", response_model=TaskRunResponse)
+def stop_collection_run(run_id: UUID, session: Annotated[Session, Depends(get_db_session)]):
+    run = SchedulerRepository(session).get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Task run not found")
+    if not run.task_type.startswith("data.ths.") or run.status != "running":
+        raise HTTPException(status_code=409, detail="Only running Tonghuashun collections can be stopped")
+    SchedulerRepository(session).request_cancellation(run_id)
+    session.commit()
+    session.refresh(run)
+    return TaskRunResponse.model_validate(run)
+
+
 def _change_state(
     task_id: UUID,
     version: int,

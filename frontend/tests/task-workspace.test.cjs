@@ -76,3 +76,10 @@ test('errors distinguish conflict, unknown write outcome, authorization and call
   const controller=new AbortController();controller.abort();global.fetch=async()=>{throw new DOMException('','AbortError');};await assert.rejects(api.listTaskWorkspace({},controller.signal),{name:'AbortError'});
  }finally{global.fetch=before;}
 });
+
+test('running collection reports actual batch progress rather than a fake percentage',()=>{
+ const run={status:'running',task_type:'data.ths.fund_nav',collection_progress:{stage:'等待接口限速或响应',batch_total:20,processed:3,subject:'510300.SH'}};
+ assert.match(view.runSummary(run),/本批已处理 3\/20/);
+ assert.match(view.runSummary({...run,cancellation_requested_at:'2026-09-15'}),/正在安全停止/);
+ assert.match(view.runSummary({...run,collection_progress:{...run.collection_progress,batch_total:null}}),/总量待确认/);
+});

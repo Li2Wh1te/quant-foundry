@@ -71,6 +71,43 @@ class SourceGateRaceTest(unittest.TestCase):
             assert session.scalar(text("SELECT result IS NULL FROM task_runs WHERE id = :id"),
                 {"id": self.run_id})
 
+    def test_queued_priority_changes_do_not_preempt_running_work(self):
+        from app.scheduling.schemas import TaskUpdate
+        with Session(self.engine) as session:
+            task = session.get(ScheduledTask, self.task_id)
+            active = SchedulerRepository(session).add_run(task, trigger_type=TriggerType.MANUAL, status=RunStatus.QUEUED)
+            active.status = 'running'
+            active.started_at = datetime.now(UTC)
+            active_id = active.id
+            original_priority = active.priority
+            session.commit()
+        with Session(self.engine) as session:
+            task = session.get(ScheduledTask, self.task_id)
+            SchedulerService(session, self.registry).update_task(self.task_id,
+                TaskUpdate(version=task.version, priority=100))
+            session.commit()
+        with Session(self.engine) as session:
+            assert session.get(TaskRun, self.run_id).priority == 100
+            assert session.get(TaskRun, active_id).priority == original_priority
+
+    def test_collection_stop_is_observed_at_safe_boundary(self):
+        from app.data_ingestion.tonghuashun.control import CollectionControl, CollectionYield
+        with Session(self.engine) as session:
+            run = session.get(TaskRun, self.run_id)
+            run.status = 'running'
+            run.started_at = datetime.now(UTC)
+            session.commit()
+        monitor = CollectionControl(self.engine, self.run_id)
+        monitor.emit(stage='读取报告', batch_total=5, processed=1,
+                     last_advanced_at=datetime.now(UTC).isoformat())
+        with Session(self.engine) as session:
+            assert session.get(TaskRun, self.run_id).collection_progress['processed'] == 1
+            SchedulerRepository(session).request_cancellation(self.run_id)
+            session.commit()
+        with self.assertRaises(CollectionYield) as caught:
+            monitor.check()
+        assert caught.exception.reason == 'stopped'
+
     def tearDown(self):
         self.providers_patch.stop()
         with Session(self.engine) as session:

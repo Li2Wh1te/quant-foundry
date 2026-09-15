@@ -149,7 +149,8 @@ export function sourceScheduleDefaults(key: string): Partial<TaskDraft> {
   const catalog = ["data.ths.tickers", "data.ths.calendar", "data.ths.index_catalog"].includes(key);
   return { scheduleKind: "cron", cronMode: catalog ? "daily" : "advanced",
     cronTime: "20:00", cronExpression: catalog ? "0 20 * * *" : "*/10 * * * *",
-    timezone: "Asia/Shanghai", priority: "10" };
+    timezone: "Asia/Shanghai", priority: catalog ? "100" :
+      ["etf_daily", "stock_daily", "index_daily", "fund_nav", "stock_actions", "stock_recent_dump", "stock_actions_dump", "stock_quote", "etf_quote", "index_quote"].includes(key.replace("data.ths.", "")) ? "80" : key === "data.ths.stock_daily_dump" ? "10" : "50" };
 }
 
 export function draftFromTask(task: SchedulerTask): TaskDraft {
@@ -204,6 +205,8 @@ const PARAMETER_COPY: Record<string, [string, string]> = {
   asset_types: ["资产类型", "仅采集当前接口支持的已选类型；不同来源的数据独立保存。"],
   subjects: ["指定标的或关联对象", "可用英文逗号分隔完整代码或公司、经理 ID；留空采集所有适用对象。"],
   mode: ["采集方式", "日常更新会补采新增及失败对象；历史核对会复查接口可用历史。"],
+  max_requests: ["每批接口请求预算", "达到预算后保存断点并结束本批，下次继续。"],
+  max_seconds: ["每批时间预算（秒）", "达到预算后在安全边界退出；当前请求或文件校验可能延长实际时间。"],
   batch_size: ["每批对象数", "每次最多处理这些对象，后续运行继续未完成范围；首次回补建议使用较低优先级并定期运行。"],
   refresh_today: ["再次检查本期已完成对象", "用于净值补查或手动复查；已有成功版本会保留。"],
   exchange: ["交易所", "上交所使用 SSE，深交所使用 SZSE。"],

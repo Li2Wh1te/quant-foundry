@@ -23,15 +23,21 @@ class Acquisition:
         self.fetched_count = 0
 
     def read(self, interface: str, params: dict) -> dict:
-        response = self.client.request(interface, params)
+        from app.data_ingestion.tonghuashun.control import control
+        monitor = control()
+        if monitor:
+            data, request_id = monitor.read(interface, params, lambda: self.client.request(interface, params))
+        else:
+            response = self.client.request(interface, params)
+            data, request_id = response.data, response.request_id
         # Store only allowlisted request parameters and the sanitized trace ID;
         # neither connection URL nor headers can enter source versions.
         self.requests.append({"interface": interface, "parameters": params,
-                              "request_id": response.request_id})
-        records = response.data.get("item", response.data.get("abilities", []))
+                              "request_id": request_id})
+        records = data.get("item", data.get("abilities", []))
         if isinstance(records, list):
             self.fetched_count += len(records)
-        return response.data
+        return data
 
     def report_read(self, interface: str, params: dict) -> dict | None:
         """Missing reports are independent retry units, not proof of no history.
@@ -282,6 +288,10 @@ class Acquisition:
             if key in pending and key not in visible:
                 dates.append(report)
                 visible.add(key)
+        from app.data_ingestion.tonghuashun.control import control
+        monitor = control()
+        if monitor:
+            monitor.emit(reports_total=len(dates), reports_saved=len(set(known) & visible))
         seen = set()
         for report in dates:
             kind = report.get("report_type")
@@ -304,5 +314,7 @@ class Acquisition:
                 continue
             items(data, allow_empty=True)
             known[key] = {"report_key": key, "report": report, "data": data}
+            if monitor:
+                monitor.emit(reports_saved=len(set(known) & visible), report_period=end.isoformat())
         return {"item": [known[k] for k in sorted(known)], "report_directory": {**directory, "item": dates},
                 "current_provider_directory": directory, "historical_revision_evidence": False}

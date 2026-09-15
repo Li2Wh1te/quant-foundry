@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from pydantic import ValidationError
+from sqlalchemy import update
 from sqlalchemy.orm import Session
 
 from app.scheduling.models import ScheduledTask, TaskRun
@@ -102,6 +103,10 @@ class SchedulerService:
                 setattr(task, field, changes[field])
         if "overlap_policy" in changes:
             task.overlap_policy = changes["overlap_policy"].value
+        if "priority" in changes:
+            # Existing queued runs own copied priorities; running work is never preempted.
+            self.session.execute(update(TaskRun).where(TaskRun.task_id == task.id,
+                TaskRun.status == RunStatus.QUEUED.value).values(priority=task.priority))
         task.parameters = validated_parameters
         task.parameter_version = parameter_version
         task.schedule = schedule.model_dump(mode="json")

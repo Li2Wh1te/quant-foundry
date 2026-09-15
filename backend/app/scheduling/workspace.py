@@ -93,6 +93,11 @@ def task_workspace(
     sources = {row.key: row for row in session.scalars(
         select(DataSourceConfig).where(DataSourceConfig.key.in_([key for key in source_keys if key is not None]))
     )} if source_keys else {}
+    active_runs = {}
+    if rows:
+        for run in session.scalars(select(TaskRun).where(TaskRun.task_id.in_([row[0].id for row in rows]),
+            TaskRun.status == 'running').order_by(TaskRun.started_at, TaskRun.id)):
+            active_runs.setdefault(run.task_id, run)
     items = []
     for task, latest_run, running_count, queued_count in rows:
         definition = definitions.get(task.task_type)
@@ -115,5 +120,6 @@ def task_workspace(
         items.append(item.model_copy(update={
             "next_run_at": next_run_at,
             "latest_run": TaskRunResponse.model_validate(latest_run) if latest_run else None,
+            "active_run": TaskRunResponse.model_validate(active_runs[task.id]) if task.id in active_runs else None,
         }))
     return TaskWorkspaceResponse(items=items, total=total, limit=limit, offset=offset)
