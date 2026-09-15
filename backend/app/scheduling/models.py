@@ -184,6 +184,7 @@ class TaskRun(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     current_trading_date: Mapped[str | None] = mapped_column(String(10))
+    collection_progress: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     current_step: Mapped[str | None] = mapped_column(String(128))
     progress: Mapped[float] = mapped_column(Float, default=0.0, server_default="0")
     last_heartbeat_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

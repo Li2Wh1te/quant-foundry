@@ -28,9 +28,10 @@ def require_dataset(key):
 
 def schedule_templates(spec):
     """Templates use the existing scheduler API; reads never create jobs."""
+    from app.data_ingestion.tonghuashun.policy import tune_templates
     if spec.kind.startswith("m3_") or spec.kind == "dump":
         from app.data_ingestion.tonghuashun.milestone_three import templates
-        return templates(spec)
+        return tune_templates(templates(spec), spec.key, spec.kind)
     clock = "30 22" if spec.kind == "nav" else "30 20" if spec.kind == "bars" else "0 20"
     # Weekly resources are checked daily for new/failed subjects; the handler
     # refreshes existing successful subjects only after the weekly boundary.
@@ -47,7 +48,7 @@ def schedule_templates(spec):
         result.append({**result[0], "name": spec.name + "历史核对", "parameters": {"mode": "reconcile"},
             "description": "每10分钟续作一个批次；ETF历史每周日03:00起核对，其他历史每月1日03:00起核对，已完成对象不重复请求。",
             "priority": -10, "schedule": {"type": "cron", "expression": "*/10 * * * *", "timezone": "Asia/Shanghai"}})
-    return result
+    return tune_templates(result, spec.key, spec.kind)
 
 
 @router.get("/datasets")

@@ -304,13 +304,20 @@ class SchedulerRuntime:
                     ingestion_session.close()
                     ingestion_session = None
 
+                stopped = task_type.startswith("data.ths.") and isinstance(result, dict) and result.get("yield_reason") == "stopped"
                 with Session(get_engine()) as session:
                     SchedulerRepository(session).finish_run(
                         run_id,
-                        status=RunStatus.SUCCEEDED,
+                        status=RunStatus.CANCELLED if stopped else RunStatus.SUCCEEDED,
                         result=result,
                     )
                     session.commit()
+                if stopped:
+                    logger.info("task_run_terminal_written",
+                        message=f"采集任务已安全停止：task={task_id}，run={run_id}；已保存断点，未完成范围未推进完成标记。",
+                        task_id=str(task_id), run_id=str(run_id), task_type=task_type,
+                        completion_marker="cancelled", source="scheduler")
+                    return
                 logger.info(
                     "task_run_succeeded",
                     message=f"任务运行执行成功：范围为task={task_id}, run={run_id}, task_type={task_type}，结果已写入。",

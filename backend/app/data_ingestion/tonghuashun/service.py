@@ -95,6 +95,8 @@ def due(spec, previous, parameters, now):
 
 def collect(dataset: str, parameters: CollectionParameters, client, engine,
             *, now: datetime | None = None) -> dict:
+    from app.data_ingestion.tonghuashun.control import control
+    monitor = control()
     spec = DATASETS[dataset]
     if spec.kind.startswith("m3_"):
         from app.data_ingestion.tonghuashun.research_service import collect_research
@@ -144,25 +146,33 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     # Bounded batches release scheduler slots so routine updates can run before
     # the next low-priority bootstrap batch.
     from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState
+    from app.data_ingestion.tonghuashun.repository import Previous
     with Session(engine) as session:
-        attempts = dict(session.execute(select(TonghuashunCollectionState.subject,
-            TonghuashunCollectionState.attempted_at).where(TonghuashunCollectionState.dataset == dataset,
-            TonghuashunCollectionState.variant == variant)).all())
-    subjects.sort(key=lambda subject: (aware(attempts.get(subject)) or datetime.min.replace(tzinfo=UTC), subject))
+        states = {row.subject: row for row in session.scalars(select(TonghuashunCollectionState).where(
+            TonghuashunCollectionState.dataset == dataset, TonghuashunCollectionState.variant == variant))}
+    subjects.sort(key=lambda subject: (aware(states[subject].attempted_at) if subject in states else
+        datetime.min.replace(tzinfo=UTC), subject))
+    eligible = []
     for subject in subjects:
-        with Session(engine) as session:
-            previous = CollectionRepository(session).read(dataset, subject, variant, with_data=False)
-        if not due(spec, previous, parameters, now):
-            summary["skipped"] += 1
-            continue
-        if summary["succeeded"] + summary["failed"] >= parameters.batch_size:
-            summary["pending"] += 1
-            continue
+        state = states.get(subject)
+        old = Previous(state.revision, {} if state.observation_id else None, state.succeeded_at,
+            state.status, state.reconciled_at, state.attempted_at) if state else Previous(0, None, None, "pending")
+        if due(spec, old, parameters, now):
+            eligible.append(subject)
+    summary["skipped"] = len(subjects) - len(eligible)
+    summary["pending"] = max(0, len(eligible) - parameters.batch_size)
+    if monitor:
+        monitor.emit(batch_total=min(len(eligible), parameters.batch_size), coverage_total=len(subjects),
+                     coverage_pending=len(eligible), skipped=summary["skipped"])
+    for subject in eligible[:parameters.batch_size]:
         with Session(engine) as session:
             previous = CollectionRepository(session).read(dataset, subject, variant)
         if not due(spec, previous, parameters, now):
             summary["skipped"] += 1
             continue
+        if monitor:
+            monitor.begin(dataset, subject, variant, previous.revision, parameters,
+                          cache=spec.kind in ("reports", "bars", "financials", "indicators"))
         acquisition = Acquisition(client)
         try:
             data = acquisition.fetch(spec, subject, parameters, previous.data, now)
@@ -174,11 +184,15 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                     expected=previous.revision, data=data, requests=acquisition.requests,
                     now=published_at, ticker_rows=data["item"] if spec.kind == "directory" else None,
                     reconcile=parameters.mode == "reconcile")
+                if monitor:
+                    monitor.published(session)
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
             result["fetched_count"] = acquisition.fetched_count
             for field in ("received", "changed", "unchanged", "removed"):
                 summary[field] += result[field]
+            if monitor:
+                monitor.completed(summary)
             log_result(spec, subject, parameters, data, result, not acquisition.failures,
                        "partial_reports" if acquisition.failures else None)
         except CollectionConflict:
@@ -186,6 +200,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             summary["skipped"] += 1
             summary["pending"] += 1
         except (CollectionError, TonghuashunError) as exc:
+            if monitor:
+                monitor.discard()
             kind = exc.kind if isinstance(exc, TonghuashunError) else "invalid_data"
             with Session(engine) as session:
                 try:
@@ -195,6 +211,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                 except CollectionError:
                     session.rollback()  # A newer run owns the visible state.
             summary["failed"] += 1
+            if monitor:
+                monitor.completed(summary, advanced=False)
             log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
                        error_message=str(exc))
             if kind in ("unauthenticated", "forbidden", "rate_limited"):

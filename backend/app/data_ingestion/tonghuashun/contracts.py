@@ -31,6 +31,8 @@ class CollectionConflict(CollectionError):
 
 class CollectionParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    max_requests: int = Field(default=40, ge=1, le=1000)
+    max_seconds: int = Field(default=180, ge=10, le=1800)
     asset_types: list[Literal["fund-etf", "fund-lof", "fund-reits", "fund-otc", "a-share", "a-share-index"]] = Field(default=list(ASSET_TYPES), min_length=1)
     subjects: list[str] | None = Field(default=None, min_length=1, max_length=10000)
     mode: Literal["incremental", "reconcile", "backfill"] = "incremental"

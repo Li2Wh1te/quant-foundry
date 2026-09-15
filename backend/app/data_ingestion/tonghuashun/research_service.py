@@ -92,6 +92,8 @@ def plan(spec, params, repo, acq, now):
 def collect_research(dataset, params, raw_client, engine, *, now=None):
     from app.data_ingestion.tonghuashun.service import BudgetedClient, log_result, aware
     now = (now or datetime.now(UTC)).astimezone(SHANGHAI)
+    from app.data_ingestion.tonghuashun.control import control
+    monitor = control()
     spec = DATASETS[dataset]
     client = BudgetedClient(raw_client, engine)
     acq = Acquisition(client)
@@ -125,11 +127,15 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
     summary = {'source':'tonghuashun','dataset':dataset,'subjects':len(units),'succeeded':0,'failed':0,
         'skipped':len(units)-len(eligible),'pending':len(eligible)-len(selected),
         'received':0,'changed':0,'unchanged':0,'removed':0}
+    if monitor:
+        monitor.emit(batch_total=len(selected), coverage_total=len(units), coverage_pending=len(eligible))
     # Batch quote endpoints at their documented caps. One stock still owns one
     # CAS/version, so an absent stock cannot be silently treated as acquired.
     batches = [selected[i:i+100] for i in range(0,len(selected),100)] if spec.kind == 'm3_quote' else [[u] for u in selected]
     for batch in batches:
         batch_data, batch_error, batch_trace = {}, None, []
+        if monitor:
+            monitor.check()
         if spec.kind == 'm3_quote':
             q = Acquisition(client)
             try:
@@ -147,6 +153,9 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                 batch_error = exc
         for u in batch:
             old = previous[u.subject]
+            if monitor:
+                monitor.begin(dataset, u.subject, variant, old.revision, params,
+                              cache=spec.kind in ('m3_series', 'm3_selected'))
             read = Acquisition(client)
             try:
                 if batch_error:
@@ -166,11 +175,15 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                 with Session(engine) as session:
                     result = CollectionRepository(session).publish(dataset,u.subject,variant,expected=old.revision,
                         data=data,requests=read.requests,now=datetime.now(UTC),reconcile=params.mode=='reconcile')
+                    if monitor:
+                        monitor.published(session)
                     session.commit()
                 partial = bool(data.get('failed_requests'))
                 summary['failed' if partial else 'succeeded'] += 1
                 for key in ('received','changed','unchanged','removed'):
                     summary[key] += result[key]
+                if monitor:
+                    monitor.completed(summary)
                 log_result(spec,u.subject,params,data,{**result,'fetched_count':read.fetched_count},not partial,
                     'partial_reports' if partial else None)
             except CollectionConflict:
@@ -179,6 +192,8 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                 summary['skipped'] += 1
                 summary['pending'] += 1
             except (CollectionError,TonghuashunError) as exc:
+                if monitor:
+                    monitor.discard()
                 kind = exc.kind if isinstance(exc,TonghuashunError) else 'invalid_data'
                 with Session(engine) as session:
                     try:
@@ -187,6 +202,8 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                     except CollectionError:
                         session.rollback()
                 summary['failed'] += 1
+                if monitor:
+                    monitor.completed(summary, advanced=False)
                 log_result(spec,u.subject,params,None,{'fetched_count':read.fetched_count},False,kind,error_message=str(exc))
                 if kind in ('unauthenticated','forbidden','rate_limited'):
                     raise CollectionError(f'{spec.name}采集停止：成功 {summary["succeeded"]} 个，失败 {summary["failed"]} 个；账号或限流异常，完成范围已保存。') from None

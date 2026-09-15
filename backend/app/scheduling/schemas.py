@@ -169,6 +169,7 @@ class TaskRunResponse(BaseModel):
     started_at: datetime | None
     finished_at: datetime | None
     current_trading_date: str | None
+    collection_progress: dict[str, Any] | None = None
     current_step: str | None
     progress: float = Field(ge=0.0, le=1.0)
     last_heartbeat_at: datetime | None
@@ -213,6 +214,7 @@ class TaskTypeResponse(BaseModel):
 class TaskWorkspaceItem(TaskResponse):
     """Read-only presentation data; task state and live executions are separate."""
 
+    active_run: TaskRunResponse | None = None
     registered: bool
     task_type_name: str | None
     task_type_english_name: str | None

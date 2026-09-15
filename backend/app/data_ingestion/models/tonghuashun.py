@@ -99,3 +99,12 @@ class TonghuashunDumpStage(Base):
     dataset: Mapped[str] = mapped_column(ForeignKey('tonghuashun_dump_imports.dataset'), primary_key=True)
     subject: Mapped[str] = mapped_column(String(64), primary_key=True)
     data_json: Mapped[str] = mapped_column(Text)
+
+
+class TonghuashunWorkUnit(Base):
+    """Unpublished request results; scopes include the source head revision."""
+    __tablename__ = 'tonghuashun_work_units'
+    scope: Mapped[str] = mapped_column(String(64), primary_key=True)
+    request_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    data_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
