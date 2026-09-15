@@ -147,6 +147,7 @@ def validate_file(path, dataset, directory, now):
                 raise CollectionError('Parquet 字段与官方日线或复权事件结构不一致。')
             expanded, observed_min, observed_max = 0, None, None
             future_events = 0
+            negative_bonus_rows = 0
             row_ordinal = 0
             for batch in file.iter_batches(batch_size=4096, use_threads=False):
                 payloads = []
@@ -174,8 +175,15 @@ def validate_file(path, dataset, directory, now):
                     else:
                         for key in ('dividend_per_share','per_share_bonus','allotment_ratio','allotment_price'):
                             value = row[key]
-                            if value is not None and (isinstance(value,bool) or not isinstance(value,(int,Decimal)) or value<0):
+                            if value is not None and (isinstance(value,bool) or not isinstance(value,(int,Decimal))
+                                or isinstance(value, Decimal) and not value.is_finite()
+                                or key != 'per_share_bonus' and value < 0):
                                 raise CollectionError('复权事件包含非法数值。')
+                        # Signed bonus ratios occur in the provider's historical
+                        # export. Preserve them as raw evidence, without assigning
+                        # a corporate-action meaning or applying a price factor.
+                        if row['per_share_bonus'] is not None and row['per_share_bonus'] < 0:
+                            negative_bonus_rows += 1
                     encoded = exact_json(row)
                     expanded += len(encoded)
                     if expanded > 8*1024**3:
@@ -187,7 +195,8 @@ def validate_file(path, dataset, directory, now):
                 disk.executemany('INSERT INTO records VALUES (?,?,?,?)',payloads)
                 disk.commit()
             return disk, {'rows':count,'observed_start':observed_min.isoformat(),'observed_end':observed_max.isoformat(),
-                'future_event_rows':future_events, 'collected_at':now.isoformat(),
+                'future_event_rows':future_events, 'negative_bonus_rows':negative_bonus_rows,
+                'collected_at':now.isoformat(),
                 'columns':file.schema_arrow.names, 'numeric_encoding':'provider_decimal_or_float_roundtrip'}
     except CollectionError:
         disk.close()

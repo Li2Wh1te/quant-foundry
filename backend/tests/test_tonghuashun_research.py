@@ -397,3 +397,20 @@ def test_action_dump_preserves_date_groups_and_source_occurrences(research_engin
         assert saved == expected
         assert not list(session.scalars(select(Stage)))
         assert json.loads(session.get(Import, 'stock_actions_dump').metadata_json)['rows'] == 3
+
+
+def test_signed_bonus_ratios_remain_raw_while_invalid_amounts_fail(tmp_path):
+    event = {'thscode': '000887.SZ', 'ticker': '000887', 'currency': 'CNY',
+             'ex_date_ms': date_ms(date(2007, 3, 30)), 'dividend_per_share': 0.0,
+             'per_share_bonus': -0.67335, 'allotment_ratio': 0.0, 'allotment_price': 0.0}
+    path = tmp_path / 'data.parquet'
+    write_parquet(path, [event])
+    disk, metadata = validate_file(path, 'stock_actions_dump', tmp_path, NOW)
+    assert metadata['negative_bonus_rows'] == 1
+    stored = json.loads(disk.execute('SELECT payload FROM records').fetchone()[0], parse_float=Decimal)
+    assert stored['per_share_bonus'] == Decimal('-0.67335')
+    disk.close()
+    (tmp_path / 'rows.sqlite').unlink()
+    write_parquet(path, [{**event, 'dividend_per_share': -1.0}])
+    with pytest.raises(CollectionError, match='非法数值'):
+        validate_file(path, 'stock_actions_dump', tmp_path, NOW)
