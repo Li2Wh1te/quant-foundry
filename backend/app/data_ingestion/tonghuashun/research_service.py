@@ -86,7 +86,7 @@ def plan(spec, params, repo, acq, now):
         raise CollectionError('没有可采集对象，请先完成同花顺目录和所需基金资料。')
     if spec.key == 'fund_manager_performance':
         return [Unit((s if len(s)<=54 else hashlib.sha256(s.encode()).hexdigest()[:40])+'.'+r, {'manager_id': s, 'range': r}) for s in subjects for r in ('month','tmonth','year','nowyear','now')]
-    return [Unit(s, {('thscodes' if spec.kind in ('m3_quote','m3_selected') else spec.identity): s}) for s in subjects]
+    return [Unit(s, {('thscode' if spec.key == 'etf_quote' else 'thscodes' if spec.kind in ('m3_quote','m3_selected') else spec.identity): s}) for s in subjects]
 
 
 def collect_research(dataset, params, raw_client, engine, *, now=None):
@@ -131,7 +131,10 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
         monitor.emit(batch_total=len(selected), coverage_total=len(units), coverage_pending=len(eligible))
     # Batch quote endpoints at their documented caps. One stock still owns one
     # CAS/version, so an absent stock cannot be silently treated as acquired.
-    batches = [selected[i:i+100] for i in range(0,len(selected),100)] if spec.kind == 'm3_quote' else [[u] for u in selected]
+    # ETF snapshots accept exactly one singular thscode; stock/index quote
+    # endpoints have separate documented batch contracts.
+    quote_limit = 1 if spec.key == 'etf_quote' else 100
+    batches = [selected[i:i+quote_limit] for i in range(0,len(selected),quote_limit)] if spec.kind == 'm3_quote' else [[u] for u in selected]
     for batch in batches:
         batch_data, batch_error, batch_trace = {}, None, []
         if monitor:
@@ -139,7 +142,8 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
         if spec.kind == 'm3_quote':
             q = Acquisition(client)
             try:
-                query = {'thscodes': ','.join(u.subject for u in batch)}
+                query = ({'thscode': batch[0].subject} if spec.key == 'etf_quote'
+                         else {'thscodes': ','.join(u.subject for u in batch)})
                 if spec.key == 'stock_auction':
                     query['stage'] = 'final'
                 data = q.read(spec.interface,query)
