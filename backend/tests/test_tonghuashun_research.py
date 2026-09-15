@@ -336,3 +336,26 @@ def test_etf_quotes_use_singular_code_and_preserve_each_subject(engine):
         for code in ('510300.SH', '510500.SH'):
             data = CollectionRepository(session).read('etf_quote', code, 'default').data
             assert data['item'][0]['thscode'] == code
+
+
+def test_future_ex_dates_are_preserved_but_future_prices_are_rejected(tmp_path):
+    future_day = NOW.date() + timedelta(days=1)
+    event = {'thscode': '600519.SH', 'ticker': '600519', 'currency': 'CNY',
+             'ex_date_ms': date_ms(future_day), 'dividend_per_share': 1.0,
+             'per_share_bonus': 0.0, 'allotment_ratio': 0.0, 'allotment_price': 0.0}
+    actions_dir = tmp_path / 'actions'; actions_dir.mkdir()
+    path = actions_dir / 'events.parquet'
+    pq.write_table(pa.Table.from_pylist([event]), path)
+    disk, metadata = validate_file(path, 'stock_actions_dump', actions_dir, NOW)
+    try:
+        assert metadata['future_event_rows'] == 1
+        assert metadata['observed_end'] == future_day.isoformat()
+        assert disk.execute('SELECT day FROM records').fetchone()[0] == event['ex_date_ms']
+    finally:
+        disk.close()
+    bars_dir = tmp_path / 'bars'; bars_dir.mkdir()
+    path = bars_dir / 'bars.parquet'
+    row = {**bar(future_day), 'thscode': '600519.SH', 'currency': 'CNY', 'interval': '1d', 'adjusted': 'none'}
+    pq.write_table(pa.Table.from_pylist([row]), path)
+    with pytest.raises(CollectionError, match='未来日期'):
+        validate_file(path, 'stock_recent_dump', bars_dir, NOW)
