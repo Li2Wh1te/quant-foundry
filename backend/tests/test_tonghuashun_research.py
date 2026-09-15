@@ -316,3 +316,23 @@ def test_download_falls_back_only_within_validated_public_addresses(monkeypatch,
     assert download('https://objects.example/a', tmp_path / 'file')[1] == 3
     assert [c.args[0] for c in connect.call_args_list] == [('1.1.1.1', 443), ('8.8.8.8', 443)]
     dns.assert_called_once()
+
+
+def test_etf_quotes_use_singular_code_and_preserve_each_subject(engine):
+    seed(engine, [ticker('510300.SH'), ticker('510500.SH')])
+    def respond(interface, parameters):
+        if interface == 'a-share.calendar.trading-days':
+            return calendar()
+        assert interface == 'fund.market.snapshot'
+        assert set(parameters) == {'thscode'}
+        assert ',' not in parameters['thscode']
+        return reply([{'thscode': parameters['thscode'], 'last_price': Decimal('1.23456789')}])
+    c = client(respond)
+    result = collect('etf_quote', Params(), c, engine, now=NOW)
+    assert result['succeeded'] == 2 and result['failed'] == 0
+    calls = [call for call in c.request.call_args_list if call.args[0] == 'fund.market.snapshot']
+    assert [call.args[1] for call in calls] == [{'thscode': '510300.SH'}, {'thscode': '510500.SH'}]
+    with Session(engine) as session:
+        for code in ('510300.SH', '510500.SH'):
+            data = CollectionRepository(session).read('etf_quote', code, 'default').data
+            assert data['item'][0]['thscode'] == code
