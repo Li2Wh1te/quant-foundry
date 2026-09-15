@@ -298,3 +298,21 @@ def test_concurrent_publication_is_deferred_without_invalidating_winner(engine, 
         assert state.status == 'succeeded'
         assert state.data == winner
         assert state.revision == 1
+
+
+def test_download_falls_back_only_within_validated_public_addresses(monkeypatch, tmp_path):
+    from app.data_ingestion.tonghuashun import dump_service as mod
+    dns = Mock(return_value=[(10, 1, 6, '', ('2606:4700:4700::1111', 443)),
+                             (2, 1, 6, '', ('8.8.8.8', 443)),
+                             (2, 1, 6, '', ('1.1.1.1', 443))])
+    monkeypatch.setattr(mod.socket, 'getaddrinfo', dns)
+    connect = Mock(side_effect=[OSError('unreachable'), Mock()])
+    monkeypatch.setattr(mod.socket, 'create_connection', connect)
+    response = Mock(status=200, headers={'Content-Length': '3'},
+                    read1=Mock(side_effect=[b'abc', b'']))
+    conn = Mock(getresponse=Mock(return_value=response))
+    conn.request.side_effect = lambda *a, **kw: conn._create_connection(('objects.example', 443), 20)
+    monkeypatch.setattr(mod.http.client, 'HTTPSConnection', lambda *a, **kw: conn)
+    assert download('https://objects.example/a', tmp_path / 'file')[1] == 3
+    assert [c.args[0] for c in connect.call_args_list] == [('1.1.1.1', 443), ('8.8.8.8', 443)]
+    dns.assert_called_once()

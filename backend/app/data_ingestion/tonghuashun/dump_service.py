@@ -57,16 +57,30 @@ def download(url, path):
         addresses = {a[4][0] for a in socket.getaddrinfo(host,443,type=socket.SOCK_STREAM)}
         if not addresses or any(not ipaddress.ip_address(a).is_global for a in addresses):
             raise ValueError()
-        address = sorted(addresses)[0]
+        addresses = sorted(addresses, key=lambda a: (ipaddress.ip_address(a).version, a))
     except (ValueError, TypeError, OSError):
         raise CollectionError('批量下载地址必须是合法的公网 HTTPS 对象地址。') from None
     digest, size, deadline = hashlib.sha256(), 0, time.monotonic()+900
     connection = http.client.HTTPSConnection(host,443,timeout=20,context=ssl.create_default_context())
     # Keep TLS SNI/certificate validation tied to the original hostname while
-    # connecting to the one already-validated address. http.client does not log
+    # connecting only to already-validated addresses. http.client does not log
     # request URLs (debuglevel stays zero), unlike urllib3 debug request logs.
-    connection._create_connection = lambda ignored, timeout, source_address=None: socket.create_connection(
-        (address,443),timeout,source_address)
+    def connect_public_address(ignored, timeout, source_address=None):
+        # Containers may resolve AAAA records without having an IPv6 route.
+        # Try the validated IPv4 addresses first, with one bounded connection
+        # budget. Never resolve the hostname again or fall back to a proxy.
+        connect_deadline = time.monotonic() + timeout
+        for address in addresses:
+            remaining = connect_deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                return socket.create_connection((address, 443), min(5, remaining), source_address)
+            except OSError:
+                continue
+        raise OSError("No validated public address is reachable")
+
+    connection._create_connection = connect_public_address
     try:
         target = parsed.path or '/'
         if parsed.query:
