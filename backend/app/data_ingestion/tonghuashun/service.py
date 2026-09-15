@@ -16,7 +16,7 @@ import structlog
 from app.data_ingestion.clients.tonghuashun import TonghuashunError
 from app.data_ingestion.models.tonghuashun import TonghuashunRequestBudget
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
-from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionParameters, DATASETS, SHANGHAI
+from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
 
 logger = structlog.get_logger(__name__)
@@ -181,6 +181,10 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                 summary[field] += result[field]
             log_result(spec, subject, parameters, data, result, not acquisition.failures,
                        "partial_reports" if acquisition.failures else None)
+        except CollectionConflict:
+            # Preserve the newer publication and recheck this scope next run.
+            summary["skipped"] += 1
+            summary["pending"] += 1
         except (CollectionError, TonghuashunError) as exc:
             kind = exc.kind if isinstance(exc, TonghuashunError) else "invalid_data"
             with Session(engine) as session:
@@ -206,7 +210,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     summary["message"] = (f"{spec.name}本批采集完成：日期范围按接口及任务参数，成功 {summary['succeeded']} 个，"
         f"已跳过 {summary['skipped']} 个，读取版本记录 {summary['received']} 条，变更 {summary['changed']} 条，"
         f"未变更 {summary['unchanged']} 条，失败 0 个，待后续采集 {summary['pending']} 个；"
-        + ("本次成功标的完成标记已推进。" if summary["succeeded"] else "本期范围已完成，完成标记未重复推进。"))
+        + ("本次成功标的完成标记已推进。" if summary["succeeded"] else "本次未推进完成标记；待续采范围将在后续运行重新检查。"))
     return summary
 
 

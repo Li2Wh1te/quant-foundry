@@ -16,7 +16,7 @@ from app.data_ingestion.models.tonghuashun import (
     TonghuashunCollectionState as State, TonghuashunObservation as Observation,
     TonghuashunTicker as Ticker,
 )
-from app.data_ingestion.tonghuashun.contracts import CollectionError, content_hash, exact_json
+from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, content_hash, exact_json
 
 SERIES_KEYS = {"etf_daily": "date_ms", "stock_daily": "date_ms", "index_daily": "date_ms",
     "fund_nav": "nav_date", "stock_income": "period_end_ms", "stock_balance": "period_end_ms",
@@ -103,7 +103,7 @@ class CollectionRepository:
         state = self.session.scalar(select(State).where(State.dataset == dataset,
             State.subject == subject, State.variant == variant).with_for_update().execution_options(populate_existing=True))
         if state.revision != expected:
-            raise CollectionError("同一采集范围已被其他运行更新，本次结果未覆盖较新版本。")
+            raise CollectionConflict("同一采集范围已被其他运行更新，本次结果未覆盖较新版本。")
         return state
 
     def publish(self, dataset: str, subject: str, variant: str, *, expected: int,

@@ -448,3 +448,12 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_absent_task_result_binds_as_sql_null():
+    from app.scheduling.models import TaskRun
+    # JSON null would fail PostgreSQL's result-object CHECK during completion.
+    result_type = TaskRun.__table__.c.result.type
+    process = result_type.bind_processor(postgresql.dialect())
+    assert process(None) is None
+    assert process({'changed': 1}) == '{"changed": 1}'

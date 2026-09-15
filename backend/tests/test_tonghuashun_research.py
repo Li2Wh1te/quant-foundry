@@ -272,3 +272,29 @@ def test_new_migration_round_trip_preserves_existing_tables():
             m.downgrade()
         assert connection.execute(text('SELECT id FROM existing')).scalar_one()==1
     db.dispose()
+
+
+@pytest.mark.parametrize('dataset', ['stock_quote', 'fund_profile'])
+def test_concurrent_publication_is_deferred_without_invalidating_winner(engine, dataset):
+    code = '600519.SH' if dataset == 'stock_quote' else '510300.SH'
+    seed(engine, [ticker(code, 'a-share' if dataset == 'stock_quote' else 'fund-etf')])
+    winner = {'timestamp': 1720000000000, 'item': [{'thscode': code, 'name': 'newer'}]}
+
+    def respond(key, parameters):
+        if key == 'a-share.calendar.trading-days':
+            return calendar()
+        # Another session wins while the first collector is awaiting I/O.
+        with Session(engine) as session:
+            CollectionRepository(session).publish(dataset, code, 'default', expected=0,
+                data=winner, requests=[], now=NOW)
+            session.commit()
+        return reply([{'thscode': code, 'name': 'older'}])
+
+    result = collect(dataset, Params(), client(respond), engine, now=NOW)
+    assert result['failed'] == result['succeeded'] == 0
+    assert result['skipped'] == result['pending'] == 1
+    with Session(engine) as session:
+        state = CollectionRepository(session).read(dataset, code, 'default')
+        assert state.status == 'succeeded'
+        assert state.data == winner
+        assert state.revision == 1
