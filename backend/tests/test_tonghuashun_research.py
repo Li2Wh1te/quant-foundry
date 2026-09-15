@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 from tests.test_tonghuashun_collections import engine, seed, ticker, bar, reply, NOW
 from app.data_ingestion.clients.tonghuashun import TonghuashunResponse
 from app.data_ingestion.models.tonghuashun import TonghuashunDumpImport as Import, TonghuashunDumpStage as Stage
-from app.data_ingestion.tonghuashun.contracts import CollectionParameters as Params, CollectionError, DATASETS, date_ms
+from app.data_ingestion.tonghuashun.contracts import CollectionParameters as Params, CollectionError, DATASETS, date_ms, exact_json
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
 from app.data_ingestion.tonghuashun.service import collect
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
@@ -359,3 +359,41 @@ def test_future_ex_dates_are_preserved_but_future_prices_are_rejected(tmp_path):
     pq.write_table(pa.Table.from_pylist([row]), path)
     with pytest.raises(CollectionError, match='未来日期'):
         validate_file(path, 'stock_recent_dump', bars_dir, NOW)
+
+
+@pytest.mark.parametrize('newer_rest', [False, True])
+def test_action_dump_preserves_date_groups_and_source_occurrences(research_engine, newer_rest):
+    # A cash event, a bonus event and an identical repeated source row all
+    # belong to one date. None can be identified by the ex-date alone.
+    event = {'thscode': '000812.SZ', 'ticker': '000812', 'currency': 'CNY',
+             'ex_date_ms': date_ms(date(1998, 9, 22)), 'dividend_per_share': 0.2,
+             'per_share_bonus': 0.0, 'allotment_ratio': 0.0, 'allotment_price': 0.0}
+    bonus = {**event, 'dividend_per_share': 0.0, 'per_share_bonus': 0.1}
+    rows = [event, bonus, bonus.copy()]
+    params = Params(batch_size=1)
+    generation, _ = reserve('stock_actions_dump', params, research_engine, NOW)
+    def downloader(url, path):
+        write_parquet(path, rows)
+        return 'digest', Path(path).stat().st_size
+    c = client(TonghuashunResponse({'presigned_url': 'https://objects.example/file'}, None))
+    stage_file('stock_actions_dump', generation, c, research_engine, NOW, downloader)
+    # REST snapshots already preserve item arrays. Exercise that path as well,
+    # with different same-day values, so stale imports cannot mix observations.
+    rest_rows = [{**event, 'dividend_per_share': Decimal('0.3')}, bonus]
+    response = TonghuashunResponse({'thscode': event['thscode'], 'item': rest_rows}, None)
+    data = Acquisition(client(response)).fetch(DATASETS['stock_actions'], event['thscode'], params, None, NOW)
+    assert data['item'] == rest_rows
+    with Session(research_engine) as session:
+        CollectionRepository(session).publish('stock_actions', event['thscode'], 'default',
+            expected=0, data=data, requests=[],
+            now=NOW + timedelta(seconds=1 if newer_rest else -1))
+        session.commit()
+    result = publish_batch('stock_actions_dump', generation, params, research_engine, NOW + timedelta(seconds=2))
+    assert result['received'] == 3 and result['pending'] == 0
+    assert result['superseded'] == int(newer_rest)
+    with Session(research_engine) as session:
+        saved = CollectionRepository(session).read('stock_actions', event['thscode'], 'default').data['item']
+        expected = json.loads(exact_json(rest_rows if newer_rest else rows), parse_float=Decimal)
+        assert saved == expected
+        assert not list(session.scalars(select(Stage)))
+        assert json.loads(session.get(Import, 'stock_actions_dump').metadata_json)['rows'] == 3
