@@ -45,3 +45,22 @@ def test_report_budget_resumes_saved_requests_and_publishes_only_complete_scope(
         data = CollectionRepository(session).read('fund_stock_history', '510300.SH', 'default').data
         assert len(data['item']) == 3
         assert session.scalar(select(func.count()).select_from(Work)) == 0
+
+
+def test_budget_exit_accepts_snapshot_task_schema_without_date_fields(monkeypatch):
+    from types import SimpleNamespace
+    from app.data_ingestion.scheduler_tasks import tonghuashun as tasks
+    from app.data_ingestion.tonghuashun.contracts import DATASETS
+    from app.data_ingestion.tonghuashun.control import CollectionControl
+    monkeypatch.setattr(tasks, 'get_engine', lambda: None)
+    monkeypatch.setattr(tasks, 'get_settings', lambda: None)
+    monkeypatch.setattr(tasks.TonghuashunClient, 'from_settings', lambda _: None)
+    monkeypatch.setattr(CollectionControl, 'emit', lambda self, **values: self.detail.update(values))
+    def yield_batch(*args, **kwargs):
+        raise CollectionYield('budget')
+    monkeypatch.setattr(tasks, 'collect', yield_batch)
+    params = tasks.parameters_model(DATASETS['stock_quote'])()
+    assert 'start_date' not in params.model_fields
+    result = tasks.execute('stock_quote', SimpleNamespace(run_id=None), params)
+    assert result['yield_reason'] == 'budget'
+    assert '未推进' in result['message']

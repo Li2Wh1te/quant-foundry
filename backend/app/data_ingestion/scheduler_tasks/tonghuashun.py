@@ -16,6 +16,7 @@ from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
 def execute(dataset: str, context: TaskContext, parameters: CollectionParameters):
     from app.data_ingestion.tonghuashun.control import CollectionControl, CollectionYield, active_control
+    parameters = CollectionParameters.model_validate(parameters.model_dump())
     engine = get_engine()
     monitor = CollectionControl(engine, context.run_id,
         max_requests=parameters.max_requests, max_seconds=parameters.max_seconds)
