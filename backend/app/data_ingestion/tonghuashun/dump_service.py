@@ -5,6 +5,7 @@ before any source version is published. Staged per-symbol payloads survive a
 worker restart and disappear in the same transaction as their publication.
 """
 
+from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 import hashlib
@@ -129,7 +130,10 @@ def validate_file(path, dataset, directory, now):
     """Validate every row and uniqueness on disk before staging any publication."""
     _, _, date_key = DUMPS[dataset]
     disk = sqlite3.connect(str(Path(directory)/'rows.sqlite'))
-    disk.execute('CREATE TABLE records (code TEXT, day INTEGER, payload TEXT, PRIMARY KEY(code,day))')
+    # Event dates are not event identities. Preserve every source row, even
+    # identical occurrences, using a file-local ordinal rather than deduplication.
+    # Prices retain their strict one-row-per-symbol-and-day constraint.
+    disk.execute('CREATE TABLE records (code TEXT, day INTEGER, ordinal INTEGER, payload TEXT, PRIMARY KEY(code,day,ordinal))')
     try:
         # Keep decoding synchronous and close Arrow resources before the worker exits.
         with pq.ParquetFile(path) as file:
@@ -143,6 +147,7 @@ def validate_file(path, dataset, directory, now):
                 raise CollectionError('Parquet 字段与官方日线或复权事件结构不一致。')
             expanded, observed_min, observed_max = 0, None, None
             future_events = 0
+            row_ordinal = 0
             for batch in file.iter_batches(batch_size=4096, use_threads=False):
                 payloads = []
                 for row in batch.to_pylist():
@@ -175,10 +180,11 @@ def validate_file(path, dataset, directory, now):
                     expanded += len(encoded)
                     if expanded > 8*1024**3:
                         raise CollectionError('批量文件解码后超过8GiB暂存上限。')
-                    payloads.append((code,row[date_key],encoded))
+                    row_ordinal += 1
+                    payloads.append((code,row[date_key],row_ordinal if date_key == 'ex_date_ms' else 0,encoded))
                     observed_min = min(observed_min or day,day)
                     observed_max = max(observed_max or day,day)
-                disk.executemany('INSERT INTO records VALUES (?,?,?)',payloads)
+                disk.executemany('INSERT INTO records VALUES (?,?,?,?)',payloads)
                 disk.commit()
             return disk, {'rows':count,'observed_start':observed_min.isoformat(),'observed_end':observed_max.isoformat(),
                 'future_event_rows':future_events, 'collected_at':now.isoformat(),
@@ -257,7 +263,7 @@ def stage_file(dataset,generation,client,engine,now,downloader=download):
                     monitor.emit(stage="暂存已校验文件")
                 count=0
                 for (code,) in disk.execute('SELECT DISTINCT code FROM records ORDER BY code'):
-                    payload='{"item":['+','.join(r[0] for r in disk.execute('SELECT payload FROM records WHERE code=? ORDER BY day',(code,)))+']}'
+                    payload='{"item":['+','.join(r[0] for r in disk.execute('SELECT payload FROM records WHERE code=? ORDER BY day,ordinal',(code,)))+']}'
                     session.add(Stage(dataset=dataset,subject=code,data_json=payload))
                     count+=1
                     if count%100==0:
@@ -283,18 +289,25 @@ def publish_batch(dataset,generation,params,engine,now):
         for staged in rows:
             old=repo.read(target,staged.subject,'default')
             new=json.loads(staged.data_json,parse_float=Decimal)['item']
-            known={r[date_key]:r for r in (old.data or {}).get('item',[])}
+            # Merge whole date groups, never individual events keyed only by date.
+            # A newer REST snapshot wins as a group on overlapping dates; old
+            # immutable observations still retain the prior source evidence.
+            known = defaultdict(list)
+            merged = defaultdict(list)
+            for row in (old.data or {}).get('item', []):
+                known[row[date_key]].append(row)
+            for row in new:
+                merged[row[date_key]].append(row)
             newer=old.succeeded_at is not None and aware(old.succeeded_at)>aware(slot.started_at)
             # A full bootstrap only fills missing dates in established history.
             # Recent dumps can revise overlaps unless a newer REST run won first.
             fill_only=newer or dataset=='stock_daily_dump' and params.mode!='reconcile'
-            merged={r[date_key]:r for r in new}
             if fill_only:
                 merged.update(known)
             else:
                 merged={**known,**merged}
             superseded+=int(newer)
-            data={**(old.data or {}),'item':[merged[k] for k in sorted(merged)],
+            data={**(old.data or {}),'item':[row for k in sorted(merged) for row in merged[k]],
                 'adjust':'none','bulk_source':metadata,'coverage':'observed_rows_only',
                 'requested_start':min(metadata['observed_start'],(old.data or {}).get('requested_start',metadata['observed_start'])),
                 'requested_end':max(metadata['observed_end'],(old.data or {}).get('requested_end',metadata['observed_end']))}
