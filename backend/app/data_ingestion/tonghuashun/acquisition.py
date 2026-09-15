@@ -11,6 +11,10 @@ from app.data_ingestion.tonghuashun.contracts import (
 )
 
 
+class DirectorySnapshotChanged(CollectionError):
+    """Only a cross-page snapshot change permits restarting a directory read."""
+
+
 class Acquisition:
     def __init__(self, client):
         self.client = client
@@ -45,17 +49,31 @@ class Acquisition:
             return None
 
     def directory(self, spec: Dataset, asset: str) -> dict:
+        # Restart the entire read; never combine rows from different attempts.
+        # Keep retries inside BudgetedClient so account-wide pacing still holds.
+        for attempt in range(3):
+            try:
+                return self._directory_snapshot(spec, asset)
+            except DirectorySnapshotChanged:
+                if attempt == 2:
+                    raise
+        raise AssertionError("unreachable directory attempt")
+
+    def _directory_snapshot(self, spec: Dataset, asset: str) -> dict:
+        # The documented cap avoids unnecessary snapshot boundaries for most
+        # asset types, while retaining pagination for large OTC fund catalogues.
+        page_size = 10_000
         all_rows, seen, timestamp = [], set(), None
-        for offset in range(0, 1_000_000, 1000):
-            data = self.read(spec.interface, {"asset_type": asset, "limit": 1000, "offset": offset})
+        for offset in range(0, 1_000_000, page_size):
+            data = self.read(spec.interface, {"asset_type": asset, "limit": page_size, "offset": offset})
             rows = items(data, allow_empty=True)
             current = data.get("timestamp")
             if type(current) is not int or current < 0:
                 raise CollectionError("标的目录缺少有效的上游快照时间。")
             if timestamp is not None and timestamp != current:
-                raise CollectionError("分页期间上游目录版本发生变化，本次未发布不一致目录。")
+                raise DirectorySnapshotChanged("分页期间上游目录版本发生变化，本次未发布不一致目录。")
             timestamp = current
-            if len(rows) > 1000:
+            if len(rows) > page_size:
                 raise CollectionError("目录分页超过请求条数。")
             for row in rows:
                 validate_ticker(row, asset)
@@ -63,7 +81,7 @@ class Acquisition:
                     raise CollectionError("目录分页出现重复代码，本次未推进完成标记。")
                 seen.add(row["thscode"])
                 all_rows.append(row)
-            if len(rows) < 1000:
+            if len(rows) < page_size:
                 if not all_rows:
                     raise CollectionError("完整标的目录为空，未覆盖已有记录。")
                 return {"timestamp": timestamp, "item": sorted(all_rows, key=lambda r: r["thscode"])}
