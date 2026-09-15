@@ -149,7 +149,7 @@ def test_exact_decimal_and_null_roundtrip():
 def test_directory_pages_are_validated_before_any_write(engine):
     initial = ticker()
     seed(engine, [initial])
-    first = [ticker(f"{i:06d}.SH") for i in range(1000)]
+    first = [ticker(f"{i:06d}.SH") for i in range(10000)]
     client = Mock(interval_ms=0)
     client.request.side_effect = [reply(first), reply([first[0]])]
     with pytest.raises(CollectionError, match="部分失败"):
@@ -165,7 +165,7 @@ def test_directory_detects_snapshot_change_empty_and_asset_mismatch():
     for responses in (
         [reply([])],
         [reply([ticker(asset="fund-lof")])],
-        [reply([ticker(f"{i:06d}.SH") for i in range(1000)]), reply([], timestamp=1)],
+        [reply([ticker(f"{i:06d}.SH") for i in range(10000)]), reply([], timestamp=1)] * 3,
     ):
         client = Mock(interval_ms=0)
         client.request.side_effect = responses
@@ -480,3 +480,14 @@ def test_delta_preserves_decimal_representation_changes_and_removals(engine):
         data = repo.read("etf_daily", "510300.SH", "default").data
         assert str(data["item"][0]["close_price"]) == "1.0000"
         assert len(data["item"]) == 99
+
+
+def test_directory_restarts_snapshot_without_mixing_attempts():
+    first = [ticker(f"{i:06d}.SH") for i in range(10000)]
+    client = Mock(interval_ms=0)
+    client.request.side_effect = [reply(first), reply([], timestamp=1),
+                                  reply([ticker("510300.SH")], timestamp=2)]
+    data = Acquisition(client).directory(DATASETS["tickers"], "fund-etf")
+    assert data["timestamp"] == 2 and data["item"] == [ticker("510300.SH")]
+    assert [call.args[1]["offset"] for call in client.request.call_args_list] == [0, 10000, 0]
+    assert all(call.args[1]["limit"] == 10000 for call in client.request.call_args_list)
