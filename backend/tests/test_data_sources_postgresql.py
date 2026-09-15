@@ -25,6 +25,10 @@ from app.scheduling.service import SchedulerService, TaskConflictError
 from tests.test_data_sources import settings
 
 
+class EmptyParameters(BaseModel):
+    pass
+
+
 @unittest.skipUnless(os.getenv("POSTGRES_TEST_ENABLED") == "1", "requires disposable PostgreSQL")
 class SourceGateRaceTest(unittest.TestCase):
     def setUp(self):
@@ -32,7 +36,7 @@ class SourceGateRaceTest(unittest.TestCase):
         self.key = "race." + uuid4().hex
         self.registry = TaskRegistry()
         self.registry.register(TaskDefinition(key=self.key, name="并发测试", english_name="Concurrency test",
-            source_key=self.key, parameters_model=BaseModel, handler=lambda *_: None))
+            source_key=self.key, parameters_model=EmptyParameters, handler=lambda *_: None))
         provider = TushareProvider()
         provider.key = self.key
         self.providers_patch = patch.dict(PROVIDERS, {self.key: provider})
