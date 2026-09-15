@@ -142,6 +142,7 @@ def validate_file(path, dataset, directory, now):
             if len(file.schema_arrow.names) != len(set(file.schema_arrow.names)) or not required <= set(file.schema_arrow.names):
                 raise CollectionError('Parquet 字段与官方日线或复权事件结构不一致。')
             expanded, observed_min, observed_max = 0, None, None
+            future_events = 0
             for batch in file.iter_batches(batch_size=4096, use_threads=False):
                 payloads = []
                 for row in batch.to_pylist():
@@ -150,7 +151,12 @@ def validate_file(path, dataset, directory, now):
                         raise CollectionError('批量文件包含非法代码或币种。')
                     day = provider_date(row.get(date_key))
                     if day > now.astimezone(SHANGHAI).date():
-                        raise CollectionError('批量文件包含未来日期。')
+                        if date_key == 'date_ms':
+                            raise CollectionError('批量文件包含未来日期。')
+                        # Ex-dates describe source events, not observed prices.
+                        # Preserve future events as raw evidence without applying
+                        # them to historical prices or claiming they are effective.
+                        future_events += 1
                     if row[date_key] != int(datetime.combine(day,datetime.min.time(),SHANGHAI).timestamp()*1000):
                         raise CollectionError('批量文件日期不是上海时区零点。')
                     # Arrow decimals retain precision. Binary floats retain their
@@ -175,6 +181,7 @@ def validate_file(path, dataset, directory, now):
                 disk.executemany('INSERT INTO records VALUES (?,?,?)',payloads)
                 disk.commit()
             return disk, {'rows':count,'observed_start':observed_min.isoformat(),'observed_end':observed_max.isoformat(),
+                'future_event_rows':future_events, 'collected_at':now.isoformat(),
                 'columns':file.schema_arrow.names, 'numeric_encoding':'provider_decimal_or_float_roundtrip'}
     except CollectionError:
         disk.close()
