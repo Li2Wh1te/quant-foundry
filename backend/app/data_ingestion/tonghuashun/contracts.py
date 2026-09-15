@@ -25,6 +25,10 @@ class CollectionError(ValueError):
     """Only locally authored explanations can enter persisted error messages."""
 
 
+class CollectionConflict(CollectionError):
+    """A newer collector owns this scope; retry eligibility on a later run."""
+
+
 class CollectionParameters(BaseModel):
     model_config = ConfigDict(extra="forbid")
     asset_types: list[Literal["fund-etf", "fund-lof", "fund-reits", "fund-otc", "a-share", "a-share-index"]] = Field(default=list(ASSET_TYPES), min_length=1)

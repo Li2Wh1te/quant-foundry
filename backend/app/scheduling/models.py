@@ -169,7 +169,9 @@ class TaskRun(Base):
     parameters: Mapped[dict[str, Any]] = mapped_column(JSONB)
     parameter_version: Mapped[int] = mapped_column(SmallInteger)
     priority: Mapped[int] = mapped_column(SmallInteger, default=0, server_default="0")
-    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
+    # Missing handler results must be SQL NULL. JSON null violates the
+    # result-object constraint and prevents failed runs from terminating.
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True))
     error_type: Mapped[str | None] = mapped_column(String(255))
     error_message: Mapped[str | None] = mapped_column(Text)
     scheduled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

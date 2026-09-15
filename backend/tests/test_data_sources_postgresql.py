@@ -52,6 +52,25 @@ class SourceGateRaceTest(unittest.TestCase):
             self.run_id = run.id
             session.commit()
 
+    def test_failed_run_without_result_reaches_terminal_state(self):
+        # Exercise the real JSONB CHECK, which SQLite cannot reproduce.
+        with Session(self.engine) as session:
+            run = session.get(TaskRun, self.run_id)
+            run.status = RunStatus.RUNNING.value
+            run.started_at = datetime.now(UTC)
+            session.commit()
+        with Session(self.engine) as session:
+            assert SchedulerRepository(session).finish_run(self.run_id,
+                status=RunStatus.FAILED, error_type="CollectionError",
+                error_message="Synthetic collection failure")
+            session.commit()
+        with Session(self.engine) as session:
+            run = session.get(TaskRun, self.run_id)
+            assert run.status == RunStatus.FAILED.value
+            assert run.result is None and run.finished_at is not None
+            assert session.scalar(text("SELECT result IS NULL FROM task_runs WHERE id = :id"),
+                {"id": self.run_id})
+
     def tearDown(self):
         self.providers_patch.stop()
         with Session(self.engine) as session:

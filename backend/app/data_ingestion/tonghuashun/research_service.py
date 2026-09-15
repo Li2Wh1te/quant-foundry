@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.data_ingestion.clients.tonghuashun import TonghuashunError
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
 from app.data_ingestion.tonghuashun.contracts import (
-    CollectionError, DATASETS, SHANGHAI, date_ms, exact_json, items, provider_date, years_before,
+    CollectionError, CollectionConflict, DATASETS, SHANGHAI, date_ms, exact_json, items, provider_date, years_before,
 )
 from app.data_ingestion.tonghuashun.milestone_three import DATES, SELECTED, SLOTS, TRADE_ONLY
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
@@ -160,7 +160,7 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                     with Session(engine) as session:
                         full = CollectionRepository(session).read(dataset,u.subject,variant)
                     if full.revision != old.revision:
-                        raise CollectionError('同一范围已被其他任务更新，下批重新检查。')
+                        raise CollectionConflict('同一范围已被其他任务更新，下批重新检查。')
                     data = fetch(read,spec,u,params,full.data,now)
                 data = {**data,'collection_scope':u.parameters, 'source_observed_at': now.isoformat()}
                 with Session(engine) as session:
@@ -173,6 +173,11 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                     summary[key] += result[key]
                 log_result(spec,u.subject,params,data,{**result,'fetched_count':read.fetched_count},not partial,
                     'partial_reports' if partial else None)
+            except CollectionConflict:
+                # Do not mark valid data as invalid or overwrite the winner.
+                # A later run rechecks eligibility, including a failed winner.
+                summary['skipped'] += 1
+                summary['pending'] += 1
             except (CollectionError,TonghuashunError) as exc:
                 kind = exc.kind if isinstance(exc,TonghuashunError) else 'invalid_data'
                 with Session(engine) as session:
@@ -189,7 +194,7 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
     end = max((u.day for u in selected if u.day),default=now.date())
     summary['event'] = 'tonghuashun_collection_failed' if summary['failed'] else 'tonghuashun_collection_completed'
     summary['message'] = (f'{spec.name}采集：日期范围 {start} 至 {end}，成功 {summary["succeeded"]} 个，失败 {summary["failed"]} 个，'
-        f'变更 {summary["changed"]} 条，未变更 {summary["unchanged"]} 条，待续采 {summary["pending"]} 个；'
+        f'变更 {summary["changed"]} 条，未变更 {summary["unchanged"]} 条，跳过 {summary["skipped"]} 个，待续采 {summary["pending"]} 个；'
         + ('成功范围完成标记已推进。' if summary['succeeded'] else '本次未推进完成标记。'))
     if summary['failed']:
         raise CollectionError(summary['message'])
