@@ -14,6 +14,15 @@ from scripts.selfhost_env import (
 
 
 class SelfhostEnvironmentTestCase(unittest.TestCase):
+    def test_existing_archive_directory_permissions_are_preserved(self):
+        template=Path(__file__).resolve().parents[1]/"backend"/".env.example"
+        with tempfile.TemporaryDirectory() as directory:
+            env=Path(directory)/".env"
+            archive=env.parent/"data"/"foundation-runtime-archives"
+            archive.mkdir(parents=True);archive.chmod(0o700)
+            ensure_selfhost_environment(env,template)
+            self.assertEqual(archive.stat().st_mode & 0o777,0o700)
+
     def test_existing_archive_group_is_not_overwritten(self):
         template=Path(__file__).resolve().parents[1]/"backend"/".env.example"
         with tempfile.TemporaryDirectory() as directory:
@@ -33,6 +42,9 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
                                    ("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64 + "\n" if existing == "true" else ""))
                 ensure_selfhost_environment(env, template)
                 contents = env.read_text()
+                archive_dir=env.parent/"data"/"foundation-runtime-archives"
+                self.assertTrue(archive_dir.is_dir())
+                self.assertEqual(archive_dir.stat().st_mode & 0o007, 0)
                 expected = existing if existing else "false"
                 self.assertIn("QF_FOUNDATION_WORKER_ENABLED=" + expected, contents)
                 self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=", contents)

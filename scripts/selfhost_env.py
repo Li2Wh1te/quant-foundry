@@ -42,6 +42,11 @@ ENV_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
 def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozenset[str]:
+    # Create the bind-mount directory as the deploying user before Compose can
+    # create a root-owned directory. Existing operator permissions stay intact.
+    (env_path.parent / "data" / "foundation-runtime-archives").mkdir(
+        parents=True, exist_ok=True, mode=0o750
+    )
     if not env_path.exists():
         shutil.copyfile(template_path, env_path)
 
