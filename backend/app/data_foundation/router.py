@@ -12,9 +12,8 @@ router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation']
 
 @router.get('/datasets')
 def datasets(session: Session = Depends(get_db_session)):
-    rows = session.scalars(select(Definition).where(Definition.kind == 'contract').order_by(Definition.name, Definition.version)).all()
-    return {'items': [{'id': str(row.id), 'dataset': row.name, 'version': row.version, 'definition_hash': row.content_hash,
-        'read_status': 'not_implemented', 'update_status': 'not_implemented'} for row in rows]}
+    from app.data_foundation.query import dataset_view
+    return foundation_response(lambda: {'items': [dataset_view(session)]})
 
 
 @router.get('/source-refs/{ref_id}')
@@ -75,3 +74,79 @@ def decision_detail(decision_id: UUID, session: Session = Depends(snapshot_sessi
     return {'id':row.id,'work_id':row.work_id,'target_key':row.target_key,'action':row.action,
         'candidate_manifest_id':row.candidate_manifest_id,'selected_candidate_id':row.selected_candidate_id,
         'parent_official_id':row.parent_official_id,'evidence':json.loads(row.evidence_json)}
+
+
+# Serialize inside the transaction that holds the current issue scope lock.
+# Returning a Response avoids a later framework encoder changing Decimal values.
+from fastapi import Request, Response
+from fastapi.security import HTTPAuthorizationCredentials
+from app.core.auth import require_api_token
+from app.data_foundation.canonical import FoundationError, encode
+from app.data_foundation.query import DataRequirement
+
+
+def current_auth(request):
+    def authenticate():
+        header=request.headers.get('authorization','')
+        scheme,_,token=header.partition(' ')
+        credentials=HTTPAuthorizationCredentials(scheme=scheme,credentials=token) if token else None
+        return require_api_token(request,credentials).owner_scope
+    return authenticate
+
+
+def foundation_response(callback):
+    try:
+        payload=callback()
+        return Response(payload if isinstance(payload,bytes) else encode(payload),media_type='application/json')
+    except FoundationError as exc:
+        status={'INVALID_REQUIREMENT':422,'CONTRACT_RELEASE_MISMATCH':422,'RELEASE_UNAVAILABLE':404,
+            'READ_CONTEXT_CHANGED':409,'AUTH_REQUIRED':401,'AUTH_CONTEXT_CHANGED':401}.get(exc.code,503)
+        raise HTTPException(status,detail={'code':exc.code,'message':str(exc)}) from None
+
+
+@router.get('/datasets/{dataset_id}')
+def describe_dataset(dataset_id: str, contract_version: str='1.0', session: Session=Depends(snapshot_session)):
+    from app.data_foundation.query import DATASET,dataset_view
+    if dataset_id!=DATASET or contract_version!='1.0':
+        raise HTTPException(404,detail={'message':'数据集或契约版本不存在。'})
+    return foundation_response(lambda:dataset_view(session))
+
+
+@router.post('/capability-checks')
+def capability_check(body: DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+    from app.data_foundation.query import query_official
+    return foundation_response(lambda:query_official(session,body,current_auth(request),check_only=True))
+
+
+@router.post('/queries')
+def official_query(body: DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+    from app.data_foundation.query import query_official
+    return foundation_response(lambda:query_official(session,body,current_auth(request)))
+
+
+@router.get('/revisions/{revision_id}/lineage')
+def revision_lineage(revision_id: UUID, session: Session=Depends(snapshot_session)):
+    from app.data_foundation.query import lineage
+    return foundation_response(lambda:lineage(session,revision_id))
+
+
+from pydantic import BaseModel
+import json
+
+
+class CandidateInspection(BaseModel):
+    model_config={'extra':'forbid'}
+    work_id: UUID
+
+
+@router.post('/candidate-inspections')
+def candidate_inspection(body: CandidateInspection, session: Session=Depends(snapshot_session)):
+    from app.data_foundation.work_models import Work,Candidate,Assessment
+    row=session.get(Work,body.work_id)
+    if row is None or row.kind!='A':
+        raise HTTPException(404,detail={'message':'标准化工作不存在。'})
+    rows=session.scalars(select(Candidate).where(Candidate.work_id==row.id).order_by(Candidate.occurrence).limit(1001)).all()
+    if len(rows)>1000:raise HTTPException(422,detail={'message':'首期诊断最多1000条。'})
+    return foundation_response(lambda:{'representation':'candidate','work_id':row.id,'items':[
+        {'id':c.id,'source_ref_id':c.source_ref_id,'readiness':c.readiness,
+         'quality':json.loads(session.get(Assessment,c.assessment_id).results_json)} for c in rows]})

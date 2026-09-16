@@ -1,4 +1,5 @@
 import "./components/controls/CreationDrawers.css";
+import { DataAssetsPage } from "./pages/DataAssetsPage";
 import { Navigate, Route, Routes } from "react-router-dom";
 
 import { LoadingScreen } from "./components/LoadingScreen";
@@ -46,6 +47,8 @@ export function App() {
           </RequireAuth>
         }
       />
+      {["/admin/data-assets", "/admin/data-assets/:datasetId", "/admin/data-assets/:datasetId/processing"].map(path => <Route key={path} path={path} element={<RequireAuth><OverviewShell title="数据资产" section="MARKET DATA" className="qf-assets-root"><DataAssetsPage /></OverviewShell></RequireAuth>} />)
+      }
       <Route path="/admin/data-sources" element={<RequireAuth><OverviewShell title="数据源" section="DATA OPS"><DataSourcesPage /></OverviewShell></RequireAuth>} />
       <Route
         path="/admin/tasks"

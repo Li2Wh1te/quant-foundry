@@ -25,6 +25,8 @@ def stage_decisions(session, work_id, epoch):
     if work.kind != 'B':
         raise ValueError('Governance work required')
     params = json.loads(work.parameters_json)
+    from app.data_foundation.governance import verify_plan
+    verify_plan(session, work)
     actions = params['actions']
     from app.data_foundation.models import Definition, SourceRef
     policy = session.get(Definition, work.policy_id)
@@ -60,11 +62,19 @@ def stage_decisions(session, work_id, epoch):
             raise ValueError('Invalid governance action')
         from app.data_foundation.quality import assessment
         checked = assessment(session, input_hash=digest('decision-input', [work.fingerprint, action]), rule_hash=policy.content_hash, scope_hash=work.scope_key, status='pass', results={'action': choice, 'reason': action['reason']})
+        competing = session.scalars(select(CandidateBar.candidate_id).where(
+            CandidateBar.candidate_id.in_(admitted), CandidateBar.instrument_id == iid,
+            CandidateBar.trade_date == business_date)).all()
+        field_quality = {}
+        if selected:
+            from app.data_foundation.work_models import Assessment
+            field_quality = json.loads(session.get(Assessment, candidate.assessment_id).results_json).get('field_quality', {})
         decision = Decision(assessment_id=checked.id, work_id=work.id, target_key=action['target_key'], candidate_manifest_id=work.candidate_manifest_id,
             selected_candidate_id=candidate_id, parent_official_id=parent_id, action=choice,
             evidence_json=encode({'reason': action['reason'], 'input_manifest_id': work.candidate_manifest_id,
-                'selected': candidate_id, 'excluded_candidates': [str(c) for c in sorted(admitted, key=str) if c != candidate_id],
-                'comparison': 'disabled', 'policy_id': work.policy_id}), created_at=now())
+                'selected': candidate_id, 'excluded_candidates': [str(c) for c in sorted(competing, key=str) if c != candidate_id],
+                'comparison': 'not_applicable' if action['reason'] == 'SINGLE_SOURCE' else 'disabled',
+                'field_quality': field_quality, 'policy_id': work.policy_id}), created_at=now())
         session.add(decision); session.flush()
         if selected:
             typed = validate_bar(values(selected))

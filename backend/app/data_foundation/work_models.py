@@ -236,3 +236,10 @@ class ExecutionArchive(Base):
     __tablename__ = 'foundation_execution_archives'
     execution_id: Mapped[UUID] = mapped_column(fk('execution_manifests'), primary_key=True)
     archive_id: Mapped[UUID] = mapped_column(fk('runtime_archives'))
+
+
+class WorkCoverage(Base):
+    """Immutable applicability evidence, retained independently of source readers."""
+    __tablename__ = 'foundation_work_coverage'
+    work_id: Mapped[UUID] = mapped_column(fk('work'), primary_key=True)
+    assessment_id: Mapped[UUID] = mapped_column(fk('assessments'))

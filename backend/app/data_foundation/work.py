@@ -87,7 +87,12 @@ def append_event(session, work, step, status, details):
     params = json.loads(work.parameters_json)
     labels = {'input': '固定输入', 'normalization': '标准化', 'quality': '质量检查', 'governance': '治理', 'publication': '发布'}
     state_label = {'fixed': '输入已固定', 'evaluated': '已评估', 'queued': '等待续作', 'succeeded': '成功', 'failed': '失败', 'cancelled': '已取消', 'dependency_missing': '依赖缺失', 'superseded': '父发布已更新', 'published': '已发布'}.get(status, '处理中')
-    message = f"日线底座 {params['start']} 至 {params['end']} 的{labels[step]}结果为{state_label}，已提交{work.cursor}行，检查点为{work.cursor}。"
+    previous = session.scalar(select(WorkEvent).where(WorkEvent.work_id == work.id).order_by(WorkEvent.sequence.desc()).limit(1))
+    previous_cursor = json.loads(previous.details_json).get('checkpoint', 0) if previous else 0
+    checkpoint = '已推进' if work.cursor > previous_cursor else '未推进'
+    counts = f"，合格{details['ready']}行、隔离{details.get('quarantined', 0)}行" if 'ready' in details else ''
+    message = f"日线底座 {params['start']} 至 {params['end']} 的{labels[step]}结果为{state_label}，已提交{work.cursor}行{counts}，检查点{checkpoint}，当前位于{work.cursor}。"
+    details = {**details, 'checkpoint': work.cursor, 'checkpoint_advanced': work.cursor > previous_cursor}
     session.add(WorkEvent(work_id=work.id, sequence=sequence, step=step, status=status, message=message,
         details_json=encode(details), created_at=now()))
 
