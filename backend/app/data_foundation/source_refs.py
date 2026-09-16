@@ -55,7 +55,7 @@ def register_observation(session, observation_id: UUID, decoder_id: UUID):
         if cursor_id in seen or len(chain) >= 31:
             raise FoundationError('SOURCE_INVALID', '同花顺版本依赖链循环或超出限制。')
         seen.add(cursor_id)
-        cursor = session.scalar(select(Observation).where(Observation.id == cursor_id).with_for_update(read=True))
+        cursor = session.scalar(select(Observation).where(Observation.id == cursor_id).with_for_update(read=True).execution_options(populate_existing=True))
         if cursor is None:
             raise FoundationError('SOURCE_UNAVAILABLE', '同花顺固定版本或基础版本不存在。')
         if chain and (cursor.dataset, cursor.subject, cursor.variant) != (chain[0].dataset, chain[0].subject, chain[0].variant):

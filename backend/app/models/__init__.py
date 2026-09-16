@@ -128,3 +128,5 @@ from app.backtesting.fee_catalog import FeeScheduleVersionRecord  # noqa: F401
 from app.backtesting.saved_comparisons import SavedComparison, SavedComparisonMember  # noqa: F401
 
 from app.data_foundation import models as foundation_models  # noqa: F401
+
+from app.data_foundation import work_models as foundation_work_models  # noqa: F401

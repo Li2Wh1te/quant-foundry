@@ -21,11 +21,15 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
                 env = Path(directory) / ".env"
                 if existing is not None:
                     env.write_text("QF_TUSHARE_TOKEN=preserved-secret\n" +
-                                   ("QF_FOUNDATION_WORKER_ENABLED=" + existing + "\n" if existing else ""))
+                                   ("QF_FOUNDATION_WORKER_ENABLED=" + existing + "\n" if existing else "") +
+                                   ("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64 + "\n" if existing == "true" else ""))
                 ensure_selfhost_environment(env, template)
                 contents = env.read_text()
                 expected = existing if existing else "false"
                 self.assertIn("QF_FOUNDATION_WORKER_ENABLED=" + expected, contents)
+                self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=", contents)
+                if existing == "true":
+                    self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64, contents)
                 if existing is not None:
                     self.assertIn("QF_TUSHARE_TOKEN=preserved-secret", contents)
                 ensure_selfhost_environment(env, template)

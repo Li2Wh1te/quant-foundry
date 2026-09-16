@@ -35,7 +35,8 @@ def session():
         dbapi.execute('PRAGMA foreign_keys=ON')
         dbapi.create_function('btrim', 1, lambda s: s.strip())
     tables = [Base.metadata.tables['instruments'], Observation.__table__]
-    tables += [t for t in Base.metadata.sorted_tables if t.name.startswith('foundation_')]
+    from app.data_foundation import models as source_models
+    tables += [v.__table__ for v in vars(source_models).values() if isinstance(v, type) and hasattr(v, '__table__')]
     Base.metadata.create_all(engine, tables=tables)
     with Session(engine) as session:
         yield session

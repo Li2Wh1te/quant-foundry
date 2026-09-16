@@ -26,17 +26,20 @@ def local_execution(session, git_commit, image_digest=None):
             info.mode = 0o644
             archive.addfile(info, io.BytesIO(payload))
     code = buffer.getvalue()
-    code_hash = hashlib.sha256(code).hexdigest()
-    component = dict(key='foundation-source-v1', version='1', hash=code_hash)
+    from app.data_foundation.execution import installed_code_hash
+    component = dict(key='foundation-source-v1', version='1', hash=installed_code_hash())
     return register_execution(session, dict(schema_version=1, git_commit=git_commit, runtime_image_digest=image_digest,
         python_version=platform.python_version(), dependency_lock_hash=hashlib.sha256((root / 'uv.lock').read_bytes()).hexdigest(),
-        parser=component, transform=component, quality=component, config={}, decoder_refs=[],
+        parser=component, transform=component, quality=component,
+        config={'batch_rows': 200, 'budget_seconds': 30, 'lease_seconds': 60, 'heartbeat_seconds': 15}, decoder_refs=[],
         archive=dict(key=None, sha256=None, verified=False)), code)
 
 
 def main():
     parser = argparse.ArgumentParser(description='固定批准的 S1 来源；不启动采集或发布正式值。')
-    parser.add_argument('command', choices=['s1-dry-run', 's1-apply', 'observation-register'])
+    parser.add_argument('command', choices=['s1-dry-run', 's1-apply', 'observation-register', 'archive-register'])
+    parser.add_argument('--archive-evidence')
+    parser.add_argument('--execution-id')
     parser.add_argument('--expected-hash')
     parser.add_argument('--event-key')
     parser.add_argument('--git-commit')
@@ -50,6 +53,17 @@ def main():
             'counts': {k: len(v) for k, v in capture['content'].items()},
             'identities': [{'code': r['ts_code'], 'instrument_id': r['etf_id']} for r in capture['content']['directory']],
             'binding_status': 'unresolved'}))
+        return
+    if args.command == 'archive-register':
+        import json
+        from app.data_foundation.execution import register_archive
+        if not args.execution_id or not args.archive_evidence:
+            parser.error('--execution-id and --archive-evidence are required')
+        evidence = json.loads(Path(args.archive_evidence).read_text())
+        with Session(engine) as session, session.begin():
+            row = register_archive(session, UUID(args.execution_id), evidence, '/app/data/foundation-runtime-archives')
+            archive_id = row.id
+        print(encode({'archive_id': archive_id, 'status': 'verified'}))
         return
     if not args.git_commit:
         parser.error('--git-commit is required')

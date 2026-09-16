@@ -18,7 +18,7 @@ from app.core.config import get_settings
 from app.db.session import get_engine
 
 
-def main() -> None:
+def backtest_main() -> None:
     settings = get_settings()
     engine = get_engine()
     from sqlalchemy.orm import Session
@@ -50,6 +50,14 @@ def main() -> None:
             supervisor.run_forever(stop_event=stop_event)
         finally:
             supervisor.stop()
+
+
+def main() -> None:
+    if get_settings().foundation_worker_enabled:
+        from app.runner.coordinator import main as coordinated_main
+        coordinated_main()
+    else:
+        backtest_main()
 
 
 if __name__ == "__main__":  # pragma: no cover - launched by deployment
