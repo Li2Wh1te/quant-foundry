@@ -303,6 +303,15 @@ def test_c20_archive_hash_missing_files_and_fixed_execution_closure(session,tmp_
         parameters=f['params'],source_ref_id=f['ref'].id)
     verify_execution(session,new,image,tmp_path)
     with pytest.raises(FoundationError):verify_execution(session,new,'sha256:'+'2'*64,tmp_path)
+    from unittest.mock import patch
+    original_open=Path.open
+    def unreadable_archive(file,*args,**kwargs):
+        if file.suffix=='.tar':raise PermissionError('isolated permission failure')
+        return original_open(file,*args,**kwargs)
+    with patch.object(Path,'open',unreadable_archive):
+        assert replay_status(session,ex.id,tmp_path)=='dependency_missing'
+        with pytest.raises(FoundationError):verify_execution(session,new,image,tmp_path)
+        with pytest.raises(FoundationError):register_archive(session,ex.id,evidence,tmp_path)
     path.unlink()
     assert replay_status(session,ex.id,tmp_path)=='dependency_missing'
     with pytest.raises(FoundationError):verify_execution(session,new,image,tmp_path)

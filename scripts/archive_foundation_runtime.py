@@ -4,6 +4,8 @@ Run on the deployment host. The digest and archive hash are then registered
 inside the backend, so an existing release tag is never moved or recreated.
 """
 import argparse
+import grp
+import pwd
 import hashlib
 import json
 import os
@@ -17,7 +19,25 @@ def run(args):
     return subprocess.check_output(args, text=True).strip()
 
 
-def archive_image(image, directory):
+def grant_container_group_read(path, reader_gid):
+    """Share only with the owner's private group, added inside the container.
+
+    The host's app UID may belong to an unrelated account. A supplementary
+    group assigned only to the container avoids granting that host account any
+    access. Refuse shared host groups rather than broadening their permissions.
+    """
+    metadata = path.stat()
+    if type(reader_gid) is not int or reader_gid <= 0 or metadata.st_gid != reader_gid:
+        raise ValueError('Reader group must match the archive owner group')
+    owner = pwd.getpwuid(metadata.st_uid).pw_name
+    members = set(grp.getgrgid(reader_gid).gr_mem)
+    members.update(user.pw_name for user in pwd.getpwall() if user.pw_gid == reader_gid)
+    if members - {owner}:
+        raise ValueError('Archive owner group is shared with unrelated host users')
+    path.chmod(0o640)
+
+
+def archive_image(image, directory, reader_gid=None):
     digest = run(['docker', 'image', 'inspect', image, '--format', '{{.Id}}'])
     if not digest.startswith('sha256:') or len(digest) != 71:
         raise ValueError('Invalid Docker image digest')
@@ -34,6 +54,10 @@ def archive_image(image, directory):
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
+    # Other host users retain no access. The deployment adds this verified
+    # private owner group only to the application container's supplementary GIDs.
+    if reader_gid is not None:
+        grant_container_group_read(target, reader_gid)
     with tarfile.open(target, 'r') as saved:
         manifest = json.load(saved.extractfile('manifest.json'))
         configurations = [hashlib.sha256(saved.extractfile(item['Config']).read()).hexdigest() for item in manifest]
@@ -60,7 +84,8 @@ if __name__ == '__main__':
     parser.add_argument('--image', required=True)
     parser.add_argument('--directory', required=True)
     parser.add_argument('--output', required=True)
+    parser.add_argument('--reader-gid', type=int, help='Private archive owner group added inside the container')
     args=parser.parse_args()
-    result=archive_image(args.image,args.directory)
+    result=archive_image(args.image,args.directory,args.reader_gid)
     Path(args.output).write_text(json.dumps(result,sort_keys=True)+'\n')
     print(json.dumps({'status':'verified','image_digest':result['image_digest'],'archive_key':result['archive_key'],'byte_count':result['byte_count']}))

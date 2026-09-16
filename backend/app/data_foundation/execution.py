@@ -38,8 +38,11 @@ def verify_execution(session, work, runtime_image_digest, archive_root):
     # fallback is permitted. Archives are deployment-owned and mounted read-only.
     if path.name != archive.archive_key or not path.is_file() or path.stat().st_size != archive.byte_count:
         raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档缺失。')
-    with path.open('rb') as stream:
-        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+    try:
+        with path.open('rb') as stream:
+            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+    except OSError:
+        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档无法读取。') from None
     if actual != archive.archive_hash:
         raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档校验失败。')
 
@@ -68,6 +71,8 @@ def register_archive(session, execution_id, evidence, archive_root):
     if set(evidence) != required or not re.fullmatch(r'sha256:[0-9a-f]{64}', evidence['image_digest']):
         raise ValueError('Invalid runtime archive evidence')
     execution = session.get(Execution, execution_id)
+    if execution is None:
+        raise FoundationError('DEPENDENCY_MISSING', '固定执行清单不存在。')
     manifest = json.loads(execution.manifest_json)
     check = evidence['verification']
     if set(check) != {'restored_image_digest','network','python','lock_hash'} or check['network'] != 'none' or check['restored_image_digest'] != evidence['image_digest'] or check['python'] != manifest['python_version'] or check['lock_hash'] != manifest['dependency_lock_hash'] or manifest['runtime_image_digest'] != evidence['image_digest']:
@@ -75,8 +80,11 @@ def register_archive(session, execution_id, evidence, archive_root):
     if evidence['archive_key'] != evidence['image_digest'].split(':')[1]+'.tar':
         raise ValueError('Archive key must be its image digest')
     path = Path(archive_root) / evidence['archive_key']
-    with path.open('rb') as stream:
-        actual = hashlib.file_digest(stream,'sha256').hexdigest()
+    try:
+        with path.open('rb') as stream:
+            actual = hashlib.file_digest(stream,'sha256').hexdigest()
+    except OSError:
+        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档无法读取，未登记引用。') from None
     if path.stat().st_size != evidence['byte_count'] or actual != evidence['archive_hash']:
         raise FoundationError('DEPENDENCY_MISSING', '运行归档文件校验不一致。')
     lock_key(session,'runtime-archive',evidence['image_digest'])

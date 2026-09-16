@@ -53,6 +53,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     image: quant-foundry-backend:local
+    group_add:
+      - "${QF_FOUNDATION_ARCHIVE_GID:-1000}"
     env_file:
       - .env
     environment:
@@ -86,6 +88,8 @@ services:
       dockerfile: backend/Dockerfile
     image: quant-foundry-backend:local
     command: ["python", "-m", "app.runner"]
+    group_add:
+      - "${QF_FOUNDATION_ARCHIVE_GID:-1000}"
     env_file:
       - .env
     environment:
