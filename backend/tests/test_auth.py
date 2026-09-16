@@ -122,6 +122,10 @@ class AuthenticationTestCase(unittest.TestCase):
 
     def test_protects_business_routes_and_exempts_readiness(self) -> None:
         protected_operations = (
+            ("/api/admin/data-foundation/processing", "get"),
+            ("/api/admin/data-foundation/work/{work_id}", "get"),
+            ("/api/admin/data-foundation/releases/{release_id}", "get"),
+            ("/api/admin/data-foundation/decisions/{decision_id}", "get"),
             ("/api/admin/data-foundation/datasets", "get"),
             ("/api/admin/data-foundation/source-refs/{ref_id}", "get"),
             ("/api/auth/verify", "get"),
