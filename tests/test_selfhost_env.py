@@ -14,6 +14,14 @@ from scripts.selfhost_env import (
 
 
 class SelfhostEnvironmentTestCase(unittest.TestCase):
+    def test_existing_archive_group_is_not_overwritten(self):
+        template=Path(__file__).resolve().parents[1]/"backend"/".env.example"
+        with tempfile.TemporaryDirectory() as directory:
+            env=Path(directory)/".env"
+            env.write_text("QF_FOUNDATION_ARCHIVE_GID=2050\n")
+            ensure_selfhost_environment(env,template)
+            self.assertIn("QF_FOUNDATION_ARCHIVE_GID=2050",env.read_text())
+
     def test_foundation_default_first_install_upgrade_and_existing_value(self):
         template = Path(__file__).resolve().parents[1] / "backend" / ".env.example"
         for existing in (None, "", "true", "false"):
@@ -28,6 +36,7 @@ class SelfhostEnvironmentTestCase(unittest.TestCase):
                 expected = existing if existing else "false"
                 self.assertIn("QF_FOUNDATION_WORKER_ENABLED=" + expected, contents)
                 self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=", contents)
+                self.assertIn("QF_FOUNDATION_ARCHIVE_GID=1000", contents)
                 if existing == "true":
                     self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64, contents)
                 if existing is not None:

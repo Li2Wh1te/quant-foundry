@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     log_queue_size: int = Field(default=10_000, ge=100, le=100_000)
     foundation_worker_enabled: bool = False
     foundation_runtime_image_digest: str = ""
+    foundation_archive_gid: int = Field(default=1000, ge=1)
     scheduler_enabled: bool = True
     scheduler_max_workers: int = Field(default=4, ge=1, le=64)
     scheduler_dispatch_interval_ms: int = Field(default=500, ge=100, le=10_000)
