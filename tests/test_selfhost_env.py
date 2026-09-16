@@ -14,6 +14,23 @@ from scripts.selfhost_env import (
 
 
 class SelfhostEnvironmentTestCase(unittest.TestCase):
+    def test_foundation_default_first_install_upgrade_and_existing_value(self):
+        template = Path(__file__).resolve().parents[1] / "backend" / ".env.example"
+        for existing in (None, "", "true", "false"):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                env = Path(directory) / ".env"
+                if existing is not None:
+                    env.write_text("QF_TUSHARE_TOKEN=preserved-secret\n" +
+                                   ("QF_FOUNDATION_WORKER_ENABLED=" + existing + "\n" if existing else ""))
+                ensure_selfhost_environment(env, template)
+                contents = env.read_text()
+                expected = existing if existing else "false"
+                self.assertIn("QF_FOUNDATION_WORKER_ENABLED=" + expected, contents)
+                if existing is not None:
+                    self.assertIn("QF_TUSHARE_TOKEN=preserved-secret", contents)
+                ensure_selfhost_environment(env, template)
+                self.assertEqual(env.read_text(), contents)
+
     def test_source_encryption_key_first_install_and_upgrade_preserve_existing_values(self):
         for upgrade in (False, True):
             with self.subTest(upgrade=upgrade), tempfile.TemporaryDirectory() as directory:
