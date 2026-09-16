@@ -11,7 +11,7 @@ const groups = [
     { label: "数据源", to: "/admin/data-sources", icon: Database },
     { label: "采集任务", to: "/admin/tasks", icon: Clock3 }
   ] },
-  { label: "市场数据", items: [{ label: "A 股市场", to: "/admin/data/etf-basics", icon: ChartNoAxesColumn }] },
+  { label: "市场数据", items: [{ label: "A 股市场", to: "/admin/data/etf-basics", icon: ChartNoAxesColumn }, { label: "数据资产", to: "/admin/data-assets", icon: Database }] },
   { label: "策略研究", items: [
     { label: "策略工作台", to: "/admin/strategies", icon: Code2 },
     { label: "策略数据接口", to: "/admin/strategy-data", icon: BookOpen },

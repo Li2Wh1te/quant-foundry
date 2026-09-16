@@ -61,6 +61,9 @@ def domain_hash():
 def normalize_batch(session, work_id, epoch):
     work = fenced(session, work_id, epoch)
     params = json.loads(work.parameters_json)
+    from app.data_foundation import tushare
+    if params['domain'] == tushare.DOMAIN_KEY:
+        return tushare.normalize_batch(session, work_id, epoch)
     if work.kind != 'A' or params['domain'] != DOMAIN_KEY or params['domain_hash'] != domain_hash():
         raise FoundationError('DEPENDENCY_MISSING', '固定转换版本不可加载，不能使用新版本继续工作。')
     source = session.get(SourceRef, work.source_ref_id)

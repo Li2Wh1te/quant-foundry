@@ -2,13 +2,18 @@
 import json
 from sqlalchemy import select, text
 from app.data_foundation.catalog import now
-from app.data_foundation.work_models import Work, WorkEvent, Attempt, Release, Head, IssueScope
+from app.data_foundation.work_models import Work, WorkEvent, Attempt, Release, Head, IssueScope, CandidateManifest
 
 STEPS=('input','normalization','quality','governance','publication')
 
 
 def processing_view(session, work):
     events=session.scalars(select(WorkEvent).where(WorkEvent.work_id==work.id).order_by(WorkEvent.sequence)).all()
+    if work.kind=='B':
+        manifest=session.get(CandidateManifest,work.candidate_manifest_id)
+        source_events=session.scalars(select(WorkEvent).where(WorkEvent.work_id==manifest.work_id,
+            WorkEvent.step.in_(['input','normalization','quality'])).order_by(WorkEvent.sequence)).all()
+        events=source_events+[e for e in events if e.step not in ('input','normalization','quality')]
     attempts=session.scalars(select(Attempt).where(Attempt.work_id==work.id).order_by(Attempt.created_at,Attempt.epoch)).all()
     outputs=session.scalars(select(Release).where(Release.work_id==work.id,Release.status=='published')).all()
     head=session.get(Head,work.scope_key)
