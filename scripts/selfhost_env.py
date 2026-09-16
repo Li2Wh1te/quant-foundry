@@ -96,7 +96,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
             raise ValueError("Invalid QF_DATA_SOURCE_ENCRYPTION_KEY; restore the original 64-character hex key.")
     # Existing self-hosted installations retain their .env across deployments.
     # Seed only keys absent from that file with template defaults so new
-    # configuration (for example, a newly added data provider) becomes visible
+    # configuration (including QF_FOUNDATION_WORKER_ENABLED=false) becomes visible
     # after an upgrade without replacing any operator-provided value.
     template_defaults = {
         key: value
