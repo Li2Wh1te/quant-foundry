@@ -42,7 +42,8 @@ def record_issue(session, *, scope_key, instrument_id, start, end, fields, state
 
 
 def read_release(session, *, release_id, expected_issue_epoch, authenticate, instrument_ids=None,
-                 start=None, end=None, fields=('open','high','low','close'), allow_partial=False):
+                 start=None, end=None, fields=('open','high','low','close'), allow_partial=False, keys_only=False,
+                 selected_keys=None):
     """Return serialized bytes while still holding the shared issue lock.
 
     authenticate is a mandatory current-context check, not a cached success.
@@ -63,11 +64,20 @@ def read_release(session, *, release_id, expected_issue_epoch, authenticate, ins
         raise FoundationError('DEPENDENCY_MISSING', '正式读取缺少问题限制上下文。')
     if guard.epoch != expected_issue_epoch:
         raise FoundationError('READ_CONTEXT_CHANGED', '当前数据问题限制已改变，请重新检查读取条件。')
-    statement = select(BlockMember).join(BlockRef, BlockRef.block_id == BlockMember.block_id).where(BlockRef.release_id == release.id)
+    statement = select(BlockMember, *[getattr(OfficialBar, f).is_(None).label(f) for f in fields]).outerjoin(
+        OfficialBar, OfficialBar.id == BlockMember.official_id).join(BlockRef, BlockRef.block_id == BlockMember.block_id).where(BlockRef.release_id == release.id)
     if instrument_ids is not None: statement = statement.where(BlockMember.instrument_id.in_(instrument_ids))
     if start: statement = statement.where(BlockMember.trade_date >= start)
     if end: statement = statement.where(BlockMember.trade_date <= end)
-    members = session.scalars(statement.order_by(BlockMember.instrument_id, BlockMember.trade_date)).all()
+    rows = session.execute(statement.order_by(BlockMember.instrument_id, BlockMember.trade_date)).all()
+    members = [row[0] for row in rows]
+    missing_fields = {(row[0].instrument_id,row[0].trade_date): any(row[1:]) for row in rows}
+    # Evaluate quality using null flags only. Fetch Decimal values in one query
+    # only for the selected page, never once per member or during a check.
+    wanted = {m.official_id for m in members if m.official_id and
+        (selected_keys is None or (str(m.instrument_id), str(m.trade_date)) in selected_keys)}
+    values_by_id = {} if keys_only or not wanted else {o.id:o for o in session.scalars(
+        select(OfficialBar).where(OfficialBar.id.in_(wanted)))}
     history = session.scalars(select(Issue).where(Issue.scope_key == release.scope_key).order_by(Issue.revision)).all()
     current = {item.issue_id: item for item in history}
     # A confirmed bad historical revision stays bad after a replacement fixes
@@ -83,10 +93,15 @@ def read_release(session, *, release_id, expected_issue_epoch, authenticate, ins
             gaps.append({'instrument_id': member.instrument_id, 'trade_date': member.trade_date,
                          'reason': 'current_issue' if blocked else member.state})
         else:
-            official = session.get(OfficialBar, member.official_id)
-            if any(getattr(official, f) is None for f in fields):
+            if missing_fields[(member.instrument_id,member.trade_date)]:
                 gaps.append({'instrument_id': member.instrument_id, 'trade_date': member.trade_date, 'reason': 'field_unavailable'})
                 continue
+            if selected_keys is not None and (str(member.instrument_id), str(member.trade_date)) not in selected_keys:
+                continue
+            if keys_only:
+                items.append({'instrument_id':member.instrument_id,'trade_date':member.trade_date})
+                continue
+            official = values_by_id[member.official_id]
             items.append({'instrument_id': official.instrument_id, 'trade_date': official.trade_date,
                 'series': official.series, 'official_id': official.id, 'decision_id': member.decision_id, 'value_decision_id': official.decision_id,
                 **{f: getattr(official, f) for f in fields}})

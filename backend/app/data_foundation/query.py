@@ -9,9 +9,9 @@ import json
 from typing import Literal
 from uuid import UUID
 from pydantic import BaseModel, ConfigDict, Field, model_validator
-from sqlalchemy import select
+from sqlalchemy import select, text
 
-from app.data_foundation.canonical import FoundationError, encode
+from app.data_foundation.canonical import FoundationError, encode, digest
 from app.data_foundation.catalog import now
 from app.data_foundation.coverage import coverage_for
 from app.data_foundation.models import Definition, SourceRef
@@ -34,7 +34,7 @@ class BusinessRange(BaseModel):
 class DataRequirement(BaseModel):
     model_config = ConfigDict(extra='forbid')
     dataset_id: str
-    contract_version: str
+    contract_version: str = Field(pattern=r'^\d+\.\d+$')
     profile_id: str
     semantic_series_id: str
     subjects: list[UUID] = Field(min_length=1,max_length=100)
@@ -50,12 +50,10 @@ class DataRequirement(BaseModel):
     def validate_request(self):
         if self.business_range.end < self.business_range.start or len(set(self.fields)) != len(self.fields):
             raise ValueError('日期区间或重复字段无效')
-        if not self.require_complete:
-            raise ValueError('首期只支持完整性检查；部分读取请显式使用 allow_partial')
         self.subjects = sorted(set(self.subjects),key=str)
         self.fields = [f for f in FIELDS if f in self.fields]
         # This deliberately conservative cap bounds even an unknown calendar.
-        # M4 adds paging; M3 never silently truncates a requested interval.
+        # Paging bounds values, while applicability still covers this full range.
         if (self.business_range.end-self.business_range.start).days+1 > 1000//len(self.subjects):
             raise ValueError('首期请求最多1000个标的自然日，请缩小范围')
         return self
@@ -84,16 +82,20 @@ def release_origin(session, release):
     return work,session.get(Work,manifest.work_id)
 
 
-def query_official(session, request, authenticate, *, check_only=False):
+def query_official(session, request, authenticate, *, check_only=False, page_after=None,
+                   page_size=None, expected_issue_epoch=None, excluded_after=None):
     owner=authenticate()
     if not owner:
         raise FoundationError('AUTH_REQUIRED','正式查询需要有效身份。')
     release=resolve_release(session,request)
     requirements=[]
     def requirement(key,result,reason,message):
-        requirements.append({'id':key,'result':result,'reason_code':reason,'message':message})
+        requirements.append({'id':key,'result':result,'reason_code':reason,'message':message,
+            'scope':request.model_dump(mode='json',by_alias=True)['business_range'],'evidence_refs':
+            [str(release.id)] if release else []})
     response={'representation':'official','contract_version':'1.0','request':request.model_dump(mode='json',by_alias=True),
         'release_id':str(release.id) if release else None,'checked_at':now(), 'read_guard_at':None,
+        'as_of':now(),'view_snapshot_id':session.scalar(text('SELECT pg_current_snapshot()::text')),
         'issue_state_version':None,'items':[],'requirements':requirements,'next_cursor':None}
     if release is None:
         requirement('publication','fail','NO_OFFICIAL_RELEASE','所选范围和语义尚无正式发布。')
@@ -106,9 +108,11 @@ def query_official(session, request, authenticate, *, check_only=False):
             .with_for_update(read=True).execution_options(populate_existing=True))
         if guard is None:
             raise FoundationError('DEPENDENCY_MISSING','正式读取缺少当前问题上下文。')
+        if expected_issue_epoch is not None and guard.epoch != expected_issue_epoch:
+            raise FoundationError('READ_CONTEXT_CHANGED','当前数据限制已变化，请基于原版本重新检查。')
         raw=json.loads(read_release(session,release_id=release.id,expected_issue_epoch=guard.epoch,authenticate=authenticate,
             instrument_ids=request.subjects,start=request.business_range.start,end=request.business_range.end,
-            fields=request.fields,allow_partial=True))
+            fields=request.fields,allow_partial=True,keys_only=True))
         coverage=coverage_for(session,origin.id)
         ids={str(i) for i in request.subjects}
         start,end=str(request.business_range.start),str(request.business_range.end)
@@ -121,9 +125,9 @@ def query_official(session, request, authenticate, *, check_only=False):
         missing=expected-all_keys
         gaps=raw['gaps']+[{'instrument_id':i,'trade_date':d,'reason':'COVERAGE_GAP'} for i,d in sorted(missing)]
         complete=known and not gaps and readable==expected
-        requirement('coverage','pass' if complete else 'fail' if gaps else 'unknown',
+        requirement('coverage','not_required' if not request.require_complete else 'pass' if complete else 'fail' if gaps else 'unknown',
             None if complete else 'COVERAGE_GAP' if gaps else 'COVERAGE_DEPENDENCY_MISSING',
-            '固定日历范围内的正式业务键完整。' if complete else '正式范围有缺口或字段限制。' if gaps else '日历或主体适用范围证据不足。')
+            '本次未要求完整覆盖；已有缺口仍保留，不能据此推断区间完整。' if not request.require_complete else '固定日历范围内的正式业务键完整。' if complete else '正式范围有缺口或字段限制。' if gaps else '日历或主体适用范围证据不足。')
         field_missing=any(g['reason']=='field_unavailable' for g in raw['gaps'])
         if field_missing:
             requirement('fields','fail','UNIT_UNVERIFIED' if 'volume' in request.fields else 'OPTIONAL_FIELD_MISSING',
@@ -138,28 +142,65 @@ def query_official(session, request, authenticate, *, check_only=False):
             BlockMember.trade_date.between(request.business_range.start,request.business_range.end))).all()
         official_count=sum(m.state=='value' for m in members)
         latest=max((str(m.trade_date) for m in members if m.state=='value'),default=None)
-        fresh=request.max_staleness_days is None or (latest is not None and (request.business_range.end-date.fromisoformat(latest)).days<=request.max_staleness_days)
-        if not fresh:
-            requirement('freshness','fail','STALE_BUSINESS_DATE','实际业务截至未满足相对请求结束日的新鲜度要求。')
-        if not readable and (gaps or (known and expected)):
+        # Freshness is evaluated per subject against the requested end date.
+        # A newer neighbour must not conceal stale data for another instrument.
+        stale=[]
+        for instrument in sorted(ids):
+            subject_dates=[str(m.trade_date) for m in members if m.state=='value' and str(m.instrument_id)==instrument]
+            zero=known and not any(i==instrument for i,d in expected)
+            if request.max_staleness_days is not None and not zero and (not subject_dates or
+                (request.business_range.end-date.fromisoformat(max(subject_dates))).days>request.max_staleness_days):
+                stale.append(instrument)
+        if stale:
+            requirement('freshness','fail','STALE_BUSINESS_DATE','部分标的业务截至未满足相对请求结束日的新鲜度要求。')
+            requirements[-1]['scope']['subjects']=stale
+        effective=readable-{k for k in readable if k[0] in stale}
+        gaps += [{'instrument_id':i,'trade_date':d,'reason':'STALE_BUSINESS_DATE'} for i,d in readable if i in stale]
+        constrained=any(g['reason']!='gap' for g in raw['gaps']) or bool(stale)
+        if not effective and (gaps or (known and expected)):
             state='unavailable'
-        elif not time_ok or not known:
+        elif not time_ok:
             state='unknown'
-        elif not fresh:
-            state='unavailable'
-        elif complete:
+        elif not request.require_complete and effective:
+            state='partial' if constrained else 'available'
+        elif request.require_complete and effective and gaps:
+            state='partial'
+        elif not known:
+            state='unknown'
+        elif complete and not stale:
             state='available'
-        elif readable and gaps:
+        elif effective and gaps:
             state='partial'
         else:
             state='unavailable'
         response.update(state=state,request_satisfied=state=='available',issue_state_version=guard.epoch,
             scope_summary={'expected_business_keys':len(expected) if known else None,'official_keys':official_count,
-                'currently_readable_keys':len(readable)}, excluded=gaps,manifest_hash=release.manifest_hash,
+                'currently_readable_keys':len(effective)}, excluded=gaps,manifest_hash=release.manifest_hash,
             policy_id=str(work.policy_id),source_observed_at=session.get(SourceRef,origin.source_ref_id).observed_at,
             business_as_of=latest,published_at=release.published_at)
+        response['total_readable']=len(effective)
+        response['assessment_hash']=digest(
+            'read-assessment-v1',{'release':str(release.id),'request':response['request'],
+            'issue_epoch':guard.epoch,'requirements':requirements,'state':state})
+        response['excluded_total']=len(gaps)
+        ordered_gaps=sorted(gaps,key=lambda g:(g['trade_date'],g['instrument_id'],g['reason']))
+        if page_size is not None:
+            if excluded_after:
+                ordered_gaps=[g for g in ordered_gaps if (g['trade_date'],g['instrument_id'],g['reason'])>tuple(excluded_after)]
+            response['excluded']=ordered_gaps[:page_size]
+            response['excluded_has_more']=len(ordered_gaps)>page_size
         if not check_only and (state=='available' or state=='partial' and request.allow_partial):
-            response['items']=sorted(raw['items'],key=lambda i:(i['trade_date'],i['instrument_id']))
+            ordered=sorted(effective,key=lambda k:(k[1],k[0]))
+            if page_after:
+                ordered=[k for k in ordered if (k[1],k[0])>tuple(page_after)]
+            selected=ordered if page_size is None else ordered[:page_size]
+            values=json.loads(read_release(session,release_id=release.id,expected_issue_epoch=guard.epoch,
+                authenticate=authenticate,instrument_ids=request.subjects,start=request.business_range.start,
+                end=request.business_range.end,fields=request.fields,allow_partial=True,selected_keys=set(selected)))
+            response['items']=sorted(values['items'],key=lambda i:(i['trade_date'],i['instrument_id']))
+            response['has_more']=page_size is not None and len(ordered)>page_size
+        response.setdefault('has_more',False)
+        response['returned']=len(response['items'])
     if authenticate()!=owner:
         raise FoundationError('AUTH_CONTEXT_CHANGED','当前认证上下文已改变。')
     response['read_guard_at']=now()
@@ -170,8 +211,8 @@ def dataset_view(session):
     scope=scope_key(DATASET,1,'default',SERIES)
     head=session.get(Head,scope)
     release=session.get(Release,head.release_id) if head else None
-    works=session.scalars(select(Work).where(Work.scope_key==scope).order_by(Work.created_at.desc(),Work.id.desc())).all()
-    normalizations=[w for w in works if w.kind=='A']
+    works=session.scalars(select(Work).where(Work.scope_key==scope).order_by(Work.created_at.desc(),Work.id.desc()).limit(20)).all()
+    normalizations=session.scalars(select(Work).where(Work.scope_key==scope,Work.kind=='A').order_by(Work.created_at.desc(),Work.id.desc()).limit(1)).all()
     origin=release_origin(session,release)[1] if release else normalizations[0] if normalizations else None
     coverage=coverage_for(session,origin.id) if origin else None
     params=json.loads(origin.parameters_json) if origin else {}
@@ -181,6 +222,7 @@ def dataset_view(session):
         .where(BlockRef.release_id==release.id)).all() if release else []
     source=session.get(SourceRef,origin.source_ref_id) if origin else None
     result={'dataset':DATASET,'version':'1.0','name':'ETF 未复权日线','series':SERIES,'profile':'default',
+        'view_snapshot_id':session.scalar(text('SELECT pg_current_snapshot()::text')),
         'read_status':'implemented','update_status':'bounded_manual','current_release':str(release.id) if release else None,
         'published_at':release.published_at if release else None,'source_observed_at':source.observed_at if source else None,
         'business_as_of':max((m.trade_date for m in members if m.state=='value'),default=None),

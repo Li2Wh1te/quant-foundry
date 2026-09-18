@@ -1,6 +1,6 @@
-"""Authenticated metadata only; M4 owns the eventual public query contract."""
+"""Authenticated, read-only foundation queries and bounded operator evidence."""
 from uuid import UUID
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from app.db.session import get_db_session
@@ -11,9 +11,9 @@ router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation']
 
 
 @router.get('/datasets')
-def datasets(session: Session = Depends(get_db_session)):
+def datasets(request: Request, session: Session = Depends(get_db_session)):
     from app.data_foundation.query import dataset_view
-    return foundation_response(lambda: {'items': [dataset_view(session)]})
+    return foundation_response(lambda: {'items': [json.loads(service(session,request).describe_dataset())]})
 
 
 @router.get('/source-refs/{ref_id}')
@@ -41,18 +41,18 @@ def snapshot_session():
 @router.get('/processing')
 def processing(limit: int = Query(20, ge=1, le=100), session: Session = Depends(snapshot_session)):
     from app.data_foundation.work_models import Work
-    from app.data_foundation.read_models import processing_view
+    from app.data_foundation.views import process_detail
     rows=session.scalars(select(Work).order_by(Work.created_at.desc(),Work.id).limit(limit)).all()
-    return {'items':[processing_view(session,row) for row in rows]}
+    return {'items':[process_detail(session,row) for row in rows]}
 
 
 @router.get('/work/{work_id}')
 def work_detail(work_id: UUID, session: Session = Depends(snapshot_session)):
     from app.data_foundation.work_models import Work
-    from app.data_foundation.read_models import processing_view
+    from app.data_foundation.views import process_detail
     row=session.get(Work,work_id)
     if row is None:raise HTTPException(404,detail={'code':'WORK_UNAVAILABLE','message':'底座工作不存在。'})
-    return processing_view(session,row)
+    return process_detail(session,row)
 
 
 @router.get('/releases/{release_id}')
@@ -83,6 +83,16 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.core.auth import require_api_token
 from app.data_foundation.canonical import FoundationError, encode
 from app.data_foundation.query import DataRequirement
+from app.data_foundation.service import FoundationService, PagedRequirement, PageRequest
+from pydantic import Field
+
+def service(session,request):
+    settings=request.app.state.settings
+    # The bearer credential is known to its holder; sign using the existing
+    # server-only cursor secret, domain-separated and bound to credential rotation.
+    import hashlib
+    secret=settings.cursor_signing_key.get_secret_value()+hashlib.sha256(settings.api_token.get_secret_value().encode()).hexdigest()
+    return FoundationService(session,current_auth(request),secret)
 
 
 def current_auth(request):
@@ -90,38 +100,39 @@ def current_auth(request):
         header=request.headers.get('authorization','')
         scheme,_,token=header.partition(' ')
         credentials=HTTPAuthorizationCredentials(scheme=scheme,credentials=token) if token else None
-        return require_api_token(request,credentials).owner_scope
+        return require_api_token(request,credentials)
     return authenticate
 
 
 def foundation_response(callback):
     try:
         payload=callback()
-        return Response(payload if isinstance(payload,bytes) else encode(payload),media_type='application/json')
+        return Response(payload if isinstance(payload,bytes) else encode(payload),media_type='application/json',headers={'Cache-Control':'no-store'})
     except FoundationError as exc:
         status={'INVALID_REQUIREMENT':422,'CONTRACT_RELEASE_MISMATCH':422,'RELEASE_UNAVAILABLE':404,
-            'READ_CONTEXT_CHANGED':409,'AUTH_REQUIRED':401,'AUTH_CONTEXT_CHANGED':401}.get(exc.code,503)
+            'READ_CONTEXT_CHANGED':409,'AUTH_REQUIRED':401,'AUTH_CONTEXT_CHANGED':401,
+            'INVALID_RESOLUTION':422,'CURSOR_MISMATCH':422,'RESOLUTION_EXPIRED':410,'CONTRACT_RETIRED':410}.get(exc.code,503)
         raise HTTPException(status,detail={'code':exc.code,'message':str(exc)}) from None
 
 
 @router.get('/datasets/{dataset_id}')
-def describe_dataset(dataset_id: str, contract_version: str='1.0', session: Session=Depends(snapshot_session)):
+def describe_dataset(dataset_id: str, request: Request, contract_version: str='1.0', session: Session=Depends(snapshot_session)):
     from app.data_foundation.query import DATASET,dataset_view
     if dataset_id!=DATASET or contract_version!='1.0':
         raise HTTPException(404,detail={'message':'数据集或契约版本不存在。'})
-    return foundation_response(lambda:dataset_view(session))
+    return foundation_response(lambda:service(session,request).describe_dataset())
 
 
 @router.post('/capability-checks')
 def capability_check(body: DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
-    return foundation_response(lambda:query_official(session,body,current_auth(request),check_only=True))
+    return foundation_response(lambda:service(session,request).check_capability(body))
 
 
 @router.post('/queries')
-def official_query(body: DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+def official_query(body: PageRequest | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
-    return foundation_response(lambda:query_official(session,body,current_auth(request)))
+    return foundation_response(lambda:service(session,request).query_official(body))
 
 
 @router.get('/revisions/{revision_id}/lineage')
@@ -137,6 +148,8 @@ import json
 class CandidateInspection(BaseModel):
     model_config={'extra':'forbid'}
     work_id: UUID
+    after_occurrence: int | None = Field(default=None,ge=0)
+    page_size: int = Field(default=100,ge=1,le=1000)
 
 
 @router.post('/candidate-inspections')
@@ -145,8 +158,104 @@ def candidate_inspection(body: CandidateInspection, session: Session=Depends(sna
     row=session.get(Work,body.work_id)
     if row is None or row.kind!='A':
         raise HTTPException(404,detail={'message':'标准化工作不存在。'})
-    rows=session.scalars(select(Candidate).where(Candidate.work_id==row.id).order_by(Candidate.occurrence).limit(1001)).all()
-    if len(rows)>1000:raise HTTPException(422,detail={'message':'首期诊断最多1000条。'})
-    return foundation_response(lambda:{'representation':'candidate','work_id':row.id,'items':[
+    statement=select(Candidate,Assessment).join(Assessment,Assessment.id==Candidate.assessment_id).where(Candidate.work_id==row.id)
+    if body.after_occurrence is not None:statement=statement.where(Candidate.occurrence>body.after_occurrence)
+    rows=session.execute(statement.order_by(Candidate.occurrence).limit(body.page_size+1)).all()
+    from sqlalchemy import func
+    total=session.scalar(select(func.count()).select_from(Candidate).where(Candidate.work_id==row.id))
+    return foundation_response(lambda:{'representation':'candidate','work_id':row.id,'total':total,
+        'next_occurrence':rows[body.page_size-1][0].occurrence if len(rows)>body.page_size else None,'items':[
         {'id':c.id,'source_ref_id':c.source_ref_id,'readiness':c.readiness,
-         'quality':json.loads(session.get(Assessment,c.assessment_id).results_json)} for c in rows]})
+         'quality':json.loads(a.results_json)} for c,a in rows[:body.page_size]]})
+
+
+
+class SnapshotResolution(BaseModel):
+    model_config={'extra':'forbid'}
+    requests: list[DataRequirement] = Field(min_length=1,max_length=8)
+
+
+class SnapshotEntry(BaseModel):
+    model_config={'extra':'forbid'}
+    request: DataRequirement
+    manifest_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
+    projection_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+class SnapshotRead(BaseModel):
+    model_config={'extra':'forbid'}
+    schema_version: int = Field(alias="schema",ge=1,le=1)
+    entries: list[SnapshotEntry] = Field(min_length=1,max_length=8)
+    snapshot_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
+
+
+@router.post('/snapshot-resolutions')
+def snapshot_resolution(body: SnapshotResolution, request: Request, session: Session=Depends(get_db_session)):
+    return foundation_response(lambda:service(session,request).resolve_snapshot(body.requests))
+
+
+@router.post('/snapshot-reads')
+def snapshot_read(body: SnapshotRead, request: Request, session: Session=Depends(get_db_session)):
+    return foundation_response(lambda:service(session,request).read_snapshot(body.model_dump(mode='json',by_alias=True)))
+
+
+@router.get('/datasets/{dataset_id}/processing')
+def dataset_processing(dataset_id: str, request: Request, work_id: UUID | None=None,
+                       before: UUID | None=None, limit: int=Query(20,ge=1,le=100), session: Session=Depends(snapshot_session)):
+    from app.data_foundation.work_models import Work
+    from app.data_foundation.views import process_detail
+    from app.data_foundation.work import scope_key
+    from app.data_foundation.tushare import SERIES
+    if dataset_id!='market.bar.daily':raise HTTPException(404,detail={'message':'数据集不存在。'})
+    scope=scope_key(dataset_id,1,'default',SERIES)
+    statement=select(Work).where(Work.scope_key==scope)
+    if work_id:statement=statement.where(Work.id==work_id)
+    if before:
+        anchor=session.get(Work,before)
+        if anchor is None or anchor.scope_key!=scope:raise HTTPException(422,detail={'message':'工作分页位置无效。'})
+        from sqlalchemy import tuple_
+        statement=statement.where(tuple_(Work.created_at,Work.id)<(anchor.created_at,anchor.id))
+    rows=session.scalars(statement.order_by(Work.created_at.desc(),Work.id.desc()).limit(limit+1)).all()
+    return foundation_response(lambda:service(session,request).finish({'items':[process_detail(session,w) for w in rows[:limit]],
+        'next_cursor':str(rows[limit-1].id) if len(rows)>limit else None}))
+
+
+@router.get('/datasets/{dataset_id}/releases')
+def dataset_releases(dataset_id: str, request: Request, before: UUID | None=None,
+                     limit: int=Query(20,ge=1,le=100),session: Session=Depends(snapshot_session)):
+    from app.data_foundation.views import release_list
+    from app.data_foundation.work import scope_key
+    from app.data_foundation.tushare import SERIES
+    if dataset_id!='market.bar.daily':raise HTTPException(404,detail={'message':'数据集不存在。'})
+    return foundation_response(lambda:service(session,request).finish(release_list(session,scope_key(dataset_id,1,'default',SERIES),before,limit)))
+
+
+class ChangeRequest(DataRequirement):
+    previous_release: UUID
+    current_release: UUID
+    cursor: str | None = Field(default=None,max_length=2048)
+    page_size: int = Field(default=50,ge=1,le=1000)
+
+
+@router.post('/datasets/{dataset_id}/release-changes')
+def changes(dataset_id: str, body: ChangeRequest, request: Request, session: Session=Depends(get_db_session)):
+    from app.data_foundation.views import release_changes
+    from app.data_foundation.canonical import digest
+    def read():
+        if dataset_id!=body.dataset_id:raise FoundationError('INVALID_REQUIREMENT','数据集与请求不匹配。')
+        svc=service(session,request)
+        normalized=body.model_dump(mode='json',by_alias=True,exclude={'cursor','page_size'})
+        fingerprint=digest('changes-v1',normalized)
+        after=None;expected=None
+        if body.cursor:
+            payload=svc.codec.read(body.cursor,'changes')
+            if payload['fingerprint']!=fingerprint or payload['owner']!=digest('owner-v1',svc.owner()):
+                raise FoundationError('CURSOR_MISMATCH','变化游标与当前请求不匹配。')
+            after=payload['after'];expected=payload['epoch']
+        result=release_changes(session,body,body.previous_release,body.current_release,svc.owner,after=after,limit=body.page_size)
+        if expected is not None and expected!=result['issue_state_version']:
+            raise FoundationError('READ_CONTEXT_CHANGED','版本变化的当前问题限制已改变，请重新读取。')
+        result['next_cursor']=svc.codec.sign('changes',{'fingerprint':fingerprint,'after':result['next_key'],
+            'epoch':result['issue_state_version'],'owner':digest('owner-v1',svc.owner())}) if result['next_key'] else None
+        return svc.finish(result)
+    return foundation_response(read)

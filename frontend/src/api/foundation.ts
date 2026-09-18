@@ -22,13 +22,15 @@ export interface Dataset {
   candidate_work_id?: string | null; pending_governance?: boolean; source_records: number | null; candidate_records: number; official_keys: number; expected_business_keys: number | null; quarantined_records: number;
   range: { from: string | null; to: string | null }; subjects: { instrument_id: string; code: string; name: string }[];
   fields: { key: string; name: string; unit: string }[]; limitations: string[]; work_ids: string[]; work_summaries?: { id: string; label: string }[]; as_of: string;
+  contract?: { core_fields: Record<string, {precision:number;scale:number;required:boolean}>; optional_fields: Record<string,{precision:number;scale:number}> };
+  support?: {read:string;update:string;replay:string}; projection?: {version:string;hash:string};
   normalization_delay_seconds?: number | null; publication_delay_seconds?: number | null;
 }
 export interface OfficialResult {
   state: string; request_satisfied: boolean; release_id: string | null; checked_at: string;
   requirements: { id: string; result: string; message: string }[];
   scope_summary: { expected_business_keys: number | null; official_keys: number; currently_readable_keys: number };
-  items: { instrument_id: string; trade_date: string; official_id: string; close?: string; volume?: string; turnover?: string }[];
+  items: { instrument_id: string; trade_date: string; official_id: string; open?: string; high?: string; low?: string; close?: string; volume?: string; turnover?: string }[];
 }
 export interface ProcessView {
   id: string; kind: string; status: string; current_release: string | null; output_releases: string[];
@@ -41,4 +43,25 @@ export interface Lineage {
   official_id: string; candidate_id: string; decision_id: string; source_ref_id: string; source: string;
   source_hash: string; binding_id: string; dependency_id: string; assessment_id: string;
   policy: { reason: string; comparison: string; field_quality: Record<string,string> };
+}
+
+export interface ReadRequest {
+  dataset_id: string; contract_version: string; profile_id: string; semantic_series_id: string;
+  subjects: string[]; business_range: { from: string; to: string }; fields: string[];
+  release: string; require_complete: boolean; allow_partial: boolean; time_mode: string;
+  max_staleness_days?: number;
+}
+export interface ReadResult extends OfficialResult {
+  resolution_token?: string | null; expires_at?: number; next_cursor?: string | null;
+  next_excluded_cursor?: string | null; excluded_total?: number;
+  excluded?: { instrument_id: string; trade_date: string; reason: string }[];
+  request: ReadRequest; issue_state_version?: number; has_more?: boolean; total_readable?: number;
+  projection_version?: string;
+}
+export interface ReleaseItem { id: string; parent_id: string | null; published_at: string; manifest_hash: string; work_id: string }
+export interface DetailedProcess extends ProcessView {
+  rules: Record<string, Record<string, string>>; diagnostic: Record<string, unknown>;
+  scope: Record<string, string>;
+  steps: (ProcessView['steps'][number] & { detail: { input: Record<string,string>; processing: string;
+    output: { events: number; releases: string[] }; basis: Record<string,unknown>; impact: string; next_step: string } })[];
 }
