@@ -159,6 +159,16 @@ def test_conversion_repair_preserves_prices_and_restricts_bad_history(session):
     assert query(session,old,iid,fields=['turnover'])['state']=='partial'
     assert query(session,old,iid,fields=['turnover'])['items']==[]
     assert session.get(OfficialBar,bad_id).turnover==Decimal('5925661.225')
+    # M4 historical process views must retain the transform used by each work,
+    # while comparison suppresses the subsequently restricted old amount.
+    from app.data_foundation.views import process_detail,release_changes
+    assert process_detail(session,oldwork)['rules']['transform']['version'] != process_detail(session,work)['rules']['transform']['version']
+    req=DataRequirement(dataset_id='market.bar.daily',contract_version='1.0',profile_id='default',semantic_series_id=SERIES,
+        subjects=[iid],business_range={'from':'2026-06-05','to':'2026-06-08'},fields=['close','turnover'],release=new.id)
+    diff=release_changes(session,req,old.id,new.id,lambda:'test')
+    assert 'turnover' not in diff['items'][0]['before']
+    assert diff['items'][0]['after']['turnover']=='5925661225'
+    assert diff['items'][0]['kind']=='restricted_comparison'
 
 
 def test_real_governance_rejects_manually_changed_decision_plan(session):

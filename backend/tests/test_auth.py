@@ -132,6 +132,12 @@ class AuthenticationTestCase(unittest.TestCase):
             ("/api/admin/data-foundation/releases/{release_id}", "get"),
             ("/api/admin/data-foundation/decisions/{decision_id}", "get"),
             ("/api/admin/data-foundation/datasets", "get"),
+            ("/api/admin/data-foundation/snapshot-resolutions", "post"),
+            ("/api/admin/data-foundation/snapshot-reads", "post"),
+            ("/api/admin/data-foundation/datasets/{dataset_id}/processing", "get"),
+            ("/api/admin/data-foundation/datasets/{dataset_id}/releases", "get"),
+            ("/api/admin/data-foundation/datasets/{dataset_id}/release-changes", "post"),
+
             ("/api/admin/data-foundation/source-refs/{ref_id}", "get"),
             ("/api/auth/verify", "get"),
             ("/api/system/version", "get"),
