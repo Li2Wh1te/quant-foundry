@@ -34,12 +34,12 @@ class BusinessRange(BaseModel):
 class DataRequirement(BaseModel):
     model_config = ConfigDict(extra='forbid')
     dataset_id: str
-    contract_version: str = Field(pattern=r'^\d+\.\d+$')
+    contract_version: str = Field(pattern=r'^[1-9]\d*\.\d+$')
     profile_id: str
     semantic_series_id: str
     subjects: list[UUID] = Field(min_length=1,max_length=100)
     business_range: BusinessRange
-    fields: list[Literal['open','high','low','close','volume','turnover']] = Field(default_factory=lambda:list(FIELDS[:4]),min_length=1)
+    fields: list[str] = Field(default_factory=lambda:list(FIELDS[:4]),min_length=1,max_length=20)
     release: UUID | Literal['latest'] = 'latest'
     require_complete: bool = True
     allow_partial: bool = False
@@ -51,7 +51,7 @@ class DataRequirement(BaseModel):
         if self.business_range.end < self.business_range.start or len(set(self.fields)) != len(self.fields):
             raise ValueError('日期区间或重复字段无效')
         self.subjects = sorted(set(self.subjects),key=str)
-        self.fields = [f for f in FIELDS if f in self.fields]
+        self.fields = [f for f in FIELDS if f in self.fields] + sorted(set(self.fields)-set(FIELDS))
         # This deliberately conservative cap bounds even an unknown calendar.
         # Paging bounds values, while applicability still covers this full range.
         if (self.business_range.end-self.business_range.start).days+1 > 1000//len(self.subjects):
@@ -60,20 +60,13 @@ class DataRequirement(BaseModel):
 
 
 def resolve_release(session, request):
-    if request.dataset_id != DATASET or request.contract_version != '1.0' or request.profile_id != 'default':
-        raise FoundationError('INVALID_REQUIREMENT','首期仅支持日线1.0默认配置。')
-    scope = scope_key(DATASET,1,request.profile_id,request.semantic_series_id)
-    if request.release == 'latest':
-        head = session.get(Head,scope)
-        return session.get(Release,head.release_id) if head else None
-    release = session.get(Release,request.release)
-    if release is None or release.status != 'published':
-        raise FoundationError('RELEASE_UNAVAILABLE','指定正式发布不存在。')
-    work=session.get(Work,release.work_id)
-    contract=session.get(Definition,work.contract_id)
-    if release.scope_key != scope or contract.version != request.contract_version:
-        raise FoundationError('CONTRACT_RELEASE_MISMATCH','请求契约或语义与指定正式版本不符。')
-    return release
+    if request.dataset_id == 'fund.holdings_report':
+        from app.data_foundation.holding_query import resolve_release as report_release
+        return report_release(session, request)
+    if request.dataset_id != DATASET or request.profile_id != 'default':
+        raise FoundationError('INVALID_REQUIREMENT','日线读取器仅支持默认配置。')
+    from app.data_foundation.projection import resolve_projected_release
+    return resolve_projected_release(session, request)
 
 
 def release_origin(session, release):
@@ -87,13 +80,20 @@ def query_official(session, request, authenticate, *, check_only=False, page_aft
     owner=authenticate()
     if not owner:
         raise FoundationError('AUTH_REQUIRED','正式查询需要有效身份。')
+    from app.data_foundation.projection import projection_for
+    projection = projection_for(session, request.dataset_id, request.contract_version)
+    if not set(request.fields) <= set(projection['fields']):
+        raise FoundationError('INVALID_REQUIREMENT','请求包含所选契约未提供的字段。')
+    unavailable = set(request.fields).intersection(projection.get('unavailable_fields', []))
+    if not set(request.fields) <= set(FIELDS) | unavailable:
+        raise FoundationError('INVALID_REQUIREMENT','契约字段尚无可执行的读取投影。')
     release=resolve_release(session,request)
     requirements=[]
     def requirement(key,result,reason,message):
         requirements.append({'id':key,'result':result,'reason_code':reason,'message':message,
             'scope':request.model_dump(mode='json',by_alias=True)['business_range'],'evidence_refs':
             [str(release.id)] if release else []})
-    response={'representation':'official','contract_version':'1.0','request':request.model_dump(mode='json',by_alias=True),
+    response={'representation':'official','contract_version':request.contract_version,'request':request.model_dump(mode='json',by_alias=True),
         'release_id':str(release.id) if release else None,'checked_at':now(), 'read_guard_at':None,
         'as_of':now(),'view_snapshot_id':session.scalar(text('SELECT pg_current_snapshot()::text')),
         'issue_state_version':None,'items':[],'requirements':requirements,'next_cursor':None}
@@ -112,7 +112,12 @@ def query_official(session, request, authenticate, *, check_only=False, page_aft
             raise FoundationError('READ_CONTEXT_CHANGED','当前数据限制已变化，请基于原版本重新检查。')
         raw=json.loads(read_release(session,release_id=release.id,expected_issue_epoch=guard.epoch,authenticate=authenticate,
             instrument_ids=request.subjects,start=request.business_range.start,end=request.business_range.end,
-            fields=request.fields,allow_partial=True,keys_only=True))
+            fields=[f for f in request.fields if f in FIELDS] or ['close'],allow_partial=True,keys_only=True))
+        if unavailable:
+            # Additive readers may declare fields unavailable on immutable old
+            # releases. Never backfill them from a newer release or source.
+            raw['gaps'] += [{**row, 'reason':'field_unavailable'} for row in raw['items']]
+            raw['items'] = []
         coverage=coverage_for(session,origin.id)
         ids={str(i) for i in request.subjects}
         start,end=str(request.business_range.start),str(request.business_range.end)

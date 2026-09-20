@@ -27,3 +27,31 @@ def register_initial_catalog(session):
         'schema_version': 1, 'read_status': 'not_implemented', 'update_status': 'not_implemented',
         'replay_status': 'dependency_missing', 'notice_days': 30, 'approval_required': True})
     return [contract, series, policy, support]
+
+
+def register_holdings_catalog(session):
+    """Declare stock holdings with explicit scope and observed-only time."""
+    from app.data_foundation.holdings import DATASET, SERIES
+    register_definition(session, kind='series', name=SERIES, version='1', definition={
+        'schema_version': 1, 'object_kind': 'holdings-report', 'scope_kind': 'provider_reported', 'asset_scope': 'stock',
+        'weight_unit': 'ratio', 'public_time_status': 'unverified', 'portfolio_completeness': 'unknown'})
+    register_definition(session, kind='support', name=DATASET, version='m5', definition={
+        'schema_version': 1, 'read_status': 'implemented', 'update_status': 'bounded_manual',
+        'replay_status': 'verify_execution_dependencies', 'notice_days': 30, 'approval_required': True,
+        'supported_series': [SERIES], 'time_modes': ['observed'], 'max_report_objects': 100,
+        'pagination': True, 'market_value_unit': 'unverified'})
+    contract = register_definition(session, kind='contract', name=DATASET, version='1.0', definition={
+        'schema_version': 1, 'subject_kind': 'fund_share',
+        'key_fields': ['fund_share_id', 'period_start', 'period_end', 'report_type', 'scope_kind', 'series'],
+        'core_fields': {'hold_ratio': {'type': 'decimal', 'precision': 20, 'scale': 10, 'unit': 'ratio', 'required': True}},
+        'optional_fields': {'market_value': {'type': 'decimal', 'precision': 32, 'scale': 8, 'unit': 'CNY'},
+            'period_change_ratio': {'type': 'decimal', 'precision': 20, 'scale': 10, 'unit': 'ratio'},
+            'rank': {'type': 'integer', 'unit': 'rank'}},
+        'time_semantics': {'business': 'report_period', 'observation': 'observed_at', 'public_at': 'unknown-unless-proven'},
+        'atomic_unit': 'whole-report', 'supported_filters': ['fund_share_id', 'report_period', 'report_type', 'scope_kind']})
+    policy = register_definition(session, kind='policy', name='holdings-single-source', version='1', definition={
+        'schema_version': 1, 'dataset': DATASET, 'major': 1, 'profile': 'default', 'series': SERIES,
+        'input_admission': 'resolved-identity-and-complete-object', 'core_fields': ['hold_ratio'],
+        'source_order': ['tonghuashun'], 'comparison': {'enabled': False}, 'fallback': {'enabled': False},
+        'atomicity': 'whole-report'})
+    return contract, policy

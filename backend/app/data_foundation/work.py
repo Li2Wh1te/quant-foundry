@@ -24,8 +24,13 @@ def create_work(session, *, kind, contract_id, execution_id, dependency_id, para
                 source_ref_id=None, candidate_manifest_id=None, parent_release_id=None, policy_id=None,
                 expected_head_revision=0, expected_issue_epoch=0, total=None):
     required = {'dataset', 'major', 'profile', 'series', 'start', 'end', 'domain', 'domain_hash'}
-    if set(parameters) != (required | ({'actions'} if kind == 'B' else set())) or kind not in ('A', 'B'):
+    report_keys = {'report_keys'} if parameters.get('domain') == 'holdings-report-v1' else set()
+    if set(parameters) != (required | report_keys | ({'actions'} if kind == 'B' else set())) or kind not in ('A', 'B'):
         raise ValueError('Invalid fixed work parameters')
+    if report_keys:
+        keys = parameters['report_keys']
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 100 or any(not isinstance(k, str) or len(k) > 80 for k in keys) or len(set(keys)) != len(keys):
+            raise ValueError('Report work requires 1 to 100 distinct fixed report keys')
     contract = session.get(Definition, contract_id)
     execution = session.get(Execution, execution_id)
     dependency = session.get(DependencyManifest, dependency_id)
@@ -90,8 +95,13 @@ def append_event(session, work, step, status, details):
     previous = session.scalar(select(WorkEvent).where(WorkEvent.work_id == work.id).order_by(WorkEvent.sequence.desc()).limit(1))
     previous_cursor = json.loads(previous.details_json).get('checkpoint', 0) if previous else 0
     checkpoint = '已推进' if work.cursor > previous_cursor else '未推进'
-    counts = f"，合格{details['ready']}行、隔离{details.get('quarantined', 0)}行" if 'ready' in details else ''
-    message = f"日线底座 {params['start']} 至 {params['end']} 的{labels[step]}结果为{state_label}，已提交{work.cursor}行{counts}，检查点{checkpoint}，当前位于{work.cursor}。"
+    is_report = params['dataset'] == 'fund.holdings_report'
+    unit = '份报告' if is_report else '行'
+    label = '基金持仓报告底座' if is_report else '日线底座'
+    counts = f"，合格{details['ready']}{unit}、隔离{details.get('quarantined', 0)}{unit}" if 'ready' in details else ''
+    if is_report and 'members' in details:
+        counts += f"，涉及{details['members']}条持仓成员"
+    message = f"{label} {params['start']} 至 {params['end']} 的{labels[step]}结果为{state_label}，已提交{work.cursor}{unit}{counts}，检查点{checkpoint}，当前位于{work.cursor}。"
     details = {**details, 'checkpoint': work.cursor, 'checkpoint_advanced': work.cursor > previous_cursor}
     session.add(WorkEvent(work_id=work.id, sequence=sequence, step=step, status=status, message=message,
         details_json=encode(details), created_at=now()))

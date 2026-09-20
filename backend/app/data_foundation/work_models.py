@@ -139,10 +139,11 @@ class Decision(Record, Base):
     candidate_manifest_id: Mapped[UUID] = mapped_column(fk('candidate_manifests'))
     selected_candidate_id: Mapped[UUID | None] = mapped_column(fk('candidates'))
     parent_official_id: Mapped[UUID | None] = mapped_column(fk('bar_official_revisions'))
+    parent_report_id: Mapped[UUID | None] = mapped_column(fk('report_official_revisions'))
     action: Mapped[str] = mapped_column(String(16))
     evidence_json: Mapped[str] = mapped_column(Text)
     __table_args__ = (UniqueConstraint('work_id', 'target_key'),
-        CheckConstraint("(action = 'select' AND selected_candidate_id IS NOT NULL AND parent_official_id IS NULL) OR (action = 'retain' AND selected_candidate_id IS NULL AND parent_official_id IS NOT NULL) OR (action IN ('gap','block','withdraw') AND selected_candidate_id IS NULL AND parent_official_id IS NULL)", name='decision_action'))
+        CheckConstraint("(action = 'select' AND selected_candidate_id IS NOT NULL AND parent_official_id IS NULL AND parent_report_id IS NULL) OR (action = 'retain' AND selected_candidate_id IS NULL AND ((parent_official_id IS NOT NULL AND parent_report_id IS NULL) OR (parent_official_id IS NULL AND parent_report_id IS NOT NULL))) OR (action IN ('gap','block','withdraw') AND selected_candidate_id IS NULL AND parent_official_id IS NULL AND parent_report_id IS NULL)", name='decision_action'))
 
 
 class OfficialBar(Record, BarFields, Base):

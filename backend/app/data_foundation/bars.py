@@ -61,7 +61,9 @@ def domain_hash():
 def normalize_batch(session, work_id, epoch):
     work = fenced(session, work_id, epoch)
     params = json.loads(work.parameters_json)
-    from app.data_foundation import tushare
+    from app.data_foundation import tushare, holding_work
+    if params['domain'] == holding_work.DOMAIN_KEY:
+        return holding_work.normalize_batch(session, work_id, epoch)
     if params['domain'] == tushare.DOMAIN_KEY:
         return tushare.normalize_batch(session, work_id, epoch)
     if work.kind != 'A' or params['domain'] != DOMAIN_KEY or params['domain_hash'] != domain_hash():

@@ -1,3 +1,4 @@
+import { ReportAssetsPage, FoundationCatalog } from "./ReportAssetsPage";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { RefreshCw, X } from "lucide-react";
@@ -15,7 +16,7 @@ const count=(v:number|null|undefined)=>v==null?"待确认":v.toLocaleString("zh-
 const time=(v:string|null|undefined)=>v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"暂无记录";
 
 /** Native modal focus containment with one close path for Escape and backdrop. */
-function EvidencePanel({title,children,onClose,wide=false}:{title:string;children:ReactNode;onClose:()=>void;wide?:boolean}) {
+export function EvidencePanel({title,children,onClose,wide=false}:{title:string;children:ReactNode;onClose:()=>void;wide?:boolean}) {
   const ref=useRef<HTMLDialogElement>(null);
   useEffect(()=>{const element=ref.current!,previous=document.activeElement as HTMLElement|null;const overflow=document.body.style.overflow;
     document.body.style.overflow="hidden";element.showModal();return()=>{element.close();document.body.style.overflow=overflow;previous?.focus();};},[]);
@@ -23,14 +24,14 @@ function EvidencePanel({title,children,onClose,wide=false}:{title:string;childre
     <header><h2 id="foundation-panel-title">{title}</h2><button className="qfo-secondary-btn" aria-label="关闭详情" onClick={onClose}><X size={18}/></button></header><div className="qf-assets-panel-body">{children}</div><footer><button className="qfo-secondary-btn" onClick={onClose}>关闭</button></footer>
   </dialog>;
 }
-const referenceLabels:Record<string,string>={open:'开盘价',high:'最高价',low:'最低价',close:'收盘价',volume:'成交量',turnover:'成交额',source_ref_id:'固定来源',candidate_manifest_id:'候选清单',dependency_id:'依赖清单',execution_id:'执行版本',fingerprint:'输入摘要',contract:'契约',execution:'执行依据',governance:'治理版本',parser:'解析版本',policy:'治理规则',quality:'质量规则',transform:'转换规则',version:'版本',hash:'内容摘要',id:'标识',name:'规则名称'};
-function References({values}:{values:Record<string,unknown>}) {return <dl>{Object.entries(values).map(([key,value])=><div key={key}><dt>{referenceLabels[key]||key}</dt><dd>{value&&typeof value==='object'&&!Array.isArray(value)?<References values={value as Record<string,unknown>}/>:<code>{value==null?'不适用':Array.isArray(value)?value.join('、'):String(value)}</code>}</dd></div>)}</dl>;}
+const referenceLabels:Record<string,string>={candidate_id:'候选修订',decision_id:'治理决策',official_id:'正式修订',atomic_unit:'原子处理单位',comparison:'来源比较',policy_id:'政策版本',reason:'选取原因',representation:'数据层次',source:'数据来源',source_hash:'来源内容摘要',source_observed_at:'来源观察时间',source_report_key:'来源报告标识',work_id:'处理工作',binding_id:'身份绑定',assessment_id:'质量评估',contract_id:'契约版本',open:'开盘价',high:'最高价',low:'最低价',close:'收盘价',volume:'成交量',turnover:'成交额',source_ref_id:'固定来源',candidate_manifest_id:'候选清单',dependency_id:'依赖清单',execution_id:'执行版本',fingerprint:'输入摘要',contract:'契约',execution:'执行依据',governance:'治理版本',parser:'解析版本',policy:'治理规则',quality:'质量规则',transform:'转换规则',version:'版本',hash:'内容摘要',id:'标识',name:'规则名称'};
+export function References({values}:{values:Record<string,unknown>}) {return <dl>{Object.entries(values).map(([key,value])=><div key={key}><dt>{referenceLabels[key]||key}</dt><dd>{value&&typeof value==='object'&&!Array.isArray(value)?<References values={value as Record<string,unknown>}/>:<code>{value==null?'不适用':Array.isArray(value)?value.join('、'):({ 'whole-report':'整份报告',not_applicable:'不适用',SINGLE_SOURCE:'单一准入来源',official:'正式数据',tonghuashun:'同花顺',tushare:'Tushare' } as Record<string,string>)[String(value)]||String(value)}</code>}</dd></div>)}</dl>;}
 
 
 /** The URL stores intent and immutable references, never signed tokens or data.
  * Request controllers fence stale responses; current authorization wins over
  * any previously cached page, evidence panel, or diagnostic clipboard preview. */
-export function DataAssetsPage() {
+function DailyAssetsPage() {
   const {datasetId}=useParams(), location=useLocation(), [params,setParams]=useSearchParams();
   const view=location.pathname.endsWith('/processing')?'process':params.get('view')||'data';
   const [dataset,setDataset]=useState<Dataset|null>(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[refresh,setRefresh]=useState(0);
@@ -124,4 +125,12 @@ export function DataAssetsPage() {
     {dataset&&<p className="qf-assets-asof">资产摘要读取于 {time(dataset.as_of)}。来源、候选与正式数量分别统计。</p>}
     {panel&&<EvidencePanel title={panel.title} wide={panel.wide} onClose={()=>setPanel(null)}>{auxError&&<p role="alert" className="qf-assets-error">{auxError}</p>}{panel.content}</EvidencePanel>}
   </section>;
+}
+
+/** Select a domain page before mounting its request state. */
+export function DataAssetsPage() {
+  const {datasetId}=useParams();
+  if (!datasetId) return <FoundationCatalog/>;
+  if (datasetId==='fund.holdings_report') return <ReportAssetsPage/>;
+  return <DailyAssetsPage/>;
 }

@@ -22,8 +22,8 @@ def verify_execution(session, work, runtime_image_digest, archive_root):
     manifest = json.loads(execution.manifest_json)
     link = session.get(ExecutionArchive, execution.id)
     artifact = session.get(Artifact, execution.artifact_id) if execution.artifact_id else None
-    from app.data_foundation import tushare
-    domains = {DOMAIN_KEY: domain_hash, tushare.DOMAIN_KEY: tushare.domain_hash}
+    from app.data_foundation import tushare, holding_work
+    domains = {DOMAIN_KEY: domain_hash, tushare.DOMAIN_KEY: tushare.domain_hash, holding_work.DOMAIN_KEY: holding_work.domain_hash}
     resolver = domains.get(params['domain'])
     if resolver is None or params['domain_hash'] != resolver() or not link or not artifact:
         raise FoundationError('DEPENDENCY_MISSING', '工作固定执行依赖或运行归档不可用。')
