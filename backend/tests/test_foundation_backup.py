@@ -89,3 +89,43 @@ def test_scheduled_backup_refuses_damaged_protected_copy(tmp_path,monkeypatch):
     monkeypatch.setattr(backup,'create_backup',lambda *a:pytest.fail('Backup invoked without valid protection'))
     with pytest.raises(backup.BackupError,match='摘要'):
         backup.scheduled_backup(tmp_path,tmp_path/'scheduled',protected)
+
+
+@pytest.mark.parametrize('free_space',[100,10*1024**3])
+def test_create_checks_space_before_dump_and_seals_only_declared_files(tmp_path,monkeypatch,free_space):
+    import io
+    from types import SimpleNamespace
+    project=tmp_path/'deployment';archive_root=project/'data'/'foundation-runtime-archives'
+    archive_root.mkdir(parents=True);(archive_root/'runtime.tar').write_bytes(b'runtime bytes')
+    (project/'.env').write_text('PRIVATE_TOKEN=fixture-do-not-copy')
+    evidence={'archives':[dict(key='runtime.tar',bytes=13,sha256=backup.sha(archive_root/'runtime.tar'))]}
+    writes=[];commands=[]
+    coordinator=SimpleNamespace(stdout=io.StringIO(json.dumps({'snapshot':'000A-000B-1','evidence':evidence})+'\n'),
+        stdin=SimpleNamespace(write=writes.append,flush=lambda:None,close=lambda:None),
+        poll=lambda:0,wait=lambda **kwargs:0)
+    monkeypatch.setattr(backup.subprocess,'Popen',lambda *args,**kwargs:coordinator)
+    monkeypatch.setattr(backup.shutil,'disk_usage',lambda path:SimpleNamespace(free=free_space))
+    def run(command,**kwargs):
+        commands.append(command)
+        if 'images' in command:return SimpleNamespace(stdout=json.dumps([{'ID':'test-image','Service':'backend'}]))
+        if command[:3]==['docker','image','inspect']:
+            return SimpleNamespace(stdout=json.dumps([{'Id':'sha256:'+'a'*64,'Size':100}]))
+        if any('pg_database_size' in part for part in command):return SimpleNamespace(stdout='1000\n')
+        if any('pg_dump' in part for part in command):kwargs['stdout'].write(b'postgres fixture dump')
+        elif command[:3]==['docker','image','save']:kwargs['stdout'].write(b'archived application fixture')
+        else:pytest.fail('Unexpected backup command')
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(backup,'run',run)
+    destination=tmp_path/'complete'
+    if free_space==100:
+        with pytest.raises(backup.BackupError,match='空间不足'):backup.create_backup(project,destination)
+        assert not any(any('pg_dump' in part for part in command) for command in commands)
+        assert not destination.exists() and not writes
+    else:
+        result=backup.create_backup(project,destination)
+        assert result['status']=='complete' and writes==['complete\n']
+        manifest=backup.verify_package(destination)
+        assert manifest['recovery_point_at']<=manifest['created_at']
+        assert len(manifest['application_archives'])==1
+        assert not (destination/'.env').exists()
+        assert 'fixture-do-not-copy' not in (destination/'manifest.json').read_text()

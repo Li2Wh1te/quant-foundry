@@ -95,7 +95,22 @@ def create_backup(project, destination, *, exporter=None):
         snapshot, evidence = response['snapshot'], response['evidence']
         if not re.fullmatch(r'[0-9A-Fa-f-]+',snapshot):
             raise BackupError('快照标识无效。')
-        estimated = sum(a['bytes'] for a in evidence['archives'])
+        # Estimate before writing a dump on the same host as production. Use
+        # uncompressed database/image sizes, double the database allowance, and
+        # reserve an additional GiB; a compressed dump is normally much smaller.
+        image_output=run(compose+['images','--format','json'],stdout=subprocess.PIPE,text=True).stdout.strip()
+        images=json.loads(image_output) if image_output.startswith('[') else [json.loads(line) for line in image_output.splitlines()]
+        identities=[]
+        for image_id in sorted({row['ID'] for row in images}):
+            metadata=json.loads(run(['docker','image','inspect',image_id],stdout=subprocess.PIPE,text=True).stdout)[0]
+            identity=metadata['Id']
+            if not re.fullmatch(r'sha256:[0-9a-f]{64}',identity):
+                raise BackupError('部署镜像摘要不合法。')
+            identities.append((identity,metadata['Size']))
+        database_size=int(run(compose+['exec','-T','postgres','sh','-c',
+            'exec psql -X -At -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT pg_database_size(current_database())"'],
+            stdout=subprocess.PIPE,text=True).stdout.strip())
+        estimated = sum(a['bytes'] for a in evidence['archives']) + sum(size for _,size in identities) + database_size*2
         if shutil.disk_usage(temporary).free < estimated + 1024**3:
             raise BackupError('备份目录可用空间不足。')
         dump = temporary/'database.dump'
@@ -114,13 +129,8 @@ def create_backup(project, destination, *, exporter=None):
             copied=temporary/archive['key']
             shutil.copyfile(original,copied);copied.chmod(0o600)
             with copied.open('rb') as stream:os.fsync(stream.fileno())
-        image_output=run(compose+['images','--format','json'],stdout=subprocess.PIPE,text=True).stdout.strip()
-        images=json.loads(image_output) if image_output.startswith('[') else [json.loads(line) for line in image_output.splitlines()]
         application_archives=[]
-        for image_id in sorted({row['ID'] for row in images}):
-            identity=run(['docker','image','inspect',image_id,'--format','{{.Id}}'],stdout=subprocess.PIPE,text=True).stdout.strip()
-            if not re.fullmatch(r'sha256:[0-9a-f]{64}',identity):
-                raise BackupError('部署镜像摘要不合法。')
+        for identity,_ in identities:
             name='application-'+identity.split(':')[1]+'.tar'
             with (temporary/name).open('xb') as stream:
                 run(['docker','image','save',identity],stdout=stream)
