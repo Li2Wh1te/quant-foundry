@@ -13,7 +13,7 @@ from sqlalchemy import select, text
 
 from app.data_foundation.canonical import FoundationError, encode, digest
 from app.data_foundation.catalog import now
-from app.data_foundation.coverage import coverage_for
+from app.data_foundation.coverage import coverage_for, covers_request, release_coverage
 from app.data_foundation.models import Definition, SourceRef
 from app.data_foundation.quality import read_release
 from app.data_foundation.tushare import SERIES
@@ -71,6 +71,10 @@ def resolve_release(session, request):
 
 def release_origin(session, release):
     work=session.get(Work,release.work_id)
+    # A multi-input release has no representative normalization. Its B work
+    # carries the union parameters and coverage_for resolves actual inputs.
+    if work.candidate_input_set_id:
+        return work,work
     manifest=session.get(CandidateManifest,work.candidate_manifest_id)
     return work,session.get(Work,manifest.work_id)
 
@@ -118,11 +122,10 @@ def query_official(session, request, authenticate, *, check_only=False, page_aft
             # releases. Never backfill them from a newer release or source.
             raw['gaps'] += [{**row, 'reason':'field_unavailable'} for row in raw['items']]
             raw['items'] = []
-        coverage=coverage_for(session,origin.id)
+        coverage=release_coverage(session,release)
         ids={str(i) for i in request.subjects}
         start,end=str(request.business_range.start),str(request.business_range.end)
-        known=(coverage is not None and coverage['status']=='pass' and coverage['start']<=start<=end<=coverage['end']
-            and ids <= {s['instrument_id'] for s in coverage['subjects']})
+        known=covers_request(coverage, ids, start, end)
         expected={(k['instrument_id'],k['trade_date']) for k in coverage['expected_keys']
             if k['instrument_id'] in ids and start<=k['trade_date']<=end} if coverage else set()
         all_keys={(i['instrument_id'],i['trade_date']) for i in raw['items']+raw['gaps']}
@@ -181,7 +184,7 @@ def query_official(session, request, authenticate, *, check_only=False, page_aft
         response.update(state=state,request_satisfied=state=='available',issue_state_version=guard.epoch,
             scope_summary={'expected_business_keys':len(expected) if known else None,'official_keys':official_count,
                 'currently_readable_keys':len(effective)}, excluded=gaps,manifest_hash=release.manifest_hash,
-            policy_id=str(work.policy_id),source_observed_at=session.get(SourceRef,origin.source_ref_id).observed_at,
+            policy_id=str(work.policy_id),source_observed_at=source_observed_at(session,work),
             business_as_of=latest,published_at=release.published_at)
         response['total_readable']=len(effective)
         response['assessment_hash']=digest(
@@ -219,19 +222,19 @@ def dataset_view(session):
     works=session.scalars(select(Work).where(Work.scope_key==scope).order_by(Work.created_at.desc(),Work.id.desc()).limit(20)).all()
     normalizations=session.scalars(select(Work).where(Work.scope_key==scope,Work.kind=='A').order_by(Work.created_at.desc(),Work.id.desc()).limit(1)).all()
     origin=release_origin(session,release)[1] if release else normalizations[0] if normalizations else None
-    coverage=coverage_for(session,origin.id) if origin else None
+    coverage=release_coverage(session,release) if release else coverage_for(session,origin.id) if origin else None
     params=json.loads(origin.parameters_json) if origin else {}
     latest_a=normalizations[0] if normalizations else None
     candidates=session.scalars(select(Candidate).where(Candidate.work_id==latest_a.id)).all() if latest_a else []
     members=session.scalars(select(BlockMember).join(BlockRef,BlockRef.block_id==BlockMember.block_id)
         .where(BlockRef.release_id==release.id)).all() if release else []
-    source=session.get(SourceRef,origin.source_ref_id) if origin else None
+    source=session.get(SourceRef,origin.source_ref_id) if origin and origin.source_ref_id else None
     result={'dataset':DATASET,'version':'1.0','name':'ETF 未复权日线','series':SERIES,'profile':'default',
         'view_snapshot_id':session.scalar(text('SELECT pg_current_snapshot()::text')),
         'read_status':'implemented','update_status':'bounded_manual','current_release':str(release.id) if release else None,
         'published_at':release.published_at if release else None,'source_observed_at':source.observed_at if source else None,
         'business_as_of':max((m.trade_date for m in members if m.state=='value'),default=None),
-        'range':{'from':params.get('start'),'to':params.get('end')},'subjects':coverage['subjects'] if coverage else [],
+        'range':{'from':coverage['start'] if coverage else params.get('start'),'to':coverage['end'] if coverage else params.get('end')},'subjects':coverage['subjects'] if coverage else [],
         'source_records':latest_a.total if latest_a else None,'candidate_records':len(candidates),
         'candidate_work_id':str(latest_a.id) if latest_a else None,
         'pending_governance':bool(latest_a and (not release or latest_a.id!=origin.id)),
@@ -252,7 +255,7 @@ def dataset_view(session):
         finished=session.scalar(select(WorkEvent.created_at).where(WorkEvent.work_id==origin.id,WorkEvent.status=='succeeded').order_by(WorkEvent.sequence.desc()).limit(1))
         # Decimal-free integral seconds remain honest about unknown timestamps.
         result['normalization_delay_seconds']=int((finished-source.observed_at).total_seconds()) if finished and source else None
-        result['publication_delay_seconds']=int((release.published_at-finished).total_seconds()) if release and finished else None
+        result['publication_delay_seconds']=int((release.published_at-finished).total_seconds()) if release and finished and origin.kind=='A' else None
     return result
 
 
@@ -273,3 +276,11 @@ def lineage(session, official_id):
         'binding_id':candidate.binding_id,'dependency_id':candidate.dependency_id,
         'assessment_id':candidate.assessment_id,'policy':json.loads(decision.evidence_json),
         'candidate_quality':json.loads(session.get(Assessment,candidate.assessment_id).results_json)}
+
+
+def source_observed_at(session, work):
+    from app.data_foundation.inputs import input_manifests
+    origins = [session.get(Work,m.work_id) for m in input_manifests(session,work=work)] if work.kind == 'B' else [work]
+    # A conservative minimum cannot imply that every input was observed as
+    # recently as the newest source. Exact per-input times remain in lineage.
+    return min((session.get(SourceRef,w.source_ref_id).observed_at for w in origins), default=None)

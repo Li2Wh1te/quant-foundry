@@ -34,7 +34,9 @@ def stage_decisions(session, work_id, epoch):
     from app.data_foundation.models import Definition, SourceRef
     policy = session.get(Definition, work.policy_id)
     policy_value = json.loads(policy.definition_json)
-    admitted = set(session.scalars(select(CandidateEntry.candidate_id).where(CandidateEntry.manifest_id == work.candidate_manifest_id)))
+    from app.data_foundation.inputs import candidate_origins
+    origins = candidate_origins(session, work)
+    admitted = set(origins)
     end = min(work.cursor + BATCH_ROWS, len(actions))
     started = time.monotonic()
     for index, action in enumerate(actions[work.cursor:end], work.cursor):
@@ -72,11 +74,12 @@ def stage_decisions(session, work_id, epoch):
         if selected:
             from app.data_foundation.work_models import Assessment
             field_quality = json.loads(session.get(Assessment, candidate.assessment_id).results_json).get('field_quality', {})
-        decision = Decision(assessment_id=checked.id, work_id=work.id, target_key=action['target_key'], candidate_manifest_id=work.candidate_manifest_id,
-            selected_candidate_id=candidate_id, parent_official_id=parent_id, action=choice,
-            evidence_json=encode({'reason': action['reason'], 'input_manifest_id': work.candidate_manifest_id,
+        decision = Decision(assessment_id=checked.id, work_id=work.id, target_key=action['target_key'], candidate_manifest_id=origins.get(candidate_id) if work.candidate_input_set_id else work.candidate_manifest_id,
+            candidate_input_set_id=work.candidate_input_set_id, selected_candidate_id=candidate_id, parent_official_id=parent_id, action=choice,
+            evidence_json=encode({'reason': action['reason'], 'input_manifest_id': origins.get(candidate_id) if work.candidate_input_set_id else work.candidate_manifest_id,
+                'input_set_id': work.candidate_input_set_id,
                 'selected': candidate_id, 'excluded_candidates': [str(c) for c in sorted(competing, key=str) if c != candidate_id],
-                'comparison': 'not_applicable' if action['reason'] == 'SINGLE_SOURCE' else 'disabled',
+                'comparison': 'source_priority' if action['reason'] == 'PRIMARY_SOURCE_PRIORITY' else 'not_applicable' if action['reason'] == 'SINGLE_SOURCE' else 'disabled',
                 'field_quality': field_quality, 'policy_id': work.policy_id}), created_at=now())
         session.add(decision); session.flush()
         if selected:
@@ -195,12 +198,29 @@ def publish(session, release_id, epoch):
     release = session.get(Release, release_id)
     if not release:
         raise FoundationError('RELEASE_UNAVAILABLE', '固定发布不存在。')
+    from app.data_foundation.batches import may_publish, record_contributions
+    if not may_publish(session,session.get(Work,release.work_id)):
+        raise FoundationError('PUBLICATION_NOT_APPROVED', '该批次仅允许影子处理，尚未批准正式发布。')
+    # Lock the source prerequisites in deterministic order before issue/head
+    # locks. Source ingestion never locks foundation rows, avoiding inversion.
+    from app.data_foundation.batch_models import WorkSourcePointer
+    from app.data_foundation.models import SourceRef
+    from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState as State
+    changed=False
+    for pointer in session.scalars(select(WorkSourcePointer).where(WorkSourcePointer.work_id==release.work_id).order_by(WorkSourcePointer.source_ref_id)):
+        source=session.get(SourceRef,pointer.source_ref_id)
+        state=session.scalar(select(State).where(State.dataset==source.dataset,State.subject==source.subject,
+            State.variant==source.variant).with_for_update(read=True).execution_options(populate_existing=True))
+        if state is None or state.revision!=pointer.revision or state.observation_id!=source.observation_id:changed=True
     scope = session.scalar(select(IssueScope).where(IssueScope.scope_key == release.scope_key).with_for_update(read=True).execution_options(populate_existing=True))
     lock_key(session, 'head', release.scope_key)
     head = session.scalar(select(Head).where(Head.scope_key == release.scope_key).with_for_update().execution_options(populate_existing=True))
     if release.status == 'published':
         return release
     work = fenced(session, release.work_id, epoch)
+    if changed:
+        finish_batch(session,work,status='superseded',error_code='SOURCE_CONTEXT_CHANGED')
+        return None
     if scope is None:
         raise FoundationError('DEPENDENCY_MISSING', '发布缺少问题限制上下文。')
     if scope.epoch != work.expected_issue_epoch:
@@ -211,6 +231,7 @@ def publish(session, release_id, epoch):
         return None
     if release.status != 'sealed' or work.cursor != work.total:
         raise FoundationError('PUBLICATION_INCOMPLETE', '发布尚未封存。')
+    record_contributions(session,release)
     release.status = 'published'
     release.published_at = now()
     session.flush()

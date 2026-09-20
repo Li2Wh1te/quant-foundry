@@ -21,11 +21,11 @@ def scope_key(dataset, major, profile, series):
 
 
 def create_work(session, *, kind, contract_id, execution_id, dependency_id, parameters,
-                source_ref_id=None, candidate_manifest_id=None, parent_release_id=None, policy_id=None,
+                source_ref_id=None, candidate_manifest_id=None, candidate_input_set_id=None, parent_release_id=None, policy_id=None,
                 expected_head_revision=0, expected_issue_epoch=0, total=None):
     required = {'dataset', 'major', 'profile', 'series', 'start', 'end', 'domain', 'domain_hash'}
     report_keys = {'report_keys'} if parameters.get('domain') == 'holdings-report-v1' else set()
-    if set(parameters) != (required | report_keys | ({'actions'} if kind == 'B' else set())) or kind not in ('A', 'B'):
+    if set(parameters) != (required | report_keys | ({'actions'} if kind == 'B' else set()) | ({'source_context_hash'} if candidate_input_set_id else set())) or kind not in ('A', 'B'):
         raise ValueError('Invalid fixed work parameters')
     if report_keys:
         keys = parameters['report_keys']
@@ -40,24 +40,27 @@ def create_work(session, *, kind, contract_id, execution_id, dependency_id, para
         raise FoundationError('CONTRACT_MISMATCH', '工作契约与数据范围不匹配。')
     if parameters['start'] > parameters['end']:
         raise ValueError('Invalid work range')
-    if kind == 'A' and (not source_ref_id or candidate_manifest_id or policy_id):
+    if kind == 'A' and (not source_ref_id or candidate_manifest_id or candidate_input_set_id or policy_id):
         raise ValueError('Normalization requires a fixed source only')
-    if kind == 'B' and (source_ref_id or not candidate_manifest_id or not policy_id):
+    if kind == 'B' and (source_ref_id or bool(candidate_manifest_id) == bool(candidate_input_set_id) or not policy_id):
         raise ValueError('Governance requires a candidate manifest and policy')
     scope = scope_key(parameters['dataset'], parameters['major'], parameters['profile'], parameters['series'])
     source = session.get(SourceRef, source_ref_id) if source_ref_id else None
     manifest = session.get(CandidateManifest, candidate_manifest_id) if candidate_manifest_id else None
+    from app.data_foundation.inputs import input_manifests
+    manifests = input_manifests(session, manifest_id=candidate_manifest_id, input_set_id=candidate_input_set_id) if kind == 'B' else []
     policy = session.get(Definition, policy_id) if policy_id else None
-    if kind == 'A' and source is None or kind == 'B' and (manifest is None or policy is None or policy.kind != 'policy'):
+    if kind == 'A' and source is None or kind == 'B' and (not manifests or policy is None or policy.kind != 'policy'):
         raise FoundationError('DEPENDENCY_MISSING', '工作输入或政策不存在。')
     if kind == 'B':
         actions = parameters['actions']
         if not isinstance(actions, list) or len({a['target_key'] for a in actions}) != len(actions):
             raise ValueError('Governance actions must have unique fixed targets')
         total = len(actions)
-        origin = session.get(Work, manifest.work_id)
-        if origin.status != 'succeeded' or origin.scope_key != scope or origin.contract_id != contract_id:
-            raise FoundationError('CANDIDATE_NOT_SEALED', '候选工作未完整封存或契约范围不符。')
+        for item in manifests:
+            origin = session.get(Work, item.work_id)
+            if origin.status != 'succeeded' or origin.scope_key != scope or origin.contract_id != contract_id:
+                raise FoundationError('CANDIDATE_NOT_SEALED', '候选工作未完整封存或契约范围不符。')
         policy_value = json.loads(policy.definition_json)
         if any(policy_value[k] != parameters[k] for k in ('dataset', 'major', 'profile', 'series')):
             raise FoundationError('POLICY_MISMATCH', '治理政策与目标数据范围不符。')
@@ -69,6 +72,11 @@ def create_work(session, *, kind, contract_id, execution_id, dependency_id, para
         candidate_manifest_id=candidate_manifest_id, candidate_hash=manifest.manifest_hash if manifest else None,
         parent=parent_release_id, policy=policy.content_hash if policy else None,
         head_revision=expected_head_revision, issue_epoch=expected_issue_epoch)
+    # Preserve legacy fingerprints: optional multi-input fields exist only in
+    # the new mode, so retrying old work cannot create a duplicate.
+    if candidate_input_set_id:
+        from app.data_foundation.batch_models import CandidateInputSet
+        inputs['candidate_input_set'] = session.get(CandidateInputSet, candidate_input_set_id).manifest_hash
     fingerprint = digest('work', inputs)
     lock_key(session, 'work', fingerprint)
     existing = session.scalar(select(Work).where(Work.fingerprint == fingerprint))
@@ -79,7 +87,7 @@ def create_work(session, *, kind, contract_id, execution_id, dependency_id, para
         session.add(IssueScope(scope_key=scope, epoch=0))
     row = Work(fingerprint=fingerprint, kind=kind, contract_id=contract_id, execution_id=execution_id,
         dependency_id=dependency_id, parameters_json=encode(parameters), scope_key=scope,
-        source_ref_id=source_ref_id, candidate_manifest_id=candidate_manifest_id, parent_release_id=parent_release_id,
+        source_ref_id=source_ref_id, candidate_manifest_id=candidate_manifest_id, candidate_input_set_id=candidate_input_set_id, parent_release_id=parent_release_id,
         policy_id=policy_id, expected_head_revision=expected_head_revision, expected_issue_epoch=expected_issue_epoch,
         total=total, created_at=now())
     session.add(row); session.flush()
@@ -91,7 +99,7 @@ def append_event(session, work, step, status, details):
     sequence = (session.scalar(select(func.max(WorkEvent.sequence)).where(WorkEvent.work_id == work.id)) or 0) + 1
     params = json.loads(work.parameters_json)
     labels = {'input': '固定输入', 'normalization': '标准化', 'quality': '质量检查', 'governance': '治理', 'publication': '发布'}
-    state_label = {'fixed': '输入已固定', 'evaluated': '已评估', 'queued': '等待续作', 'succeeded': '成功', 'failed': '失败', 'cancelled': '已取消', 'dependency_missing': '依赖缺失', 'superseded': '父发布已更新', 'published': '已发布'}.get(status, '处理中')
+    state_label = {'fixed': '输入已固定', 'evaluated': '已评估', 'queued': '等待续作', 'succeeded': '成功', 'failed': '失败', 'cancelled': '已取消', 'dependency_missing': '依赖缺失', 'awaiting_publication': '已封存待发布', 'superseded': '父发布已更新', 'published': '已发布'}.get(status, '处理中')
     previous = session.scalar(select(WorkEvent).where(WorkEvent.work_id == work.id).order_by(WorkEvent.sequence.desc()).limit(1))
     previous_cursor = json.loads(previous.details_json).get('checkpoint', 0) if previous else 0
     checkpoint = '已推进' if work.cursor > previous_cursor else '未推进'
@@ -116,9 +124,12 @@ def claim(session, preferred_kind='A', work_id=None):
     the approved global limit of one foundation unit independently of ingestion.
     """
     at = database_now(session)
+    from app.data_foundation.batch_models import BatchWork, BatchControl
     for kind in (preferred_kind, 'B' if preferred_kind == 'A' else 'A'):
+        paused = select(BatchWork.work_id).join(BatchControl,BatchControl.batch_id==BatchWork.batch_id).where(
+            BatchControl.pause_a.is_(True) if kind == 'A' else BatchControl.pause_b.is_(True))
         row = session.scalar(select(Work).where(Work.kind == kind, Work.cancelled.is_(False),
-            Work.id == work_id if work_id else True,
+            Work.id == work_id if work_id else True, Work.id.not_in(paused),
             or_(Work.status == 'queued', (Work.status == 'running') & (Work.lease_until < at)))
             .order_by(Work.created_at, Work.id).with_for_update(skip_locked=True).execution_options(populate_existing=True).limit(1))
         if row is None:
@@ -147,7 +158,7 @@ def heartbeat(session, work_id, epoch):
 
 
 def finish_batch(session, row, *, status, error_code=None, error_details=None):
-    if status not in ('queued', 'succeeded', 'failed', 'cancelled', 'dependency_missing', 'superseded'):
+    if status not in ('queued', 'succeeded', 'failed', 'cancelled', 'dependency_missing', 'superseded', 'awaiting_publication'):
         raise ValueError('Invalid work transition')
     row.status = status
     row.lease_until = None

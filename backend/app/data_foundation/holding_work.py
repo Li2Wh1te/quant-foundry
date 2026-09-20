@@ -158,9 +158,10 @@ def normalize_batch(session, work_id, epoch):
     return work.cursor
 
 
-def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
-    manifest = session.get(CandidateManifest, manifest_id)
-    if manifest is None or session.get(Work, manifest.work_id).status != 'succeeded':
+def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, input_set_id=None):
+    from app.data_foundation.inputs import input_manifests
+    manifests = input_manifests(session, manifest_id=manifest_id, input_set_id=input_set_id)
+    if any(session.get(Work, m.work_id).status != 'succeeded' for m in manifests):
         raise FoundationError('CANDIDATE_NOT_SEALED', '报告标准化尚未完成。')
     policy = session.get(Definition, policy_id)
     if policy is None or policy.kind != 'policy':
@@ -171,7 +172,7 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
     from app.data_foundation.governance import choose
     groups = {}
     for candidate in session.scalars(select(Candidate).join(CandidateEntry, CandidateEntry.candidate_id == Candidate.id)
-                                    .where(CandidateEntry.manifest_id == manifest_id)):
+                                    .where(CandidateEntry.manifest_id.in_([m.id for m in manifests]))):
         report = session.get(CandidateReport, candidate.id)
         head = fields(report, KEY_FIELDS) if report else json.loads(session.get(Assessment, candidate.assessment_id).results_json).get('header')
         if not head or not head.get('fund_share_id'):
@@ -225,12 +226,18 @@ def stage_decisions(session, work_id, epoch):
     work = fenced(session, work_id, epoch)
     params = _verify(work)
     actions = params['actions']
-    manifest = session.get(CandidateManifest, work.candidate_manifest_id)
-    origin = session.get(Work, manifest.work_id)
-    if (work.kind != 'B' or work.dependency_id != origin.dependency_id
-            or {k: v for k, v in params.items() if k != 'actions'} != json.loads(origin.parameters_json)
-            or actions != plan_actions(session, manifest.id, work.policy_id, work.parent_release_id)):
-        raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '报告治理计划与固定输入不一致。')
+    from app.data_foundation.inputs import candidate_origins
+    origins = candidate_origins(session, work)
+    if work.candidate_input_set_id:
+        from app.data_foundation.governance import verify_multi_plan
+        verify_multi_plan(session, work)
+    else:
+        manifest = session.get(CandidateManifest, work.candidate_manifest_id)
+        origin = session.get(Work, manifest.work_id)
+        if (work.kind != 'B' or work.dependency_id != origin.dependency_id
+                or {k: v for k, v in params.items() if k != 'actions'} != json.loads(origin.parameters_json)
+                or actions != plan_actions(session, manifest.id, work.policy_id, work.parent_release_id)):
+            raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '报告治理计划与固定输入不一致。')
     if work.cursor < len(actions):
         action = actions[work.cursor]
         checked = assessment(session, input_hash=digest('report-action', action),
@@ -239,7 +246,8 @@ def stage_decisions(session, work_id, epoch):
             results={'reason': action['reason']})
         cid = UUID(action['candidate_id']) if action['candidate_id'] else None
         decision = Decision(assessment_id=checked.id, work_id=work.id,
-            target_key=action['target_key'], candidate_manifest_id=manifest.id,
+            target_key=action['target_key'], candidate_manifest_id=origins.get(cid) if work.candidate_input_set_id else work.candidate_manifest_id,
+            candidate_input_set_id=work.candidate_input_set_id,
             selected_candidate_id=cid, parent_official_id=None,
             parent_report_id=UUID(action['retained_official_id']) if action['retained_official_id'] else None, action=action['action'],
             evidence_json=encode({'reason': action['reason'], 'comparison': 'not_applicable',

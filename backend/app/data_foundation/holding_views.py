@@ -42,6 +42,7 @@ def release_changes(session, requirement, previous_id, current_id, authenticate,
     keys = sorted(set(old) | set(new), key=key)
     if after:
         keys = [k for k in keys if key(k) > after]
+    from app.data_foundation.views import member_basis
     items = []
     for target in keys[:limit]:
         a, b = old.get(target), new.get(target)
@@ -66,7 +67,8 @@ def release_changes(session, requirement, previous_id, current_id, authenticate,
             'kind': kind, 'comparison_restricted': restricted,
             'before_official': str(a.official_id) if a and a.official_id else None,
             'after_official': str(b.official_id) if b and b.official_id else None,
-            'before_decision': str(a.decision_id) if a else None, 'after_decision': str(b.decision_id) if b else None})
+            'before_decision': str(a.decision_id) if a else None, 'after_decision': str(b.decision_id) if b else None,
+            'basis': {'before':member_basis(session,a),'after':member_basis(session,b)}})
     if authenticate() != owner:
         raise FoundationError('AUTH_CONTEXT_CHANGED', '报告版本比较身份已失效。')
     from app.data_foundation.views import process_detail
