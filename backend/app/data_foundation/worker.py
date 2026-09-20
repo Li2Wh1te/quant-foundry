@@ -84,7 +84,9 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
                     try: row=fenced(session,wid,epoch)
                     except FoundationError: return kind
                     params=json.loads(row.parameters_json)
-                    failure_message=f"日线底座 {params['start']} 至 {params['end']} 处理失败1次，累计提交{row.cursor}行，检查点位于{row.cursor}。"
+                    label = '基金持仓报告底座' if params['dataset'] == 'fund.holdings_report' else '日线底座'
+                    unit = '份报告' if params['dataset'] == 'fund.holdings_report' else '行'
+                    failure_message=f"{label} {params['start']} 至 {params['end']} 处理失败1次，累计提交{row.cursor}{unit}，检查点位于{row.cursor}。"
                     finish_batch(session,row,status='failed',error_code=type(exc).__name__,
                         error_details={'frames':[{'file':Path(frame.filename).name,'line':frame.lineno,'function':frame.name} for frame in traceback.extract_tb(exc.__traceback__)[-20:]]})
                 logger.error('foundation_work_failed', message=failure_message, work_id=str(wid), error_type=type(exc).__name__)

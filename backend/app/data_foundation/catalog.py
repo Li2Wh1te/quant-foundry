@@ -33,6 +33,10 @@ def register_definition(session, *, kind, name, version, definition):
         'policy': {'dataset', 'major', 'profile', 'series', 'input_admission', 'core_fields', 'source_order', 'comparison', 'fallback', 'atomicity'},
         'support': {'read_status', 'update_status', 'replay_status', 'notice_days', 'approval_required'},
     }[kind]
+    if kind == 'series' and definition.get('object_kind') == 'holdings-report':
+        # Report semantics are not a price interval or an adjustment basis.
+        # Keep the legacy bar definition unchanged while validating this shape.
+        required = {'scope_kind', 'asset_scope', 'weight_unit', 'public_time_status', 'portfolio_completeness'}
     if not required <= definition.keys():
         raise ValueError('Incomplete definition')
     content_hash = digest('definition', {'kind': kind, 'name': name, 'version': version, 'definition': definition})

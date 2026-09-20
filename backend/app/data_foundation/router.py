@@ -13,7 +13,7 @@ router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation']
 @router.get('/datasets')
 def datasets(request: Request, session: Session = Depends(get_db_session)):
     from app.data_foundation.query import dataset_view
-    return foundation_response(lambda: {'items': [json.loads(service(session,request).describe_dataset())]})
+    return foundation_response(lambda: {'items': [json.loads(service(session,request).describe_dataset()), json.loads(service(session,request).describe_dataset('fund.holdings_report'))]})
 
 
 @router.get('/source-refs/{ref_id}')
@@ -73,7 +73,7 @@ def decision_detail(decision_id: UUID, session: Session = Depends(snapshot_sessi
     if row is None:raise HTTPException(404,detail={'code':'DECISION_UNAVAILABLE','message':'治理决策不存在。'})
     return {'id':row.id,'work_id':row.work_id,'target_key':row.target_key,'action':row.action,
         'candidate_manifest_id':row.candidate_manifest_id,'selected_candidate_id':row.selected_candidate_id,
-        'parent_official_id':row.parent_official_id,'evidence':json.loads(row.evidence_json)}
+        'parent_official_id':row.parent_official_id,'parent_report_id':row.parent_report_id,'evidence':json.loads(row.evidence_json)}
 
 
 # Serialize inside the transaction that holds the current issue scope lock.
@@ -83,6 +83,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from app.core.auth import require_api_token
 from app.data_foundation.canonical import FoundationError, encode
 from app.data_foundation.query import DataRequirement
+from app.data_foundation.holding_query import ReportRequirement
 from app.data_foundation.service import FoundationService, PagedRequirement, PageRequest
 from pydantic import Field
 
@@ -118,19 +119,19 @@ def foundation_response(callback):
 @router.get('/datasets/{dataset_id}')
 def describe_dataset(dataset_id: str, request: Request, contract_version: str='1.0', session: Session=Depends(snapshot_session)):
     from app.data_foundation.query import DATASET,dataset_view
-    if dataset_id!=DATASET or contract_version!='1.0':
+    if dataset_id not in (DATASET, 'fund.holdings_report') or contract_version!='1.0':
         raise HTTPException(404,detail={'message':'数据集或契约版本不存在。'})
-    return foundation_response(lambda:service(session,request).describe_dataset())
+    return foundation_response(lambda:service(session,request).describe_dataset(dataset_id))
 
 
 @router.post('/capability-checks')
-def capability_check(body: DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+def capability_check(body: ReportRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
     return foundation_response(lambda:service(session,request).check_capability(body))
 
 
 @router.post('/queries')
-def official_query(body: PageRequest | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+def official_query(body: PageRequest | ReportRequirement | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
     return foundation_response(lambda:service(session,request).query_official(body))
 
@@ -138,6 +139,9 @@ def official_query(body: PageRequest | PagedRequirement | DataRequirement, reque
 @router.get('/revisions/{revision_id}/lineage')
 def revision_lineage(revision_id: UUID, session: Session=Depends(snapshot_session)):
     from app.data_foundation.query import lineage
+    from app.data_foundation.holding_models import OfficialReport
+    if session.get(OfficialReport, revision_id):
+        from app.data_foundation.holding_query import lineage
     return foundation_response(lambda:lineage(session,revision_id))
 
 
@@ -172,12 +176,12 @@ def candidate_inspection(body: CandidateInspection, session: Session=Depends(sna
 
 class SnapshotResolution(BaseModel):
     model_config={'extra':'forbid'}
-    requests: list[DataRequirement] = Field(min_length=1,max_length=8)
+    requests: list[ReportRequirement | DataRequirement] = Field(min_length=1,max_length=8)
 
 
 class SnapshotEntry(BaseModel):
     model_config={'extra':'forbid'}
-    request: DataRequirement
+    request: ReportRequirement | DataRequirement
     manifest_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
     projection_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
 
@@ -206,7 +210,9 @@ def dataset_processing(dataset_id: str, request: Request, work_id: UUID | None=N
     from app.data_foundation.views import process_detail
     from app.data_foundation.work import scope_key
     from app.data_foundation.tushare import SERIES
-    if dataset_id!='market.bar.daily':raise HTTPException(404,detail={'message':'数据集不存在。'})
+    if dataset_id not in ('market.bar.daily', 'fund.holdings_report'):raise HTTPException(404,detail={'message':'数据集不存在。'})
+    if dataset_id == 'fund.holdings_report':
+        from app.data_foundation.holdings import SERIES
     scope=scope_key(dataset_id,1,'default',SERIES)
     statement=select(Work).where(Work.scope_key==scope)
     if work_id:statement=statement.where(Work.id==work_id)
@@ -226,7 +232,9 @@ def dataset_releases(dataset_id: str, request: Request, before: UUID | None=None
     from app.data_foundation.views import release_list
     from app.data_foundation.work import scope_key
     from app.data_foundation.tushare import SERIES
-    if dataset_id!='market.bar.daily':raise HTTPException(404,detail={'message':'数据集不存在。'})
+    if dataset_id not in ('market.bar.daily', 'fund.holdings_report'):raise HTTPException(404,detail={'message':'数据集不存在。'})
+    if dataset_id == 'fund.holdings_report':
+        from app.data_foundation.holdings import SERIES
     return foundation_response(lambda:service(session,request).finish(release_list(session,scope_key(dataset_id,1,'default',SERIES),before,limit)))
 
 
@@ -237,8 +245,14 @@ class ChangeRequest(DataRequirement):
     page_size: int = Field(default=50,ge=1,le=1000)
 
 
+class ReportChangeRequest(ReportRequirement):
+    previous_release: UUID
+    current_release: UUID
+    cursor: str | None = Field(default=None,max_length=2048)
+
+
 @router.post('/datasets/{dataset_id}/release-changes')
-def changes(dataset_id: str, body: ChangeRequest, request: Request, session: Session=Depends(get_db_session)):
+def changes(dataset_id: str, body: ReportChangeRequest | ChangeRequest, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.views import release_changes
     from app.data_foundation.canonical import digest
     def read():

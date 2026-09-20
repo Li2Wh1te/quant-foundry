@@ -44,6 +44,10 @@ def process_detail(session,work):
     descriptions={'input':'读取已固定的本地来源，不请求供应商。','normalization':'按当次转换版本解释身份、价格及金额单位。',
         'quality':'核验核心字段、可选字段与逐日覆盖证据。','governance':'按固定候选和当次治理规则选择整条正式记录；单源比较不适用。',
         'publication':'提交不可变正式清单，未提交内容不对普通读取可见。'}
+    if params['dataset'] == 'fund.holdings_report':
+        descriptions.update(normalization='按当次版本解析报告头、全部成员和身份依据。',
+            quality='核验完整报告、成员核心比例及可选字段限制。',
+            governance='按整份报告选择同一修订的全部成员；不拼接不同修订。')
     result['authorized_actions']=['view','copy_safe_summary']
     result['evidence_visibility']='metadata_only'
     for attempt in result['attempts']:
@@ -56,7 +60,7 @@ def process_detail(session,work):
         for event in step['events']:
             detail=event['details']
             event['details']={k:v for k,v in detail.items() if k in ('checkpoint','checkpoint_advanced','committed_rows',
-                'total_rows','ready','quarantined','release_id','manifest_hash','coverage')}
+                'total_rows','ready','quarantined','release_id','manifest_hash','coverage','members','unit')}
         owner=upstream if upstream and step['step'] in ('input','normalization','quality') else result
         step['detail']={'input':owner['input_manifest'],'processing':descriptions[step['step']],
             'output':{'events':len(step['events']),'releases':result['output_releases'] if step['step']=='publication' else []},
@@ -69,6 +73,9 @@ def process_detail(session,work):
 
 
 def release_changes(session, requirement, previous_id, current_id, authenticate, *, after=None, limit=50):
+    if requirement.dataset_id == 'fund.holdings_report':
+        from app.data_foundation.holding_views import release_changes as report_changes
+        return report_changes(session, requirement, previous_id, current_id, authenticate, after=after, limit=limit)
     previous=resolve_release(session,requirement.model_copy(update={'release':previous_id}))
     current=resolve_release(session,requirement.model_copy(update={'release':current_id}))
     if previous.scope_key!=current.scope_key:raise FoundationError('CONTRACT_RELEASE_MISMATCH','只能比较相同契约和语义的正式发布。')
@@ -87,6 +94,9 @@ def release_changes(session, requirement, previous_id, current_id, authenticate,
     def values(release):
         result={}
         for field in requirement.fields:
+            from app.data_foundation.query import FIELDS
+            if field not in FIELDS:
+                continue
             raw=json.loads(read_release(session,release_id=release.id,expected_issue_epoch=guard.epoch,
                 authenticate=authenticate,instrument_ids=requirement.subjects,start=requirement.business_range.start,
                 end=requirement.business_range.end,fields=[field],allow_partial=True,selected_keys=selected))

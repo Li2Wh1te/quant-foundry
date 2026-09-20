@@ -35,7 +35,7 @@ export interface OfficialResult {
 export interface ProcessView {
   id: string; kind: string; status: string; current_release: string | null; output_releases: string[];
   input_manifest: { source_ref_id: string | null; candidate_manifest_id: string | null; fingerprint: string; dependency_id: string; execution_id: string };
-  counters: { processed: number; total: number | null; unit: string };
+  counters: { processed: number; total: number | null; unit: string; members?:number };
   steps: { step: string; status: string; events: { sequence: number; message: string; at: string }[] }[];
   as_of: string; view_snapshot_id: string;
 }
