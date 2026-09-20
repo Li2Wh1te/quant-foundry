@@ -1,5 +1,6 @@
 """Persist object-level source/candidate/decision/release settlement evidence."""
 import json
+from collections import defaultdict
 from sqlalchemy import select
 from app.data_foundation.canonical import FoundationError, digest, encode
 from app.data_foundation.catalog import lock_key, now
@@ -84,11 +85,31 @@ def reconcile_batch(session,batch_id):
                 and [e.candidate_id for e in entries]==[c.id for c in candidates]
                 and manifest.manifest_hash==digest('candidates',[[c.id,c.values_hash,c.readiness] for c in candidates]))
             add('source',work.id,'explained' if valid else 'unexplained','SOURCE_CANDIDATE_MATCH' if valid else 'CANDIDATE_MANIFEST_MISMATCH',source_ref_id=str(ref.id))
+            # Keep strong references for this finite input. SQLAlchemy's identity
+            # map is weak: a get() inside the candidate/decision cross product
+            # otherwise repeats the same typed-row SELECT thousands of times.
+            assessments = {a.id: a for a in session.scalars(select(Assessment).where(
+                Assessment.id.in_([c.assessment_id for c in candidates])))}
+            from app.data_foundation.work_models import CandidateBar
+            from app.data_foundation.holding_models import CandidateReport
+            typed_model = CandidateReport if params['domain'] == 'holdings-report-v1' else CandidateBar
+            typed_candidates = list(session.scalars(select(typed_model).where(
+                typed_model.candidate_id.in_([c.id for c in candidates]))))
+            by_candidate, by_target = defaultdict(list), defaultdict(list)
+            for ordinal, decision in enumerate(decisions):
+                by_candidate[(decision.work_id, decision.selected_candidate_id)].append((ordinal, decision))
+                by_target[(decision.work_id, decision.target_key)].append((ordinal, decision))
             mismatches=verify_candidate_values(session,work,candidates,raw)
             for candidate in candidates:
-                check=json.loads(session.get(Assessment,candidate.assessment_id).results_json)
-                relevant=[d for d in decisions if d.work_id in admitted.get(candidate.id,[]) and
-                    (d.selected_candidate_id==candidate.id or d.target_key==candidate_target(session,candidate,check))]
+                check=json.loads(assessments[candidate.assessment_id].results_json)
+                target = candidate_target(session, candidate, check)
+                matched = {}
+                for governance_id in admitted.get(candidate.id, []):
+                    for ordinal, decision in by_candidate[(governance_id, candidate.id)] + by_target[(governance_id, target)]:
+                        matched[ordinal] = decision
+                # Preserve the original decision order and OR semantics exactly,
+                # including candidates not selected for an otherwise decided key.
+                relevant = [matched[index] for index in sorted(matched)]
                 if candidate.id in mismatches:state,reason='unexplained','SOURCE_VALUE_MISMATCH'
                 elif candidate.readiness=='quarantined':state,reason='restricted','CANDIDATE_QUARANTINED'
                 elif relevant:state,reason='explained','GOVERNANCE_DECIDED'

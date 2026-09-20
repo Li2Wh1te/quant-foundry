@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily Quant Foundry local foundation backup
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+Persistent=true
+AccuracySec=1min
+Unit=quant-foundry-backup.service
+
+[Install]
+WantedBy=timers.target

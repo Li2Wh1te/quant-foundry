@@ -38,6 +38,10 @@ class FoundationService:
         principal=self.authenticate()
         if not isinstance(principal,AuthenticatedPrincipal) or not principal.owner_scope:
             raise FoundationError('AUTH_REQUIRED','底座读取需要由认证适配器核验的身份。')
+        # The Python adapter shares the same fail-closed recovery boundary as
+        # HTTP. Recheck at serialization so a reused service cannot bypass it.
+        from app.data_foundation.recovery import ensure_serving
+        ensure_serving(self.session)
         return principal
 
     def owner(self):

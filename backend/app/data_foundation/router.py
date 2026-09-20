@@ -7,7 +7,18 @@ from app.db.session import get_db_session
 from app.data_foundation.models import Definition, SourceRef, Execution
 from app.data_foundation.execution import replay_status
 
-router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation'])
+def recovery_gate(session: Session = Depends(get_db_session)):
+    from app.data_foundation.recovery import ensure_serving
+    from app.data_foundation.canonical import FoundationError
+    from fastapi import HTTPException
+    try:
+        ensure_serving(session)
+    except FoundationError as exc:
+        raise HTTPException(503, detail={'code': exc.code, 'message': str(exc)}) from None
+
+
+router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation'],
+                   dependencies=[Depends(recovery_gate)])
 
 
 @router.get('/datasets')

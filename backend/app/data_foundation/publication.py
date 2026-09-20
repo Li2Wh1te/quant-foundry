@@ -164,20 +164,33 @@ def validate_release(session, release):
         from app.data_foundation.holding_work import validate_release as validate_report_release
         return validate_report_release(session, release)
     series = json.loads(work.parameters_json)['series']
+    # Validate the same immutable graph using bounded set reads instead of one
+    # database round trip per member. No validation or hash check is skipped.
+    refs = list(session.scalars(select(BlockRef).where(BlockRef.release_id == release.id).order_by(BlockRef.partition_key)))
+    block_ids = [ref.block_id for ref in refs]
+    blocks = {b.id: b for b in session.scalars(select(ReleaseBlock).where(ReleaseBlock.id.in_(block_ids)))}
+    all_members = list(session.scalars(select(BlockMember).where(BlockMember.block_id.in_(block_ids))
+        .order_by(BlockMember.instrument_id, BlockMember.trade_date)))
+    from collections import defaultdict
+    grouped = defaultdict(list)
+    for member in all_members:
+        grouped[member.block_id].append(member)
+    decisions = {d.id: d for d in session.scalars(select(Decision).where(Decision.id.in_([m.decision_id for m in all_members])))}
+    officials = {o.id: o for o in session.scalars(select(OfficialBar).where(OfficialBar.id.in_([m.official_id for m in all_members if m.official_id])))}
     manifest = []
-    for ref in session.scalars(select(BlockRef).where(BlockRef.release_id == release.id).order_by(BlockRef.partition_key)):
-        block = session.get(ReleaseBlock, ref.block_id)
-        members = session.scalars(select(BlockMember).where(BlockMember.block_id == block.id).order_by(BlockMember.instrument_id, BlockMember.trade_date)).all()
+    for ref in refs:
+        block = blocks[ref.block_id]
+        members = grouped[block.id]
         if ref.partition_key != block.partition_key or len(members) != block.row_count:
             raise FoundationError('MANIFEST_INVALID', '发布块范围或行数不符。')
         for member in members:
             if partition(member.instrument_id, member.trade_date) != ref.partition_key:
                 raise FoundationError('MANIFEST_INVALID', '发布成员不属于当前分区。')
-            decision = session.get(Decision, member.decision_id)
+            decision = decisions[member.decision_id]
             if decision.target_key != target_key(member.instrument_id, member.trade_date):
                 raise FoundationError('MANIFEST_INVALID', '成员与决策目标不一致。')
             if member.official_id:
-                official = session.get(OfficialBar, member.official_id)
+                official = officials[member.official_id]
                 if (official.instrument_id, official.trade_date, official.series) != (member.instrument_id, member.trade_date, series):
                     raise FoundationError('MANIFEST_INVALID', '成员与正式值语义不一致。')
                 if digest('bar-values', values(official)) != official.values_hash:
