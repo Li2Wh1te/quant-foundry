@@ -36,7 +36,7 @@ export interface ProcessView {
   id: string; kind: string; status: string; current_release: string | null; output_releases: string[];
   input_manifest: { source_ref_id: string | null; candidate_manifest_id: string | null; fingerprint: string; dependency_id: string; execution_id: string };
   counters: { processed: number; total: number | null; unit: string; members?:number };
-  steps: { step: string; status: string; events: { sequence: number; message: string; at: string }[] }[];
+  steps: { step: string; status: string; events: { work_id?: string; sequence: number; message: string; at: string }[] }[];
   as_of: string; view_snapshot_id: string;
 }
 export interface Lineage {
@@ -62,6 +62,6 @@ export interface ReleaseItem { id: string; parent_id: string | null; published_a
 export interface DetailedProcess extends ProcessView {
   rules: Record<string, Record<string, string>>; diagnostic: Record<string, unknown>;
   scope: Record<string, string>;
-  steps: (ProcessView['steps'][number] & { detail: { input: Record<string,string>; processing: string;
+  steps: (ProcessView['steps'][number] & { detail: { input_works?: {work_id:string; input:Record<string,unknown>; basis:Record<string,unknown>}[]; input: Record<string,string>; processing: string;
     output: { events: number; releases: string[] }; basis: Record<string,unknown>; impact: string; next_step: string } })[];
 }

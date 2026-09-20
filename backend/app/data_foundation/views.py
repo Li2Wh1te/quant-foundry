@@ -53,16 +53,25 @@ def process_detail(session,work):
     for attempt in result['attempts']:
         attempt.pop('details',None)
     upstream=None
+    upstreams=[]
     if work.kind=='B':
-        fixed=session.get(CandidateManifest,work.candidate_manifest_id)
-        upstream=process_detail(session,session.get(Work,fixed.work_id))
+        from app.data_foundation.inputs import input_manifests
+        inputs=input_manifests(session,work=work)
+        result['input_works']=[{'work_id':str(m.work_id),'manifest_id':str(m.id),'manifest_hash':m.manifest_hash} for m in inputs]
+        # Preserve the legacy single-input presentation. Multiple inputs remain
+        # explicit; no arbitrary first worker supplies the displayed rule basis.
+        upstreams=[process_detail(session,session.get(Work,m.work_id)) for m in inputs]
+        if len(upstreams)==1:
+            upstream=upstreams[0]
     for step in result['steps']:
         for event in step['events']:
             detail=event['details']
             event['details']={k:v for k,v in detail.items() if k in ('checkpoint','checkpoint_advanced','committed_rows',
                 'total_rows','ready','quarantined','release_id','manifest_hash','coverage','members','unit')}
         owner=upstream if upstream and step['step'] in ('input','normalization','quality') else result
-        step['detail']={'input':owner['input_manifest'],'processing':descriptions[step['step']],
+        actual_inputs=upstreams if step['step'] in ('input','normalization','quality') else []
+        step['detail']={'input_works':[{'work_id':u['id'],'input':u['input_manifest'],'basis':u['rules']} for u in actual_inputs],
+            'input':owner['input_manifest'],'processing':descriptions[step['step']],
             'output':{'events':len(step['events']),'releases':result['output_releases'] if step['step']=='publication' else []},
             'basis':owner['rules'],'impact':'本次输出与当前正式发布独立展示；工作完成不等于任意请求可用。',
             'next_step':'查看固定依据与当前请求检查；执行失败由维护者核验后处理。'}
@@ -117,9 +126,33 @@ def release_changes(session, requirement, previous_id, current_id, authenticate,
         else:kind='basis_changed'
         items.append({'trade_date':key[0],'instrument_id':key[1],'kind':kind,
             'before':a_values,'after':b_values,'restricted_fields':[f for f in requirement.fields if f not in a_values or f not in b_values],
-            'before_decision':str(a.decision_id) if a else None,'after_decision':str(b.decision_id) if b else None})
+            'before_decision':str(a.decision_id) if a else None,'after_decision':str(b.decision_id) if b else None,
+            'basis':{'before':member_basis(session,a),'after':member_basis(session,b)}})
     return {'representation':'official','previous_release':str(previous.id),'release_id':str(current.id),
         'issue_state_version':guard.epoch,'checked_at':now(),'items':items,'has_more':len(keys)>limit,
         'next_key':list(chosen[-1]) if len(keys)>limit else None,
         'rules':{'before':process_detail(session,session.get(Work,previous.work_id))['rules'],
                  'after':process_detail(session,session.get(Work,current.work_id))['rules']}}
+
+
+def member_basis(session, member):
+    """A containing release's policy is not the rule that created an old block."""
+    if member is None:return None
+    from app.data_foundation.work_models import Decision,OfficialBar,Candidate
+    from app.data_foundation.holding_models import OfficialReport
+    decision=session.get(Decision,member.decision_id)
+    governance=session.get(Work,decision.work_id)
+    official=None
+    if member.official_id:
+        official=session.get(OfficialBar,member.official_id) if isinstance(member,BlockMember) else session.get(OfficialReport,member.official_id)
+    candidate=session.get(Candidate,official.candidate_id) if official else None
+    origin=session.get(Work,candidate.work_id) if candidate else None
+    value_decision=session.get(Decision,official.decision_id) if official else None
+    value_work=session.get(Work,value_decision.work_id) if value_decision else None
+    return dict(value_decision_id=str(value_decision.id) if value_decision else None,
+        value_policy_id=str(value_work.policy_id) if value_work else None,
+        decision_id=str(decision.id),governance_work_id=str(governance.id),policy_id=str(governance.policy_id),
+        normalization_work_id=str(origin.id) if origin else None,execution_id=str(origin.execution_id) if origin else None,
+        dependency_id=str(candidate.dependency_id) if candidate else None,
+        candidate_manifest_id=str(decision.candidate_manifest_id) if decision.candidate_manifest_id else None,
+        candidate_input_set_id=str(decision.candidate_input_set_id) if decision.candidate_input_set_id else None)

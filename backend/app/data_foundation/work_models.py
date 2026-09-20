@@ -21,6 +21,7 @@ class Work(Record, Base):
     scope_key: Mapped[str] = mapped_column(String(64), index=True)
     source_ref_id: Mapped[UUID | None] = mapped_column(fk('source_refs'))
     candidate_manifest_id: Mapped[UUID | None] = mapped_column(fk('candidate_manifests'))
+    candidate_input_set_id: Mapped[UUID | None] = mapped_column(fk('candidate_input_sets'))
     parent_release_id: Mapped[UUID | None] = mapped_column(fk('official_releases'))
     policy_id: Mapped[UUID | None] = mapped_column(fk('definitions'))
     expected_head_revision: Mapped[int] = mapped_column(Integer, default=0)
@@ -33,9 +34,9 @@ class Work(Record, Base):
     cancelled: Mapped[bool] = mapped_column(default=False)
     __table_args__ = (
         CheckConstraint("kind IN ('A','B')", name='work_kind'),
-        CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled','dependency_missing','superseded')", name='work_status'),
+        CheckConstraint("status IN ('queued','running','succeeded','failed','cancelled','dependency_missing','superseded','awaiting_publication')", name='work_status'),
         CheckConstraint('cursor >= 0 AND lease_epoch >= 0 AND (total IS NULL OR total >= cursor)', name='work_counts'),
-        CheckConstraint("(kind = 'A' AND source_ref_id IS NOT NULL AND candidate_manifest_id IS NULL AND policy_id IS NULL) OR (kind = 'B' AND source_ref_id IS NULL AND candidate_manifest_id IS NOT NULL AND policy_id IS NOT NULL)", name='work_input'))
+        CheckConstraint("(kind = 'A' AND source_ref_id IS NOT NULL AND candidate_manifest_id IS NULL AND candidate_input_set_id IS NULL AND policy_id IS NULL) OR (kind = 'B' AND source_ref_id IS NULL AND ((candidate_manifest_id IS NOT NULL AND candidate_input_set_id IS NULL) OR (candidate_manifest_id IS NULL AND candidate_input_set_id IS NOT NULL)) AND policy_id IS NOT NULL)", name='work_input'))
 
 
 class Attempt(Record, Base):
@@ -136,7 +137,8 @@ class Decision(Record, Base):
     assessment_id: Mapped[UUID] = mapped_column(fk('assessments'))
     work_id: Mapped[UUID] = mapped_column(fk('work'))
     target_key: Mapped[str] = mapped_column(String(128))
-    candidate_manifest_id: Mapped[UUID] = mapped_column(fk('candidate_manifests'))
+    candidate_manifest_id: Mapped[UUID | None] = mapped_column(fk('candidate_manifests'))
+    candidate_input_set_id: Mapped[UUID | None] = mapped_column(fk('candidate_input_sets'))
     selected_candidate_id: Mapped[UUID | None] = mapped_column(fk('candidates'))
     parent_official_id: Mapped[UUID | None] = mapped_column(fk('bar_official_revisions'))
     parent_report_id: Mapped[UUID | None] = mapped_column(fk('report_official_revisions'))

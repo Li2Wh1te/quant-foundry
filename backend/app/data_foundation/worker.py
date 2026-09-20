@@ -71,7 +71,13 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
                     # Publish in a fresh transaction with the approved lock order;
                     # the potentially expensive decode/staging transaction is over.
                     with Session(engine) as session, session.begin():
-                        publish(session,release_id,epoch)
+                        from app.data_foundation.batches import may_publish
+                        row=session.get(Work,wid)
+                        if may_publish(session,row):
+                            publish(session,release_id,epoch)
+                        else:
+                            row=fenced(session,wid,epoch)
+                            finish_batch(session,row,status='awaiting_publication')
             except FoundationError as exc:
                 with Session(engine) as session, session.begin():
                     try:

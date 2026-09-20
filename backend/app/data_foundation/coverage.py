@@ -9,6 +9,11 @@ from app.data_foundation.source_refs import read_source
 
 
 def coverage_for(session, work_id):
+    from app.data_foundation.work_models import Work
+    work = session.get(Work, work_id)
+    if work and work.kind == 'B':
+        from app.data_foundation.inputs import input_manifests
+        return merge_coverage([coverage_for(session, m.work_id) for m in input_manifests(session, work=work)])
     link = session.get(WorkCoverage, work_id)
     return json.loads(session.get(Assessment, link.assessment_id).results_json) if link else None
 
@@ -77,3 +82,68 @@ def seal_coverage(session, work):
         scope_hash=work.scope_key,status=result['status'],results=result)
     session.add(WorkCoverage(work_id=work.id,assessment_id=checked.id));session.flush()
     return result
+
+
+def merge_coverage(parts):
+    """Union actual applicability, retaining per-subject intervals and evidence.
+
+    A bounding date range alone cannot prove coverage across holes. Readers use
+    covers_request below, and overlapping inputs must agree on expected dates.
+    """
+    if len(parts) == 1:
+        return parts[0]
+    if not parts or any(not p or p['status'] != 'pass' for p in parts):
+        return None
+    subjects, spans, expected = {}, {}, set()
+    for part in parts:
+        keys = {(k['instrument_id'], k['trade_date']) for k in part['expected_keys']}
+        for subject in part['subjects']:
+            iid = subject['instrument_id']
+            prior = subjects.get(iid)
+            if prior and any(prior.get(k) != subject.get(k) for k in ('code', 'exchange')):
+                raise FoundationError('COVERAGE_CONFLICT', '输入的标的适用依据冲突。')
+            for start, end in spans.get(iid, []):
+                lo, hi = max(start, part['start']), min(end, part['end'])
+                if lo <= hi and ({k for k in expected if k[0] == iid and lo <= k[1] <= hi}
+                        != {k for k in keys if k[0] == iid and lo <= k[1] <= hi}):
+                    raise FoundationError('COVERAGE_CONFLICT', '重叠输入的交易日适用依据冲突。')
+            subjects[iid] = subject
+            spans.setdefault(iid, []).extend(part.get('subject_intervals', {}).get(iid, [[part['start'], part['end']]]))
+        expected.update(keys)
+    return dict(status='pass', start=min(p['start'] for p in parts), end=max(p['end'] for p in parts),
+        subjects=[subjects[k] for k in sorted(subjects)], subject_intervals=spans,
+        expected_keys=[dict(instrument_id=i, trade_date=d) for i, d in sorted(expected, key=lambda k:(k[1],k[0]))],
+        reasons=[], time_evidence='observed_only', input_evidence=parts,
+        calendar_ref_id=None, directory_ref_id=None)
+
+
+def covers_request(coverage, ids, start, end):
+    if not coverage or coverage['status'] != 'pass':
+        return False
+    if not ids <= {s['instrument_id'] for s in coverage['subjects']}:
+        return False
+    for iid in ids:
+        spans = coverage.get('subject_intervals', {}).get(iid, [[coverage['start'], coverage['end']]])
+        cursor = date.fromisoformat(start)
+        for lower, upper in sorted(spans):
+            lo, hi = date.fromisoformat(lower), date.fromisoformat(upper)
+            if lo > cursor:
+                break
+            if hi >= cursor:
+                if hi >= date.fromisoformat(end):
+                    break
+                cursor = hi + timedelta(days=1)
+        else:
+            return False
+        if hi < date.fromisoformat(end) or lo > cursor:
+            return False
+    return True
+
+
+def release_coverage(session, release):
+    """Include the actual decision origins of inherited blocks and revisions."""
+    from app.data_foundation.work_models import BlockRef, BlockMember, Decision
+    work_ids = set(session.scalars(select(Decision.work_id).join(BlockMember,BlockMember.decision_id==Decision.id)
+        .join(BlockRef,BlockRef.block_id==BlockMember.block_id).where(BlockRef.release_id==release.id)))
+    work_ids.add(release.work_id)
+    return merge_coverage([coverage_for(session,wid) for wid in sorted(work_ids,key=str)])

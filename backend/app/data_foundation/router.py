@@ -72,7 +72,7 @@ def decision_detail(decision_id: UUID, session: Session = Depends(snapshot_sessi
     row=session.get(Decision,decision_id)
     if row is None:raise HTTPException(404,detail={'code':'DECISION_UNAVAILABLE','message':'治理决策不存在。'})
     return {'id':row.id,'work_id':row.work_id,'target_key':row.target_key,'action':row.action,
-        'candidate_manifest_id':row.candidate_manifest_id,'selected_candidate_id':row.selected_candidate_id,
+        'candidate_manifest_id':row.candidate_manifest_id,'candidate_input_set_id':row.candidate_input_set_id,'selected_candidate_id':row.selected_candidate_id,
         'parent_official_id':row.parent_official_id,'parent_report_id':row.parent_report_id,'evidence':json.loads(row.evidence_json)}
 
 
@@ -273,3 +273,53 @@ def changes(dataset_id: str, body: ReportChangeRequest | ChangeRequest, request:
             'epoch':result['issue_state_version'],'owner':digest('owner-v1',svc.owner())}) if result['next_key'] else None
         return svc.finish(result)
     return foundation_response(read)
+
+
+@router.get('/datasets/{dataset_id}/batches')
+def batches(dataset_id: str, request: Request, cursor: str | None = Query(None,max_length=4096),
+            limit: int = Query(50,ge=20,le=100), session: Session = Depends(snapshot_session)):
+    from app.data_foundation.batch_views import list_batches
+    from app.data_foundation.work import scope_key
+    from app.data_foundation.tushare import SERIES
+    from app.data_foundation.holdings import SERIES as REPORT_SERIES
+    if dataset_id not in ('market.bar.daily','fund.holdings_report'):
+        raise HTTPException(404,detail={'code':'DATASET_UNAVAILABLE','message':'数据集不存在。'})
+    scope=scope_key(dataset_id,1,'default',REPORT_SERIES if dataset_id=='fund.holdings_report' else SERIES)
+    return foundation_response(lambda: service(session,request).finish(list_batches(service(session,request),scope,cursor=cursor,limit=limit)))
+
+
+@router.get('/batches/{batch_id}')
+def batch_detail(batch_id: UUID, request: Request, dataset_id: str | None = None, session: Session = Depends(snapshot_session)):
+    from app.data_foundation.batch_models import Batch
+    from app.data_foundation.batch_views import batch_summary
+    row=session.get(Batch,batch_id)
+    if row is None:raise HTTPException(404,detail={'code':'BATCH_UNAVAILABLE','message':'业务批次不存在。'})
+    if dataset_id:
+        from app.data_foundation.work import scope_key
+        from app.data_foundation.tushare import SERIES
+        from app.data_foundation.holdings import SERIES as REPORT_SERIES
+        if dataset_id not in ('market.bar.daily','fund.holdings_report') or row.scope_key!=scope_key(dataset_id,1,'default',REPORT_SERIES if dataset_id=='fund.holdings_report' else SERIES):
+            raise HTTPException(422,detail={'code':'SCOPE_MISMATCH','message':'所选批次不属于当前数据集。'})
+    return foundation_response(lambda: service(session,request).finish(batch_summary(session,row)))
+
+
+@router.get('/batches/{batch_id}/reconciliation')
+def batch_reconciliation(batch_id: UUID, request: Request, cursor: str | None = Query(None,max_length=4096),
+                         limit: int = Query(50,ge=20,le=100), session: Session = Depends(snapshot_session)):
+    from app.data_foundation.batch_views import reconciliation_page
+    return foundation_response(lambda: service(session,request).finish(reconciliation_page(service(session,request),batch_id,cursor=cursor,limit=limit)))
+
+
+@router.get('/datasets/{dataset_id}/intake')
+def intake_ledger(dataset_id: str, request: Request, cursor: str | None = Query(None,max_length=4096),
+                  limit: int = Query(50,ge=20,le=100), session: Session = Depends(snapshot_session)):
+    from app.data_foundation.batch_views import list_intakes
+    return foundation_response(lambda: service(session,request).finish(list_intakes(service(session,request),dataset_id,cursor=cursor,limit=limit)))
+
+
+@router.get('/maintenance/impact')
+def maintenance_impact(request: Request, kind: str, dependency_id: UUID, session: Session = Depends(snapshot_session)):
+    from app.data_foundation.maintenance import impact
+    if kind not in ('source_ref_id','binding_id','execution_id','definition_id'):
+        raise HTTPException(422,detail={'code':'INVALID_REQUIREMENT','message':'不支持的依赖类型。'})
+    return foundation_response(lambda:service(session,request).finish(impact(session,[{'kind':kind,'id':dependency_id}])))
