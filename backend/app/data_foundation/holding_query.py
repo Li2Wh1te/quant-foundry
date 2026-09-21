@@ -112,10 +112,13 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
     if len(objects) > 100:
         raise FoundationError('INVALID_REQUIREMENT', '一次报告请求最多100个对象，请缩小报告范围。')
     restrictions = _restricted(session, release.scope_key)
+    from app.data_foundation.restrictions import revision_fingerprints, matches_revision
+    fingerprints = revision_fingerprints(session, OfficialReport,
+        [o.official_id for o in objects], [t.official_id for _, t in restrictions])
     readable, totals = [], 0
     for obj in objects:
         reason = None if obj.state == 'value' else obj.state
-        if any(t.target_key == obj.target_key and (t.official_id is None or t.official_id == obj.official_id)
+        if any(t.target_key == obj.target_key and matches_revision(t.official_id, obj.official_id, fingerprints)
                and set(request.fields).intersection(json.loads(i.fields_json)) for i, t in restrictions):
             reason = 'current_issue'
         head = session.get(OfficialReport, obj.official_id) if obj.official_id else None
@@ -124,7 +127,7 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
             if request.require_portfolio_complete and head.portfolio_complete is not True:
                 reason = reason or 'PORTFOLIO_COMPLETENESS_UNKNOWN'
             # Check only null flags, not sensitive values, until the report passes
-            # current restrictions. The official reader never consults candidates.
+            # current restrictions. Only provenance hashes, not candidate values, participate in restrictions.
             columns = [getattr(OfficialReportMember, f).is_(None) for f in request.fields if f in FIELDS]
             flags = session.execute(select(*columns).where(OfficialReportMember.official_id == head.id)).all() if columns else []
             if (any(any(row) for row in flags) or 'market_value' in request.fields

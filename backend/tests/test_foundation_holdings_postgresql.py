@@ -179,6 +179,13 @@ def test_report_token_cannot_bypass_new_issue_and_old_revision_remains_restricte
         period_end=date(2025, 3, 31), fields=['hold_ratio'], state='resolved', reason='隔离测试已修复',
         evidence={'test': True}, official_id=__import__('uuid').UUID(item['official_id']), issue_id=issue.issue_id)
     assert json.loads(svc.check_capability(request(f, release)))['state'] == 'unavailable'
+    rollback = create_governance(session, normalization_id=f[0].id, execution_id=f[1].id, policy_id=f[2].id,
+        parent_release_id=release.id, expected_head_revision=1, expected_issue_epoch=2)
+    lease = claim(session, work_id=rollback.id)
+    rolled = stage_decisions(session, rollback.id, lease.lease_epoch)
+    publish(session, rolled.id, lease.lease_epoch)
+    assert rolled.id != release.id
+    assert json.loads(svc.check_capability(request(f, rolled)))['state'] == 'unavailable'
 
 
 def test_report_snapshot_requires_no_provider_and_rechecks_original_release(session):
