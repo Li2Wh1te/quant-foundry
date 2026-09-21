@@ -491,3 +491,27 @@ def test_directory_restarts_snapshot_without_mixing_attempts():
     assert data["timestamp"] == 2 and data["item"] == [ticker("510300.SH")]
     assert [call.args[1]["offset"] for call in client.request.call_args_list] == [0, 10000, 0]
     assert all(call.args[1]["limit"] == 10000 for call in client.request.call_args_list)
+
+
+def test_automatic_scope_uses_last_complete_directory_without_deleting_history(engine):
+    live = ticker('000001.SH', 'a-share-index')
+    retired = ticker('950084.SH', 'a-share-index')
+    seed(engine, [live, retired])
+    with Session(engine) as session:
+        repo = CollectionRepository(session)
+        repo.publish('tickers', 'a-share-index', 'default', expected=0,
+                     data={'item': [live]}, requests=[], now=NOW, ticker_rows=[live])
+        session.commit()
+        assert repo.subjects(('a-share-index',), current_only=True) == ['000001.SH']
+        assert repo.subjects(('a-share-index',)) == ['000001.SH', '950084.SH']
+        # A failed refresh must neither empty the scope nor resurrect retired
+        # subjects: the previously published complete snapshot remains trusted.
+        repo.fail('tickers', 'a-share-index', 'default', expected=1, kind='timeout', now=NOW)
+        session.commit()
+        assert repo.subjects(('a-share-index',), current_only=True) == ['000001.SH']
+    c = Mock(interval_ms=0)
+    c.request.side_effect = lambda key, p: reply([{'thscode': p['thscodes']}])
+    assert collect('index_quote', CollectionParameters(), c, engine, now=NOW)['subjects'] == 1
+    assert c.request.call_args.args[1] == {'thscodes': '000001.SH'}
+    assert collect('index_quote', CollectionParameters(subjects=['950084.SH']), c, engine, now=NOW)['subjects'] == 1
+    assert c.request.call_args.args[1] == {'thscodes': '950084.SH'}

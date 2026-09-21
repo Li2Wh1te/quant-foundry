@@ -75,7 +75,8 @@ def plan(spec, params, repo, acq, now):
                 query = {'date_ms': date_ms(day)} if spec.kind == 'm3_pool' else {'date': day.isoformat()}
                 result.append(Unit(day.isoformat(), query, day))
         return result
-    subjects = repo.related('manager_id') if spec.kind == 'm3_manager' else repo.subjects(tuple(a for a in spec.assets if a in params.asset_types))
+    subjects = repo.related('manager_id') if spec.kind == 'm3_manager' else repo.subjects(
+        tuple(a for a in spec.assets if a in params.asset_types), current_only=not params.subjects)
     if spec.key in SELECTED and not params.subjects:
         raise CollectionError('此任务只采集指定股票，请填写标的代码。')
     if params.subjects:
@@ -149,7 +150,12 @@ def collect_research(dataset, params, raw_client, engine, *, now=None):
                 data = q.read(spec.interface,query)
                 rows = items(data,allow_empty=True)
                 code_rows(rows,{u.subject for u in batch})
-                if spec.key == 'stock_auction' and (data.get('data_status') != 'ready' or data.get('auction_phase') != 'final'):
+                # The provider publishes closed auctions as status=final and
+                # phase=closed. Retain the earlier ready/final envelope, while
+                # rejecting live, missing, and not-ready combinations.
+                if spec.key == 'stock_auction' and (data.get('data_status'), data.get('auction_phase')) not in {
+                    ('final', 'closed'), ('ready', 'final'),
+                }:
                     raise CollectionError('集合竞价终态尚未就绪，本次未推进完成标记。')
                 batch_data = {r['thscode']:{**data,'item':[r]} for r in rows}
                 batch_trace = q.requests

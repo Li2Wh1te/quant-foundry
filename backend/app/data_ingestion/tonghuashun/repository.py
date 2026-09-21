@@ -158,9 +158,22 @@ class CollectionRepository:
         # Last-good observation and succeeded_at remain untouched, so a failed
         # refresh never becomes an empty collection or a successful checkpoint.
 
-    def subjects(self, assets: tuple[str, ...]) -> list[str]:
-        return list(self.session.scalars(select(Ticker.thscode).where(
-            Ticker.asset_type.in_(assets)).order_by(Ticker.thscode)))
+    def subjects(self, assets: tuple[str, ...], *, current_only: bool = False) -> list[str]:
+        rows = self.session.execute(select(Ticker.thscode, Ticker.asset_type).where(
+            Ticker.asset_type.in_(assets)).order_by(Ticker.thscode)).all()
+        if not current_only:
+            return [code for code, _ in rows]
+        # Retaining historical identities is not evidence that the provider
+        # still accepts them. Automatic collection follows each asset's last
+        # complete directory snapshot; explicit historical requests retain
+        # access to old identities. A failed refresh uses the last good head,
+        # and installations without directory snapshots keep their seed scope.
+        current = {}
+        for asset in assets:
+            previous = self.read('tickers', asset, 'default')
+            if previous.data is not None:
+                current[asset] = {row['thscode'] for row in previous.data['item']}
+        return [code for code, asset in rows if asset not in current or code in current[asset]]
 
     def related(self, field: str) -> list[str]:
         observations = self.session.scalars(select(Observation).join(State,

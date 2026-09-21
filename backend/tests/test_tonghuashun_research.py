@@ -414,3 +414,40 @@ def test_signed_bonus_ratios_remain_raw_while_invalid_amounts_fail(tmp_path):
     write_parquet(path, [{**event, 'dividend_per_share': -1.0}])
     with pytest.raises(CollectionError, match='非法数值'):
         validate_file(path, 'stock_actions_dump', tmp_path, NOW)
+
+
+@pytest.mark.parametrize('status,phase', [('final', 'closed'), ('ready', 'final')])
+def test_auction_accepts_completed_provider_envelopes(engine, status, phase):
+    seed(engine, [ticker('600519.SH', 'a-share')])
+    c = client(lambda key, p: calendar() if key == 'a-share.calendar.trading-days'
+               else reply([{'thscode': '600519.SH'}], data_status=status, auction_phase=phase))
+    assert collect('stock_auction', Params(), c, engine, now=NOW)['succeeded'] == 1
+    with Session(engine) as session:
+        saved = CollectionRepository(session).read('stock_auction', '600519.SH', 'default')
+        assert saved.data['data_status'] == status
+        assert saved.data['auction_phase'] == phase
+
+
+@pytest.mark.parametrize('status,phase', [('final', 'live'), ('not_ready', 'closed'), (None, 'closed')])
+def test_auction_rejects_unconfirmed_terminal_envelopes(engine, status, phase):
+    seed(engine, [ticker('600519.SH', 'a-share')])
+    c = client(lambda key, p: calendar() if key == 'a-share.calendar.trading-days'
+               else reply([{'thscode': '600519.SH'}], data_status=status, auction_phase=phase))
+    with pytest.raises(CollectionError):
+        collect('stock_auction', Params(), c, engine, now=NOW)
+    with Session(engine) as session:
+        assert CollectionRepository(session).read('stock_auction', '600519.SH', 'default').data is None
+
+
+def test_offerings_collapses_only_identical_records():
+    from app.data_ingestion.tonghuashun.research_acquisition import fetch
+    row = {'thscode': '028546.OF', 'subscription_start_ms': date_ms(NOW.date())}
+    acq = Acquisition(client(reply([row, dict(row)])))
+    result = fetch(acq, DATASETS['fund_offerings'], Unit('active', {'subscribe': 'active'}), Params(), None, NOW)
+    assert result['item'] == [row]
+    assert result['identical_duplicates_removed'] == 1
+    assert acq.fetched_count == 2
+    conflict = {**row, 'subscription_start_ms': date_ms(NOW.date() - timedelta(days=1))}
+    with pytest.raises(CollectionError, match='重复标的'):
+        fetch(Acquisition(client(reply([row, conflict]))), DATASETS['fund_offerings'],
+              Unit('active', {'subscribe': 'active'}), Params(), None, NOW)

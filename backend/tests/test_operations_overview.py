@@ -239,3 +239,41 @@ class OverviewContractTest(unittest.TestCase):
         service.return_value.read.reset_mock()
         read_overview(request, response, session)
         service.return_value.read.assert_called_once_with(source_configured={"tushare": False, "tonghuashun": False})
+
+
+class SchedulerFairnessTest(OverviewTest):
+    # Reuse the rollback-only SQL fixture so PostgreSQL CI exercises the actual
+    # locking query as well as SQLite ordering, without touching deployed jobs.
+    def test_overdue_work_precedes_fresh_priority_without_bypassing_limits(self):
+        from app.scheduling.repository import SchedulerRepository
+        oldest = self.task()
+        old = self.add_run(oldest, 'queued', at=NOW-timedelta(days=6))
+        old.priority = 0
+        newer = self.add_run(self.task(), 'queued', at=NOW-timedelta(hours=2))
+        newer.priority = 100
+        fresh = self.add_run(self.task(), 'queued', at=NOW-timedelta(minutes=1))
+        fresh.priority = 100
+        blocked = self.task()
+        self.add_run(blocked, 'running', at=NOW-timedelta(hours=3))
+        self.add_run(blocked, 'queued', at=NOW-timedelta(days=7))
+        future = self.add_run(self.task(), 'queued', at=NOW+timedelta(hours=1))
+        future.created_at = NOW-timedelta(days=8)
+        self.session.flush()
+        with patch('app.scheduling.repository.datetime') as clock:
+            clock.now.return_value = NOW
+            actual = SchedulerRepository(self.session).claim_queued_runs(3, task_types=[self.key])
+        self.assertEqual(actual, [old.id, newer.id, fresh.id])
+        self.assertEqual(old.priority, 0)
+        self.assertEqual(future.status, 'queued')
+
+    def test_fresh_work_retains_configured_priority(self):
+        from app.scheduling.repository import SchedulerRepository
+        low = self.add_run(self.task(), 'queued', at=NOW-timedelta(minutes=10))
+        low.priority = -100
+        high = self.add_run(self.task(), 'queued', at=NOW-timedelta(minutes=1))
+        high.priority = 100
+        self.session.flush()
+        with patch('app.scheduling.repository.datetime') as clock:
+            clock.now.return_value = NOW
+            actual = SchedulerRepository(self.session).claim_queued_runs(2, task_types=[self.key])
+        self.assertEqual(actual, [high.id, low.id])
