@@ -169,6 +169,30 @@ def test_conversion_repair_preserves_prices_and_restricts_bad_history(session):
     assert 'turnover' not in diff['items'][0]['before']
     assert diff['items'][0]['after']['turnover']=='5925661225'
     assert diff['items'][0]['kind']=='restricted_comparison'
+    # Rolling back the policy/input creates a new revision, but must not make
+    # a previously confirmed erroneous candidate readable under a fresh ID.
+    rollback = create_governance(session, normalization_id=oldwork.id, execution_id=ex.id,
+        policy_id=policy.id, parent_release_id=new.id, expected_head_revision=2, expected_issue_epoch=2)
+    lease = claim(session, work_id=rollback.id)
+    rolled = stage_decisions(session, rollback.id, lease.lease_epoch)
+    publish(session, rolled.id, lease.lease_epoch)
+    assert query(session, rolled, iid, fields=['turnover'])['items'] == []
+    assert query(session, rolled, iid, fields=['close'])['state'] == 'available'
+    replay_manifest = json.loads(ex.manifest_json)
+    replay_manifest['transform']['version'] = 'rollback-replay'
+    replay_execution = register_execution(session, replay_manifest, b'isolated old converter replay')
+    replay = create_work(session, kind='A', contract_id=oldwork.contract_id, execution_id=replay_execution.id,
+        dependency_id=oldwork.dependency_id, parameters=json.loads(oldwork.parameters_json), source_ref_id=oldwork.source_ref_id)
+    with patch('app.data_foundation.tushare.optional_amount', return_value=(Decimal('5925661.225'), None)):
+        lease = claim(session, work_id=replay.id)
+        normalize_batch(session, replay.id, lease.lease_epoch)
+    rerun = create_governance(session, normalization_id=replay.id, execution_id=replay_execution.id,
+        policy_id=policy.id, parent_release_id=rolled.id, expected_head_revision=3, expected_issue_epoch=2)
+    lease = claim(session, work_id=rerun.id)
+    replayed = stage_decisions(session, rerun.id, lease.lease_epoch)
+    publish(session, replayed.id, lease.lease_epoch)
+    assert query(session, replayed, iid, fields=['turnover'])['items'] == []
+    assert query(session, replayed, iid, fields=['close'])['state'] == 'available'
 
 
 def test_real_governance_rejects_manually_changed_decision_plan(session):

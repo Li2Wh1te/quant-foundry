@@ -1,0 +1,15 @@
+[Unit]
+Description=Quant Foundry verified local foundation backup
+
+[Service]
+Type=oneshot
+# Install as a user service for the account that already owns the deployment.
+# The environment file contains paths only; database secrets remain in Docker.
+EnvironmentFile=%h/.config/quant-foundry/backup.env
+ExecStart=/usr/bin/python3 ${QF_BACKUP_PROJECT}/scripts/foundation_backup.py scheduled --project ${QF_BACKUP_PROJECT} --root ${QF_BACKUP_ROOT} --protected-backup ${QF_BACKUP_PROTECTED}
+TimeoutStartSec=3600
+UMask=0077
+Nice=10
+Restart=on-failure
+RestartSec=3600
+

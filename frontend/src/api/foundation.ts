@@ -4,17 +4,36 @@ export class FoundationApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
 }
 export async function foundationApi<T>(path: string, signal?: AbortSignal, body?: unknown): Promise<T> {
-  const response = await fetch(`/api/admin/data-foundation${path}`, {
-    method: body === undefined ? "GET" : "POST", signal,
-    headers: { Authorization: `Bearer ${readApiToken() ?? ""}`, "Content-Type": "application/json" },
-    ...(body === undefined ? {} : { body: JSON.stringify(body) })
-  });
-  if (!response.ok) {
-    let message = `数据服务暂不可用（HTTP ${response.status}），请重试。`;
-    try { const error = await response.json(); if (typeof error.detail?.message === "string") message = error.detail.message; } catch { /* Keep the safe local summary. */ }
-    throw new FoundationApiError(response.status, message);
+  signal?.throwIfAborted();
+  const payload = body === undefined ? undefined : JSON.stringify(body);
+  const controller = new AbortController();
+  const cancel = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", cancel, { once: true });
+  let timedOut = false;
+  // Bound both the request and response-body read. Keep caller cancellation
+  // distinct so a superseded page request cannot render a spurious error.
+  const deadline = setTimeout(() => { timedOut = true; controller.abort(); }, 15_000);
+  try {
+    const response = await fetch(`/api/admin/data-foundation${path}`, {
+      method: body === undefined ? "GET" : "POST", signal: controller.signal,
+      headers: { Authorization: `Bearer ${readApiToken() ?? ""}`, "Content-Type": "application/json" },
+      ...(payload === undefined ? {} : { body: payload })
+    });
+    if (!response.ok) {
+      let message = `数据服务暂不可用（HTTP ${response.status}），请重试。`;
+      try { const error = await response.json(); if (typeof error.detail?.message === "string") message = error.detail.message; } catch { /* Keep the safe local summary. */ }
+      throw new FoundationApiError(response.status, message);
+    }
+    return await response.json();
+  } catch (error) {
+    if (signal?.aborted || error instanceof FoundationApiError) throw error;
+    if (timedOut) throw new FoundationApiError(504, "数据服务响应超时，请稍后重试。");
+    if (error instanceof SyntaxError) throw new FoundationApiError(502, "数据服务返回格式异常，请稍后重试。");
+    throw new FoundationApiError(0, "无法连接数据服务，请检查网络后重试。");
+  } finally {
+    clearTimeout(deadline);
+    signal?.removeEventListener("abort", cancel);
   }
-  return response.json();
 }
 export interface Dataset {
   dataset: string; version: string; name: string; series: string; profile: string;
