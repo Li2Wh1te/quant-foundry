@@ -16,6 +16,13 @@ const stepNames:Record<string,string>={input:"读取本地来源",normalization:
 const count=(v:number|null|undefined)=>v==null?"待确认":v.toLocaleString("zh-CN");
 const time=(v:string|null|undefined)=>v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"暂无记录";
 
+/** Render the server's settled-input conclusion without guessing from counts.
+ * Keeping this context independently renderable lets CI exercise both states
+ * with real React markup while preserving the page's existing layout. */
+export function DatasetContext({dataset}:{dataset:Dataset}) {
+  return <div className="qf-assets-context"><p>当前正式版本：<code>{dataset.current_release||'暂无正式发布'}</code></p><p>业务截至：{dataset.business_as_of||'待确认'} · 发布于 {time(dataset.published_at)}</p><p>来源观察：{time(dataset.source_observed_at)} · 来源至候选 {count(dataset.normalization_delay_seconds)} 秒 · 候选至正式 {count(dataset.publication_delay_seconds)} 秒</p>{dataset.pending_governance&&<p>最新候选尚未形成当前正式发布；候选数量与正式数量分别统计。</p>}</div>;
+}
+
 /** Native modal focus containment with one close path for Escape and backdrop. */
 export function EvidencePanel({title,children,onClose,wide=false}:{title:string;children:ReactNode;onClose:()=>void;wide?:boolean}) {
   const ref=useRef<HTMLDialogElement>(null);
@@ -103,7 +110,7 @@ function DailyAssetsPage() {
     {dataset&&(!datasetId?<><div className="qf-assets-controls"><label>搜索数据集<input value={search} onChange={e=>update('search',e.target.value)} placeholder="名称或数据集"/></label><label>发布状态<Select value={filter} onChange={e=>update('status',e.target.value)}><option value="all">全部</option><option value="published">已正式发布</option><option value="pending">暂无正式发布</option></Select></label></div>{matches?<div className="qf-assets-sheet"><table><thead><tr><th>数据集</th><th>契约与口径</th><th>业务截至</th><th>正式记录</th><th>状态</th></tr></thead><tbody><tr><td><Link to={detail+`?${params}`}>{dataset.name}</Link></td><td>1.0 · 未复权 · CNY</td><td>{dataset.business_as_of||'暂无正式数据'}</td><td>{count(dataset.official_keys)} 行</td><td>{dataset.current_release?'已正式发布':dataset.candidate_records?'有候选待治理':'暂无正式发布'}<small>成交量单位待验证</small></td></tr></tbody></table></div>:<p>没有匹配的数据集，请调整筛选条件。</p>}</>:<>
       <nav className="qf-assets-tabs" aria-label="数据集视图">{[['data','概况与数据'],['fields','字段与口径'],['versions','来源与版本'],['process','处理过程']].map(([key,label])=><Link key={key} aria-current={view===key?'page':undefined} to={tabLink(key)}>{label}</Link>)}</nav>
       <div className="qf-assets-metrics">{[['来源记录',dataset.source_records],['候选记录',dataset.candidate_records],['正式业务键',dataset.official_keys],['应有业务键',dataset.expected_business_keys]].map(([label,v])=><div key={String(label)}><span>{label}</span><strong>{count(v as number|null)}</strong><small>行</small></div>)}</div>
-      <div className="qf-assets-context"><p>当前正式版本：<code>{dataset.current_release||'暂无正式发布'}</code></p><p>业务截至：{dataset.business_as_of||'待确认'} · 发布于 {time(dataset.published_at)}</p><p>来源观察：{time(dataset.source_observed_at)} · 来源至候选 {count(dataset.normalization_delay_seconds)} 秒 · 候选至正式 {count(dataset.publication_delay_seconds)} 秒</p>{dataset.pending_governance&&<p>最新候选尚未形成当前正式发布；候选数量与正式数量分别统计。</p>}</div>
+      <DatasetContext dataset={dataset}/>
       {view==='versions'&&datasetId&&<FoundationIntakeLedger datasetId={datasetId} refresh={refresh} onError={handleError}/>}
       {(view==='process'||view==='versions')&&datasetId&&<FoundationBatchLedger datasetId={datasetId} refresh={refresh} onError={handleError}/>}
       {auxError&&<p role="alert" className="qf-assets-error">{auxError}</p>}
