@@ -90,8 +90,8 @@ def read_release(session, *, release_id, expected_issue_epoch, authenticate, ins
     items, gaps = [], []
     for member in members:
         blocked = any(issue.instrument_id == member.instrument_id and issue.start <= member.trade_date <= issue.end
-            and matches_revision(issue.official_id, member.official_id, fingerprints)
-            and set(fields).intersection(json.loads(issue.fields_json)) for issue in restrictions)
+            and matches_revision(issue.official_id, member.official_id, fingerprints,
+                set(fields).intersection(json.loads(issue.fields_json))) for issue in restrictions)
         if member.state != 'value' or blocked:
             gaps.append({'instrument_id': member.instrument_id, 'trade_date': member.trade_date,
                          'reason': 'current_issue' if blocked else member.state})

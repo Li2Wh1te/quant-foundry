@@ -215,6 +215,33 @@ def query_official(session, request, authenticate, *, check_only=False, page_aft
     return encode(response).encode()
 
 
+def pending_governance(session, latest_a, release):
+    """Check actual settled inputs on the current release's ancestor chain.
+
+    Multi-input publication settles every reviewed manifest, including explicit
+    historical exclusions and unselected eligible inputs. Descendants preserve
+    that settlement. Unrelated/abandoned publications cannot hide new work.
+    One recursive query avoids per-release round trips and history truncation.
+    """
+    if latest_a is None:
+        return False
+    if release is None:
+        return True
+    from sqlalchemy import or_
+    from app.data_foundation.batch_models import CandidateInputEntry
+    chain = select(Release.id, Release.parent_id, Release.work_id).where(
+        Release.id == release.id, Release.status == 'published').cte('settled_release_chain', recursive=True)
+    chain = chain.union_all(select(Release.id, Release.parent_id, Release.work_id)
+        .join(chain, Release.id == chain.c.parent_id)
+        .where(Release.status == 'published', Release.scope_key == release.scope_key))
+    manifests = select(CandidateManifest.id).where(CandidateManifest.work_id == latest_a.id)
+    reviewed = select(CandidateInputEntry.input_set_id).where(CandidateInputEntry.manifest_id.in_(manifests))
+    settled = session.scalar(select(Work.id).join(chain, Work.id == chain.c.work_id)
+        .where(Work.status == 'succeeded', or_(Work.candidate_manifest_id.in_(manifests),
+            Work.candidate_input_set_id.in_(reviewed))).limit(1))
+    return settled is None
+
+
 def dataset_view(session):
     scope=scope_key(DATASET,1,'default',SERIES)
     head=session.get(Head,scope)
@@ -237,7 +264,7 @@ def dataset_view(session):
         'range':{'from':coverage['start'] if coverage else params.get('start'),'to':coverage['end'] if coverage else params.get('end')},'subjects':coverage['subjects'] if coverage else [],
         'source_records':latest_a.total if latest_a else None,'candidate_records':len(candidates),
         'candidate_work_id':str(latest_a.id) if latest_a else None,
-        'pending_governance':bool(latest_a and (not release or latest_a.id!=origin.id)),
+        'pending_governance':pending_governance(session, latest_a, release),
         'quarantined_records':sum(c.readiness=='quarantined' for c in candidates),
         'official_keys':sum(m.state=='value' for m in members),'coverage_status':coverage['status'] if coverage else 'unknown',
         'expected_business_keys':len(coverage['expected_keys']) if coverage and coverage['status']=='pass' else None,

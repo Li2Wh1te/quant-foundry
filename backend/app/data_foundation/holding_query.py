@@ -118,8 +118,8 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
     readable, totals = [], 0
     for obj in objects:
         reason = None if obj.state == 'value' else obj.state
-        if any(t.target_key == obj.target_key and matches_revision(t.official_id, obj.official_id, fingerprints)
-               and set(request.fields).intersection(json.loads(i.fields_json)) for i, t in restrictions):
+        if any(t.target_key == obj.target_key and matches_revision(t.official_id, obj.official_id, fingerprints,
+                   set(request.fields).intersection(json.loads(i.fields_json))) for i, t in restrictions):
             reason = 'current_issue'
         head = session.get(OfficialReport, obj.official_id) if obj.official_id else None
         if head:

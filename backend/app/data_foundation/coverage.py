@@ -102,13 +102,25 @@ def merge_coverage(parts):
             prior = subjects.get(iid)
             if prior and any(prior.get(k) != subject.get(k) for k in ('code', 'exchange')):
                 raise FoundationError('COVERAGE_CONFLICT', '输入的标的适用依据冲突。')
+            incoming = part.get('subject_intervals', {}).get(iid, [[part['start'], part['end']]])
+            # Both operands can be already-merged coverage with unknown holes.
+            # Compare only intersections of actual evidence intervals; a total
+            # bounding range is not evidence of a closed trading calendar.
             for start, end in spans.get(iid, []):
-                lo, hi = max(start, part['start']), min(end, part['end'])
-                if lo <= hi and ({k for k in expected if k[0] == iid and lo <= k[1] <= hi}
-                        != {k for k in keys if k[0] == iid and lo <= k[1] <= hi}):
-                    raise FoundationError('COVERAGE_CONFLICT', '重叠输入的交易日适用依据冲突。')
+                for lower, upper in incoming:
+                    lo, hi = max(start, lower), min(end, upper)
+                    if lo <= hi and ({k for k in expected if k[0] == iid and lo <= k[1] <= hi}
+                            != {k for k in keys if k[0] == iid and lo <= k[1] <= hi}):
+                        raise FoundationError('COVERAGE_CONFLICT', '重叠输入的交易日适用依据冲突。')
             subjects[iid] = subject
-            spans.setdefault(iid, []).extend(part.get('subject_intervals', {}).get(iid, [[part['start'], part['end']]]))
+            # Canonicalize the interval union without filling an unknown day.
+            combined = []
+            for lower, upper in sorted(spans.get(iid, []) + list(incoming)):
+                if combined and (date.fromisoformat(lower) - date.fromisoformat(combined[-1][1])).days <= 1:
+                    combined[-1][1] = max(combined[-1][1], upper)
+                else:
+                    combined.append([lower, upper])
+            spans[iid] = combined
         expected.update(keys)
     return dict(status='pass', start=min(p['start'] for p in parts), end=max(p['end'] for p in parts),
         subjects=[subjects[k] for k in sorted(subjects)], subject_intervals=spans,
