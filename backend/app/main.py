@@ -15,6 +15,7 @@ from app.data_ingestion.router import router as data_ingestion_router
 from app.data_ingestion.tonghuashun.router import router as tonghuashun_data_router
 from app.data_ingestion.watchlist_router import router as etf_watchlist_router
 from app.data_sources.router import router as data_sources_router
+from app.data_foundation.router import router as foundation_router
 from app.data_sources.service import initialize_sources
 from app.backtesting.router import router as backtesting_router
 from app.backtesting.fee_catalog import router as fee_catalog_router
@@ -77,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(tonghuashun_data_router)
     protected_router.include_router(etf_watchlist_router)
     protected_router.include_router(data_sources_router)
+    protected_router.include_router(foundation_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)
     protected_router.include_router(fee_catalog_router)

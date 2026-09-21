@@ -1,4 +1,4 @@
-.PHONY: backend-test frontend-build root-test test release-check release-set-version selfhost selfhost-deploy-backend selfhost-deploy-frontend selfhost-down selfhost-logs selfhost-migrate selfhost-psql selfhost-reset selfhost-restart-postgres selfhost-status
+.PHONY: backend-test frontend-test frontend-build root-test test release-check release-set-version selfhost selfhost-deploy-backend selfhost-deploy-frontend selfhost-down selfhost-logs selfhost-migrate selfhost-psql selfhost-reset selfhost-restart-postgres selfhost-status
 
 root-test:
 	@python3 -m unittest discover -s tests -v
@@ -6,10 +6,13 @@ root-test:
 backend-test:
 	@cd backend && uv run python -m pytest -q tests
 
+frontend-test:
+	@cd frontend && pnpm test
+
 frontend-build:
 	@cd frontend && pnpm build
 
-test: root-test backend-test frontend-build
+test: root-test backend-test frontend-test frontend-build
 
 release-check:
 	@python3 scripts/release_version.py check

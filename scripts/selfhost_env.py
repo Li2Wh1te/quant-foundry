@@ -42,6 +42,11 @@ ENV_ASSIGNMENT = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=")
 
 
 def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozenset[str]:
+    # Create the bind-mount directory as the deploying user before Compose can
+    # create a root-owned directory. Existing operator permissions stay intact.
+    (env_path.parent / "data" / "foundation-runtime-archives").mkdir(
+        parents=True, exist_ok=True, mode=0o750
+    )
     if not env_path.exists():
         shutil.copyfile(template_path, env_path)
 
@@ -96,7 +101,7 @@ def ensure_selfhost_environment(env_path: Path, template_path: Path) -> frozense
             raise ValueError("Invalid QF_DATA_SOURCE_ENCRYPTION_KEY; restore the original 64-character hex key.")
     # Existing self-hosted installations retain their .env across deployments.
     # Seed only keys absent from that file with template defaults so new
-    # configuration (for example, a newly added data provider) becomes visible
+    # configuration (including QF_FOUNDATION_WORKER_ENABLED=false) becomes visible
     # after an upgrade without replacing any operator-provided value.
     template_defaults = {
         key: value

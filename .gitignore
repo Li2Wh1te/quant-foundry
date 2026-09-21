@@ -18,3 +18,6 @@ __pycache__/
 *REVIEW_CHECKLIST.md
 *TRACEABILITY.md
 *REVIEW_STATUS.md
+
+# Immutable runtime evidence is local deployment data, never source code.
+/data/foundation-runtime-archives/

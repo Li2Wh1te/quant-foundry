@@ -14,6 +14,48 @@ from scripts.selfhost_env import (
 
 
 class SelfhostEnvironmentTestCase(unittest.TestCase):
+    def test_existing_archive_directory_permissions_are_preserved(self):
+        template=Path(__file__).resolve().parents[1]/"backend"/".env.example"
+        with tempfile.TemporaryDirectory() as directory:
+            env=Path(directory)/".env"
+            archive=env.parent/"data"/"foundation-runtime-archives"
+            archive.mkdir(parents=True);archive.chmod(0o700)
+            ensure_selfhost_environment(env,template)
+            self.assertEqual(archive.stat().st_mode & 0o777,0o700)
+
+    def test_existing_archive_group_is_not_overwritten(self):
+        template=Path(__file__).resolve().parents[1]/"backend"/".env.example"
+        with tempfile.TemporaryDirectory() as directory:
+            env=Path(directory)/".env"
+            env.write_text("QF_FOUNDATION_ARCHIVE_GID=2050\n")
+            ensure_selfhost_environment(env,template)
+            self.assertIn("QF_FOUNDATION_ARCHIVE_GID=2050",env.read_text())
+
+    def test_foundation_default_first_install_upgrade_and_existing_value(self):
+        template = Path(__file__).resolve().parents[1] / "backend" / ".env.example"
+        for existing in (None, "", "true", "false"):
+            with self.subTest(existing=existing), tempfile.TemporaryDirectory() as directory:
+                env = Path(directory) / ".env"
+                if existing is not None:
+                    env.write_text("QF_TUSHARE_TOKEN=preserved-secret\n" +
+                                   ("QF_FOUNDATION_WORKER_ENABLED=" + existing + "\n" if existing else "") +
+                                   ("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64 + "\n" if existing == "true" else ""))
+                ensure_selfhost_environment(env, template)
+                contents = env.read_text()
+                archive_dir=env.parent/"data"/"foundation-runtime-archives"
+                self.assertTrue(archive_dir.is_dir())
+                self.assertEqual(archive_dir.stat().st_mode & 0o007, 0)
+                expected = existing if existing else "false"
+                self.assertIn("QF_FOUNDATION_WORKER_ENABLED=" + expected, contents)
+                self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=", contents)
+                self.assertIn("QF_FOUNDATION_ARCHIVE_GID=1000", contents)
+                if existing == "true":
+                    self.assertIn("QF_FOUNDATION_RUNTIME_IMAGE_DIGEST=sha256:" + "1" * 64, contents)
+                if existing is not None:
+                    self.assertIn("QF_TUSHARE_TOKEN=preserved-secret", contents)
+                ensure_selfhost_environment(env, template)
+                self.assertEqual(env.read_text(), contents)
+
     def test_source_encryption_key_first_install_and_upgrade_preserve_existing_values(self):
         for upgrade in (False, True):
             with self.subTest(upgrade=upgrade), tempfile.TemporaryDirectory() as directory:

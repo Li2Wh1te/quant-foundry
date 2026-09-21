@@ -53,6 +53,8 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     image: quant-foundry-backend:local
+    group_add:
+      - "${QF_FOUNDATION_ARCHIVE_GID:-1000}"
     env_file:
       - .env
     environment:
@@ -62,6 +64,7 @@ services:
       - "${QF_SERVER_PORT:-8000}"
     volumes:
       - server_logs:/app/data/logs
+      - ./data/foundation-runtime-archives:/app/data/foundation-runtime-archives:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -85,6 +88,8 @@ services:
       dockerfile: backend/Dockerfile
     image: quant-foundry-backend:local
     command: ["python", "-m", "app.runner"]
+    group_add:
+      - "${QF_FOUNDATION_ARCHIVE_GID:-1000}"
     env_file:
       - .env
     environment:
@@ -92,6 +97,7 @@ services:
       QF_DATABASE_PORT: 5432
     volumes:
       - server_logs:/app/data/logs
+      - ./data/foundation-runtime-archives:/app/data/foundation-runtime-archives:ro
     depends_on:
       postgres:
         condition: service_healthy

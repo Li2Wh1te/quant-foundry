@@ -126,3 +126,11 @@ __all__ = [
 from app.backtesting.fee_catalog import FeeScheduleVersionRecord  # noqa: F401
 
 from app.backtesting.saved_comparisons import SavedComparison, SavedComparisonMember  # noqa: F401
+
+from app.data_foundation import models as foundation_models  # noqa: F401
+
+from app.data_foundation import work_models as foundation_work_models  # noqa: F401
+from app.data_foundation import holding_models as foundation_holding_models  # noqa: F401
+
+from app.data_foundation import intake_models as foundation_intake_models  # noqa: F401
+from app.data_foundation import batch_models as foundation_batch_models  # noqa: F401
