@@ -347,7 +347,7 @@ def collect_dump(dataset,params,raw_client,engine,*,now=None):
     from app.data_ingestion.tonghuashun.service import BudgetedClient, logger
     now=now or datetime.now(UTC)
     spec=DATASETS[dataset]
-    from app.data_ingestion.tonghuashun.control import control
+    from app.data_ingestion.tonghuashun.control import CollectionYield, control
     monitor = control()
     if monitor:
         monitor.check()
@@ -375,6 +375,13 @@ def collect_dump(dataset,params,raw_client,engine,*,now=None):
             if slot.generation==generation and slot.status=='downloading':
                 slot.status='failed'
             session.commit()
+        # Cooperative budget/cancellation exits are consumed by the scheduler
+        # wrapper. Preserve a ready staging generation so the next batch can
+        # publish without downloading again, and never mislabel this control
+        # signal as a provider/import failure. An unfinished download remains
+        # retryable through the cleanup above.
+        if isinstance(exc, CollectionYield):
+            raise
         # Never chain network/Arrow exceptions containing signed URLs or data.
         message=str(exc) if isinstance(exc,(CollectionError,TonghuashunError)) else '批量导入失败，未完成范围将在下次续作。'
         logger.warning('tonghuashun_collection_failed',source='tonghuashun',data_type=dataset,

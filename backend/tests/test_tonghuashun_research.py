@@ -451,3 +451,35 @@ def test_offerings_collapses_only_identical_records():
     with pytest.raises(CollectionError, match='重复标的'):
         fetch(Acquisition(client(reply([row, conflict]))), DATASETS['fund_offerings'],
               Unit('active', {'subscribe': 'active'}), Params(), None, NOW)
+
+
+@pytest.mark.parametrize('reason', ['budget', 'stopped'])
+@pytest.mark.parametrize('stage_status', ['ready', 'downloading'])
+def test_dump_cooperative_exit_keeps_ready_generation(research_engine, monkeypatch, reason, stage_status):
+    from app.data_ingestion.tonghuashun import dump_service
+    from app.data_ingestion.tonghuashun.control import CollectionYield, active_control
+    generation, _ = reserve('stock_daily_dump', Params(), research_engine, NOW)
+    with Session(research_engine) as session:
+        slot = session.get(Import, 'stock_daily_dump')
+        slot.status = stage_status
+        if stage_status == 'ready':
+            slot.total_subjects = 1
+            session.add(Stage(dataset='stock_daily_dump', subject='600519.SH', data_json='{"item":[]}'))
+        session.commit()
+    monkeypatch.setattr(dump_service, 'reserve', lambda *args: (generation, False))
+    monitor = Mock()
+    signal = CollectionYield(reason)
+    monitor.check.side_effect = [None, signal]
+    token = active_control.set(monitor)
+    try:
+        with pytest.raises(CollectionYield) as caught:
+            dump_service.collect_dump('stock_daily_dump', Params(), client(reply([])), research_engine, now=NOW)
+        assert caught.value is signal
+    finally:
+        active_control.reset(token)
+    with Session(research_engine) as session:
+        slot = session.get(Import, 'stock_daily_dump')
+        assert slot.generation == generation
+        assert slot.status == ('ready' if stage_status == 'ready' else 'failed')
+        if stage_status == 'ready':
+            assert session.get(Stage, ('stock_daily_dump', '600519.SH')) is not None
