@@ -131,7 +131,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         else:
             assets = tuple(a for a in spec.assets if a in parameters.asset_types)
             subjects = (repo.related(spec.identity) if spec.kind in ("company", "manager")
-                        else repo.subjects(assets))
+                        else repo.subjects(assets, current_only=not parameters.subjects))
             if parameters.subjects:
                 if set(parameters.subjects) - set(subjects):
                     raise CollectionError("指定标的尚未进入同花顺目录或关联资料，或不在本接口适用范围。")

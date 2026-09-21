@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
 from app.scheduling.models import ScheduledTask, TaskRun
@@ -140,7 +140,15 @@ class SchedulerRepository:
             .subquery()
         )
         running_count = func.coalesce(running_counts.c.running_count, 0)
+        # Promote executions that have been eligible for an hour ahead of fresh
+        # work, oldest first. Strict priority alone can starve backfills forever
+        # when recurring high-priority tasks continuously refill the queue.
+        # Use available_at rather than creation time so delayed work cannot age
+        # before it is eligible. Keep the persisted user priority unchanged.
+        overdue = TaskRun.available_at <= now - timedelta(hours=1)
         task_order = (
+            case((overdue, 0), else_=1),
+            case((overdue, TaskRun.available_at), else_=None),
             TaskRun.priority.desc(),
             TaskRun.available_at,
             TaskRun.created_at,
@@ -183,12 +191,7 @@ class SchedulerRepository:
                     )
                 )
             )
-            .order_by(
-                TaskRun.priority.desc(),
-                TaskRun.available_at,
-                TaskRun.created_at,
-                TaskRun.id,
-            )
+            .order_by(*task_order)
             .limit(limit)
             .with_for_update(of=TaskRun, skip_locked=True)
         )

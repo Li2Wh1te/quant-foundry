@@ -77,6 +77,15 @@ def fetch(acq, spec, unit, params, previous, now):
     if spec.key == 'fund_drawdowns':
         if code_rows(rows, [unit.subject]) != {unit.subject}:
             raise CollectionError('基金回撤未返回请求标的。')
+    if spec.kind == 'm3_offerings':
+        # Offering lists can repeat an identical subscription record. Collapse
+        # only exact duplicates; differing windows for one code still fail the
+        # identity check below instead of silently choosing a conflicting row.
+        unique_rows = {exact_json(row): row for row in rows}
+        if len(unique_rows) != len(rows):
+            data = {**data, 'item': list(unique_rows.values()),
+                    'identical_duplicates_removed': len(rows) - len(unique_rows)}
+            rows = data['item']
     if spec.kind in ('m3_period', 'm3_offerings'):
         code_rows(rows)
     if spec.kind in ('m3_snapshot', 'm3_manager'):
