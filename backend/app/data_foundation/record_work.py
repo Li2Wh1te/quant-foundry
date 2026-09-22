@@ -11,7 +11,7 @@ from app.data_foundation.catalog import now, lock_key, register_definition, regi
 from app.data_foundation.models import SourceRef, Definition
 from app.data_foundation.source_refs import read_source
 from app.data_foundation.record_models import (RecordSubject, CandidateRecord, OfficialRecord,
-    RecordBlockMember, RecordBlockVerification)
+    RecordBlockMember, RecordBlockVerification, RecordPlanVerification)
 from app.data_foundation.record_schemas import schema_for, validate_body
 from app.data_foundation.record_adapters import dataset_for, rows_for, convert
 from app.data_foundation.work import create_work, fenced, finish_batch, append_event, BATCH_ROWS
@@ -279,23 +279,65 @@ def create_governance(session, *, normalization_id, execution_id, policy_id, par
         raise FoundationError('CANDIDATE_NOT_SEALED', '领域候选尚未封存。')
     params = verify(origin)
     actions = plan_actions(session, manifest.id, policy_id, parent_release_id)
-    return create_work(session, kind='B', contract_id=origin.contract_id, execution_id=execution_id,
+    work = create_work(session, kind='B', contract_id=origin.contract_id, execution_id=execution_id,
         dependency_id=origin.dependency_id, candidate_manifest_id=manifest.id, policy_id=policy_id,
         parent_release_id=parent_release_id, expected_head_revision=expected_head_revision,
         expected_issue_epoch=expected_issue_epoch, parameters={**params, 'actions': actions})
+    # The full sealed input and policy were just used to derive every action.
+    # Work inputs/parameters and candidate/policy/parent evidence are immutable;
+    # record that derivation transactionally instead of repeating it per page.
+    _save_plan_verification(session, work, validation_hash(), len(actions))
+    return work
 
 
-def stage_decisions(session, work_id, epoch):
-    work = fenced(session, work_id, epoch)
+def _plan_parameters_hash(work):
+    import hashlib
+    return hashlib.sha256(work.parameters_json.encode('utf-8')).hexdigest()
+
+
+def _save_plan_verification(session, work, validator, action_count):
+    from sqlalchemy.dialects.postgresql import insert
+    session.execute(insert(RecordPlanVerification).values(work_id=work.id,
+        validator_hash=validator, work_fingerprint=work.fingerprint,
+        parameters_hash=_plan_parameters_hash(work), action_count=action_count, verified_at=now())
+        .on_conflict_do_nothing(index_elements=['work_id', 'validator_hash']))
+
+
+def verify_governance_plan(session, work, *, force=False):
+    """Reuse a matching derivation receipt, or rederive the entire fixed plan.
+
+    Generic work creation cannot forge a receipt: unverified work must pass the
+    original full comparison before any page executes. Explicit audit callers
+    use force=True to rederive even a previously verified immutable plan.
+    """
     params = verify(work)
     if work.kind != 'B' or work.candidate_input_set_id:
         raise FoundationError('SCOPE_MISMATCH', '领域治理需要单个固定来源候选清单。')
+    validator = validation_hash()
+    receipt = session.get(RecordPlanVerification, (work.id, validator))
+    if receipt:
+        if (receipt.work_fingerprint != work.fingerprint
+                or receipt.parameters_hash != _plan_parameters_hash(work)
+                or receipt.action_count != len(params['actions'])):
+            raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '治理计划与已核验的固定推导凭据不一致。')
+        if not force:
+            return params['actions']
     manifest = session.get(CandidateManifest, work.candidate_manifest_id)
     origin = session.get(Work, manifest.work_id)
     actions = plan_actions(session, manifest.id, work.policy_id, work.parent_release_id)
     if (params != {**json.loads(origin.parameters_json), 'actions': actions}
             or work.dependency_id != origin.dependency_id):
         raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '领域治理计划与固定输入不一致。')
+    if receipt is None:
+        _save_plan_verification(session, work, validator, len(actions))
+    return actions
+
+
+def stage_decisions(session, work_id, epoch):
+    work = fenced(session, work_id, epoch)
+    params = verify(work)
+    actions = verify_governance_plan(session, work)
+    manifest = session.get(CandidateManifest, work.candidate_manifest_id)
     policy = session.get(Definition, work.policy_id)
     end = min(work.cursor + BATCH_ROWS, len(actions))
     from app.data_foundation.record_bulk import register_assessments
