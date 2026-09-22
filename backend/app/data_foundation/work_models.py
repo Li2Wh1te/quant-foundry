@@ -130,7 +130,9 @@ class CandidateEntry(Base):
     __tablename__ = 'foundation_candidate_entries'
     manifest_id: Mapped[UUID] = mapped_column(fk('candidate_manifests'), primary_key=True)
     ordinal: Mapped[int] = mapped_column(primary_key=True)
-    candidate_id: Mapped[UUID] = mapped_column(fk('candidates'))
+    # Sealing guards ask whether a candidate belongs to any manifest, without
+    # knowing a manifest ID. The forward composite key cannot serve that lookup.
+    candidate_id: Mapped[UUID] = mapped_column(fk('candidates'), index=True)
     __table_args__ = (UniqueConstraint('manifest_id', 'candidate_id'),)
 
 
@@ -192,7 +194,9 @@ class BlockRef(Base):
     __tablename__ = 'foundation_release_block_refs'
     release_id: Mapped[UUID] = mapped_column(fk('official_releases'), primary_key=True)
     partition_key: Mapped[str] = mapped_column(String(128), primary_key=True)
-    block_id: Mapped[UUID] = mapped_column(fk('release_blocks'))
+    # Member insertion checks this reverse edge for every row before sealing.
+    # Retain the guard and its lock semantics while avoiding full-history scans.
+    block_id: Mapped[UUID] = mapped_column(fk('release_blocks'), index=True)
 
 
 class Head(Base):
