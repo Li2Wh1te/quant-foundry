@@ -11,6 +11,7 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'fund_company'): 'fund.company',
     ('tonghuashun', 'fund_manager'): 'fund.manager',
     ('tonghuashun', 'fund_profile'): 'fund.profile',
+    ('tonghuashun', 'fund_manager_experience'): 'fund.manager_experience',
     ('tonghuashun', 'calendar'): 'market.calendar',
     ('tonghuashun', 'index_catalog'): 'index.category_snapshot',
     ('tonghuashun', 'index_constituents'): 'index.constituent_snapshot',
@@ -37,6 +38,8 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset == 'fund_manager_experience' and len(rows) != 1:
+        raise FoundationError('SOURCE_SCHEMA_INVALID', '经理经历须有一个明确的任职集合容器，未猜测缺失或重复容器。')
     if source.source == 'tonghuashun' and source.dataset in ('index_catalog', 'index_constituents'):
         # Preserve the entire fixed set as one atomic candidate, including an
         # explicitly empty set. A corrupt child quarantines the collection;
@@ -113,7 +116,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if dataset in ('index.category_snapshot', 'index.constituent_snapshot'):
+    if dataset == 'fund.manager_experience':
+        from app.data_foundation.manager_experience import experience_body
+        body, quality = experience_body(source, raw)
+        key, kind = source.subject, 'fund_manager'
+    elif dataset in ('index.category_snapshot', 'index.constituent_snapshot'):
         key = source.subject
         if not isinstance(key, str) or not key.strip():
             raise FoundationError('IDENTITY_UNRESOLVED', '指数集合缺少固定来源主体。')

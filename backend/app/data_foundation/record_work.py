@@ -25,7 +25,8 @@ MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official
 
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
-        for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py', 'record_bulk.py')})
+        for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py',
+                     'record_bulk.py', 'manager_experience.py')})
 
 
 def validation_hash():
