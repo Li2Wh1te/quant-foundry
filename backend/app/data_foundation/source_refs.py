@@ -1,5 +1,6 @@
 """Seal source events, preserving occurrence identity independently of value hash."""
 import json
+from decimal import Decimal
 from uuid import UUID
 from sqlalchemy import select
 from app.data_foundation.canonical import FoundationError, digest, encode
@@ -7,6 +8,39 @@ from app.data_foundation.catalog import lock_key, now
 from app.data_foundation.models import Baseline, BaselineBlock, Execution, SourceRef, ObservationDependency
 from app.data_ingestion.models.tonghuashun import TonghuashunObservation as Observation
 from app.data_ingestion.tonghuashun.repository import materialize
+from app.data_ingestion.tonghuashun.contracts import content_hash
+
+
+def validate_chain(chain):
+    """Verify every fixed version with one forward reconstruction per level.
+
+    Reconstructing each ancestor independently has quadratic cost in chain
+    depth, amplified by years of full-history rows. Carry only the current
+    materialization and verify each intermediate hash before applying the next
+    delta. This retains the old all-dependency integrity guarantee, including
+    detecting an invalid ancestor whose corruption is hidden by a later upsert.
+    """
+    data = None
+    try:
+        for index, item in enumerate(reversed(chain)):
+            if item.chain_depth != index:
+                raise FoundationError('SOURCE_INVALID', '同花顺版本链深度与实际依赖不一致。')
+            payload = json.loads(item.data_json, parse_float=Decimal)
+            if index == 0:
+                data = payload
+            else:
+                key = payload['key_field']
+                rows = {row[key]: row for row in data['item']}
+                for identity in payload['removed']:
+                    rows.pop(identity, None)
+                rows.update({row[key]: row for row in payload['upserts']})
+                data = {**payload['metadata'], 'item': [rows[k] for k in sorted(rows)]}
+            if content_hash(data) != item.content_hash:
+                raise FoundationError('SOURCE_INVALID', '同花顺固定版本或依赖版本内容校验失败。')
+    except FoundationError:
+        raise
+    except (ValueError, KeyError, TypeError, IndexError):
+        raise FoundationError('SOURCE_INVALID', '同花顺固定版本编码或增量结构无效，未登记来源。') from None
 
 
 def register_baseline(session, *, source, dataset, scope, rows, observed_at, decoder_id, event_key):
@@ -62,10 +96,7 @@ def register_observation(session, observation_id: UUID, decoder_id: UUID):
             raise FoundationError('SOURCE_INVALID', '同花顺基础版本的数据范围不一致。')
         chain.append(cursor)
         cursor_id = cursor.base_observation_id
-    for index, item in enumerate(reversed(chain)):
-        if item.chain_depth != index:
-            raise FoundationError('SOURCE_INVALID', '同花顺版本链深度与实际依赖不一致。')
-        materialize(session, item)
+    validate_chain(chain)
     root = chain[0]
     locator = digest('observation-locator', {'id': root.id, 'decoder_id': decoder_id, 'dataset': root.dataset, 'subject': root.subject, 'variant': root.variant})
     old = session.scalar(select(SourceRef).where(SourceRef.source == 'tonghuashun', SourceRef.representation == 'ths_observation', SourceRef.locator_hash == locator))

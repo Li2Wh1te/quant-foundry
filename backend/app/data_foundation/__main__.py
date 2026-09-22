@@ -37,7 +37,7 @@ def local_execution(session, git_commit, image_digest=None):
 
 def main():
     parser = argparse.ArgumentParser(description='固定批准的 S1 来源；不启动采集或发布正式值。')
-    parser.add_argument('command', choices=['s1-dry-run', 's1-apply', 'observation-register', 'archive-register'])
+    parser.add_argument('command', choices=['s1-dry-run', 's1-apply', 'observation-register', 'archive-register', 'execution-register'])
     parser.add_argument('--archive-evidence')
     parser.add_argument('--execution-id')
     parser.add_argument('--expected-hash')
@@ -67,6 +67,14 @@ def main():
         return
     if not args.git_commit:
         parser.error('--git-commit is required')
+    if args.command == 'execution-register':
+        with Session(engine) as session, session.begin():
+            execution = local_execution(session, args.git_commit, args.image_digest)
+            result = {'execution_id': execution.id, 'manifest_hash': execution.manifest_hash,
+                'replay_status': execution.replay_status,
+                'message': '当前数据底座执行版本已登记，运行归档仍需单独核验，未纳入来源或发布正式值。'}
+        print(encode(result))
+        return
     if args.command == 's1-apply' and (not args.expected_hash or not args.event_key):
         parser.error('s1-apply requires --expected-hash and --event-key')
     if args.command == 'observation-register' and not args.observation_id:

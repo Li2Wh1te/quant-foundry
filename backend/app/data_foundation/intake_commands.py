@@ -27,7 +27,7 @@ def main():
     parser.add_argument('--pause-a',action=argparse.BooleanOptionalAction,default=True)
     parser.add_argument('--pause-b',action=argparse.BooleanOptionalAction,default=True)
     parser.add_argument('--allow-publish',action='store_true')
-    parser.add_argument('--mode',choices=['full','recent','auto'],default='full')
+    parser.add_argument('--mode',choices=['full','recent','frozen','auto'],default='full')
     args=parser.parse_args()
     if not 1<=args.pages<=100:parser.error('--pages must be between 1 and 100')
     document=json.loads(args.document.read_text()) if args.document else None
