@@ -80,6 +80,11 @@ def create_governance(session, *, normalization_id, execution_id, policy_id, par
     manifest = session.scalar(select(CandidateManifest).where(CandidateManifest.work_id == normalization_id))
     if origin is None or manifest is None:
         raise FoundationError('CANDIDATE_NOT_SEALED', '标准化工作尚无封存候选。')
+    if json.loads(origin.parameters_json)['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_work import create_governance as create_record_governance
+        return create_record_governance(session, normalization_id=normalization_id, execution_id=execution_id,
+            policy_id=policy_id, parent_release_id=parent_release_id, expected_head_revision=expected_head_revision,
+            expected_issue_epoch=expected_issue_epoch)
     actions = plan_actions(session,manifest.id,policy_id)
     return create_work(session,kind='B',contract_id=origin.contract_id,execution_id=execution_id,
         dependency_id=origin.dependency_id,parameters={**json.loads(origin.parameters_json),'actions':actions},

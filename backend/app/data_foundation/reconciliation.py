@@ -75,6 +75,9 @@ def reconcile_batch(session,batch_id):
         for work in origins:
             params=json.loads(work.parameters_json)
             expected=len(params['report_keys']) if params['domain']=='holdings-report-v1' else len(raw)
+            if params['domain'] == 'typed-record-v1':
+                from app.data_foundation.record_adapters import rows_for
+                expected = len(rows_for(ref, raw))
             candidates=session.scalars(select(Candidate).where(Candidate.work_id==work.id).order_by(Candidate.occurrence)).all()
             manifest=session.scalar(select(CandidateManifest).where(CandidateManifest.work_id==work.id))
             if work.status!='succeeded':
@@ -93,6 +96,9 @@ def reconcile_batch(session,batch_id):
             from app.data_foundation.work_models import CandidateBar
             from app.data_foundation.holding_models import CandidateReport
             typed_model = CandidateReport if params['domain'] == 'holdings-report-v1' else CandidateBar
+            if params['domain'] == 'typed-record-v1':
+                from app.data_foundation.record_models import CandidateRecord
+                typed_model = CandidateRecord
             typed_candidates = list(session.scalars(select(typed_model).where(
                 typed_model.candidate_id.in_([c.id for c in candidates]))))
             by_candidate, by_target = defaultdict(list), defaultdict(list)
@@ -122,6 +128,7 @@ def reconcile_batch(session,batch_id):
     from app.data_foundation.publication import validate_release
     from app.data_foundation.work_models import BlockRef,BlockMember
     from app.data_foundation.holding_models import ReportBlockMember
+    from app.data_foundation.record_models import RecordBlockMember
     for work in works:
         if work.kind!='B':continue
         produced=[r for r in releases if r.work_id==work.id]
@@ -132,6 +139,7 @@ def reconcile_batch(session,batch_id):
             blocks=select(BlockRef.block_id).where(BlockRef.release_id==release.id)
             represented=set(session.scalars(select(BlockMember.decision_id).where(BlockMember.block_id.in_(blocks))))
             represented.update(session.scalars(select(ReportBlockMember.decision_id).where(ReportBlockMember.block_id.in_(blocks))))
+            represented.update(session.scalars(select(RecordBlockMember.decision_id).where(RecordBlockMember.block_id.in_(blocks))))
             for decision in (d for d in decisions if d.work_id==work.id):
                 add('decision',decision.id,'explained' if decision.id in represented else 'unexplained',
                     'DECISION_MANIFEST_MATCH' if decision.id in represented else 'DECISION_MISSING',
@@ -150,6 +158,8 @@ def reconcile_batch(session,batch_id):
 
 
 def candidate_target(session,candidate,check):
+    if check.get('target_key'):
+        return check['target_key']
     from app.data_foundation.work_models import CandidateBar
     from app.data_foundation.holding_models import CandidateReport
     from app.data_foundation.holding_work import fields,KEY_FIELDS
@@ -179,6 +189,26 @@ def verify_candidate_values(session,work,candidates,raw):
     from app.data_foundation.bars import values
     params=json.loads(work.parameters_json)
     mismatches=set()
+    if params['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_adapters import rows_for, convert
+        from app.data_foundation.record_work import record_key, value_hash
+        from app.data_foundation.record_models import CandidateRecord, RecordSubject
+        source = session.get(SourceRef, work.source_ref_id)
+        rows = rows_for(source, raw)
+        for candidate in candidates:
+            if candidate.readiness != 'ready':
+                continue
+            typed = session.get(CandidateRecord, candidate.id)
+            try:
+                value = convert(source, rows[candidate.occurrence])
+                subject = session.get(RecordSubject, typed.subject_id)
+                if (typed.body_json != encode(value['body']) or typed.field_quality_json != encode(value['field_quality'])
+                        or typed.business_key != record_key(source, value) or value_hash(typed) != candidate.values_hash
+                        or (subject.source, subject.kind, subject.source_key) != (source.source, value['subject_kind'], value['subject_key'])):
+                    mismatches.add(candidate.id)
+            except (ValueError, TypeError, IndexError, AttributeError):
+                mismatches.add(candidate.id)
+        return mismatches
     if params['domain']=='tushare-local-daily-v1':
         from app.data_foundation.tushare import map_row
         for candidate in candidates:

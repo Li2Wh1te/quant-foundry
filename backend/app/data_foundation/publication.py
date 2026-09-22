@@ -25,6 +25,9 @@ def stage_decisions(session, work_id, epoch):
     if work.kind != 'B':
         raise ValueError('Governance work required')
     params = json.loads(work.parameters_json)
+    if params['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_work import stage_decisions as stage_records
+        return stage_records(session, work_id, epoch)
     if params['domain'] == 'holdings-report-v1':
         from app.data_foundation.holding_work import stage_decisions as stage_reports
         return stage_reports(session, work_id, epoch)
@@ -160,6 +163,9 @@ def seal_release(session, work):
 
 def validate_release(session, release):
     work = session.get(Work, release.work_id)
+    if json.loads(work.parameters_json)['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_work import validate_release as validate_record_release
+        return validate_record_release(session, release)
     if json.loads(work.parameters_json)['domain'] == 'holdings-report-v1':
         from app.data_foundation.holding_work import validate_release as validate_report_release
         return validate_report_release(session, release)

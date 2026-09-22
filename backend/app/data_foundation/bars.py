@@ -61,6 +61,9 @@ def domain_hash():
 def normalize_batch(session, work_id, epoch):
     work = fenced(session, work_id, epoch)
     params = json.loads(work.parameters_json)
+    if params['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_work import normalize_batch as normalize_records
+        return normalize_records(session, work_id, epoch)
     from app.data_foundation import tushare, holding_work
     if params['domain'] == holding_work.DOMAIN_KEY:
         return holding_work.normalize_batch(session, work_id, epoch)
