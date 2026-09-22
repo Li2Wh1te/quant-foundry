@@ -90,7 +90,7 @@ def describe(svc, dataset):
     candidates = svc.session.scalar(select(func.count()).select_from(Candidate).join(Work, Work.id == Candidate.work_id)
         .join(Definition, Definition.id == Work.contract_id).where(Definition.name == dataset))
     return dict(dataset=dataset, name=schema.name, kind='typed_records', version='1.0', profile='default', series=series,
-        as_of=now(), candidate_count=candidates, official_count=sum(s['official_count'] for s in series),
+        as_of=now(), business_date_field=schema.date_field, candidate_count=candidates, official_count=sum(s['official_count'] for s in series),
         business_as_of=max((s['range']['to'] for s in series if s['range']['to']), default=None),
         fields=[dict(key=k, required=k in schema.core_fields) for k in schema.body.model_fields],
         contract=projection['definition'], projection={k: v for k, v in projection.items() if k != 'definition'},
