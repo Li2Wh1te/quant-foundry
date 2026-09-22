@@ -148,6 +148,17 @@ def capability_check(body: RecordRequirement | ReportRequirement | DataRequireme
     return foundation_response(lambda:service(session,request).check_capability(body))
 
 
+@router.get('/datasets/{dataset_id}/subjects')
+def record_subjects(dataset_id: str, request: Request, series: str, release_id: UUID,
+                    after: UUID | None = None, search: str = Query('', max_length=128),
+                    limit: int = Query(50, ge=1, le=100), session: Session = Depends(snapshot_session)):
+    from app.data_foundation.record_service import subjects
+    if dataset_id not in SCHEMAS:
+        raise HTTPException(404, detail={'message': '该数据集不使用来源主体目录。'})
+    return foundation_response(lambda: subjects(service(session, request), dataset_id, series, release_id,
+        after=after, search=search, limit=limit))
+
+
 @router.post('/queries')
 def official_query(body: PageRequest | RecordRequirement | ReportRequirement | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official

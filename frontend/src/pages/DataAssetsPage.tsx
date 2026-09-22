@@ -1,3 +1,4 @@
+import { RecordAssetsPage } from './RecordAssetsPage';
 import { FoundationBatchLedger, FoundationIntakeLedger } from './FoundationBatchLedger';
 import { ReportAssetsPage, FoundationCatalog } from "./ReportAssetsPage";
 import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
@@ -142,5 +143,6 @@ export function DataAssetsPage() {
   const {datasetId}=useParams();
   if (!datasetId) return <FoundationCatalog/>;
   if (datasetId==='fund.holdings_report') return <ReportAssetsPage/>;
+  if (datasetId !== 'market.bar.daily') return <RecordAssetsPage key={datasetId} datasetId={datasetId}/>;
   return <DailyAssetsPage/>;
 }
