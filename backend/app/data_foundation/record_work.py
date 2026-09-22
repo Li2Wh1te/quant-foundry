@@ -209,9 +209,9 @@ def subject_partitioned(dataset, partitions):
     # Existing hash-partitioned lineages retain their original layout; a release
     # may never mix the two schemes and accidentally expose a key twice.
     if not partitions:
-        return dataset == 'market.adjustment_factor'
+        return dataset in ('market.adjustment_factor', 'market.fund_daily')
     subject_flags = [key.startswith('subject:') for key in partitions]
-    if any(subject_flags) and (not all(subject_flags) or dataset != 'market.adjustment_factor'):
+    if any(subject_flags) and (not all(subject_flags) or dataset not in ('market.adjustment_factor', 'market.fund_daily')):
         raise FoundationError('MANIFEST_INVALID', '领域发布分块方式不一致。')
     return all(subject_flags)
 
