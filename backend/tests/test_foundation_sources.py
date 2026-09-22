@@ -105,6 +105,30 @@ def test_fixed_delta_chain_and_scope_validation(session):
     with pytest.raises(FoundationError): register_observation(session, delta.id, ex.id)
 
 
+def test_sealing_checks_corrupt_ancestor_even_when_later_upsert_hides_it(session):
+    ex = execution(session)
+    anchor, delta = observations(session)
+    # The newest version replaces this row completely and still reconstructs
+    # to its expected hash. Its referenced historical version is nevertheless
+    # corrupt, so sealing only the newest hash would be insufficient.
+    anchor.data_json = exact_json({'item': [{'date_ms': 1, 'close': Decimal('99')}]})
+    session.flush()
+    from app.data_ingestion.tonghuashun.repository import materialize
+    assert materialize(session, delta)['item'][0]['close'] == Decimal('2.3')
+    with pytest.raises(FoundationError, match='依赖版本内容校验失败'):
+        register_observation(session, delta.id, ex.id)
+    assert session.scalar(select(SourceRef)) is None
+
+
+def test_sealing_invalid_json_returns_isolatable_source_error(session):
+    ex = execution(session)
+    anchor, _ = observations(session)
+    anchor.data_json = '{malformed'
+    session.flush()
+    with pytest.raises(FoundationError, match='编码或增量结构无效'):
+        register_observation(session, anchor.id, ex.id)
+
+
 def test_identity_reuses_uuid_and_requires_range_evidence(session):
     from app.instruments.models import Instrument
     from app.data_foundation.identity import register_binding, resolve_binding
