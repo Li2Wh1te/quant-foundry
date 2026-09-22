@@ -62,6 +62,44 @@ class CalendarDay(Body):
     scope_basis: Literal['declared_exchange', 'provider_reported_dates']
 
 
+class IndexMember(Body):
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    name: StrictStr | None = None
+    ticker: StrictStr | None = None
+
+
+class IndexCollection(Body):
+    """One indivisible provider-reported set, without inferred effective dates.
+
+    Replacing the collection replaces all its members. An empty list is an
+    explicit empty observation; omitted or malformed lists cannot become one.
+    Local source identifiers do not assert cross-provider instrument bindings.
+    """
+    collection_key: StrictStr = Field(min_length=1, max_length=64)
+    collection_kind: Literal['category', 'index']
+    membership_basis: Literal['provider_reported_snapshot']
+    members: list[IndexMember]
+
+    @field_validator('members')
+    @classmethod
+    def unique_sorted_members(cls, value):
+        keys = [member.source_code for member in value]
+        if len(keys) != len(set(keys)):
+            raise ValueError('Duplicate collection member identity')
+        if keys != sorted(keys):
+            raise ValueError('Collection members must be canonically sorted')
+        return value
+
+
+class IndexCategorySnapshot(IndexCollection):
+    collection_key: Literal['cn_concept', 'region', 'tszs', 'industry']
+    collection_kind: Literal['category']
+
+
+class IndexConstituentSnapshot(IndexCollection):
+    collection_kind: Literal['index']
+
+
 class AdjustmentFactor(Body):
     """Provider factors are retained without inventing a price-adjustment anchor.
 
@@ -101,6 +139,14 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
+    Schema('index.category_snapshot', '指数分类目录快照', IndexCategorySnapshot, 'index_category',
+           ('collection_key', 'collection_kind', 'membership_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'membership_effective_dates_unverified', 'provider_reported_set_only')),
+    Schema('index.constituent_snapshot', '指数成分集合快照', IndexConstituentSnapshot, 'asset:a-share-index',
+           ('collection_key', 'collection_kind', 'membership_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'membership_effective_dates_unverified', 'provider_reported_set_only')),
     Schema('market.calendar', '交易日期', CalendarDay, 'calendar',
            ('exchange_scope', 'calendar_date', 'scope_basis'), ('calendar_date',), date_field='calendar_date'),
     Schema('market.adjustment_factor', '基金来源复权因子', AdjustmentFactor, 'asset:fund-etf',
