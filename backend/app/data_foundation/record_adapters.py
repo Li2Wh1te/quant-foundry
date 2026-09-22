@@ -12,6 +12,8 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'fund_manager'): 'fund.manager',
     ('tonghuashun', 'fund_profile'): 'fund.profile',
     ('tonghuashun', 'calendar'): 'market.calendar',
+    ('tonghuashun', 'index_catalog'): 'index.category_snapshot',
+    ('tonghuashun', 'index_constituents'): 'index.constituent_snapshot',
     ('tushare', 'etf_directory'): 'instrument.reference',
     ('tushare', 'exchange_calendar'): 'market.calendar',
     ('tushare', 'etf_adjustment_factors'): 'market.adjustment_factor',
@@ -34,6 +36,11 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset in ('index_catalog', 'index_constituents'):
+        # Preserve the entire fixed set as one atomic candidate, including an
+        # explicitly empty set. A corrupt child quarantines the collection;
+        # publishing only its valid siblings would invent membership removals.
+        return [{'members': rows}]
     return rows
 
 
@@ -85,7 +92,36 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if dataset == 'instrument.reference':
+    if dataset in ('index.category_snapshot', 'index.constituent_snapshot'):
+        key = source.subject
+        if not isinstance(key, str) or not key.strip():
+            raise FoundationError('IDENTITY_UNRESOLVED', '指数集合缺少固定来源主体。')
+        category = dataset == 'index.category_snapshot'
+        if category and key not in ('cn_concept', 'region', 'tszs', 'industry'):
+            raise FoundationError('IDENTITY_UNRESOLVED', '指数分类标签不在已验证的来源范围内。')
+        members = raw.get('members')
+        if not isinstance(members, list):
+            raise FoundationError('SOURCE_SCHEMA_INVALID', '指数集合必须包含明确的成员列表。')
+        converted = []
+        for member in members:
+            if not isinstance(member, dict):
+                raise FoundationError('SOURCE_SCHEMA_INVALID', '指数集合包含非对象成员，整组隔离。')
+            code = member.get('thscode')
+            if not isinstance(code, str) or not code.strip() or '.' not in code:
+                raise FoundationError('IDENTITY_UNRESOLVED', '指数集合成员缺少来源代码，整组隔离。')
+            # Optional source text may be absent, but a present malformed value
+            # must not be silently dropped from a formally published member.
+            optional = {}
+            for field in ('name', 'ticker'):
+                value = member.get(field)
+                if value is not None and (not isinstance(value, str) or not value.strip()):
+                    raise FoundationError('SOURCE_SCHEMA_INVALID', '指数集合成员文本类型无效，整组隔离。')
+                optional[field] = value
+            converted.append(dict(source_code=code, **optional))
+        body = dict(collection_key=key, collection_kind='category' if category else 'index',
+            membership_basis='provider_reported_snapshot', members=sorted(converted, key=lambda row: row['source_code']))
+        kind = 'index_category' if category else 'asset:a-share-index'
+    elif dataset == 'instrument.reference':
         tushare = source.source == 'tushare'
         key = text('ts_code' if tushare else 'thscode', 'source_code', True)
         asset_type = 'fund-etf' if tushare else text('asset_type', required=True)
