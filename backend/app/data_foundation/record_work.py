@@ -205,14 +205,22 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
             .join(SourceRef, SourceRef.id == Candidate.source_ref_id)
             .where(CandidateEntry.manifest_id == manifest.id)):
         groups[typed.business_key].append((candidate, typed, source))
+    # Load the finite parent key set once. Per-key lookups multiply every
+    # governance page by the entire source directory/calendar size.
+    parents = {}
+    if parent_release_id and groups:
+        parents = {m.target_key: (m, o) for m, o in session.execute(
+            select(RecordBlockMember, OfficialRecord)
+            .outerjoin(OfficialRecord, OfficialRecord.id == RecordBlockMember.official_id)
+            .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
+            .where(BlockRef.release_id == parent_release_id, RecordBlockMember.target_key.in_(groups)))}
     actions = []
     for key, group in sorted(groups.items()):
         action, cid, reason = choose([{'id': str(c.id), 'source': s.source, 'series': params['series'],
             'ready': c.readiness == 'ready'} for c, _, s in group], definition)
-        parent = parent_member(session, parent_release_id, key)
+        parent, previous = parents.get(key, (None, None))
         retained = None
         if action == 'select' and parent and parent.state == 'value':
-            previous = session.get(OfficialRecord, parent.official_id)
             selected = next(c for c, _, _ in group if str(c.id) == cid)
             if previous.values_hash == selected.values_hash:
                 action, cid, retained, reason = 'retain', None, str(previous.id), 'UNCHANGED_CANONICAL_RECORD'
@@ -342,22 +350,39 @@ def validate_release(session, release):
             raise FoundationError('MANIFEST_INVALID', '领域发布块范围或数量不一致。')
         if digest('typed-record-block-v1', [fields(m, MEMBER_FIELDS) for m in members]) != block.content_hash:
             raise FoundationError('MANIFEST_INVALID', '领域发布块摘要不一致。')
+        # Verify all cross-references for this hash partition with bounded
+        # bulk queries. Strong references keep SQLAlchemy's weak identity map
+        # from issuing one query per inherited candidate/work/official value.
+        decisions = {d.id: d for d in session.scalars(select(Decision).where(
+            Decision.id.in_({m.decision_id for m in members})))}
+        works = {w.id: w for w in session.scalars(select(Work).where(
+            Work.id.in_({d.work_id for d in decisions.values()})))}
+        officials = {o.id: o for o in session.scalars(select(OfficialRecord).where(
+            OfficialRecord.id.in_({m.official_id for m in members if m.official_id})))}
+        retained = {d.id for d in decisions.values() if d.action == 'retain'}
+        parent_values = dict(session.execute(select(Decision.id, RecordBlockMember.official_id)
+            .join(Work, Work.id == Decision.work_id)
+            .join(BlockRef, BlockRef.release_id == Work.parent_release_id)
+            .join(RecordBlockMember, RecordBlockMember.block_id == BlockRef.block_id)
+            .where(Decision.id.in_(retained), RecordBlockMember.target_key == Decision.target_key,
+                RecordBlockMember.state == 'value')).all()) if retained else {}
         for member in members:
-            decision = session.get(Decision, member.decision_id)
+            decision = decisions.get(member.decision_id)
+            if decision is None or decision.work_id not in works:
+                raise FoundationError('MANIFEST_INVALID', '领域发布的治理决策缺失。')
             if (member.target_key[:2] != ref.partition_key or decision.target_key != member.target_key
-                    or session.get(Work, decision.work_id).scope_key != release.scope_key
+                    or works[decision.work_id].scope_key != release.scope_key
                     or member.state != {'select': 'value', 'retain': 'value', 'block': 'blocked', 'gap': 'gap', 'withdraw': 'withdrawn'}[decision.action]):
                 raise FoundationError('MANIFEST_INVALID', '领域成员与决策范围不一致。')
             if member.official_id:
-                official = session.get(OfficialRecord, member.official_id)
+                official = officials.get(member.official_id)
                 if (official is None or official.schema_key != params['dataset'] or official.subject_id != member.subject_id
                         or official.business_key != member.target_key or official.business_date != member.business_date
                         or value_hash(official) != official.values_hash):
                     raise FoundationError('MANIFEST_INVALID', '正式领域记录与发布成员不一致。')
                 validate_body(params['dataset'], json.loads(official.body_json))
                 if decision.action == 'retain':
-                    parent = parent_member(session, session.get(Work, decision.work_id).parent_release_id, member.target_key)
-                    if not parent or parent.state != 'value' or parent.official_id != official.id or decision.parent_record_id != official.id:
+                    if parent_values.get(decision.id) != official.id or decision.parent_record_id != official.id:
                         raise FoundationError('MANIFEST_INVALID', '保留记录不属于固定父发布。')
                 elif official.decision_id != decision.id or official.candidate_id != decision.selected_candidate_id:
                     raise FoundationError('MANIFEST_INVALID', '正式记录与选中候选不一致。')

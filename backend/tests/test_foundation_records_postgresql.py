@@ -174,3 +174,42 @@ def test_api_schema_accepts_typed_record_and_unknown_domains_fail_closed(session
     assert 'RecordRequirement' in app.openapi()['components']['schemas']
     with pytest.raises(FoundationError, match='未知正式数据集'):
         service(session).describe_dataset('unknown')
+
+
+def test_directory_governance_and_release_validation_batch_reference_reads(session):
+    """A dense hash partition exposes accidental per-record SQL regressions."""
+    from types import SimpleNamespace
+    from sqlalchemy import event
+    from app.data_foundation.record_adapters import convert
+    from app.data_foundation.record_work import record_key, plan_actions
+    from app.data_foundation.work_models import CandidateManifest
+    src = SimpleNamespace(source='tushare', dataset='etf_directory')
+    rows = []
+    ordinal = 0
+    while len(rows) < 25:
+        raw = dict(ts_code=f'DENSE{ordinal}.SH', csname='Dense', exchange='SSE')
+        if record_key(src, convert(src, raw)).startswith('00'):
+            rows.append(raw)
+        ordinal += 1
+    first = release_records(session, setup_records(session, rows))
+    fixture = setup_records(session, rows)
+    manifest = session.scalar(select(CandidateManifest).where(CandidateManifest.work_id == fixture[0].id))
+    statements = []
+    connection = session.connection()
+    def record_sql(*args):
+        statements.append(args[2])
+    event.listen(connection, 'before_cursor_execute', record_sql)
+    try:
+        actions = plan_actions(session, manifest.id, fixture[2].id, first.id)
+        assert len(actions) == 25 and {a['action'] for a in actions} == {'retain'}
+        assert len(statements) < 15
+    finally:
+        event.remove(connection, 'before_cursor_execute', record_sql)
+    second = release_records(session, fixture, first)
+    statements.clear()
+    event.listen(connection, 'before_cursor_execute', record_sql)
+    try:
+        validate_release(session, second)
+        assert len(statements) < 15
+    finally:
+        event.remove(connection, 'before_cursor_execute', record_sql)
