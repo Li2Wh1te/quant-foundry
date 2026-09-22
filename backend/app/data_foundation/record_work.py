@@ -1,9 +1,8 @@
 """Typed source-local records on the shared fenced normalization/release kernel."""
 from collections import Counter, defaultdict
 from pathlib import Path
-from uuid import UUID
+from uuid import UUID, uuid4
 import json
-import time
 
 from sqlalchemy import select
 
@@ -14,10 +13,9 @@ from app.data_foundation.source_refs import read_source
 from app.data_foundation.record_models import RecordSubject, CandidateRecord, OfficialRecord, RecordBlockMember
 from app.data_foundation.record_schemas import schema_for, validate_body
 from app.data_foundation.record_adapters import dataset_for, rows_for, convert
-from app.data_foundation.work import create_work, fenced, finish_batch, append_event, BATCH_ROWS, BUDGET_SECONDS
+from app.data_foundation.work import create_work, fenced, finish_batch, append_event, BATCH_ROWS
 from app.data_foundation.work_models import (Work, Candidate, CandidateManifest, CandidateEntry, Assessment,
     Unit, Decision, Release, ReleaseBlock, BlockRef)
-from app.data_foundation.quality import assessment
 
 DOMAIN_KEY = 'typed-record-v1'
 VALUE_FIELDS = ('subject_id', 'business_key', 'business_date', 'schema_key', 'body_json', 'field_quality_json')
@@ -26,7 +24,7 @@ MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official
 
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
-        for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py')})
+        for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py', 'record_bulk.py')})
 
 
 def fields(row, names=VALUE_FIELDS):
@@ -135,31 +133,40 @@ def normalize_batch(session, work_id, epoch):
     counts = Counter(key for _, key, _ in parsed if key is not None)
     work.total = len(parsed)
     end = min(work.cursor + BATCH_ROWS, work.total)
-    started = time.monotonic()
+    from app.data_foundation.record_bulk import register_subjects, register_assessments
+    subjects = register_subjects(session, source, [value for value, _, _ in parsed[work.cursor:end]])
+    prepared = []
     for index in range(work.cursor, end):
         value, key, reason = parsed[index]
-        subject = register_subject(session, source, value) if value else None
+        subject = subjects[(source.source, value['subject_kind'], value['subject_key'])] if value else None
         if key is not None and counts[key] != 1:
             reason = 'DUPLICATE_BUSINESS_KEY'
         typed = dict(subject_id=subject.id, business_key=key, business_date=value['business_date'],
             schema_key=params['dataset'], body_json=encode(value['body']),
             field_quality_json=encode(value['field_quality'])) if value else None
-        checked = assessment(session, input_hash=digest('typed-record-input', [work.fingerprint, index, raw_rows[index]]),
+        spec = dict(input_hash=digest('typed-record-input', [work.fingerprint, index, raw_rows[index]]),
             rule_hash=params['domain_hash'], scope_hash=work.scope_key, status='fail' if reason else 'pass',
             results={'reason': reason, 'reasons': [reason] if reason else [], 'target_key': key, 'occurrence': index,
                 'field_quality': value['field_quality'] if value else {}})
-        candidate = Candidate(work_id=work.id, source_ref_id=source.id, record_subject_id=subject.id if subject else None,
-            binding_id=None, dependency_id=work.dependency_id, unit_key=str(index), occurrence=index,
+        prepared.append((index, subject, typed, reason, spec))
+    assessments = register_assessments(session, [entry[4] for entry in prepared])
+    candidates, typed_rows, units = [], [], []
+    for index, subject, typed, reason, spec in prepared:
+        checked = assessments[(spec['input_hash'], spec['rule_hash'], spec['scope_hash'])]
+        candidate = Candidate(id=uuid4(), work_id=work.id, source_ref_id=source.id,
+            record_subject_id=subject.id if subject else None, binding_id=None,
+            dependency_id=work.dependency_id, unit_key=str(index), occurrence=index,
             values_hash=digest('typed-record-value-v1', typed) if typed else digest('quarantined-record', raw_rows[index]),
             assessment_id=checked.id, readiness='quarantined' if reason else 'ready', created_at=now())
-        session.add(candidate)
-        session.flush()
+        candidates.append(candidate)
         if typed:
-            session.add(CandidateRecord(candidate_id=candidate.id, **typed))
-        session.add(Unit(work_id=work.id, unit_key=str(index), result_hash=candidate.values_hash, row_count=1))
-        if time.monotonic() - started >= BUDGET_SECONDS:
-            end = index + 1
-            break
+            typed_rows.append(CandidateRecord(candidate_id=candidate.id, **typed))
+        units.append(Unit(work_id=work.id, unit_key=str(index), result_hash=candidate.values_hash, row_count=1))
+    # Flush the parent rows once before child rows; explicit UUIDs allow the
+    # entire bounded page to use batched inserts while retaining real FK edges.
+    session.add_all(candidates)
+    session.flush()
+    session.add_all(typed_rows + units)
     work.cursor = end
     session.flush()
     fenced(session, work.id, epoch)
@@ -260,27 +267,40 @@ def stage_decisions(session, work_id, epoch):
         raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '领域治理计划与固定输入不一致。')
     policy = session.get(Definition, work.policy_id)
     end = min(work.cursor + BATCH_ROWS, len(actions))
-    for action in actions[work.cursor:end]:
+    from app.data_foundation.record_bulk import register_assessments
+    page = actions[work.cursor:end]
+    candidate_ids = [UUID(a['candidate_id']) for a in page if a['candidate_id']]
+    selected = {c.id: (c, typed) for c, typed in session.execute(select(Candidate, CandidateRecord)
+        .join(CandidateRecord, CandidateRecord.candidate_id == Candidate.id)
+        .where(Candidate.id.in_(candidate_ids)))} if candidate_ids else {}
+    specifications = [dict(input_hash=digest('record-decision-input', [work.fingerprint, action]),
+        rule_hash=policy.content_hash, scope_hash=work.scope_key, status='pass', results=action) for action in page]
+    assessments = register_assessments(session, specifications)
+    decisions, officials, units = [], [], []
+    for action, spec in zip(page, specifications, strict=True):
         cid = UUID(action['candidate_id']) if action['candidate_id'] else None
         retained = UUID(action['parent_record_id']) if action['parent_record_id'] else None
-        checked = assessment(session, input_hash=digest('record-decision-input', [work.fingerprint, action]),
-            rule_hash=policy.content_hash, scope_hash=work.scope_key, status='pass', results=action)
-        decision = Decision(work_id=work.id, assessment_id=checked.id, target_key=action['target_key'],
+        checked = assessments[(spec['input_hash'], spec['rule_hash'], spec['scope_hash'])]
+        decision = Decision(id=uuid4(), work_id=work.id, assessment_id=checked.id, target_key=action['target_key'],
             candidate_manifest_id=manifest.id, selected_candidate_id=cid, parent_record_id=retained,
             action=action['action'], evidence_json=encode({'reason': action['reason'], 'policy_id': policy.id,
                 'comparison': 'not_applicable', 'fallback': 'disabled'}), created_at=now())
-        session.add(decision)
-        session.flush()
+        decisions.append(decision)
         if cid:
-            typed, candidate = session.get(CandidateRecord, cid), session.get(Candidate, cid)
+            candidate, typed = selected.get(cid, (None, None))
+            if candidate is None:
+                raise FoundationError('CANDIDATE_NOT_READY', '领域候选或类型化内容缺失。')
             validate_body(params['dataset'], json.loads(typed.body_json))
             if (candidate.readiness != 'ready' or candidate.record_subject_id != typed.subject_id
                     or typed.business_key != action['target_key'] or value_hash(typed) != candidate.values_hash):
                 raise FoundationError('CANDIDATE_NOT_READY', '领域候选身份、业务键或内容摘要不一致。')
-            session.add(OfficialRecord(candidate_id=cid, decision_id=decision.id,
+            officials.append(OfficialRecord(id=uuid4(), candidate_id=cid, decision_id=decision.id,
                 values_hash=candidate.values_hash, created_at=now(), **fields(typed)))
-        session.add(Unit(work_id=work.id, unit_key=action['target_key'], row_count=1,
+        units.append(Unit(work_id=work.id, unit_key=action['target_key'], row_count=1,
             result_hash=digest('typed-record-action', action)))
+    session.add_all(decisions)
+    session.flush()
+    session.add_all(officials + units)
     work.cursor, work.total = end, len(actions)
     session.flush()
     fenced(session, work.id, epoch)
@@ -300,6 +320,13 @@ def seal_release(session, work):
         raise FoundationError('PUBLICATION_INCOMPLETE', '领域治理单元尚未完整提交。')
     blocks = {r.partition_key: r.block_id for r in session.scalars(select(BlockRef).where(BlockRef.release_id == work.parent_release_id))}
     changed = {}
+    # Decisions and retained revisions form a finite set. Read them once rather
+    # than issuing one revision query for every action during release sealing.
+    new_records = {row.decision_id: row for row in session.scalars(select(OfficialRecord)
+        .join(Decision, Decision.id == OfficialRecord.decision_id).where(Decision.work_id == work.id))}
+    retained_ids = {d.parent_record_id for d in decisions.values() if d.parent_record_id}
+    retained_records = {row.id: row for row in session.scalars(select(OfficialRecord)
+        .where(OfficialRecord.id.in_(retained_ids)))} if retained_ids else {}
     from datetime import date
     for action in params['actions']:
         key = action['target_key']
@@ -308,9 +335,9 @@ def seal_release(session, work):
             changed[partition] = {m.target_key: fields(m, MEMBER_FIELDS) for m in session.scalars(
                 select(RecordBlockMember).where(RecordBlockMember.block_id == blocks[partition]))} if partition in blocks else {}
         decision = decisions[key]
-        official = session.scalar(select(OfficialRecord).where(OfficialRecord.decision_id == decision.id))
+        official = new_records.get(decision.id)
         if decision.action == 'retain':
-            official = session.get(OfficialRecord, decision.parent_record_id)
+            official = retained_records.get(decision.parent_record_id)
         if decision.action in ('select', 'retain') and official is None:
             raise FoundationError('PUBLICATION_INCOMPLETE', '正式领域记录缺失。')
         changed[partition][key] = dict(target_key=key, subject_id=UUID(action['subject_id']),
