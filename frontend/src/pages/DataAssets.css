@@ -21,3 +21,10 @@
 @media(max-width:620px){.qf-assets-form{grid-template-columns:1fr}.qf-assets-panel,.qf-assets-panel.is-wide{width:100vw}.qf-assets-panel>header,.qf-assets-panel>footer,.qf-assets-panel-body{padding:16px}.qf-assets-checks{flex-direction:column}.qf-assets-tabs{gap:4px 16px}}
 
 .qf-assets-sheet td.qf-assets-number{text-align:right;font-variant-numeric:tabular-nums}
+/* Typed record fields include long biographies and source identifiers. Keep
+   readable columns inside the sheet's horizontal scroll region on phones. */
+.qf-record-assets .qf-assets-scroll table{min-width:680px}
+.qf-record-assets .qf-assets-scroll td{min-width:120px;max-width:420px;overflow-wrap:anywhere}
+.qf-record-assets .qf-assets-scroll th,.qf-record-assets .qf-assets-scroll button{white-space:nowrap}
+.qf-record-assets .qf-assets-metrics{grid-template-columns:repeat(2,minmax(0,1fr))}
+.qf-record-assets .qf-assets-metrics>div{border-bottom:0}

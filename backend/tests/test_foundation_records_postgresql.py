@@ -213,3 +213,22 @@ def test_directory_governance_and_release_validation_batch_reference_reads(sessi
         assert len(statements) < 15
     finally:
         event.remove(connection, 'before_cursor_execute', record_sql)
+
+
+def test_asset_summary_and_subject_pages_pin_release(session):
+    from app.data_foundation.record_service import describe, subjects
+    first = release_records(session, setup_records(session, [dict(ts_code=f'T{i}', csname=f'Name{i}') for i in range(3)]))
+    svc = service(session)
+    summary = describe(svc, 'instrument.reference')
+    assert summary['kind'] == 'typed_records'
+    assert summary['official_count'] == summary['candidate_count'] == 3
+    series = 'tushare-instrument.reference-observed-v1'
+    page = subjects(svc, 'instrument.reference', series, first.id, limit=2)
+    assert len(page['items']) == 2 and page['next_after']
+    release_records(session, setup_records(session, [dict(ts_code='NEW', csname='Later')]), first)
+    second = subjects(svc, 'instrument.reference', series, first.id, after=page['next_after'], limit=2)
+    assert len(second['items']) == 1 and second['next_after'] is None
+    assert {r['source_key'] for r in page['items'] + second['items']} == {'T0', 'T1', 'T2'}
+    assert not subjects(svc, 'instrument.reference', series, first.id, search='%')['items']
+    with pytest.raises(FoundationError, match='语义不兼容'):
+        subjects(svc, 'instrument.reference', 'wrong-series', first.id)

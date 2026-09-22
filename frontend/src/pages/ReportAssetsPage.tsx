@@ -1,3 +1,4 @@
+import type { RecordDataset } from './RecordAssetsPage';
 import { FoundationBatchLedger, FoundationIntakeLedger } from './FoundationBatchLedger';
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
@@ -41,18 +42,18 @@ function useFailure(clear:()=>void) {
 }
 
 export function FoundationCatalog(){
-  const [params,setParams]=useSearchParams(),[rows,setRows]=useState<(Dataset|ReportDataset)[]|null>(null),[error,setError]=useState(''),[revision,setRevision]=useState(0),[busy,setBusy]=useState(false);
+  const [params,setParams]=useSearchParams(),[rows,setRows]=useState<(Dataset|ReportDataset|RecordDataset)[]|null>(null),[error,setError]=useState(''),[revision,setRevision]=useState(0),[busy,setBusy]=useState(false);
   const clear=useCallback(()=>setRows(null),[]),failure=useFailure(clear);
-  useEffect(()=>{const c=new AbortController();setBusy(true);setError('');foundationApi<{items:(Dataset|ReportDataset)[]}>('/datasets',c.signal)
+  useEffect(()=>{const c=new AbortController();setBusy(true);setError('');foundationApi<{items:(Dataset|ReportDataset|RecordDataset)[]}>('/datasets',c.signal)
     .then(r=>{if(!c.signal.aborted)setRows(r.items);}).catch(e=>{if(!c.signal.aborted)setError(failure(e));}).finally(()=>{if(!c.signal.aborted)setBusy(false);});return()=>c.abort();},[revision,failure]);
   const search=params.get('search')||'',status=params.get('status')||'all';
-  const published=(r:Dataset|ReportDataset)=>'current_release'in r?r.current_release:r.release_id;
+  const published=(r:Dataset|ReportDataset|RecordDataset)=>'kind'in r?r.series.some(s=>!!s.release_id):'current_release'in r?r.current_release:r.release_id;
   const matches=rows?.filter(r=>(r.name+' '+r.dataset).toLowerCase().includes(search.toLowerCase())&&(status==='all'||(status==='published'?!!published(r):!published(r))));
   function update(k:string,v:string){const p=new URLSearchParams(params);p.set(k,v);setParams(p);}
   return <section className="qf-assets" aria-busy={busy}><header className="qf-assets-heading"><div><h1>数据资产</h1><p>查看正式数据的版本、覆盖范围与处理依据。</p></div><button className="qfo-secondary-btn" disabled={busy} onClick={()=>setRevision(r=>r+1)}><RefreshCw size={16}/>刷新</button></header>
     {error&&<p role="alert" className="qf-assets-error">{error}</p>}{!rows&&!error&&<p role="status">正在读取数据资产…</p>}
     <div className="qf-assets-controls"><label>搜索数据集<input value={search} onChange={e=>update('search',e.target.value)}/></label><label>发布状态<Select value={status} onChange={e=>update('status',e.target.value)}><option value="all">全部</option><option value="published">已正式发布</option><option value="pending">暂无正式发布</option></Select></label></div>
-    {matches?.length?<div className="qf-assets-sheet qf-assets-scroll"><table><thead><tr><th>数据集</th><th>契约与口径</th><th>业务截至</th><th>正式记录</th><th>状态</th></tr></thead><tbody>{matches.map(r=><tr key={r.dataset}><td><Link to={`${ROOT}/${r.dataset}?${params}`}>{r.name}</Link></td><td>{r.dataset===ID?'1.0 · 供应商报告范围':'1.0 · 未复权 · CNY'}</td><td>{r.business_as_of||'暂无正式数据'}</td><td>{'official_keys'in r?`${r.official_keys} 行`:`${r.official_count} 份报告 · ${r.member_count} 条成员`}</td><td>{published(r)?'已正式发布':('candidate_records'in r?r.candidate_records:r.candidate_count)?'有候选待治理':'暂无正式发布'}</td></tr>)}</tbody></table></div>:rows&&<p>没有匹配的数据集，请调整筛选条件。</p>}
+    {matches?.length?<div className="qf-assets-sheet qf-assets-scroll"><table><thead><tr><th>数据集</th><th>契约与口径</th><th>业务截至</th><th>正式记录</th><th>状态</th></tr></thead><tbody>{matches.map(r=><tr key={r.dataset}><td><Link to={`${ROOT}/${r.dataset}?${params}`}>{r.name}</Link></td><td>{'kind'in r?'1.0 · 来源观察记录':r.dataset===ID?'1.0 · 供应商报告范围':'1.0 · 未复权 · CNY'}</td><td>{r.business_as_of||('kind'in r&&published(r)?'资料观察版本':'暂无正式数据')}</td><td>{'kind'in r?`${r.official_count} 个对象`:'official_keys'in r?`${r.official_keys} 行`:`${r.official_count} 份报告 · ${r.member_count} 条成员`}</td><td>{published(r)?'已正式发布':('candidate_records'in r?r.candidate_records:r.candidate_count)?'有候选待治理':'暂无正式发布'}</td></tr>)}</tbody></table></div>:rows&&<p>没有匹配的数据集，请调整筛选条件。</p>}
     {rows?.[0]&&<p className="qf-assets-asof">资产摘要读取于 {time(rows[0].as_of)}。来源、候选与正式数量分别统计。</p>}</section>;
 }
 

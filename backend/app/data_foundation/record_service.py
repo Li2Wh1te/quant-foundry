@@ -66,6 +66,11 @@ def query(svc, page):
 
 
 def describe(svc, dataset):
+    from sqlalchemy import select, func
+    from app.data_foundation.catalog import now
+    from app.data_foundation.models import Definition
+    from app.data_foundation.record_models import RecordBlockMember
+    from app.data_foundation.work_models import BlockRef, Candidate, Work
     from app.data_foundation.record_schemas import schema_for
     from app.data_foundation.record_work import series_for
     from app.data_foundation.record_adapters import SOURCE_DATASETS
@@ -76,9 +81,48 @@ def describe(svc, dataset):
         name = series_for(dataset, source)
         head = svc.session.get(Head, scope_key(dataset, 1, 'default', name))
         release = svc.session.get(Release, head.release_id) if head else None
+        count, first, last = svc.session.execute(select(func.count(), func.min(RecordBlockMember.business_date),
+            func.max(RecordBlockMember.business_date)).join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
+            .where(BlockRef.release_id == release.id, RecordBlockMember.state == 'value')).one() if release else (0, None, None)
         series.append(dict(series=name, source=source, release_id=release.id if release else None,
+            official_count=count, range={'from': first, 'to': last},
             manifest_hash=release.manifest_hash if release else None, published_at=release.published_at if release else None))
-    return dict(dataset=dataset, name=schema.name, version='1.0', profile='default', series=series,
+    candidates = svc.session.scalar(select(func.count()).select_from(Candidate).join(Work, Work.id == Candidate.work_id)
+        .join(Definition, Definition.id == Work.contract_id).where(Definition.name == dataset))
+    return dict(dataset=dataset, name=schema.name, kind='typed_records', version='1.0', profile='default', series=series,
+        as_of=now(), candidate_count=candidates, official_count=sum(s['official_count'] for s in series),
+        business_as_of=max((s['range']['to'] for s in series if s['range']['to']), default=None),
+        fields=[dict(key=k, required=k in schema.core_fields) for k in schema.body.model_fields],
         contract=projection['definition'], projection={k: v for k, v in projection.items() if k != 'definition'},
         limitations=list(schema.limitations), coverage='published_keys_only',
         support=dict(read='active', update='bounded_local_versions', time_modes=['observed'], max_objects=1000))
+
+
+def subjects(svc, dataset, series, release_id, *, after=None, search='', limit=50):
+    """Discover identities within one immutable manifest, without reading values.
+
+    Keyset pagination is scoped by the explicit release and semantic series.
+    Only source-local identity keys are exposed; restricted canonical names and
+    values still require the ordinary capability check and signed read token.
+    """
+    from types import SimpleNamespace
+    from sqlalchemy import select, exists
+    from app.data_foundation.record_models import RecordSubject, RecordBlockMember
+    from app.data_foundation.work_models import BlockRef
+    owner = svc.owner()
+    if not owner:
+        raise FoundationError('AUTH_REQUIRED', '主体目录读取需要有效身份。')
+    release = resolve_release(svc.session, SimpleNamespace(dataset_id=dataset, contract_version='1.0',
+        profile_id='default', semantic_series_id=series, release=release_id))
+    statement = select(RecordSubject).where(exists(select(1).select_from(RecordBlockMember)
+        .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id).where(
+            BlockRef.release_id == release.id, RecordBlockMember.subject_id == RecordSubject.id)))
+    if after:
+        statement = statement.where(RecordSubject.id > after)
+    if search:
+        statement = statement.where(RecordSubject.source_key.icontains(search, autoescape=True))
+    rows = svc.session.scalars(statement.order_by(RecordSubject.id).limit(limit + 1)).all()
+    if svc.owner() != owner:
+        raise FoundationError('AUTH_CONTEXT_CHANGED', '主体目录读取身份已失效。')
+    return dict(release_id=release.id, items=[dict(id=r.id, source=r.source, source_key=r.source_key,
+        kind=r.kind) for r in rows[:limit]], next_after=rows[limit - 1].id if len(rows) > limit else None)
