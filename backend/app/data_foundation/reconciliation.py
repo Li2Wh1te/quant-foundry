@@ -135,7 +135,7 @@ def reconcile_batch(session,batch_id):
         if not produced:
             add('release',work.id,'pending','PUBLICATION_NOT_SEALED');continue
         for release in produced:
-            validate_release(session,release)
+            validate_release(session,release,reuse_verified=True)
             blocks=select(BlockRef.block_id).where(BlockRef.release_id==release.id)
             represented=set(session.scalars(select(BlockMember.decision_id).where(BlockMember.block_id.in_(blocks))))
             represented.update(session.scalars(select(ReportBlockMember.decision_id).where(ReportBlockMember.block_id.in_(blocks))))

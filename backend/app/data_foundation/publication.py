@@ -161,11 +161,11 @@ def seal_release(session, work):
     return release
 
 
-def validate_release(session, release):
+def validate_release(session, release, *, reuse_verified=False):
     work = session.get(Work, release.work_id)
     if json.loads(work.parameters_json)['domain'] == 'typed-record-v1':
         from app.data_foundation.record_work import validate_release as validate_record_release
-        return validate_record_release(session, release)
+        return validate_record_release(session, release, reuse_verified=reuse_verified)
     if json.loads(work.parameters_json)['domain'] == 'holdings-report-v1':
         from app.data_foundation.holding_work import validate_release as validate_report_release
         return validate_report_release(session, release)

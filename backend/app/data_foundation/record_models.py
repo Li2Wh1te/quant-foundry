@@ -5,10 +5,10 @@ economic instruments and cannot be passed to the legacy instrument/PIT API.
 Canonical bodies are validated against a registered executable domain schema;
 raw provider payloads remain solely in immutable source evidence.
 """
-from datetime import date
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import CheckConstraint, String, Text, UniqueConstraint
+from sqlalchemy import CheckConstraint, DateTime, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.base import Base
@@ -57,6 +57,26 @@ class RecordBlockMember(Base):
     __table_args__ = (CheckConstraint(
         "(state = 'value' AND official_id IS NOT NULL) OR "
         "(state IN ('gap','blocked','withdrawn') AND official_id IS NULL)", name='record_member_state'),)
+
+
+class RecordBlockVerification(Base):
+    """A full validator's receipt for a closed, database-immutable block.
+
+    The validator hash prevents reusing an older implementation's result.
+    Receipts are transactional with validation and may not be changed or
+    deleted. They attest to member/value/decision checks, not issue resolution
+    or publication approval, which remain live checks at their own gates.
+    """
+    __tablename__ = 'foundation_record_block_verifications'
+    block_id: Mapped[UUID] = mapped_column(fk('release_blocks'), primary_key=True)
+    validator_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    scope_key: Mapped[str] = mapped_column(String(64))
+    schema_key: Mapped[str] = mapped_column(String(128))
+    content_hash: Mapped[str] = mapped_column(String(64))
+    row_count: Mapped[int] = mapped_column(Integer)
+    governance_work_ids_json: Mapped[str] = mapped_column(Text)
+    normalization_work_ids_json: Mapped[str] = mapped_column(Text)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
 class RecordIssue(Record, Base):

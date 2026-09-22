@@ -108,19 +108,46 @@ def record_contributions(session,release):
     pairs={(work.id,'governance')}
     pairs.update((m.work_id,'normalization') for m in input_manifests(session,work=work))
     blocks=select(BlockRef.block_id).where(BlockRef.release_id==release.id)
-    decision_ids=set(session.scalars(select(BlockMember.decision_id).where(BlockMember.block_id.in_(blocks))))
-    decision_ids.update(session.scalars(select(ReportBlockMember.decision_id).where(ReportBlockMember.block_id.in_(blocks))))
-    decision_ids.update(session.scalars(select(RecordBlockMember.decision_id).where(RecordBlockMember.block_id.in_(blocks))))
-    for decision in session.scalars(select(Decision).where(Decision.id.in_(decision_ids))):
-        if decision.work_id != work.id:pairs.add((decision.work_id,'inherited'))
+    cached = None
+    params = json.loads(work.parameters_json)
+    if params['domain'] == 'typed-record-v1':
+        from sqlalchemy import func
+        from app.data_foundation.record_models import RecordBlockVerification
+        from app.data_foundation.record_work import validation_hash
+        receipts = list(session.scalars(select(RecordBlockVerification).where(
+            RecordBlockVerification.block_id.in_(blocks),
+            RecordBlockVerification.validator_hash == validation_hash(),
+            RecordBlockVerification.scope_key == release.scope_key,
+            RecordBlockVerification.schema_key == params['dataset'])))
+        count = session.scalar(select(func.count()).select_from(BlockRef).where(BlockRef.release_id == release.id))
+        if len(receipts) == count:
+            # These per-block sets were derived by full validation before seal.
+            # Union only the blocks actually referenced by this release.
+            direct = {wid for wid, role in pairs if role == 'normalization'}
+            cached = set()
+            for receipt in receipts:
+                cached.update((UUID(wid), 'inherited') for wid in json.loads(receipt.governance_work_ids_json)
+                    if UUID(wid) != work.id)
+                cached.update((UUID(wid), 'inherited') for wid in json.loads(receipt.normalization_work_ids_json)
+                    if UUID(wid) not in direct)
+    # Query distinct actual contributors in PostgreSQL. Shipping every member's
+    # decision ID and constructing an enormous IN clause is unnecessary for a
+    # release containing millions of rows but only thousands of source works.
+    for member_model in (() if cached is not None else (BlockMember, ReportBlockMember, RecordBlockMember)):
+        origins = session.scalars(select(Decision.work_id).join(member_model,
+            member_model.decision_id == Decision.id).where(member_model.block_id.in_(blocks)).distinct())
+        pairs.update((wid, 'inherited') for wid in origins if wid != work.id)
     from app.data_foundation.work_models import OfficialBar,Candidate
     from app.data_foundation.holding_models import OfficialReport
-    for member_model,official_model in ((BlockMember,OfficialBar),(ReportBlockMember,OfficialReport),(RecordBlockMember,OfficialRecord)):
+    for member_model,official_model in (() if cached is not None else ((BlockMember,OfficialBar),(ReportBlockMember,OfficialReport),(RecordBlockMember,OfficialRecord))):
         origins=session.scalars(select(Candidate.work_id).join(official_model,official_model.candidate_id==Candidate.id)
-            .join(member_model,member_model.official_id==official_model.id).where(member_model.block_id.in_(blocks))).all()
+            .join(member_model,member_model.official_id==official_model.id).where(member_model.block_id.in_(blocks)).distinct()).all()
         direct={wid for wid,role in pairs if role=='normalization'}
         pairs.update((wid,'inherited') for wid in origins if wid not in direct)
-    for wid,role in sorted(pairs,key=lambda x:(str(x[0]),x[1])):
-        if session.get(ReleaseContribution,(release.id,wid,role)) is None:
-            session.add(ReleaseContribution(release_id=release.id,work_id=wid,role=role))
+    if cached is not None:
+        pairs.update(cached)
+    existing = set(session.execute(select(ReleaseContribution.work_id, ReleaseContribution.role)
+        .where(ReleaseContribution.release_id == release.id)).all())
+    session.add_all([ReleaseContribution(release_id=release.id,work_id=wid,role=role)
+        for wid,role in sorted(pairs-existing,key=lambda x:(str(x[0]),x[1]))])
     session.flush()
