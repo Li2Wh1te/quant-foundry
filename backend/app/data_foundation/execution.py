@@ -1,13 +1,62 @@
 """Verify closed execution dependencies; never substitute the newest transform."""
 import hashlib
 import json
+from functools import lru_cache
+import os
 from pathlib import Path
 import platform
+import stat
 from sqlalchemy import select
 from app.data_foundation.canonical import FoundationError, digest
 from app.data_foundation.models import Execution, Artifact
 from app.data_foundation.work_models import ExecutionArchive, RuntimeArchive
 from app.data_foundation.bars import DOMAIN_KEY, domain_hash
+
+
+def _file_identity(info):
+    # ctime detects in-place changes even when an operator restores mtime;
+    # device/inode detect replacement of the deployment-owned archive.
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
+@lru_cache(maxsize=16)
+def _verify_archive_bytes(path, identity, expected_hash):
+    # Cache successful checks only. Check both the opened descriptor and the
+    # path after hashing so replacement or mutation cannot seed a stale entry.
+    with path.open('rb') as stream:
+        if _file_identity(os.fstat(stream.fileno())) != identity:
+            raise OSError('Archive changed before verification')
+        actual = hashlib.file_digest(stream, 'sha256').hexdigest()
+        if (_file_identity(os.fstat(stream.fileno())) != identity
+                or _file_identity(path.stat()) != identity):
+            raise OSError('Archive changed during verification')
+    if actual != expected_hash:
+        raise OSError('Archive checksum mismatch')
+
+
+def _archive_available(archive, archive_root):
+    if archive is None:
+        return False
+    path = Path(archive_root) / archive.archive_key
+    try:
+        info = path.stat()
+        if (path.name != archive.archive_key or not stat.S_ISREG(info.st_mode)
+                or info.st_size != archive.byte_count):
+            return False
+        identity = _file_identity(info)
+        # Opening on every call also checks live access controls (including
+        # ACL/mount changes not reliably represented by a cached stat tuple).
+        # Cache hits avoid reading the archive, not proving it is readable.
+        with path.open('rb') as stream:
+            if _file_identity(os.fstat(stream.fileno())) != identity:
+                return False
+            _verify_archive_bytes(path, identity, archive.archive_hash)
+        # Every cache hit still checks live metadata; deleted, modified, or
+        # replaced files must never inherit a previous successful check.
+        return _file_identity(path.stat()) == identity
+    except OSError:
+        return False
 
 
 def installed_code_hash():
@@ -37,18 +86,10 @@ def verify_execution(session, work, runtime_image_digest, archive_root):
         or any(manifest[part]['hash'] != installed_code_hash() for part in ('parser','transform','quality'))
         or hashlib.sha256(artifact.payload).hexdigest() != artifact.content_hash):
         raise FoundationError('DEPENDENCY_MISSING', '当前运行环境与固定执行清单不一致。')
-    path = Path(archive_root) / archive.archive_key
     # Only a basename is stored; no caller-supplied path traversal or network
     # fallback is permitted. Archives are deployment-owned and mounted read-only.
-    if path.name != archive.archive_key or not path.is_file() or path.stat().st_size != archive.byte_count:
-        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档缺失。')
-    try:
-        with path.open('rb') as stream:
-            actual = hashlib.file_digest(stream, 'sha256').hexdigest()
-    except OSError:
-        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档无法读取。') from None
-    if actual != archive.archive_hash:
-        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档校验失败。')
+    if not _archive_available(archive, archive_root):
+        raise FoundationError('DEPENDENCY_MISSING', '固定运行镜像归档缺失、无法读取或校验失败。')
 
 
 def replay_status(session, execution_id, archive_root='/app/data/foundation-runtime-archives'):
@@ -56,14 +97,7 @@ def replay_status(session, execution_id, archive_root='/app/data/foundation-runt
     if not link:
         return 'dependency_missing'
     archive = session.get(RuntimeArchive, link.archive_id)
-    path = Path(archive_root) / archive.archive_key
-    try:
-        if path.name != archive.archive_key or path.stat().st_size != archive.byte_count:
-            return 'dependency_missing'
-        with path.open('rb') as stream:
-            return 'ready' if hashlib.file_digest(stream, 'sha256').hexdigest() == archive.archive_hash else 'dependency_missing'
-    except OSError:
-        return 'dependency_missing'
+    return 'ready' if _archive_available(archive, archive_root) else 'dependency_missing'
 
 
 def register_archive(session, execution_id, evidence, archive_root):
