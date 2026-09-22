@@ -1,10 +1,10 @@
 """Explicit adapters from fixed source evidence to typed reference/calendar rows."""
 from datetime import date, datetime, timezone, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from zoneinfo import ZoneInfo
 
-from app.data_foundation.canonical import FoundationError
-from app.data_foundation.record_schemas import validate_body
+from app.data_foundation.canonical import FoundationError, normalized
+from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
     ('tonghuashun', 'tickers'): 'instrument.reference',
@@ -14,6 +14,7 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'calendar'): 'market.calendar',
     ('tushare', 'etf_directory'): 'instrument.reference',
     ('tushare', 'exchange_calendar'): 'market.calendar',
+    ('tushare', 'etf_adjustment_factors'): 'market.adjustment_factor',
 }
 
 
@@ -120,6 +121,23 @@ def convert(source, raw):
             established_date=day('estab_date', 'established_date'))
         quality.update(unit_nav='UNIT_UNVERIFIED', fund_scale='UNIT_UNVERIFIED')
         kind = 'fund_share'
+    elif dataset == 'market.adjustment_factor':
+        key = text('ts_code', 'source_code', True)
+        factor = raw.get('adj_factor')
+        # Reject binary floats and booleans rather than silently losing source
+        # precision. Captured PostgreSQL NUMERIC values are Decimal or strings.
+        if isinstance(factor, bool) or not isinstance(factor, (str, int, Decimal)):
+            raise FoundationError('CORE_VALUE_INVALID', '复权因子缺少精确十进制表示。')
+        try:
+            number = Decimal(factor)
+        except InvalidOperation:
+            raise FoundationError('CORE_VALUE_INVALID', '复权因子不是有效十进制值。') from None
+        if not number.is_finite() or number <= 0:
+            raise FoundationError('CORE_VALUE_INVALID', '复权因子必须为有限正数。')
+        body = dict(source_code=key, trade_date=source_date(raw.get('trade_date')),
+            factor=normalized(number), factor_basis='tushare_fund_adj', anchor_date=None)
+        quality['anchor_date'] = 'ADJUSTMENT_ANCHOR_UNVERIFIED'
+        kind = 'asset:fund-etf'
     else:
         if source.source == 'tushare':
             key = text('exchange', required=True)
@@ -143,6 +161,7 @@ def convert(source, raw):
     if source.source == 'tonghuashun' and source.dataset in ('fund_profile', 'fund_company', 'fund_manager') and key != source.subject:
         raise FoundationError('IDENTITY_CONFLICT', '来源容器主体与记录主体不一致，未跨主体发布。')
     canonical = validate_body(dataset, body)
-    business_date = date.fromisoformat(canonical['calendar_date']) if dataset == 'market.calendar' else None
+    date_field = schema_for(dataset).date_field
+    business_date = date.fromisoformat(canonical[date_field]) if date_field else None
     return dict(dataset=dataset, subject_kind=kind, subject_key=key, business_date=business_date,
         body=canonical, field_quality=quality)

@@ -232,3 +232,32 @@ def test_asset_summary_and_subject_pages_pin_release(session):
     assert not subjects(svc, 'instrument.reference', series, first.id, search='%')['items']
     with pytest.raises(FoundationError, match='语义不兼容'):
         subjects(svc, 'instrument.reference', 'wrong-series', first.id)
+
+
+def test_adjustment_factor_exact_decimal_and_unverified_anchor(session):
+    from decimal import Decimal
+    from app.data_foundation.record_service import describe
+    fixture = setup_records(session, [dict(ts_code='F.SH', trade_date='2026-08-21',
+        adj_factor=Decimal('123456789012.123456789012'))], dataset='etf_adjustment_factors')
+    release = release_records(session, fixture)
+    req = request(session, dataset_id='market.adjustment_factor',
+        semantic_series_id='tushare-market.adjustment_factor-observed-v1',
+        business_range={'from':'2026-08-21', 'to':'2026-08-21'}, fields=['factor','trade_date'])
+    result = json.loads(service(session).query_official(req))
+    assert result['request_satisfied'] and result['items'][0]['factor'] == '123456789012.123456789012'
+    assert describe(service(session), 'market.adjustment_factor')['business_date_field'] == 'trade_date'
+    unknown = json.loads(service(session).query_official(req.model_copy(update={'fields':['anchor_date']})))
+    assert not unknown['request_satisfied'] and unknown['items'] == []
+    assert unknown['excluded'][0]['reason'] == 'FIELD_UNAVAILABLE'
+    later = release_records(session, setup_records(session, [dict(ts_code='F.SH', trade_date='2026-08-21',
+        adj_factor='1.123456789012')], dataset='etf_adjustment_factors'), release)
+    assert json.loads(service(session).query_official(req.model_copy(update={'release':release.id})))['items'][0]['factor'] == '123456789012.123456789012'
+    assert json.loads(service(session).query_official(req.model_copy(update={'release':later.id})))['items'][0]['factor'] == '1.123456789012'
+
+
+def test_invalid_adjustment_factors_are_isolated(session):
+    fixture = setup_records(session, [dict(ts_code=f'F{i}', trade_date='2026-08-21', adj_factor=value)
+        for i,value in enumerate(['0','-1','NaN','Infinity','not-a-factor','1000000000000','1.0000000000001',True])],
+        dataset='etf_adjustment_factors')
+    assert fixture[0].status == 'succeeded'
+    assert list(session.scalars(select(Candidate.readiness).where(Candidate.work_id == fixture[0].id))) == ['quarantined'] * 8

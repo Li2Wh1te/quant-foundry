@@ -7,9 +7,10 @@ install an explicit schema/adapter before they can publish any canonical body.
 """
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
 
 from app.data_foundation.canonical import FoundationError
 
@@ -61,6 +62,27 @@ class CalendarDay(Body):
     scope_basis: Literal['declared_exchange', 'provider_reported_dates']
 
 
+class AdjustmentFactor(Body):
+    """Provider factors are retained without inventing a price-adjustment anchor.
+
+    Supplier field basis: https://tushare.pro/document/2?doc_id=199 (reviewed
+    2026-09-22). The local persisted NUMERIC(24,12) value is serialized exactly;
+    this contract does not derive adjusted prices or assert public-time history.
+    """
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    trade_date: date
+    factor: StrictStr = Field(pattern=r'^(0|[1-9][0-9]{0,11})(\.[0-9]{1,12})?$')
+    factor_basis: Literal['tushare_fund_adj']
+    anchor_date: date | None = None
+
+    @field_validator('factor')
+    @classmethod
+    def positive_factor(cls, value):
+        if Decimal(value) <= 0:
+            raise ValueError('Adjustment factor must be positive')
+        return value
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -71,6 +93,7 @@ class Schema:
     business_fields: tuple[str, ...] = ()
     limitations: tuple[str, ...] = (
         'source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified')
+    date_field: str | None = None
 
 
 SCHEMAS = {item.dataset: item for item in (
@@ -79,7 +102,11 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
     Schema('market.calendar', '交易日期', CalendarDay, 'calendar',
-           ('exchange_scope', 'calendar_date', 'scope_basis'), ('calendar_date',)),
+           ('exchange_scope', 'calendar_date', 'scope_basis'), ('calendar_date',), date_field='calendar_date'),
+    Schema('market.adjustment_factor', '基金来源复权因子', AdjustmentFactor, 'asset:fund-etf',
+           ('source_code', 'trade_date', 'factor', 'factor_basis'), ('trade_date',),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'adjustment_anchor_unverified', 'adjusted_price_derivation_not_supported'), date_field='trade_date'),
 )}
 
 

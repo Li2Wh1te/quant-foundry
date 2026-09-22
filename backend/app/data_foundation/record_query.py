@@ -17,7 +17,7 @@ from app.data_foundation.projection import projection_for, resolve_projected_rel
 
 class RecordRequirement(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    dataset_id: Literal['instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'market.calendar']
+    dataset_id: Literal['instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'market.calendar', 'market.adjustment_factor']
     contract_version: str = Field(default='1.0', pattern=r'^[1-9]\d*\.\d+$')
     profile_id: Literal['default'] = 'default'
     semantic_series_id: str = Field(min_length=1, max_length=128)
@@ -37,9 +37,9 @@ class RecordRequirement(BaseModel):
         schema = schema_for(self.dataset_id)
         if len(set(self.fields)) != len(self.fields) or not set(self.fields) <= set(schema.body.model_fields):
             raise ValueError('字段不属于所选领域契约或重复')
-        if self.dataset_id == 'market.calendar' and self.business_range is None:
-            raise ValueError('交易日期读取必须指定业务日期范围')
-        if self.dataset_id != 'market.calendar' and self.business_range is not None:
+        if schema.date_field is not None and self.business_range is None:
+            raise ValueError('日期型领域读取必须指定业务日期范围')
+        if schema.date_field is None and self.business_range is not None:
             raise ValueError('资料观察记录没有业务日期，不能使用日期过滤冒充历史时点读取')
         if self.business_range and self.business_range.start > self.business_range.end:
             raise ValueError('业务日期范围无效')
