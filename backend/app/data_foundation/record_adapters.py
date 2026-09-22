@@ -17,6 +17,7 @@ SOURCE_DATASETS = {
     ('tushare', 'etf_directory'): 'instrument.reference',
     ('tushare', 'exchange_calendar'): 'market.calendar',
     ('tushare', 'etf_adjustment_factors'): 'market.adjustment_factor',
+    ('tushare', 'etf_daily'): 'market.fund_daily',
 }
 
 
@@ -60,6 +61,26 @@ def source_date(value):
             return datetime.strptime(value, '%Y%m%d').date()
         return date.fromisoformat(value)
     raise ValueError('Unsupported date representation')
+
+
+def daily_decimal(value, *, precision, scale, positive=False, signed=False):
+    """Preserve captured NUMERIC values exactly, rejecting lossy coercion.
+
+    Canonical digit checks do not depend on the active Decimal context
+    and do not round a value into the published database precision contract.
+    """
+    if isinstance(value, bool) or not isinstance(value, (str, int, Decimal)):
+        raise ValueError('Exact decimal value required')
+    number = Decimal(value)
+    if not number.is_finite() or (positive and number <= 0) or (not signed and number < 0):
+        raise ValueError('Decimal value outside admitted range')
+    if number and (number.adjusted() >= precision-scale or number.adjusted() < -scale):
+        raise ValueError('Decimal value exceeds persisted precision')
+    encoded = normalized(number) if number else '0'
+    whole, _, fraction = encoded.lstrip('-').partition('.')
+    if len(whole) > precision-scale or len(fraction) > scale:
+        raise ValueError('Decimal value exceeds persisted precision')
+    return encoded
 
 
 def convert(source, raw):
@@ -157,6 +178,30 @@ def convert(source, raw):
             established_date=day('estab_date', 'established_date'))
         quality.update(unit_nav='UNIT_UNVERIFIED', fund_scale='UNIT_UNVERIFIED')
         kind = 'fund_share'
+    elif dataset == 'market.fund_daily':
+        key = text('ts_code', 'source_code', True)
+        if raw.get('source') != 'tushare':
+            raise FoundationError('IDENTITY_CONFLICT', '日线记录来源与固定来源命名空间不一致。')
+        body = dict(source_code=key, trade_date=source_date(raw.get('trade_date')),
+            price_unit='yuan', price_basis='provider_reported')
+        for field in ('open', 'high', 'low', 'close'):
+            try:
+                body[field] = daily_decimal(raw.get(field), precision=20, scale=6, positive=True)
+            except (ValueError, InvalidOperation):
+                raise FoundationError('CORE_VALUE_INVALID', '日线核心价格缺失、无效或超出精度，未补造价格。') from None
+        for source_field, target, precision, scale, positive, signed in (
+                ('vol', 'volume_lots', 24, 4, False, False),
+                ('amount', 'turnover_thousand_yuan', 24, 4, False, False),
+                ('pre_close', 'previous_close', 20, 6, True, False),
+                ('change', 'change_yuan', 20, 6, False, True),
+                ('pct_chg', 'change_percent', 20, 6, False, True)):
+            value = raw.get(source_field)
+            try:
+                body[target] = daily_decimal(value, precision=precision, scale=scale, positive=positive, signed=signed)
+            except (ValueError, InvalidOperation):
+                body[target] = None
+                quality[target] = 'MISSING' if value is None else 'INVALID_DECIMAL'
+        kind = 'asset:fund-etf'
     elif dataset == 'market.adjustment_factor':
         key = text('ts_code', 'source_code', True)
         factor = raw.get('adj_factor')

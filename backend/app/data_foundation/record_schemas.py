@@ -8,9 +8,9 @@ install an explicit schema/adapter before they can publish any canonical body.
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from app.data_foundation.canonical import FoundationError
 
@@ -121,6 +121,43 @@ class AdjustmentFactor(Body):
         return value
 
 
+DailyPrice = Annotated[StrictStr, Field(pattern=r'^(0|[1-9][0-9]{0,13})(\.[0-9]{1,6})?$')]
+DailyQuantity = Annotated[StrictStr, Field(pattern=r'^(0|[1-9][0-9]{0,19})(\.[0-9]{1,4})?$')]
+DailyChange = Annotated[StrictStr, Field(pattern=r'^-?(0|[1-9][0-9]{0,13})(\.[0-9]{1,6})?$')]
+
+
+class FundDailyObservation(Body):
+    """Typed fund_daily facts in documented native units and stored precision.
+
+    https://tushare.pro/document/2?doc_id=127 establishes yuan prices, lots,
+    thousand-yuan amounts and percentage changes. Keep these units explicit;
+    neither share quantities nor adjusted prices are derived here. A source
+    code identifies the observation, not a verified historical economic entity.
+    """
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    trade_date: date
+    open: DailyPrice
+    high: DailyPrice
+    low: DailyPrice
+    close: DailyPrice
+    price_unit: Literal['yuan']
+    price_basis: Literal['provider_reported']
+    volume_lots: DailyQuantity | None = None
+    turnover_thousand_yuan: DailyQuantity | None = None
+    previous_close: DailyPrice | None = None
+    change_yuan: DailyChange | None = None
+    change_percent: DailyChange | None = None
+
+    @model_validator(mode='after')
+    def coherent_prices(self):
+        opened, high, low, close = (Decimal(getattr(self, key)) for key in ('open', 'high', 'low', 'close'))
+        if low <= 0 or high < max(opened, close) or low > min(opened, close):
+            raise ValueError('Daily OHLC values must be positive and coherent')
+        if self.previous_close is not None and Decimal(self.previous_close) <= 0:
+            raise ValueError('Previous close must be positive when available')
+        return self
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -153,6 +190,10 @@ SCHEMAS = {item.dataset: item for item in (
            ('source_code', 'trade_date', 'factor', 'factor_basis'), ('trade_date',),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
                         'adjustment_anchor_unverified', 'adjusted_price_derivation_not_supported'), date_field='trade_date'),
+    Schema('market.fund_daily', '基金来源日线', FundDailyObservation, 'asset:fund-etf',
+           ('source_code', 'trade_date', 'open', 'high', 'low', 'close', 'price_unit', 'price_basis'), ('trade_date',),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'share_quantity_conversion_not_supported', 'adjusted_price_derivation_not_supported'), date_field='trade_date'),
 )}
 
 
