@@ -79,6 +79,17 @@ class RecordBlockVerification(Base):
     verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class RecordPlanVerification(Base):
+    """Proof that an immutable work plan was derived from its sealed inputs."""
+    __tablename__ = 'foundation_record_plan_verifications'
+    work_id: Mapped[UUID] = mapped_column(fk('work'), primary_key=True)
+    validator_hash: Mapped[str] = mapped_column(String(64), primary_key=True)
+    work_fingerprint: Mapped[str] = mapped_column(String(64))
+    parameters_hash: Mapped[str] = mapped_column(String(64))
+    action_count: Mapped[int] = mapped_column(Integer)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
 class RecordIssue(Record, Base):
     """Append-only restrictions share the publication scope's issue epoch."""
     __tablename__ = 'foundation_record_issues'
