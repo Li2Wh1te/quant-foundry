@@ -37,6 +37,8 @@ def register_definition(session, *, kind, name, version, definition):
         # Report semantics are not a price interval or an adjustment basis.
         # Keep the legacy bar definition unchanged while validating this shape.
         required = {'scope_kind', 'asset_scope', 'weight_unit', 'public_time_status', 'portfolio_completeness'}
+    if kind == 'series' and definition.get('object_kind') == 'typed-record':
+        required = {'identity_basis', 'source', 'public_time_status', 'schema_key', 'atomic_unit'}
     if not required <= definition.keys():
         raise ValueError('Incomplete definition')
     content_hash = digest('definition', {'kind': kind, 'name': name, 'version': version, 'definition': definition})

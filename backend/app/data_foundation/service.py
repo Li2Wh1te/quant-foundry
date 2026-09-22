@@ -8,8 +8,8 @@ from uuid import UUID
 from pydantic import Field, BaseModel, ConfigDict
 from app.core.auth import AuthenticatedPrincipal
 from app.data_foundation.canonical import FoundationError, encode, digest
-from app.data_foundation.query import DataRequirement, query_official, resolve_release, dataset_view, lineage
-from app.data_foundation.projection import projection_for
+from app.data_foundation.query import DataRequirement, query_official, dataset_view, lineage
+from app.data_foundation.projection import projection_for, resolve_projected_release as resolve_release
 from app.data_foundation.resolution import ResolutionCodec, token_hash
 from app.data_foundation.catalog import now
 
@@ -58,6 +58,12 @@ class FoundationService:
         if dataset_id == 'fund.holdings_report':
             from app.data_foundation.holding_service import describe
             return self.finish(describe(self))
+        from app.data_foundation.record_schemas import SCHEMAS
+        if dataset_id in SCHEMAS:
+            from app.data_foundation.record_service import describe
+            return self.finish(describe(self, dataset_id))
+        if dataset_id != 'market.bar.daily':
+            raise FoundationError('INVALID_REQUIREMENT', '未知正式数据集。')
         result=dataset_view(self.session)
         projection=projection_for(self.session,result['dataset'],result['version'])
         result['projection']={k:v for k,v in projection.items() if k!='definition'}
@@ -69,6 +75,10 @@ class FoundationService:
     def check_capability(self, request, *, snapshot_hash=None):
         if request.dataset_id == 'fund.holdings_report':
             from app.data_foundation.holding_service import check
+            return self.finish(check(self, request, snapshot_hash=snapshot_hash))
+        from app.data_foundation.record_query import RecordRequirement
+        if isinstance(request, RecordRequirement):
+            from app.data_foundation.record_service import check
             return self.finish(check(self, request, snapshot_hash=snapshot_hash))
         return self.finish(self._resolve(request, snapshot_hash=snapshot_hash))
 
@@ -100,7 +110,14 @@ class FoundationService:
         return response
 
     def query_official(self, request):
-        is_report = getattr(request, 'dataset_id', None) == 'fund.holdings_report'
+        from app.data_foundation.record_schemas import SCHEMAS
+        dataset = getattr(request, 'dataset_id', None)
+        if isinstance(request, PageRequest):
+            dataset = self.codec.read(request.resolution_token, 'resolution')['request']['dataset_id']
+        if dataset in SCHEMAS:
+            from app.data_foundation.record_service import query
+            return self.finish(query(self, request))
+        is_report = dataset == 'fund.holdings_report'
         if isinstance(request, PageRequest):
             is_report = self.codec.read(request.resolution_token, 'resolution')['request']['dataset_id'] == 'fund.holdings_report'
         if is_report:
@@ -181,7 +198,10 @@ class FoundationService:
         # Shared issue guards remain held until every entry has been serialized.
         for entry in snapshot['entries']:
             from app.data_foundation.holding_query import ReportRequirement
-            model = ReportRequirement if entry['request'].get('dataset_id') == 'fund.holdings_report' else DataRequirement
+            from app.data_foundation.record_query import RecordRequirement
+            from app.data_foundation.record_schemas import SCHEMAS
+            dataset = entry['request'].get('dataset_id')
+            model = RecordRequirement if dataset in SCHEMAS else ReportRequirement if dataset == 'fund.holdings_report' else DataRequirement
             request=model.model_validate(entry['request'])
             if request.release=='latest':raise FoundationError('INVALID_REQUIREMENT','快照必须指定正式版本。')
             p=projection_for(self.session,request.dataset_id,request.contract_version)
@@ -192,11 +212,18 @@ class FoundationService:
                 from app.data_foundation.holding_service import check
                 result = check(self, request, snapshot_hash=snapshot['snapshot_hash'])
                 results.append(result)
+            elif isinstance(request, RecordRequirement):
+                from app.data_foundation.record_service import check
+                results.append(check(self, request, snapshot_hash=snapshot['snapshot_hash']))
             else:
                 results.append(self._resolve(request,snapshot_hash=snapshot['snapshot_hash']))
         return self.finish({'snapshot_hash':snapshot['snapshot_hash'],'items':results,'checked_at':now()})
 
     def get_lineage(self, revision_id):
+        from app.data_foundation.record_models import OfficialRecord
+        if self.session.get(OfficialRecord, revision_id):
+            from app.data_foundation.record_query import lineage as record_lineage
+            return self.finish(record_lineage(self.session, revision_id))
         from app.data_foundation.holding_models import OfficialReport
         if self.session.get(OfficialReport, revision_id):
             from app.data_foundation.holding_query import lineage as report_lineage

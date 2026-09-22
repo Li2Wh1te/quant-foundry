@@ -144,7 +144,9 @@ def member_basis(session, member):
     governance=session.get(Work,decision.work_id)
     official=None
     if member.official_id:
-        official=session.get(OfficialBar,member.official_id) if isinstance(member,BlockMember) else session.get(OfficialReport,member.official_id)
+        from app.data_foundation.record_models import RecordBlockMember, OfficialRecord
+        model = OfficialRecord if isinstance(member, RecordBlockMember) else OfficialBar if isinstance(member, BlockMember) else OfficialReport
+        official = session.get(model, member.official_id)
     candidate=session.get(Candidate,official.candidate_id) if official else None
     origin=session.get(Work,candidate.work_id) if candidate else None
     value_decision=session.get(Decision,official.decision_id) if official else None

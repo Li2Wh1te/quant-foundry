@@ -106,10 +106,15 @@ def append_event(session, work, step, status, details):
     is_report = params['dataset'] == 'fund.holdings_report'
     unit = '份报告' if is_report else '行'
     label = '基金持仓报告底座' if is_report else '日线底座'
+    if params['domain'] == 'typed-record-v1':
+        from app.data_foundation.record_schemas import schema_for
+        label = schema_for(params['dataset']).name + '底座'
+        unit = '条记录'
     counts = f"，合格{details['ready']}{unit}、隔离{details.get('quarantined', 0)}{unit}" if 'ready' in details else ''
     if is_report and 'members' in details:
         counts += f"，涉及{details['members']}条持仓成员"
-    message = f"{label} {params['start']} 至 {params['end']} 的{labels[step]}结果为{state_label}，已提交{work.cursor}{unit}{counts}，检查点{checkpoint}，当前位于{work.cursor}。"
+    interval = '固定来源的完整业务范围' if params['domain'] == 'typed-record-v1' else f"{params['start']} 至 {params['end']}"
+    message = f"{label} {interval}的{labels[step]}结果为{state_label}，已提交{work.cursor}{unit}{counts}，检查点{checkpoint}，当前位于{work.cursor}。"
     details = {**details, 'checkpoint': work.cursor, 'checkpoint_advanced': work.cursor > previous_cursor}
     session.add(WorkEvent(work_id=work.id, sequence=sequence, step=step, status=status, message=message,
         details_json=encode(details), created_at=now()))

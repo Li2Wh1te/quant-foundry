@@ -102,6 +102,7 @@ def may_publish(session,work):
 def record_contributions(session,release):
     """Derive inherited contributors from actual members, not parent labels."""
     from app.data_foundation.holding_models import ReportBlockMember
+    from app.data_foundation.record_models import RecordBlockMember, OfficialRecord
     from app.data_foundation.inputs import input_manifests
     work=session.get(Work,release.work_id)
     pairs={(work.id,'governance')}
@@ -109,11 +110,12 @@ def record_contributions(session,release):
     blocks=select(BlockRef.block_id).where(BlockRef.release_id==release.id)
     decision_ids=set(session.scalars(select(BlockMember.decision_id).where(BlockMember.block_id.in_(blocks))))
     decision_ids.update(session.scalars(select(ReportBlockMember.decision_id).where(ReportBlockMember.block_id.in_(blocks))))
+    decision_ids.update(session.scalars(select(RecordBlockMember.decision_id).where(RecordBlockMember.block_id.in_(blocks))))
     for decision in session.scalars(select(Decision).where(Decision.id.in_(decision_ids))):
         if decision.work_id != work.id:pairs.add((decision.work_id,'inherited'))
     from app.data_foundation.work_models import OfficialBar,Candidate
     from app.data_foundation.holding_models import OfficialReport
-    for member_model,official_model in ((BlockMember,OfficialBar),(ReportBlockMember,OfficialReport)):
+    for member_model,official_model in ((BlockMember,OfficialBar),(ReportBlockMember,OfficialReport),(RecordBlockMember,OfficialRecord)):
         origins=session.scalars(select(Candidate.work_id).join(official_model,official_model.candidate_id==Candidate.id)
             .join(member_model,member_model.official_id==official_model.id).where(member_model.block_id.in_(blocks))).all()
         direct={wid for wid,role in pairs if role=='normalization'}

@@ -85,6 +85,7 @@ class Candidate(Record, Base):
     work_id: Mapped[UUID] = mapped_column(fk('work'))
     source_ref_id: Mapped[UUID] = mapped_column(fk('source_refs'))
     binding_id: Mapped[UUID | None] = mapped_column(fk('source_bindings'))
+    record_subject_id: Mapped[UUID | None] = mapped_column(fk('record_subjects'))
     dependency_id: Mapped[UUID] = mapped_column(fk('dependency_manifests'))
     unit_key: Mapped[str] = mapped_column(String(128))
     occurrence: Mapped[int] = mapped_column(Integer)
@@ -93,7 +94,8 @@ class Candidate(Record, Base):
     readiness: Mapped[str] = mapped_column(String(24))
     __table_args__ = (UniqueConstraint('work_id', 'unit_key', 'occurrence'),
         CheckConstraint("readiness IN ('pending','ready','quarantined')", name='candidate_readiness'),
-        CheckConstraint("readiness <> 'ready' OR binding_id IS NOT NULL", name='candidate_binding'))
+        CheckConstraint("readiness <> 'ready' OR binding_id IS NOT NULL OR record_subject_id IS NOT NULL", name='candidate_binding'),
+        CheckConstraint('binding_id IS NULL OR record_subject_id IS NULL', name='candidate_identity_kind'))
 
 
 class BarFields:
@@ -142,10 +144,11 @@ class Decision(Record, Base):
     selected_candidate_id: Mapped[UUID | None] = mapped_column(fk('candidates'))
     parent_official_id: Mapped[UUID | None] = mapped_column(fk('bar_official_revisions'))
     parent_report_id: Mapped[UUID | None] = mapped_column(fk('report_official_revisions'))
+    parent_record_id: Mapped[UUID | None] = mapped_column(fk('record_official_revisions'))
     action: Mapped[str] = mapped_column(String(16))
     evidence_json: Mapped[str] = mapped_column(Text)
     __table_args__ = (UniqueConstraint('work_id', 'target_key'),
-        CheckConstraint("(action = 'select' AND selected_candidate_id IS NOT NULL AND parent_official_id IS NULL AND parent_report_id IS NULL) OR (action = 'retain' AND selected_candidate_id IS NULL AND ((parent_official_id IS NOT NULL AND parent_report_id IS NULL) OR (parent_official_id IS NULL AND parent_report_id IS NOT NULL))) OR (action IN ('gap','block','withdraw') AND selected_candidate_id IS NULL AND parent_official_id IS NULL AND parent_report_id IS NULL)", name='decision_action'))
+        CheckConstraint("(action = 'select' AND selected_candidate_id IS NOT NULL AND parent_official_id IS NULL AND parent_report_id IS NULL AND parent_record_id IS NULL) OR (action = 'retain' AND selected_candidate_id IS NULL AND ((CASE WHEN parent_official_id IS NULL THEN 0 ELSE 1 END) + (CASE WHEN parent_report_id IS NULL THEN 0 ELSE 1 END) + (CASE WHEN parent_record_id IS NULL THEN 0 ELSE 1 END)) = 1) OR (action IN ('gap','block','withdraw') AND selected_candidate_id IS NULL AND parent_official_id IS NULL AND parent_report_id IS NULL AND parent_record_id IS NULL)", name='decision_action'))
 
 
 class OfficialBar(Record, BarFields, Base):
@@ -246,3 +249,8 @@ class WorkCoverage(Base):
     __tablename__ = 'foundation_work_coverage'
     work_id: Mapped[UUID] = mapped_column(fk('work'), primary_key=True)
     assessment_id: Mapped[UUID] = mapped_column(fk('assessments'))
+
+
+# Candidate and decision foreign keys must resolve in standalone worker processes,
+# which can import this module without loading the web application registry.
+from app.data_foundation import record_models as _record_models  # noqa: E402,F401

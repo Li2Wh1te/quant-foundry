@@ -19,6 +19,13 @@ PROJECTIONS[('fund.holdings_report','1.0')] = {
     'member_sort': ['member_ordinal'], 'decimal':'canonical-string',
     'nulls':'unavailable-field', 'read_status':'active'}
 
+from app.data_foundation.record_schemas import SCHEMAS
+for dataset, schema in SCHEMAS.items():
+    PROJECTIONS[(dataset, '1.0')] = {'version': 'typed-record-1',
+        'fields': list(schema.body.model_fields), 'sort': ['target_key'],
+        'decimal': 'canonical-string', 'nulls': 'unavailable-field', 'read_status': 'active',
+        'identity_basis': 'source_local_observed', 'coverage': 'published_keys_only'}
+
 
 def projection_for(session, dataset, version):
     definition=session.scalar(select(Definition).where(Definition.kind=='contract',Definition.name==dataset,Definition.version==version))

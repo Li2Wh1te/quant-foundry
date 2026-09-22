@@ -24,7 +24,12 @@ router = APIRouter(prefix='/api/admin/data-foundation', tags=['data-foundation']
 @router.get('/datasets')
 def datasets(request: Request, session: Session = Depends(get_db_session)):
     from app.data_foundation.query import dataset_view
-    return foundation_response(lambda: {'items': [json.loads(service(session,request).describe_dataset()), json.loads(service(session,request).describe_dataset('fund.holdings_report'))]})
+    from app.data_foundation.models import Definition
+    # Only expose installed contracts; discovery must not register definitions
+    # or imply that all supported domains already have a production release.
+    installed = set(session.scalars(select(Definition.name).where(Definition.kind == 'contract', Definition.version == '1.0')))
+    names = ['market.bar.daily', 'fund.holdings_report'] + sorted(installed.intersection(SCHEMAS))
+    return foundation_response(lambda: {'items': [json.loads(service(session, request).describe_dataset(name)) for name in names]})
 
 
 @router.get('/source-refs/{ref_id}')
@@ -95,6 +100,8 @@ from app.core.auth import require_api_token
 from app.data_foundation.canonical import FoundationError, encode
 from app.data_foundation.query import DataRequirement
 from app.data_foundation.holding_query import ReportRequirement
+from app.data_foundation.record_query import RecordRequirement
+from app.data_foundation.record_schemas import SCHEMAS
 from app.data_foundation.service import FoundationService, PagedRequirement, PageRequest
 from pydantic import Field
 
@@ -130,19 +137,19 @@ def foundation_response(callback):
 @router.get('/datasets/{dataset_id}')
 def describe_dataset(dataset_id: str, request: Request, contract_version: str='1.0', session: Session=Depends(snapshot_session)):
     from app.data_foundation.query import DATASET,dataset_view
-    if dataset_id not in (DATASET, 'fund.holdings_report') or contract_version!='1.0':
+    if dataset_id not in (DATASET, 'fund.holdings_report', *SCHEMAS) or contract_version!='1.0':
         raise HTTPException(404,detail={'message':'数据集或契约版本不存在。'})
     return foundation_response(lambda:service(session,request).describe_dataset(dataset_id))
 
 
 @router.post('/capability-checks')
-def capability_check(body: ReportRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+def capability_check(body: RecordRequirement | ReportRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
     return foundation_response(lambda:service(session,request).check_capability(body))
 
 
 @router.post('/queries')
-def official_query(body: PageRequest | ReportRequirement | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
+def official_query(body: PageRequest | RecordRequirement | ReportRequirement | PagedRequirement | DataRequirement, request: Request, session: Session=Depends(get_db_session)):
     from app.data_foundation.query import query_official
     return foundation_response(lambda:service(session,request).query_official(body))
 
@@ -153,6 +160,9 @@ def revision_lineage(revision_id: UUID, session: Session=Depends(snapshot_sessio
     from app.data_foundation.holding_models import OfficialReport
     if session.get(OfficialReport, revision_id):
         from app.data_foundation.holding_query import lineage
+    from app.data_foundation.record_models import OfficialRecord
+    if session.get(OfficialRecord, revision_id):
+        from app.data_foundation.record_query import lineage
     return foundation_response(lambda:lineage(session,revision_id))
 
 
@@ -187,12 +197,12 @@ def candidate_inspection(body: CandidateInspection, session: Session=Depends(sna
 
 class SnapshotResolution(BaseModel):
     model_config={'extra':'forbid'}
-    requests: list[ReportRequirement | DataRequirement] = Field(min_length=1,max_length=8)
+    requests: list[RecordRequirement | ReportRequirement | DataRequirement] = Field(min_length=1,max_length=8)
 
 
 class SnapshotEntry(BaseModel):
     model_config={'extra':'forbid'}
-    request: ReportRequirement | DataRequirement
+    request: RecordRequirement | ReportRequirement | DataRequirement
     manifest_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
     projection_hash: str = Field(pattern=r'^[a-f0-9]{64}$')
 
