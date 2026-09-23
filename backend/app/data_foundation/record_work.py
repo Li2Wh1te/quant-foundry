@@ -26,7 +26,7 @@ MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
         for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py',
-                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py')})
+                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py')})
 
 
 def validation_hash():
@@ -62,6 +62,15 @@ def register_catalog(session, dataset, source):
         atomic_unit='typed-record', supported_filters=['subjects', 'start', 'end'],
         canonical_schema=shape, limitations=list(schema.limitations))
     contract = register_definition(session, kind='contract', name=dataset, version='1.0', definition=definitions)
+    from app.data_foundation.record_schemas import DATE_METADATA_REVISIONS
+    if dataset in DATE_METADATA_REVISIONS:
+        # Keep the original definition byte-for-byte immutable. The minor only
+        # describes the already-stored date; it never changes a business key,
+        # record body, source binding, major head, or historical public time.
+        corrected = definitions | {'time_semantics': definitions['time_semantics'] | {'business': [schema.date_field]}}
+        contract = register_definition(session, kind='contract', name=dataset,
+            version=DATE_METADATA_REVISIONS[dataset], definition=corrected)
+
     series = register_definition(session, kind='series', name=series_for(dataset, source), version='1', definition={
         'schema_version': 1, 'object_kind': 'typed-record', 'source': source,
         'identity_basis': 'source_local_observed', 'public_time_status': 'unverified',

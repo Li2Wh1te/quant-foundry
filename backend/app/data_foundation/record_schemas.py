@@ -394,6 +394,63 @@ class QuotaListSnapshot(QuotaSummarySnapshot):
     annual_return: None = None
 
 
+class ReportedPricePoint(Body):
+    trade_date: date
+    reported_open: ReportedNav
+    reported_high: ReportedNav
+    reported_low: ReportedNav
+    reported_close: ReportedNav
+    reported_volume: ReportedNav | None
+    reported_turnover: ReportedNav | None
+
+    @model_validator(mode='after')
+    def coherent_reported_prices(self):
+        opened, high, low, close = (Decimal(getattr(self, 'reported_' + key)) for key in ('open', 'high', 'low', 'close'))
+        if low <= 0 or high < max(opened, close) or low > min(opened, close):
+            raise ValueError('Reported OHLC prices must be positive and coherent')
+        return self
+
+
+class DailyPriceWindow(Body):
+    """Complete materialized observation, not complete requested-date coverage."""
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    coverage: Literal['observed_rows_only']
+    sequence_start: date
+    sequence_end: date
+    points: list[ReportedPricePoint] = Field(min_length=1)
+    declared_request_start: date | None
+    declared_request_end: date | None
+    currency: None = None
+    volume_unit: None = None
+    turnover_unit: None = None
+    adjustment_anchor: None = None
+    adjustment_formula: None = None
+
+    @model_validator(mode='after')
+    def coherent_observed_window(self):
+        days = [point.trade_date for point in self.points]
+        if days != sorted(set(days)) or self.sequence_start != days[0] or self.sequence_end != days[-1]:
+            raise ValueError('Daily window bounds must match distinct sorted materialized dates')
+        if self.declared_request_start and self.declared_request_end and self.declared_request_start > self.declared_request_end:
+            raise ValueError('Reported request dates are reversed')
+        return self
+
+
+class StockDailyWindow(DailyPriceWindow):
+    asset_type: Literal['a-share']
+    reported_adjustment: Literal['none']
+
+
+class EtfDailyWindow(DailyPriceWindow):
+    asset_type: Literal['fund-etf']
+    reported_adjustment: Literal['forward']
+
+
+class IndexDailyWindow(DailyPriceWindow):
+    asset_type: Literal['a-share-index']
+    reported_adjustment: Literal['not_applicable']
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -434,6 +491,21 @@ SCHEMAS = {item.dataset: item for item in (
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
                         'requested_category_only', 'quota_currency_units_and_formula_unverified',
                         'source_display_text_not_comparable_amounts', 'current_subscription_eligibility_unverified')),
+    Schema('market.stock_daily_window', '股票日线观察窗口', StockDailyWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'reported_adjustment', 'coverage', 'sequence_start', 'sequence_end', 'points'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'observed_rows_not_full_requested_range', 'currency_volume_and_turnover_units_unverified',
+                        'adjustment_anchor_and_formula_unverified', 'captured_numeric_precision_not_provider_precision')),
+    Schema('market.etf_daily_window', 'ETF前复权日线观察窗口', EtfDailyWindow, 'asset:fund-etf',
+           ('source_code', 'asset_type', 'reported_adjustment', 'coverage', 'sequence_start', 'sequence_end', 'points'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'observed_rows_not_full_requested_range', 'currency_volume_and_turnover_units_unverified',
+                        'adjustment_anchor_and_formula_unverified', 'captured_numeric_precision_not_provider_precision')),
+    Schema('market.index_daily_window', '指数日线观察窗口', IndexDailyWindow, 'asset:a-share-index',
+           ('source_code', 'asset_type', 'reported_adjustment', 'coverage', 'sequence_start', 'sequence_end', 'points'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'observed_rows_not_full_requested_range', 'currency_volume_and_turnover_units_unverified',
+                        'adjustment_anchor_and_formula_unverified', 'captured_numeric_precision_not_provider_precision')),
     Schema('fund.offering_snapshot', '基金募集集合观察', FundOfferingSnapshot, 'fund_offering_filter',
            ('collection_key', 'selection_basis', 'members'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
@@ -467,6 +539,12 @@ SCHEMAS = {item.dataset: item for item in (
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
                         'share_quantity_conversion_not_supported', 'adjusted_price_derivation_not_supported'), date_field='trade_date'),
 )}
+
+
+# The historical ranking date was already stored and filterable in 1.0, but
+# its contract omitted the business-time annotation because the day is part of
+# the source-local subject key. A metadata-only minor preserves those keys.
+DATE_METADATA_REVISIONS = {'market.popularity_history_snapshot': '1.1'}
 
 
 def schema_for(dataset):

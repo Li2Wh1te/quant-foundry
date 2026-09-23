@@ -17,6 +17,9 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'hot_history'): 'market.popularity_history_snapshot',
     ('tonghuashun', 'fund_quota_summary'): 'fund.quota_summary_snapshot',
     ('tonghuashun', 'fund_quota_list'): 'fund.quota_list_snapshot',
+    ('tonghuashun', 'stock_daily'): 'market.stock_daily_window',
+    ('tonghuashun', 'etf_daily'): 'market.etf_daily_window',
+    ('tonghuashun', 'index_daily'): 'market.index_daily_window',
     ('tonghuashun', 'fund_offerings'): 'fund.offering_snapshot',
     ('tonghuashun', 'fund_manager_experience'): 'fund.manager_experience',
     ('tonghuashun', 'calendar'): 'market.calendar',
@@ -58,6 +61,8 @@ def rows_for(source, content):
     if source.source == 'tonghuashun' and source.dataset in ('hot_list', 'skyrocket', 'hot_history'):
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset in ('fund_quota_summary', 'fund_quota_list'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('stock_daily', 'etf_daily', 'index_daily'):
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_offerings':
         if not isinstance(content, dict):
@@ -150,6 +155,10 @@ def convert(source, raw):
         from app.data_foundation.fund_quotas import quota_body
         body, quality = quota_body(source, raw)
         key, kind = source.subject, 'qdii_summary_category' if source.dataset == 'fund_quota_summary' else 'qdii_list_category'
+    elif source.source == 'tonghuashun' and source.dataset in ('stock_daily', 'etf_daily', 'index_daily'):
+        from app.data_foundation.daily_windows import daily_window_body
+        body, quality = daily_window_body(source, raw)
+        key, kind = source.subject, 'asset:' + body['asset_type']
     elif dataset == 'fund.offering_snapshot':
         from app.data_foundation.fund_offerings import offering_body
         body, quality = offering_body(source, raw)
