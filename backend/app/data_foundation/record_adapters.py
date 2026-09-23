@@ -7,6 +7,9 @@ from app.data_foundation.canonical import FoundationError, normalized
 from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
+    ('tonghuashun','fund_returns'): 'fund.return_snapshot',
+    ('tonghuashun','fund_drawdowns'): 'fund.drawdown_snapshot',
+    ('tonghuashun','fund_performance_history'): 'fund.performance_window',
     ('tonghuashun', 'dragon_tiger'): 'market.dragon_tiger_snapshot',
     ('tonghuashun', 'stock_auction'): 'market.auction_snapshot',
     ('tonghuashun', 'auction_benchmark'): 'market.auction_benchmark_snapshot',
@@ -60,6 +63,8 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset in ('fund_returns','fund_drawdowns','fund_performance_history'):
+        return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'dragon_tiger':
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset in ('stock_auction', 'auction_benchmark', 'limit_up', 'limit_down', 'limit_break', 'anomaly_list', 'limit_ladder'):
@@ -165,7 +170,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if source.source == 'tonghuashun' and source.dataset == 'dragon_tiger':
+    if source.source == 'tonghuashun' and source.dataset in ('fund_returns','fund_drawdowns','fund_performance_history'):
+        from app.data_foundation.fund_performance import performance_body
+        body, quality = performance_body(source, raw)
+        key, kind = source.subject, 'asset:fund'
+    elif source.source == 'tonghuashun' and source.dataset == 'dragon_tiger':
         from app.data_foundation.dragon_tiger import dragon_tiger_body
         body, quality = dragon_tiger_body(source, raw)
         key, kind = 'dragon_tiger:' + source.subject, 'dragon_tiger_list'
