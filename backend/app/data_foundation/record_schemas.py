@@ -691,6 +691,52 @@ class LimitLadderWindow(Body):
         return self
 
 
+class DragonTigerStock(ActivityMember):
+    source_order: StrictInt = Field(ge=0)
+    reported_range_days: StrictInt = Field(ge=1)
+    reported_limit_reason: StrictStr | None
+    reported_concepts: list[StrictStr]
+    reported_change: ReportedSigned | None
+    reported_net_rate: ReportedSigned | None
+    reported_net_value: ReportedSigned | None
+    reported_org_net_rate: ReportedSigned | None
+    reported_org_net_value: ReportedSigned | None
+    reported_hot_money_net_rate: ReportedSigned | None
+    reported_hot_money_net_value: ReportedSigned | None
+    reported_hot_money_item_net_rate: ReportedSigned | None
+    reported_hot_money_item_net_value: ReportedSigned | None
+    reported_amount: ReportedNav | None
+    reported_buy_value: ReportedNav | None
+    reported_sell_value: ReportedNav | None
+    reported_hot_rank: StrictInt | None = Field(ge=0)
+    reported_org_buy_num: StrictInt | None = Field(ge=0)
+    reported_org_sell_num: StrictInt | None = Field(ge=0)
+
+
+class DragonTigerParticipant(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_name: StrictStr
+    reported_buying: ReportedSigned | None
+    stocks: list[DragonTigerStock]
+
+
+class DragonTigerSnapshot(Body):
+    collection_key: StrictStr
+    trading_date: date
+    board_type: Literal['all','org','hot_money']
+    stocks: list[DragonTigerStock]
+    hot_money: list[DragonTigerParticipant]
+    reported_count: StrictInt | None = Field(ge=0)
+    reported_stock_count: StrictInt | None = Field(ge=0)
+    complete_market_coverage: None = None
+    currency: None = None
+    amount_units: None = None
+    ratio_formula: None = None
+    participant_identity: None = None
+    duplicate_resolution: None = None
+    period_start: None = None
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -705,6 +751,10 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    Schema('market.dragon_tiger_snapshot', '龙虎榜完整观察', DragonTigerSnapshot, 'dragon_tiger_list',
+           ('collection_key','trading_date','board_type','stocks','hot_money'),business_fields=('trading_date',),date_field='trading_date',
+           limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified',
+                        'provider_reported_semantics_only','source_occurrences_not_resolved','not_complete_market_universe')),
     Schema('market.auction_snapshot', '竞价终态观察', AuctionSnapshot, 'asset:a-share', ('source_code', 'asset_type', 'reported_phase', 'reported_status'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
                         'provider_reported_semantics_only', 'not_complete_market_universe')),
