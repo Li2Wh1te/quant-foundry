@@ -814,6 +814,29 @@ class ManagerStyleSnapshot(Body):
     verified_investment_strategy: None = None
 
 
+class ManagerPerformancePoint(Body):
+    trading_date: date
+    reported_fields: list[StrictStr]
+    reported_manager_return_pct: ReportedSigned | None
+    reported_peer_return_pct: ReportedSigned | None
+    reported_benchmark_return_pct: ReportedSigned | None
+
+
+class ManagerPerformanceWindow(Body):
+    manager_id: StrictStr
+    provider_period: Literal['month','tmonth','year','nowyear','now']
+    points: list[ManagerPerformancePoint]
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    coverage_basis: Literal['source_observation_window']
+    calculation_formula: None = None
+    comparable_units: None = None
+    benchmark_identity: None = None
+    excess_return: None = None
+    effective_period_boundaries: None = None
+    complete_history: None = None
+    timestamp_semantics: None = None
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -828,6 +851,9 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    Schema('fund.manager_performance_window', '基金经理业绩窗口', ManagerPerformanceWindow, 'manager_performance_window',
+           ('manager_id','provider_period','points','coverage_basis'),limitations=('source_local_identity_only','observed_time_only',
+           'historical_public_time_unverified','provider_period_and_formula_unverified','reported_series_not_proven_comparable')),
     Schema('fund.manager_style_snapshot', '基金经理风格观察', ManagerStyleSnapshot, 'fund_manager', ('manager_id','preferences'),
            limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified','provider_vector_labels_unverified','source_narrative_only')),
     Schema('fund.return_snapshot', '基金区间收益观察', ReturnSnapshot, 'asset:fund', ('source_code','asset_type','periods'),

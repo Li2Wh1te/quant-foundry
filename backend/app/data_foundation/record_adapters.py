@@ -7,6 +7,7 @@ from app.data_foundation.canonical import FoundationError, normalized
 from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
+    ('tonghuashun','fund_manager_performance'): 'fund.manager_performance_window',
     ('tonghuashun','fund_manager_style'): 'fund.manager_style_snapshot',
     ('tonghuashun','fund_returns'): 'fund.return_snapshot',
     ('tonghuashun','fund_drawdowns'): 'fund.drawdown_snapshot',
@@ -64,6 +65,8 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset == 'fund_manager_performance':
+        return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_style':
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset in ('fund_returns','fund_drawdowns','fund_performance_history'):
@@ -173,7 +176,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if source.source == 'tonghuashun' and source.dataset == 'fund_manager_style':
+    if source.source == 'tonghuashun' and source.dataset == 'fund_manager_performance':
+        from app.data_foundation.manager_performance import performance_body
+        body, quality = performance_body(source, raw)
+        key, kind = source.subject, 'manager_performance_window'
+    elif source.source == 'tonghuashun' and source.dataset == 'fund_manager_style':
         from app.data_foundation.manager_style import style_body
         body, quality = style_body(source, raw)
         key, kind = source.subject, 'fund_manager'
