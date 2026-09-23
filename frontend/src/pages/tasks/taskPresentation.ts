@@ -40,7 +40,8 @@ export function runSummary(run: TaskRun): string {
   if (typeof message === "string" && /[\u4e00-\u9fff]/.test(message) && message.length < 500) return message;
   // CollectionError is authored by the source-local collector, which records
   // only classified errors and counts, never vendor messages or credentials.
-  if (run.task_type?.startsWith("data.ths.") && run.error_type === "CollectionError"
+  if (((run.task_type?.startsWith("data.ths.") && run.error_type === "CollectionError")
+    || (run.task_type === "foundation.formalize_local_updates" && run.error_type === "FoundationUpdateError"))
     && typeof run.error_message === "string" && /[\u4e00-\u9fff]/.test(run.error_message)
     && run.error_message.length < 500) return run.error_message;
   const event = typeof run.result?.event === "string" ? collectionEvents[run.result.event] : undefined;

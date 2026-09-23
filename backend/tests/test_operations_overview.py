@@ -209,6 +209,12 @@ class OverviewContractTest(unittest.TestCase):
         definitions = task_registry.list()
         self.assertTrue(definitions)
         for definition in definitions:
+            if definition.key == 'foundation.formalize_local_updates':
+                # Local formalization reads committed evidence even while a
+                # supplier is disabled. It must not inflate vendor ingestion
+                # counters or inherit the Tushare network admission gate.
+                self.assertIsNone(definition.source_key)
+                continue
             self.assertEqual(definition.source_key,
                 "tonghuashun" if definition.key.startswith("data.ths.") else "tushare")
 

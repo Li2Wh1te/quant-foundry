@@ -25,7 +25,19 @@ def create_work(session, *, kind, contract_id, execution_id, dependency_id, para
                 expected_head_revision=0, expected_issue_epoch=0, total=None):
     required = {'dataset', 'major', 'profile', 'series', 'start', 'end', 'domain', 'domain_hash'}
     report_keys = {'report_keys'} if parameters.get('domain') == 'holdings-report-v1' else set()
-    if set(parameters) != (required | report_keys | ({'actions'} if kind == 'B' else set()) | ({'source_context_hash'} if candidate_input_set_id else set())) or kind not in ('A', 'B'):
+    # Historical typed-record publications remain independently readable but
+    # must not replace the current projection. The optional literal preserves
+    # all existing work fingerprints and cannot be supplied to other domains.
+    head_keys = {'head_mode'} if 'head_mode' in parameters else set()
+    pointer_keys = {'source_revision'} if 'source_revision' in parameters else set()
+    if pointer_keys and (kind != 'B' or parameters.get('domain') != 'typed-record-v1'
+            or candidate_input_set_id or head_keys or type(parameters['source_revision']) is not int
+            or parameters['source_revision'] < 1):
+        raise ValueError('Source revision requires current single-source typed-record governance')
+    if head_keys and (kind != 'B' or parameters.get('domain') != 'typed-record-v1'
+                      or candidate_input_set_id or parameters['head_mode'] != 'preserve'):
+        raise ValueError('Head preservation requires single-input typed-record governance')
+    if set(parameters) != (required | report_keys | head_keys | pointer_keys | ({'actions'} if kind == 'B' else set()) | ({'source_context_hash'} if candidate_input_set_id else set())) or kind not in ('A', 'B'):
         raise ValueError('Invalid fixed work parameters')
     if report_keys:
         keys = parameters['report_keys']
@@ -100,6 +112,8 @@ def append_event(session, work, step, status, details):
     params = json.loads(work.parameters_json)
     labels = {'input': '固定输入', 'normalization': '标准化', 'quality': '质量检查', 'governance': '治理', 'publication': '发布'}
     state_label = {'fixed': '输入已固定', 'evaluated': '已评估', 'queued': '等待续作', 'succeeded': '成功', 'failed': '失败', 'cancelled': '已取消', 'dependency_missing': '依赖缺失', 'awaiting_publication': '已封存待发布', 'superseded': '父发布已更新', 'published': '已发布'}.get(status, '处理中')
+    if status == 'published' and details.get('head_activated') is False:
+        state_label = '历史观察已正式发布，当前指针保持不变'
     previous = session.scalar(select(WorkEvent).where(WorkEvent.work_id == work.id).order_by(WorkEvent.sequence.desc()).limit(1))
     previous_cursor = json.loads(previous.details_json).get('checkpoint', 0) if previous else 0
     checkpoint = '已推进' if work.cursor > previous_cursor else '未推进'

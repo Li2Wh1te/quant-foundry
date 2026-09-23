@@ -43,3 +43,9 @@ test('collection event fallback never renders its internal event key',()=>{
   assert.equal(view.runSummary({task_type:'data.ths.fund_profile',status:'failed',error_type:'CollectionError',error_message:'同花顺基金资料部分失败：成功 1 个，失败 1 个。'}),'同花顺基金资料部分失败：成功 1 个，失败 1 个。');
   assert.doesNotMatch(view.runSummary({task_type:'data.ths.fund_profile',status:'failed',error_type:'VendorError',error_message:'上游原文不应显示'}),/上游原文/);
 });
+test('formalization failures show classified Chinese outcomes without leaking vendor text',()=>{
+  const message='基金公司资料本地正式化：发布 1 个，失败 1 个；已提交进度保留。';
+  assert.equal(view.runSummary({task_type:'foundation.formalize_local_updates',status:'failed',error_type:'FoundationUpdateError',error_message:message}),message);
+  assert.doesNotMatch(view.runSummary({task_type:'foundation.formalize_local_updates',status:'failed',error_type:'VendorError',error_message:'上游原文不应显示'}),/上游原文/);
+  assert.match(view.runSummary({status:'failed',result:{event:'foundation_updates_failed'}}),/本地正式化更新失败/);
+});
