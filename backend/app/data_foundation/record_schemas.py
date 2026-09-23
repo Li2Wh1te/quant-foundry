@@ -325,6 +325,75 @@ class HistoricalPopularitySnapshot(PopularitySnapshot):
         return self
 
 
+class QuotaSummaryGroup(Body):
+    category_key: StrictStr = Field(min_length=1, max_length=128)
+    reported_buy_text: StrictStr
+    reported_total_text: StrictStr
+    reported_total_limit_text: StrictStr
+    reported_unlimited_text: StrictStr
+
+
+class QuotaFund(Body):
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    fund_name: StrictStr
+    reported_quota_text: StrictStr
+    reported_year_text: StrictStr
+    classify_presence: Literal['absent', 'null', 'value']
+    reported_classify: list[StrictStr] | None
+
+    @model_validator(mode='after')
+    def distinguish_missing_classification(self):
+        if (self.classify_presence == 'value') != (self.reported_classify is not None):
+            raise ValueError('Classification presence and value must agree')
+        return self
+
+
+class QuotaSubcategory(Body):
+    category_key: StrictStr = Field(min_length=1, max_length=128)
+    funds: list[QuotaFund]
+
+    @field_validator('funds')
+    @classmethod
+    def distinct_sorted_codes(cls, members):
+        codes = [m.source_code for m in members]
+        if len(codes) != len(set(codes)) or codes != sorted(codes):
+            raise ValueError('A quota subcategory must have distinct sorted codes')
+        return members
+
+
+class QuotaListGroup(Body):
+    category_key: StrictStr = Field(min_length=1, max_length=128)
+    subcategories: list[QuotaSubcategory]
+
+    @field_validator('subcategories')
+    @classmethod
+    def distinct_sorted_categories(cls, groups):
+        keys = [g.category_key for g in groups]
+        if len(keys) != len(set(keys)) or keys != sorted(keys):
+            raise ValueError('Quota subcategories must be distinct and sorted')
+        return groups
+
+
+class QuotaSummarySnapshot(Body):
+    collection_key: StrictStr = Field(min_length=1, max_length=128)
+    scope_basis: Literal['explicit_requested_category_only']
+    reported_groups: list[QuotaSummaryGroup] = Field(max_length=1)
+    comparable_quota_amounts: None = None
+    quota_currency: None = None
+    current_subscription_eligibility: None = None
+
+    @model_validator(mode='after')
+    def group_matches_requested_category(self):
+        if any(g.category_key != self.collection_key for g in self.reported_groups):
+            raise ValueError('Reported quota category must match the requested category')
+        return self
+
+
+class QuotaListSnapshot(QuotaSummarySnapshot):
+    reported_groups: list[QuotaListGroup] = Field(max_length=1)
+    annual_return: None = None
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -355,6 +424,16 @@ SCHEMAS = {item.dataset: item for item in (
            ('collection_key', 'period', 'scope_basis', 'members', 'ranking_date'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
                         'provider_returned_list_only', 'heat_method_unverified', 'not_complete_market_universe'), date_field='ranking_date'),
+    Schema('fund.quota_summary_snapshot', 'QDII分类额度汇总观察', QuotaSummarySnapshot, 'qdii_summary_category',
+           ('collection_key', 'scope_basis', 'reported_groups'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'requested_category_only', 'quota_currency_units_and_formula_unverified',
+                        'source_display_text_not_comparable_amounts', 'current_subscription_eligibility_unverified')),
+    Schema('fund.quota_list_snapshot', 'QDII分类基金额度观察', QuotaListSnapshot, 'qdii_list_category',
+           ('collection_key', 'scope_basis', 'reported_groups'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'requested_category_only', 'quota_currency_units_and_formula_unverified',
+                        'source_display_text_not_comparable_amounts', 'current_subscription_eligibility_unverified')),
     Schema('fund.offering_snapshot', '基金募集集合观察', FundOfferingSnapshot, 'fund_offering_filter',
            ('collection_key', 'selection_basis', 'members'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',

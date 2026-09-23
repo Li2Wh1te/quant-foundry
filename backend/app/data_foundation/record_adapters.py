@@ -15,6 +15,8 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'hot_list'): 'market.popularity_snapshot',
     ('tonghuashun', 'skyrocket'): 'market.rising_popularity_snapshot',
     ('tonghuashun', 'hot_history'): 'market.popularity_history_snapshot',
+    ('tonghuashun', 'fund_quota_summary'): 'fund.quota_summary_snapshot',
+    ('tonghuashun', 'fund_quota_list'): 'fund.quota_list_snapshot',
     ('tonghuashun', 'fund_offerings'): 'fund.offering_snapshot',
     ('tonghuashun', 'fund_manager_experience'): 'fund.manager_experience',
     ('tonghuashun', 'calendar'): 'market.calendar',
@@ -54,6 +56,8 @@ def rows_for(source, content):
             raise FoundationError('IDENTITY_CONFLICT', '基金净值容器主体与固定来源主体不一致。')
         return [{'points': rows, 'coverage': content.get('coverage')}]
     if source.source == 'tonghuashun' and source.dataset in ('hot_list', 'skyrocket', 'hot_history'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_quota_summary', 'fund_quota_list'):
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_offerings':
         if not isinstance(content, dict):
@@ -142,6 +146,10 @@ def convert(source, raw):
         from app.data_foundation.popularity import popularity_body
         body, quality = popularity_body(source, raw)
         key, kind = f'{source.dataset}:{source.subject}', 'stock_rank_list'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_quota_summary', 'fund_quota_list'):
+        from app.data_foundation.fund_quotas import quota_body
+        body, quality = quota_body(source, raw)
+        key, kind = source.subject, 'qdii_summary_category' if source.dataset == 'fund_quota_summary' else 'qdii_list_category'
     elif dataset == 'fund.offering_snapshot':
         from app.data_foundation.fund_offerings import offering_body
         body, quality = offering_body(source, raw)
