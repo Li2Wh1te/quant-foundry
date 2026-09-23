@@ -55,6 +55,38 @@ class FundProfile(Body):
     established_date: date | None = None
 
 
+class ManagerAssignment(Body):
+    """Source-reported career text, without inferred economic dates or IDs."""
+    fund_code: StrictStr = Field(min_length=1, max_length=64)
+    name: StrictStr | None = None
+    quotation_code: StrictStr | None = None
+    fund_type: StrictStr | None = None
+    start_text: StrictStr | None = None
+    end_text: StrictStr | None = None
+
+
+class ManagerExperience(Body):
+    """A complete reported assignment set replaces its previous observation.
+
+    Opaque provider periods (including '至今') remain text. Performance, awards
+    and heavy-asset facts require separate verified definitions; declaring them
+    unavailable prevents consumers from treating omitted facts as zero.
+    """
+    manager_id: StrictStr = Field(min_length=1, max_length=128)
+    assignments: list[ManagerAssignment]
+    performance: None = None
+    awards: None = None
+    heavy_assets: None = None
+
+    @field_validator('assignments')
+    @classmethod
+    def unique_sorted_assignments(cls, value):
+        keys = [row.fund_code for row in value]
+        if len(keys) != len(set(keys)) or keys != sorted(keys):
+            raise ValueError('Assignments must have unique, sorted source codes')
+        return value
+
+
 class CalendarDay(Body):
     exchange_scope: StrictStr = Field(min_length=1, max_length=128)
     calendar_date: date
@@ -176,6 +208,10 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
+    Schema('fund.manager_experience', '基金经理任职观察', ManagerExperience, 'fund_manager',
+           ('manager_id', 'assignments'), limitations=('source_local_identity_only', 'observed_time_only',
+           'historical_public_time_unverified', 'assignment_effective_dates_unverified',
+           'performance_units_unverified')),
     Schema('index.category_snapshot', '指数分类目录快照', IndexCategorySnapshot, 'index_category',
            ('collection_key', 'collection_kind', 'membership_basis', 'members'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
