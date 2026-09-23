@@ -106,7 +106,7 @@ def subjects(svc, dataset, series, release_id, *, after=None, search='', limit=5
     values still require the ordinary capability check and signed read token.
     """
     from types import SimpleNamespace
-    from sqlalchemy import select, exists
+    from sqlalchemy import select
     from app.data_foundation.record_models import RecordSubject, RecordBlockMember
     from app.data_foundation.work_models import BlockRef
     owner = svc.owner()
@@ -114,9 +114,15 @@ def subjects(svc, dataset, series, release_id, *, after=None, search='', limit=5
         raise FoundationError('AUTH_REQUIRED', '主体目录读取需要有效身份。')
     release = resolve_release(svc.session, SimpleNamespace(dataset_id=dataset, contract_version='1.0',
         profile_id='default', semantic_series_id=series, release=release_id))
-    statement = select(RecordSubject).where(exists(select(1).select_from(RecordBlockMember)
-        .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id).where(
-            BlockRef.release_id == release.id, RecordBlockMember.subject_id == RecordSubject.id)))
+    # Materialize this immutable release's distinct identities before applying
+    # the ordered page limit. A correlated EXISTS lets PostgreSQL choose an
+    # ordered scan over every historical member, which becomes unbounded as
+    # unrelated backfills grow. Multiple dates/blocks still yield one identity.
+    identities = (select(RecordBlockMember.subject_id)
+        .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
+        .where(BlockRef.release_id == release.id).distinct()
+        .cte('release_subjects').prefix_with('MATERIALIZED'))
+    statement = select(RecordSubject).join(identities, identities.c.subject_id == RecordSubject.id)
     if after:
         statement = statement.where(RecordSubject.id > after)
     if search:

@@ -261,3 +261,21 @@ def test_invalid_adjustment_factors_are_isolated(session):
         dataset='etf_adjustment_factors')
     assert fixture[0].status == 'succeeded'
     assert list(session.scalars(select(Candidate.readiness).where(Candidate.work_id == fixture[0].id))) == ['quarantined'] * 8
+
+
+def test_subject_pages_deduplicate_dates_and_exclude_other_releases(session):
+    from app.data_foundation.record_service import subjects
+    # A factor subject occurs on several dates, while another release owns a
+    # different subject. Discovery must expose one identity per pinned release.
+    first = release_records(session, setup_records(session, [
+        dict(ts_code='SAME.SH', trade_date=day, adj_factor='1.25')
+        for day in ['2026-08-20', '2026-08-21', '2026-08-22']], dataset='etf_adjustment_factors'))
+    release_records(session, setup_records(session, [dict(ts_code='UNRELATED.SH',
+        trade_date='2026-08-22', adj_factor='1')], dataset='etf_adjustment_factors'), first)
+    svc = service(session)
+    page = subjects(svc, 'market.adjustment_factor',
+        'tushare-market.adjustment_factor-observed-v1', first.id, limit=1)
+    assert [row['source_key'] for row in page['items']] == ['SAME.SH']
+    assert page['next_after'] is None
+    assert not subjects(svc, 'market.adjustment_factor',
+        'tushare-market.adjustment_factor-observed-v1', first.id, search='UNRELATED')['items']
