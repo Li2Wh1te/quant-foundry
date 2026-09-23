@@ -19,9 +19,9 @@ from app.data_foundation.record_query import RecordRequirement
 from app.data_foundation.work_models import Candidate
 
 
-def setup(session,rows,dataset,subject):
+def setup(session,rows,dataset,subject,**metadata):
     ex=execution(session)
-    payload={'item':rows}
+    payload={'item':rows,**metadata}
     if dataset=='hot_history':payload['date']=subject
     observation=Observation(id=uuid4(),dataset=dataset,subject=subject,variant='default',
         observed_at=datetime.now(timezone.utc),request_json='{}',data_json=exact_json(payload),
