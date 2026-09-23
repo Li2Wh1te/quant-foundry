@@ -87,6 +87,52 @@ class ManagerExperience(Body):
         return value
 
 
+ReportedNav = Annotated[StrictStr, Field(pattern=r'^(0|[1-9][0-9]{0,31})(\.[0-9]{1,32})?$')]
+
+
+class NavPoint(Body):
+    """Exact provider categories, not a currency/share or total-return claim."""
+    nav_date: date
+    reported_unit_nav: ReportedNav | None
+    reported_adjusted_nav: ReportedNav | None
+
+    @model_validator(mode='after')
+    def has_reported_value(self):
+        if self.reported_unit_nav is None and self.reported_adjusted_nav is None:
+            raise ValueError('A NAV point must report at least one category')
+        return self
+
+
+class FundNavSnapshot(Body):
+    """One complete materialized sequence with an observation-specific basis.
+
+    The collector replaces reconciled rolling windows, so retaining absent
+    dates from the previous official snapshot would mix adjustment bases.
+    Reported categories remain separate and cannot authorize return, currency
+    conversion or cumulative-NAV calculations. Dates describe NAV business
+    dates, never historical availability to market participants.
+    """
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    coverage: Literal['provider_rolling_window']
+    value_basis: Literal['tonghuashun_nav_type_unit_adj']
+    sequence_start: date
+    sequence_end: date
+    points: list[NavPoint] = Field(min_length=1)
+    currency: None = None
+    share_basis: None = None
+    adjustment_formula: None = None
+    cumulative_nav: None = None
+
+    @model_validator(mode='after')
+    def coherent_sequence(self):
+        days = [point.nav_date for point in self.points]
+        if days != sorted(set(days)):
+            raise ValueError('NAV dates must be unique and sorted')
+        if self.sequence_start != days[0] or self.sequence_end != days[-1]:
+            raise ValueError('Sequence coverage must match materialized points')
+        return self
+
+
 class CalendarDay(Body):
     exchange_scope: StrictStr = Field(min_length=1, max_length=128)
     calendar_date: date
@@ -208,6 +254,12 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
+    Schema('fund.nav_snapshot', '基金净值窗口观察', FundNavSnapshot, 'fund_share',
+           ('source_code', 'coverage', 'value_basis', 'sequence_start', 'sequence_end', 'points'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_nav_categories_only', 'currency_and_share_basis_unverified',
+                        'adjustment_formula_unverified', 'cumulative_nav_and_return_derivation_not_supported',
+                        'rolling_window_not_complete_fund_history')),
     Schema('fund.manager_experience', '基金经理任职观察', ManagerExperience, 'fund_manager',
            ('manager_id', 'assignments'), limitations=('source_local_identity_only', 'observed_time_only',
            'historical_public_time_unverified', 'assignment_effective_dates_unverified',
