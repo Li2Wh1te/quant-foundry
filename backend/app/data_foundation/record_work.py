@@ -273,17 +273,31 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
 
 
 def create_governance(session, *, normalization_id, execution_id, policy_id, parent_release_id=None,
-                      expected_head_revision=0, expected_issue_epoch=0):
+                      expected_head_revision=0, expected_issue_epoch=0, preserve_head=False, source_revision=None):
+    if not isinstance(preserve_head, bool):
+        raise ValueError('Head preservation must be an explicit boolean')
     origin = session.get(Work, normalization_id)
     manifest = session.scalar(select(CandidateManifest).where(CandidateManifest.work_id == normalization_id))
     if origin is None or manifest is None:
         raise FoundationError('CANDIDATE_NOT_SEALED', '领域候选尚未封存。')
     params = verify(origin)
     actions = plan_actions(session, manifest.id, policy_id, parent_release_id)
+    mode = {'head_mode': 'preserve'} if preserve_head else {}
+    if source_revision is not None:
+        if preserve_head or type(source_revision) is not int or source_revision < 1:
+            raise ValueError('Invalid current source revision')
+        if session.get(SourceRef, origin.source_ref_id).representation != 'ths_observation':
+            raise FoundationError('SCOPE_MISMATCH', '当前来源指针仅适用于同花顺固定观察。')
+        mode['source_revision'] = source_revision
     work = create_work(session, kind='B', contract_id=origin.contract_id, execution_id=execution_id,
         dependency_id=origin.dependency_id, candidate_manifest_id=manifest.id, policy_id=policy_id,
         parent_release_id=parent_release_id, expected_head_revision=expected_head_revision,
-        expected_issue_epoch=expected_issue_epoch, parameters={**params, 'actions': actions})
+        expected_issue_epoch=expected_issue_epoch, parameters={**params, 'actions': actions, **mode})
+    if source_revision is not None:
+        from app.data_foundation.batch_models import WorkSourcePointer
+        if session.get(WorkSourcePointer, (work.id, origin.source_ref_id)) is None:
+            session.add(WorkSourcePointer(work_id=work.id, source_ref_id=origin.source_ref_id, revision=source_revision))
+            session.flush()
     # The full sealed input and policy were just used to derive every action.
     # Work inputs/parameters and candidate/policy/parent evidence are immutable;
     # record that derivation transactionally instead of repeating it per page.
@@ -326,7 +340,15 @@ def verify_governance_plan(session, work, *, force=False):
     manifest = session.get(CandidateManifest, work.candidate_manifest_id)
     origin = session.get(Work, manifest.work_id)
     actions = plan_actions(session, manifest.id, work.policy_id, work.parent_release_id)
-    if (params != {**json.loads(origin.parameters_json), 'actions': actions}
+    mode = {'head_mode': 'preserve'} if params.get('head_mode') == 'preserve' else {}
+    if 'source_revision' in params:
+        from app.data_foundation.batch_models import WorkSourcePointer
+        pointers = list(session.scalars(select(WorkSourcePointer).where(WorkSourcePointer.work_id == work.id)))
+        if (mode or len(pointers) != 1 or pointers[0].source_ref_id != origin.source_ref_id
+                or pointers[0].revision != params['source_revision']):
+            raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '当前来源指针凭据与固定治理计划不一致。')
+        mode['source_revision'] = params['source_revision']
+    if (params != {**json.loads(origin.parameters_json), 'actions': actions, **mode}
             or work.dependency_id != origin.dependency_id):
         raise FoundationError('GOVERNANCE_PLAN_MISMATCH', '领域治理计划与固定输入不一致。')
     if receipt is None:

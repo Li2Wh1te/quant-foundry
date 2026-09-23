@@ -237,6 +237,10 @@ def publish(session, release_id, epoch):
     if release.status == 'published':
         return release
     work = fenced(session, release.work_id, epoch)
+    params = json.loads(work.parameters_json)
+    preserve_head = params.get('head_mode') == 'preserve'
+    if preserve_head and (params.get('domain') != 'typed-record-v1' or work.candidate_input_set_id):
+        raise FoundationError('SCOPE_MISMATCH', '只有固定单来源的类型化历史发布可以保留当前指针。')
     if changed:
         finish_batch(session,work,status='superseded',error_code='SOURCE_CONTEXT_CHANGED')
         return None
@@ -245,7 +249,7 @@ def publish(session, release_id, epoch):
     if scope.epoch != work.expected_issue_epoch:
         finish_batch(session, work, status='superseded', error_code='ISSUE_CONTEXT_CHANGED')
         return None
-    if (head.release_id if head else None) != work.parent_release_id or (head.revision if head else 0) != work.expected_head_revision:
+    if not preserve_head and ((head.release_id if head else None) != work.parent_release_id or (head.revision if head else 0) != work.expected_head_revision):
         finish_batch(session, work, status='superseded', error_code='HEAD_CHANGED')
         return None
     if release.status != 'sealed' or work.cursor != work.total:
@@ -254,12 +258,18 @@ def publish(session, release_id, epoch):
     release.status = 'published'
     release.published_at = now()
     session.flush()
-    if head:
+    if preserve_head:
+        # The sealed snapshot is based on its immutable published parent. A
+        # newer current head does not invalidate that historical snapshot; issue
+        # epochs, source prerequisites, approval and content gates still apply.
+        pass
+    elif head:
         head.release_id = release.id
         head.revision += 1
     else:
         session.add(Head(scope_key=release.scope_key, release_id=release.id, revision=1))
     finish_batch(session, work, status='succeeded')
-    append_event(session, work, 'publication', 'published', {'release_id': release.id, 'manifest_hash': release.manifest_hash})
+    append_event(session, work, 'publication', 'published', {'release_id': release.id,
+        'manifest_hash': release.manifest_hash, 'head_activated': not preserve_head})
     session.flush()
     return release

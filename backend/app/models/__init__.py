@@ -135,3 +135,4 @@ from app.data_foundation import holding_models as foundation_holding_models  # n
 from app.data_foundation import intake_models as foundation_intake_models  # noqa: F401
 from app.data_foundation import batch_models as foundation_batch_models  # noqa: F401
 from app.data_foundation import record_models as foundation_record_models  # noqa: F401
+from app.data_foundation import update_models as foundation_update_models  # noqa: F401
