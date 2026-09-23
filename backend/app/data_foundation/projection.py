@@ -27,6 +27,17 @@ for dataset, schema in SCHEMAS.items():
         'identity_basis': 'source_local_observed', 'coverage': 'published_keys_only'}
 
 
+from app.data_foundation.record_schemas import DATE_METADATA_REVISIONS
+for dataset, minor in DATE_METADATA_REVISIONS.items():
+    # Read compatibility is explicit in both directions: both immutable
+    # contracts expose exactly the same records and date-filter semantics.
+    compatible = PROJECTIONS[(dataset, '1.0')] | {
+        'version': 'typed-record-business-date-metadata-1',
+        'readable_versions': ['1.0', minor], 'business_date_field': SCHEMAS[dataset].date_field}
+    PROJECTIONS[(dataset, '1.0')] = compatible
+    PROJECTIONS[(dataset, minor)] = dict(compatible)
+
+
 def projection_for(session, dataset, version):
     definition=session.scalar(select(Definition).where(Definition.kind=='contract',Definition.name==dataset,Definition.version==version))
     spec=PROJECTIONS.get((dataset,version))

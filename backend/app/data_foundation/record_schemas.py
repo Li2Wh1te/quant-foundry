@@ -541,6 +541,12 @@ SCHEMAS = {item.dataset: item for item in (
 )}
 
 
+# The historical ranking date was already stored and filterable in 1.0, but
+# its contract omitted the business-time annotation because the day is part of
+# the source-local subject key. A metadata-only minor preserves those keys.
+DATE_METADATA_REVISIONS = {'market.popularity_history_snapshot': '1.1'}
+
+
 def schema_for(dataset):
     try:
         return SCHEMAS[dataset]
