@@ -285,6 +285,46 @@ class FundDailyObservation(Body):
         return self
 
 
+class PopularityMember(Body):
+    """Provider ordering and heat remain source-reported observations only."""
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    name: StrictStr | None = None
+    ticker: StrictStr | None = None
+    reported_rank: StrictInt = Field(ge=1)
+    reported_heat: ReportedNav | None = None
+    reported_rank_change: StrictInt | None = None
+    reported_rank_trend: StrictStr | None = None
+
+
+class PopularitySnapshot(Body):
+    collection_key: StrictStr = Field(min_length=1, max_length=128)
+    period: Literal['day', 'hour']
+    scope_basis: Literal['provider_returned_ranking_list']
+    members: list[PopularityMember]
+    heat_method: None = None
+    historical_public_time: None = None
+
+    @field_validator('members')
+    @classmethod
+    def unique_ordered_members(cls, members):
+        codes = [m.source_code for m in members]
+        order = [(m.reported_rank, m.source_code) for m in members]
+        if len(codes) != len(set(codes)) or order != sorted(order):
+            raise ValueError('Ranked members must have unique codes and deterministic rank order')
+        return members
+
+
+class HistoricalPopularitySnapshot(PopularitySnapshot):
+    period: Literal['historical_day']
+    ranking_date: date
+
+    @model_validator(mode='after')
+    def date_matches_collection(self):
+        if self.collection_key != self.ranking_date.isoformat():
+            raise ValueError('Historical list identity must match its business date')
+        return self
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -303,6 +343,18 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
+    Schema('market.popularity_snapshot', '热股排行集合观察', PopularitySnapshot, 'stock_rank_list',
+           ('collection_key', 'period', 'scope_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_returned_list_only', 'heat_method_unverified', 'not_complete_market_universe')),
+    Schema('market.rising_popularity_snapshot', '飙升排行集合观察', PopularitySnapshot, 'stock_rank_list',
+           ('collection_key', 'period', 'scope_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_returned_list_only', 'heat_method_unverified', 'not_complete_market_universe')),
+    Schema('market.popularity_history_snapshot', '历史热股排行集合观察', HistoricalPopularitySnapshot, 'stock_rank_list',
+           ('collection_key', 'period', 'scope_basis', 'members', 'ranking_date'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_returned_list_only', 'heat_method_unverified', 'not_complete_market_universe'), date_field='ranking_date'),
     Schema('fund.offering_snapshot', '基金募集集合观察', FundOfferingSnapshot, 'fund_offering_filter',
            ('collection_key', 'selection_basis', 'members'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
