@@ -12,6 +12,7 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'fund_manager'): 'fund.manager',
     ('tonghuashun', 'fund_profile'): 'fund.profile',
     ('tonghuashun', 'fund_nav'): 'fund.nav_snapshot',
+    ('tonghuashun', 'fund_offerings'): 'fund.offering_snapshot',
     ('tonghuashun', 'fund_manager_experience'): 'fund.manager_experience',
     ('tonghuashun', 'calendar'): 'market.calendar',
     ('tonghuashun', 'index_catalog'): 'index.category_snapshot',
@@ -49,6 +50,13 @@ def rows_for(source, content):
         if content.get('thscode') not in (None, source.subject):
             raise FoundationError('IDENTITY_CONFLICT', '基金净值容器主体与固定来源主体不一致。')
         return [{'points': rows, 'coverage': content.get('coverage')}]
+    if source.source == 'tonghuashun' and source.dataset == 'fund_offerings':
+        if not isinstance(content, dict):
+            raise FoundationError('SOURCE_SCHEMA_INVALID', '募集列表须保留完整来源容器。')
+        scope = content.get('collection_scope')
+        if scope is not None and (not isinstance(scope, dict) or scope.get('subscribe') != source.subject):
+            raise FoundationError('IDENTITY_CONFLICT', '募集列表筛选分类与固定来源主体不一致。')
+        return [{'members': rows}]
     if source.source == 'tonghuashun' and source.dataset in ('index_catalog', 'index_constituents'):
         # Preserve the entire fixed set as one atomic candidate, including an
         # explicitly empty set. A corrupt child quarantines the collection;
@@ -125,7 +133,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if dataset == 'fund.nav_snapshot':
+    if dataset == 'fund.offering_snapshot':
+        from app.data_foundation.fund_offerings import offering_body
+        body, quality = offering_body(source, raw)
+        key, kind = source.subject, 'fund_offering_filter'
+    elif dataset == 'fund.nav_snapshot':
         from app.data_foundation.fund_nav import nav_body
         body, quality = nav_body(source, raw)
         key, kind = source.subject, 'fund_share'

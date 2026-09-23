@@ -6,11 +6,11 @@ copying a number into a guessed monetary or percentage unit. New domains must
 install an explicit schema/adapter before they can publish any canonical body.
 """
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator
 
 from app.data_foundation.canonical import FoundationError
 
@@ -131,6 +131,55 @@ class FundNavSnapshot(Body):
         if self.sequence_start != days[0] or self.sequence_end != days[-1]:
             raise ValueError('Sequence coverage must match materialized points')
         return self
+
+
+class OfferingMember(Body):
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    ticker: StrictStr | None = None
+    reported_subscription_start: AwareDatetime | None = None
+    reported_subscription_end: AwareDatetime | None = None
+
+    @field_validator('reported_subscription_start', 'reported_subscription_end', mode='before')
+    @classmethod
+    def explicit_timestamp(cls, value):
+        if value is not None and not isinstance(value, (str, datetime)):
+            raise ValueError('Canonical offering timestamps must be explicit UTC instants')
+        return value
+
+    @field_validator('reported_subscription_start', 'reported_subscription_end')
+    @classmethod
+    def utc_milliseconds(cls, value):
+        if value is not None and (value.utcoffset() != timedelta(0) or value.microsecond % 1000):
+            raise ValueError('Offering timestamp must preserve UTC milliseconds')
+        return value
+
+    @model_validator(mode='after')
+    def ordered_window(self):
+        if self.reported_subscription_start is not None and self.reported_subscription_end is not None:
+            if self.reported_subscription_start > self.reported_subscription_end:
+                raise ValueError('Reported subscription window is reversed')
+        return self
+
+
+class FundOfferingSnapshot(Body):
+    """A source-filtered offering list, without asserted live eligibility.
+
+    Source window boundaries can include intraday closing times. Keep their
+    UTC instants instead of silently truncating them into calendar dates. The
+    reported active/upcoming filter applies to this observation only.
+    """
+    collection_key: Literal['active', 'upcoming']
+    selection_basis: Literal['provider_subscription_filter']
+    members: list[OfferingMember]
+    current_subscription_eligibility: None = None
+
+    @field_validator('members')
+    @classmethod
+    def unique_sorted_members(cls, value):
+        keys = [member.source_code for member in value]
+        if keys != sorted(set(keys)):
+            raise ValueError('Offering members must have unique sorted source codes')
+        return value
 
 
 class CalendarDay(Body):
@@ -254,6 +303,10 @@ SCHEMAS = {item.dataset: item for item in (
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
     Schema('fund.profile', '基金基础资料', FundProfile, 'fund_share', ('source_code',)),
+    Schema('fund.offering_snapshot', '基金募集集合观察', FundOfferingSnapshot, 'fund_offering_filter',
+           ('collection_key', 'selection_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_subscription_windows_only', 'current_subscription_eligibility_unverified')),
     Schema('fund.nav_snapshot', '基金净值窗口观察', FundNavSnapshot, 'fund_share',
            ('source_code', 'coverage', 'value_basis', 'sequence_start', 'sequence_end', 'points'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
