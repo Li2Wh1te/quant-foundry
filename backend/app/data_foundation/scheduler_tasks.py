@@ -47,13 +47,14 @@ def summarize(native_dataset, result):
     failed = sum(item['status'] in ('failed', 'dependency_missing', 'cancelled', 'superseded', 'unexplained') for item in items)
     steps = sum(item.get('steps', 0) for item in items)
     quarantined = sum(item.get('candidate_counts', {}).get('quarantined', 0) for item in items)
+    busy = sum(item['status'] == 'busy' for item in items)
     name = DATASETS[native_dataset].name
     detail = ('固定全量发布尚未完成，等待范围结算；' if result['status'] == 'waiting_backfill'
               else '同领域执行锁忙，等待重试；' if result['status'] == 'busy' else '')
     message = (f'{name} 本地正式化更新，观察日期 {start} 至 {end}，{detail}'
-        f'选中 {len(items)} 个，发布 {published} 个，失败 {failed} 个，隔离 {quarantined} 条，执行 {steps} 个单元；'
+        f'选中 {len(items)} 个，发布 {published} 个，失败 {failed} 个，隔离 {quarantined} 条，等待工作锁 {busy} 个，执行 {steps} 个单元；'
         + ('正式发布检查点已推进。' if published else '正式发布检查点未推进，已提交工作进度保留。'))
-    return dict(**result, selected=len(items), published=published, failed=failed, quarantined=quarantined,
+    return dict(**result, selected=len(items), published=published, failed=failed, quarantined=quarantined, busy=busy,
                 observation_start=start, observation_end=end, message=message)
 
 

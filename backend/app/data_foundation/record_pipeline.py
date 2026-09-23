@@ -130,7 +130,7 @@ def _prepare(session, batch_id, *, publish, runtime_digest, archive_root):
 
 
 def advance_job(engine, batch_id, *, runtime_digest, steps=1, publish=False,
-                archive_root='/app/data/foundation-runtime-archives'):
+                archive_root='/app/data/foundation-runtime-archives', lock_wait_seconds=0):
     """Run a finite number of existing worker units, returning durable progress.
 
     A separate session advisory lock serializes drivers for this batch without
@@ -153,7 +153,7 @@ def advance_job(engine, batch_id, *, runtime_digest, steps=1, publish=False,
                 if result['status'] != 'step_ready':
                     return {**result, 'steps': completed}
                 if run_once(engine, work_id=result['work_id'], runtime_digest=runtime_digest,
-                            archive_root=archive_root) is None:
+                            archive_root=archive_root, lock_wait_seconds=lock_wait_seconds) is None:
                     return {**result, 'status': 'busy', 'steps': completed}
                 completed += 1
             # Preparing the next durable step is safe even when this invocation
