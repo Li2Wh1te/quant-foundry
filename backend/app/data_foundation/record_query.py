@@ -17,7 +17,7 @@ from app.data_foundation.projection import projection_for, resolve_projected_rel
 
 class RecordRequirement(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    dataset_id: Literal['instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'fund.manager_experience', 'fund.nav_snapshot', 'fund.offering_snapshot', 'market.calendar',
+    dataset_id: Literal['instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'fund.manager_experience', 'fund.nav_snapshot', 'fund.offering_snapshot', 'market.popularity_snapshot', 'market.rising_popularity_snapshot', 'market.popularity_history_snapshot', 'market.calendar',
                         'market.adjustment_factor', 'market.fund_daily', 'index.category_snapshot', 'index.constituent_snapshot']
     contract_version: str = Field(default='1.0', pattern=r'^[1-9]\d*\.\d+$')
     profile_id: Literal['default'] = 'default'
