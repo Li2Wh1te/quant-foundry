@@ -19,6 +19,85 @@ class Body(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
 
+class SourceLocalTableFact(Body):
+    native_dataset: StrictStr = Field(min_length=1, max_length=80)
+    native_table: StrictStr = Field(min_length=1, max_length=80)
+    source_identity: StrictStr = Field(pattern=r'^[0-9a-f]{64}$')
+    source_row_hash: StrictStr = Field(pattern=r'^[0-9a-f]{64}$')
+    reported_text: dict[StrictStr, StrictStr | None]
+    reported_numbers: dict[StrictStr, StrictStr | None]
+    reported_dates: dict[StrictStr, date | None]
+    reported_times: dict[StrictStr, AwareDatetime | None]
+    reported_identifiers: dict[StrictStr, StrictStr | None]
+    reported_flags: dict[StrictStr, StrictBool | None]
+    reported_nested_hashes: dict[StrictStr, StrictStr | None]
+    nested_semantics: Literal['source_hash_only']
+    verified_public_time: None = None
+    verified_market_completeness: None = None
+
+
+class EmptyLocalScope(Body):
+    provider: Literal['tonghuashun', 'tushare']
+    native_dataset: StrictStr = Field(min_length=1, max_length=80)
+    scope_identity: StrictStr = Field(min_length=1, max_length=128)
+    capture_identity: StrictStr = Field(min_length=1, max_length=128)
+    fixed_rows: Literal[0]
+    evidence_basis: Literal['sealed_empty_scan', 'fixed_empty_table']
+    captured_at: AwareDatetime
+    semantics: Literal['no_rows_in_fixed_local_capture']
+    market_absence: None = None
+    market_coverage_complete: None = None
+
+
+class ImportArtifact(Body):
+    dump_id: StrictStr = Field(min_length=1)
+    sha256: StrictStr = Field(pattern=r'^[0-9a-f]{64}$')
+    request_id: StrictStr = Field(min_length=1)
+    columns: list[StrictStr] = Field(min_length=1)
+    rows: StrictInt = Field(ge=0)
+    download_bytes: StrictInt = Field(ge=0)
+    observed_start: date
+    observed_end: date
+    numeric_encoding: StrictStr = Field(min_length=1)
+    collected_at: AwareDatetime | None = None
+    future_event_rows: StrictInt | None = Field(default=None, ge=0)
+    negative_bonus_rows: StrictInt | None = Field(default=None, ge=0)
+
+
+class ImportPending(Body):
+    reason: Literal['batch_budget']
+    pending: StrictInt = Field(gt=0)
+
+
+class ImportProgress(Body):
+    import_channel: Literal['stock_daily_dump', 'stock_recent_dump', 'stock_actions_dump']
+    source_scope: Literal['market']
+    artifact: ImportArtifact
+    pending_requests: list[ImportPending] = Field(max_length=1)
+    imported_subjects: StrictInt = Field(ge=0)
+    superseded_subjects: StrictInt = Field(ge=0)
+    total_subjects: StrictInt = Field(ge=0)
+    requested_start: date
+    requested_end: date
+    semantics: Literal['local_import_progress_only']
+    business_publication_complete: None = None
+
+    @model_validator(mode='after')
+    def consistent_progress(self):
+        # Import progress is authoritative only within this exact downloaded
+        # artifact. It never certifies market coverage or formal publication.
+        if not self.superseded_subjects <= self.imported_subjects <= self.total_subjects:
+            raise ValueError('导入计数超出固定文件分母')
+        pending = self.total_subjects - self.imported_subjects
+        if pending != sum(item.pending for item in self.pending_requests):
+            raise ValueError('待导入计数与固定文件分母不一致')
+        if (self.requested_start > self.requested_end
+                or self.requested_start != self.artifact.observed_start
+                or self.requested_end != self.artifact.observed_end):
+            raise ValueError('导入日期与固定文件范围不一致')
+        return self
+
+
 class InstrumentReference(Body):
     source_code: StrictStr = Field(min_length=1, max_length=64)
     asset_type: StrictStr = Field(min_length=1, max_length=32)
@@ -837,6 +916,455 @@ class ManagerPerformanceWindow(Body):
     timestamp_semantics: None = None
 
 
+class DistributionWindow(Body):
+    source_code: StrictStr
+    asset_type: Literal['fund', 'a-share']
+    coverage_basis: Literal['source_observation_window']
+    payment_execution: None = None
+    normalized_cashflow: None = None
+    event_identity: None = None
+    complete_history: None = None
+
+
+class FundDividendEvent(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_fields: list[StrictStr]
+    reported_ex_dividend_date: date | None
+    reported_in_dividend_date: date | None
+    reported_payment_date: date | None
+    reported_profit_base_date: date | None
+    reported_publish_date: date | None
+    reported_registration_date: date | None
+    reported_reinvestment_date: date | None
+    reported_per_ten_cash_after_tax: ReportedSigned | None
+    reported_per_ten_cash_before_tax: ReportedSigned | None
+    reported_progress_code: StrictStr | None
+
+
+class FundDividendWindow(DistributionWindow):
+    asset_type: Literal['fund']
+    events: list[FundDividendEvent]
+    reported_dividend_count: StrictInt | None = Field(ge=0)
+    reported_dividend_total: ReportedSigned | None
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    currency: None = None
+    tax_basis: None = None
+
+
+class CorporateActionEvent(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_fields: list[StrictStr]
+    reported_ex_date: date | None
+    reported_dividend_per_share: ReportedSigned | None
+    reported_per_share_bonus: ReportedSigned | None
+    reported_allotment_ratio: ReportedSigned | None
+    reported_allotment_price: ReportedSigned | None
+    reported_ticker: StrictStr | None
+    reported_currency: StrictStr | None
+
+
+class CorporateActionWindow(DistributionWindow):
+    asset_type: Literal['a-share']
+    events: list[CorporateActionEvent]
+    reported_ticker: StrictStr | None
+    reported_adjustment: StrictStr | None
+    requested_start: date | None
+    requested_end: date | None
+    reported_coverage: StrictStr | None
+
+
+class CompositionMember(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_fields: list[StrictStr]
+
+
+class FundAllocationMember(CompositionMember):
+    reported_bond_ratio_pct: ReportedSigned | None
+    reported_deposit_ratio_pct: ReportedSigned | None
+    reported_other_ratio_pct: ReportedSigned | None
+    reported_stock_ratio_pct: ReportedSigned | None
+    reported_report_date: date | None
+
+
+class FundIndustryMember(CompositionMember):
+    reported_ratio_pct: ReportedSigned | None
+    reported_industry_name: StrictStr | None
+    reported_report_period: StrictStr | None
+
+
+class FundHolderMember(CompositionMember):
+    reported_avg_holder_share: ReportedSigned | None
+    reported_ins_position: ReportedSigned | None
+    reported_mgmt_staff_hold_rate: ReportedSigned | None
+    reported_psnl_rate: ReportedSigned | None
+    reported_merge_scope: StrictStr | None
+    reported_report_date: date | None
+    reported_holder_amount: StrictInt | None = Field(ge=0)
+
+
+class FundTopHolderMember(CompositionMember):
+    reported_hold_rate_pct: ReportedSigned | None
+    reported_hold_share: ReportedSigned | None
+    reported_holder_code: StrictStr | None
+    reported_holder_id: StrictStr | None
+    reported_holder_name: StrictStr | None
+    reported_holder_type: StrictStr | None
+    reported_publish_date: date | None
+    reported_report_date: date | None
+    reported_rank: StrictInt | None = Field(ge=0)
+
+
+class FundCompositionWindow(Body):
+    source_code: StrictStr
+    asset_type: Literal['fund']
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    reported_limit: StrictInt | None = Field(ge=0)
+    coverage_basis: Literal['source_observation_window']
+    comparable_units: None = None
+    resolved_holder_identity: None = None
+    normalized_allocation: None = None
+    industry_taxonomy: None = None
+    complete_history: None = None
+
+
+class FundAllocationWindow(FundCompositionWindow):
+    members: list[FundAllocationMember]
+
+
+class FundIndustryWindow(FundCompositionWindow):
+    members: list[FundIndustryMember]
+
+
+class FundHolderWindow(FundCompositionWindow):
+    members: list[FundHolderMember]
+
+
+class FundTopHolderWindow(FundCompositionWindow):
+    members: list[FundTopHolderMember]
+
+
+class FinancialWindow(Body):
+    source_code: StrictStr
+    asset_type: Literal['fund', 'a-share']
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    reported_period: StrictStr | None
+    requested_start: date | None
+    requested_end: date | None
+    reported_historical_revision_evidence: StrictBool | None
+    coverage_basis: Literal['source_observation_window']
+    comparable_units: None = None
+    accounting_basis: None = None
+    normalized_currency: None = None
+    single_period_values: None = None
+    as_filed_history: None = None
+    complete_history: None = None
+
+
+class FundFinancialIndicatorReport(CompositionMember):
+    reported_asset_nav: ReportedSigned | None
+    reported_average_nav_profit_margin: ReportedSigned | None
+    reported_average_share_current_profit: ReportedSigned | None
+    reported_current_income: ReportedSigned | None
+    reported_current_profit: ReportedSigned | None
+    reported_distribution_profit: ReportedSigned | None
+    reported_distribution_share_profit: ReportedSigned | None
+    reported_nav_rate: ReportedSigned | None
+    reported_share_nav: ReportedSigned | None
+    reported_sum_nav_rate: ReportedSigned | None
+    reported_sum_share_nav: ReportedSigned | None
+    reported_start_date: date | None
+    reported_end_date: date | None
+    reported_publish_date: date | None
+
+
+class FundFinancialIndicatorWindow(FinancialWindow):
+    asset_type: Literal['fund']
+    reports: list[FundFinancialIndicatorReport]
+
+
+class FundIncomeReport(CompositionMember):
+    reported_bond_investment_income: ReportedSigned | None
+    reported_custodian_fee: ReportedSigned | None
+    reported_dividend_income: ReportedSigned | None
+    reported_exchange_income: ReportedSigned | None
+    reported_fair_value_income: ReportedSigned | None
+    reported_fee: ReportedSigned | None
+    reported_fund_investment_income: ReportedSigned | None
+    reported_income: ReportedSigned | None
+    reported_interest_income: ReportedSigned | None
+    reported_investment_income: ReportedSigned | None
+    reported_manager_reward: ReportedSigned | None
+    reported_net_profit: ReportedSigned | None
+    reported_other_income: ReportedSigned | None
+    reported_stock_investment_income: ReportedSigned | None
+    reported_tax_surcharge: ReportedSigned | None
+    reported_total_fee: ReportedSigned | None
+    reported_total_income: ReportedSigned | None
+    reported_total_profit: ReportedSigned | None
+    reported_transaction_cost: ReportedSigned | None
+    reported_start_date: date | None
+    reported_end_date: date | None
+    reported_publish_date: date | None
+
+
+class FundIncomeWindow(FinancialWindow):
+    asset_type: Literal['fund']
+    reports: list[FundIncomeReport]
+
+
+class FundBalanceReport(CompositionMember):
+    reported_bank_deposit: ReportedSigned | None
+    reported_bond_investment: ReportedSigned | None
+    reported_fund_investment: ReportedSigned | None
+    reported_liability_and_owner_equity: ReportedSigned | None
+    reported_other_assets: ReportedSigned | None
+    reported_other_liability: ReportedSigned | None
+    reported_owner_total_equity: ReportedSigned | None
+    reported_stock_investment: ReportedSigned | None
+    reported_total_assets: ReportedSigned | None
+    reported_total_liability: ReportedSigned | None
+    reported_transactional_financial_assets: ReportedSigned | None
+    reported_undistributed_profit: ReportedSigned | None
+    reported_start_date: date | None
+    reported_end_date: date | None
+    reported_publish_date: date | None
+
+
+class FundBalanceWindow(FinancialWindow):
+    asset_type: Literal['fund']
+    reports: list[FundBalanceReport]
+
+
+class StockIncomeReport(CompositionMember):
+    reported_basic_eps: ReportedSigned | None
+    reported_income_tax_expense: ReportedSigned | None
+    reported_interest_expenses: ReportedSigned | None
+    reported_manage_fee: ReportedSigned | None
+    reported_net_profit: ReportedSigned | None
+    reported_operating_costs: ReportedSigned | None
+    reported_operating_expenses: ReportedSigned | None
+    reported_operating_income: ReportedSigned | None
+    reported_operating_profit: ReportedSigned | None
+    reported_parent_holder_net_profit: ReportedSigned | None
+    reported_profit_total: ReportedSigned | None
+    reported_research_and_development_expenses: ReportedSigned | None
+    reported_sales_fee: ReportedSigned | None
+    reported_period_end: date | None
+    reported_report_date: date | None
+    reported_currency: StrictStr | None
+    reported_fiscal_period: StrictStr | None
+    reported_period: StrictStr | None
+    reported_ticker: StrictStr | None
+    reported_fiscal_year: StrictInt | None = Field(ge=0)
+
+
+class StockIncomeWindow(FinancialWindow):
+    asset_type: Literal['a-share']
+    reports: list[StockIncomeReport]
+
+
+class StockBalanceReport(CompositionMember):
+    reported_accounts_receivable: ReportedSigned | None
+    reported_assets_total: ReportedSigned | None
+    reported_cash: ReportedSigned | None
+    reported_holder_equity_total: ReportedSigned | None
+    reported_non_current_nets_total: ReportedSigned | None
+    reported_total_current_assets: ReportedSigned | None
+    reported_total_debt: ReportedSigned | None
+    reported_period_end: date | None
+    reported_report_date: date | None
+    reported_currency: StrictStr | None
+    reported_fiscal_period: StrictStr | None
+    reported_period: StrictStr | None
+    reported_ticker: StrictStr | None
+    reported_fiscal_year: StrictInt | None = Field(ge=0)
+
+
+class StockBalanceWindow(FinancialWindow):
+    asset_type: Literal['a-share']
+    reports: list[StockBalanceReport]
+
+
+class StockCashFlowReport(CompositionMember):
+    reported_act_cash_flow_net: ReportedSigned | None
+    reported_cash_equivalents_net_addition: ReportedSigned | None
+    reported_financing_cash_flow_net: ReportedSigned | None
+    reported_invest_cash_flow_net: ReportedSigned | None
+    reported_pay_dividends_profits_interest_cash: ReportedSigned | None
+    reported_pay_fixed_assets_etc_cash: ReportedSigned | None
+    reported_period_end: date | None
+    reported_report_date: date | None
+    reported_currency: StrictStr | None
+    reported_fiscal_period: StrictStr | None
+    reported_period: StrictStr | None
+    reported_ticker: StrictStr | None
+    reported_fiscal_year: StrictInt | None = Field(ge=0)
+
+
+class StockCashFlowWindow(FinancialWindow):
+    asset_type: Literal['a-share']
+    reports: list[StockCashFlowReport]
+
+
+class StockIndicatorValue(Body):
+    provider_indicator: StrictStr
+    reported_value: ReportedSigned | None
+
+
+class StockIndicatorAbility(Body):
+    provider_ability: StrictStr
+    indicators: list[StockIndicatorValue]
+
+
+class StockIndicatorReport(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_period: StrictStr
+    abilities: list[StockIndicatorAbility]
+
+
+class StockIndicatorWindow(Body):
+    source_code: StrictStr
+    asset_type: Literal['a-share']
+    reports: list[StockIndicatorReport]
+    requested_start: date | None
+    requested_end: date | None
+    reported_historical_revision_evidence: StrictBool | None
+    coverage_basis: Literal['source_observation_window']
+    calculation_formula: None = None
+    comparable_units: None = None
+    resolved_indicator_taxonomy: None = None
+    effective_period_boundaries: None = None
+    as_filed_history: None = None
+
+
+class PortfolioWindow(Body):
+    source_code: StrictStr
+    asset_type: Literal['fund']
+    coverage_basis: Literal['source_observation_window']
+    resolved_instrument_identities: None = None
+    portfolio_complete: None = None
+    transport_complete: None = None
+    comparable_units: None = None
+    normalized_weights: None = None
+    as_filed_history: None = None
+
+
+class CurrentPortfolioMember(CompositionMember):
+    source_member_code: StrictStr | None
+    reported_hold_ratio: ReportedSigned | None
+    reported_period_increase_rate_pct: ReportedSigned | None
+    reported_position_capital: ReportedSigned | None
+    reported_position_count: ReportedSigned | None
+    reported_security_market_value_rate_pct: ReportedSigned | None
+    reported_start_date: date | None
+    reported_end_date: date | None
+    reported_modify_time: date | None
+    reported_publish_date: date | None
+    reported_asset_type: StrictStr | None
+    reported_stock_name: StrictStr | None
+    reported_ticker: StrictStr | None
+    reported_investment_rank: StrictInt | None = Field(ge=0)
+
+
+class HistoricalPortfolioMember(CompositionMember):
+    source_member_code: StrictStr
+    reported_hold_ratio: ReportedSigned | None
+    reported_market_value: ReportedSigned | None
+    reported_period_increase_pct: ReportedSigned | None
+    reported_end_date: date | None
+    reported_asset_type: StrictStr | None
+    reported_name: StrictStr | None
+    reported_report_type: StrictStr | None
+    reported_ticker: StrictStr | None
+    reported_rank: StrictInt | None = Field(ge=0)
+
+
+class CurrentPortfolioWindow(PortfolioWindow):
+    reported_total_bond_ratio_pct: ReportedSigned | None
+    reported_total_fund_ratio_pct: ReportedSigned | None
+    members: list[CurrentPortfolioMember]
+    reported_concentration_ratio: ReportedSigned | None
+    reported_stock_ratio_pct: ReportedSigned | None
+    reported_total_stock_ratio_pct: ReportedSigned | None
+    reported_main_industry: StrictStr | None
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+
+
+class PortfolioPeriod(Body):
+    report_key: StrictStr
+    period_start: date
+    period_end: date
+    provider_report_type: Literal['quarter', 'annual', 'semiannual']
+    reported_type_name: StrictStr | None
+
+
+class HistoricalPortfolioReport(PortfolioPeriod):
+    source_order: StrictInt = Field(ge=0)
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    members: list[HistoricalPortfolioMember]
+
+
+class HistoricalPortfolioWindow(PortfolioWindow):
+    reports: list[HistoricalPortfolioReport]
+    report_directory: list[PortfolioPeriod]
+    current_provider_directory: list[PortfolioPeriod] | None
+    reported_historical_revision_evidence: StrictBool | None
+
+
+class NarrativeWindow(Body):
+    source_code: StrictStr
+    coverage_basis: Literal['source_observation_window']
+    complete_history: None = None
+    verified_market_events: None = None
+
+
+class FundNewsArticle(Body):
+    provider_article_id: StrictStr
+    reported_content_type: StrictStr | None
+    reported_title: StrictStr | None
+    reported_summary: StrictStr | None
+    reported_source: StrictStr | None
+    reported_url: StrictStr | None
+    reported_image_url: StrictStr | None
+    reported_author: StrictStr | None
+    reported_publish_time: AwareDatetime
+    reported_top: StrictBool | None
+    reported_fields: list[StrictStr]
+
+
+class FundNewsWindow(NarrativeWindow):
+    articles: list[FundNewsArticle]
+    requested_start: date
+    requested_end: date
+    reported_coverage: StrictStr | None
+    reported_scope_truncated: StrictBool | None
+
+
+class RankTrendPoint(Body):
+    trading_date: date
+    reported_ticker: StrictStr | None
+    reported_rank: StrictInt | None = Field(ge=0)
+
+
+class RankTrendWindow(NarrativeWindow):
+    points: list[RankTrendPoint]
+    requested_start: date
+    requested_end: date
+    selection_formula: None = None
+
+
+class StockAnomalyNarrative(Body):
+    source_order: StrictInt = Field(ge=0)
+    reported_name: StrictStr | None
+    reported_tag: StrictStr | None
+    reported_keywords: list[StrictStr]
+    reported_analysis: StrictStr | None
+
+
+class StockAnomalyWindow(NarrativeWindow):
+    narratives: list[StockAnomalyNarrative]
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -851,6 +1379,114 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    *(
+        Schema(dataset, label, SourceLocalTableFact, 'source_row',
+               ('native_dataset', 'native_table', 'source_identity', 'source_row_hash',
+                'reported_text', 'reported_numbers', 'reported_dates', 'reported_times',
+                'reported_identifiers', 'reported_flags', 'reported_nested_hashes', 'nested_semantics'),
+               limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                            'source_row_only', 'nested_json_hash_only', 'economic_identity_unverified',
+                            'market_completeness_unverified'))
+        for dataset, label in (
+            ('operations.etf_mapping_audit', 'ETF代码映射审计观察'),
+            ('operations.etf_daily_revision', 'ETF日线修订审计观察'),
+            ('operations.corporate_action_source_fact', '公司行动来源事实观察'),
+            ('operations.corporate_action_fact', '公司行动事实观察'),
+            ('operations.corporate_action_coverage', '公司行动覆盖证据观察'),
+            ('operations.trading_status_source_fact', '交易状态来源事实观察'),
+            ('operations.trading_status_fact', '交易状态事实观察'),
+            ('operations.trading_status_coverage', '交易状态覆盖证据观察'),
+            ('operations.trading_status_revision', '交易状态修订审计观察'),
+        )
+    ),
+    Schema('operations.empty_local_scope', '固定本地空范围结算', EmptyLocalScope, 'local_capture_scope',
+           ('provider', 'native_dataset', 'scope_identity', 'capture_identity', 'fixed_rows', 'evidence_basis', 'semantics'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'fixed_local_capture_only', 'empty_capture_not_market_absence')),
+    Schema('operations.import_progress', '本地批量导入进度观察', ImportProgress, 'import_channel',
+           ('import_channel', 'source_scope', 'artifact', 'pending_requests', 'imported_subjects', 'total_subjects', 'semantics'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'import_progress_not_business_publication', 'artifact_bounds_not_market_completeness')),
+    Schema('fund.news_window', '基金资讯完整观察', FundNewsWindow, 'asset:fund',
+           ('source_code', 'articles', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'source_reports_not_verified_market_events', 'source_window_only')),
+    Schema('market.rank_trend_window', '个股排名走势观察', RankTrendWindow, 'asset:a-share',
+           ('source_code', 'points', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'source_reports_not_verified_market_events', 'source_window_only')),
+    Schema('market.stock_anomaly_window', '个股异动叙述观察', StockAnomalyWindow, 'asset:a-share',
+           ('source_code', 'narratives', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'source_reports_not_verified_market_events', 'source_window_only')),
+
+    Schema('fund.reported_holdings_window', '基金重仓持仓来源观察', CurrentPortfolioWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'members', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'historical_member_identity_unresolved', 'portfolio_completeness_unverified')),
+    Schema('fund.reported_stock_holdings_window', '基金股票持仓历史来源观察', HistoricalPortfolioWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'historical_member_identity_unresolved', 'portfolio_completeness_unverified')),
+    Schema('fund.reported_bond_holdings_window', '基金债券持仓历史来源观察', HistoricalPortfolioWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'historical_member_identity_unresolved', 'portfolio_completeness_unverified')),
+
+    Schema('market.financial_indicator_window', '股票财务指标完整观察', StockIndicatorWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_indicator_formula_and_units_unverified', 'historical_vintages_unverified')),
+    Schema('fund.financial_indicator_window', '基金财务指标完整观察', FundFinancialIndicatorWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+    Schema('fund.income_window', '基金利润表完整观察', FundIncomeWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+    Schema('fund.balance_window', '基金资产负债表完整观察', FundBalanceWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+    Schema('market.income_window', '股票利润表完整观察', StockIncomeWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+    Schema('market.balance_window', '股票资产负债表完整观察', StockBalanceWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+    Schema('market.cash_flow_window', '股票现金流量表完整观察', StockCashFlowWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'reports', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_accounting_basis_unverified', 'historical_vintages_unverified')),
+
+    Schema('fund.allocation_window', '基金配置完整观察', FundAllocationWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'members', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_units_unverified', 'source_occurrences_not_resolved')),
+    Schema('fund.industry_window', '基金行业配置完整观察', FundIndustryWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'members', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_units_unverified', 'source_occurrences_not_resolved')),
+    Schema('fund.holder_composition_window', '基金持有人结构完整观察', FundHolderWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'members', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_units_unverified', 'source_occurrences_not_resolved')),
+    Schema('fund.top_holder_window', '基金主要持有人完整观察', FundTopHolderWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'members', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_units_unverified', 'source_occurrences_not_resolved')),
+
+    Schema('fund.dividend_window', '基金分红完整观察', FundDividendWindow, 'asset:fund',
+           ('source_code', 'asset_type', 'events', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'reported_events_not_execution', 'provider_units_and_tax_basis_unverified')),
+    Schema('market.corporate_action_window', '股票除权除息完整观察', CorporateActionWindow, 'asset:a-share',
+           ('source_code', 'asset_type', 'events', 'coverage_basis'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'reported_events_not_execution', 'source_occurrences_not_resolved')),
     Schema('fund.manager_performance_window', '基金经理业绩窗口', ManagerPerformanceWindow, 'manager_performance_window',
            ('manager_id','provider_period','points','coverage_basis'),limitations=('source_local_identity_only','observed_time_only',
            'historical_public_time_unverified','provider_period_and_formula_unverified','reported_series_not_proven_comparable')),

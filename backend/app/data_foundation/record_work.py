@@ -26,7 +26,7 @@ MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
         for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py',
-                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py', 'fund_performance.py', 'manager_style.py', 'manager_performance.py')})
+                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py', 'fund_performance.py', 'manager_style.py', 'manager_performance.py', 'distributions.py', 'fund_ownership.py', 'financial_windows.py', 'stock_indicators.py', 'portfolio_windows.py', 'holdings.py', 'narrative_windows.py', 'staged_inputs.py', 'import_progress.py', 'scope_settlement.py', 'table_updates.py', 'local_table_contracts.py', 'table_bootstrap.py')})
 
 
 def validation_hash():
@@ -144,10 +144,14 @@ def normalize_batch(session, work_id, epoch):
     if work.kind != 'A' or dataset_for(source) != params['dataset']:
         raise FoundationError('SCOPE_MISMATCH', '来源与领域契约不一致。')
     raw_rows = rows_for(source, read_source(session, source.id))
+    from app.data_foundation.table_updates import is_deleted_change
+    deleted_change = is_deleted_change(session, source)
     parsed = []
     for raw in raw_rows:
         try:
             value = convert(source, raw)
+            if deleted_change:
+                value['field_quality']['source_deleted'] = 'FIXED_LOCAL_ROW_REMOVAL'
             parsed.append((value, record_key(source, value), None))
         except (FoundationError, ValueError, TypeError, OverflowError) as exc:
             parsed.append((None, None, getattr(exc, 'code', 'SOURCE_SCHEMA_INVALID')))
@@ -264,6 +268,17 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
                 RecordBlockMember.subject_id.in_(subject_ids)))}
     actions = []
     for key, group in sorted(groups.items()):
+        removals = [json.loads(typed.field_quality_json).get('source_deleted') == 'FIXED_LOCAL_ROW_REMOVAL'
+                    for _, typed, _ in group]
+        if any(removals):
+            if len(group) != 1 or not all(removals) or group[0][0].readiness != 'ready':
+                raise FoundationError('SOURCE_CONTEXT_CHANGED', '删除候选与同一业务键的有效值冲突。')
+            typed = group[0][1]
+            actions.append(dict(target_key=key, subject_id=str(typed.subject_id),
+                business_date=str(typed.business_date) if typed.business_date else None,
+                action='withdraw', candidate_id=None, parent_record_id=None,
+                reason='FIXED_LOCAL_ROW_REMOVAL'))
+            continue
         action, cid, reason = choose([{'id': str(c.id), 'source': s.source, 'series': params['series'],
             'ready': c.readiness == 'ready'} for c, _, s in group], definition)
         parent, previous = parents.get(key, (None, None))
@@ -295,8 +310,13 @@ def create_governance(session, *, normalization_id, execution_id, policy_id, par
     if source_revision is not None:
         if preserve_head or type(source_revision) is not int or source_revision < 1:
             raise ValueError('Invalid current source revision')
-        if session.get(SourceRef, origin.source_ref_id).representation != 'ths_observation':
-            raise FoundationError('SCOPE_MISMATCH', '当前来源指针仅适用于同花顺固定观察。')
+        fixed_source = session.get(SourceRef, origin.source_ref_id)
+        if fixed_source.representation == 'local_table_baseline':
+            from app.data_foundation.table_updates import is_current_change
+            if not is_current_change(session, fixed_source, source_revision):
+                raise FoundationError('SOURCE_CONTEXT_CHANGED', '固定本地表变化已非当前来源。')
+        elif fixed_source.representation != 'ths_observation':
+            raise FoundationError('SCOPE_MISMATCH', '当前来源指针没有支持的固定来源类型。')
         mode['source_revision'] = source_revision
     work = create_work(session, kind='B', contract_id=origin.contract_id, execution_id=execution_id,
         dependency_id=origin.dependency_id, candidate_manifest_id=manifest.id, policy_id=policy_id,
@@ -448,7 +468,8 @@ def seal_release(session, work):
             raise FoundationError('PUBLICATION_INCOMPLETE', '正式领域记录缺失。')
         changed[partition][key] = dict(target_key=key, subject_id=UUID(action['subject_id']),
             business_date=date.fromisoformat(action['business_date']) if action['business_date'] else None,
-            state={'select': 'value', 'retain': 'value', 'block': 'blocked', 'gap': 'gap'}[decision.action],
+            state={'select': 'value', 'retain': 'value', 'block': 'blocked', 'gap': 'gap',
+                   'withdraw': 'withdrawn'}[decision.action],
             official_id=official.id if official else None, decision_id=decision.id)
     for partition, values in sorted(changed.items()):
         members = [values[key] for key in sorted(values)]

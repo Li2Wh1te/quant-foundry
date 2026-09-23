@@ -25,13 +25,25 @@ TERMINAL_FAILURES = {'failed', 'dependency_missing', 'cancelled', 'superseded'}
 
 
 def register_job(session, *, source_ref_id, execution_id, runtime_digest,
-                 archive_root='/app/data/foundation-runtime-archives', preserve_head=False, source_revision=None):
+                 archive_root='/app/data/foundation-runtime-archives', preserve_head=False,
+                 source_revision=None, table_change_id=None, purpose='update'):
     """Bind one exact source to a verified execution and an initially live batch.
 
     Only a newly registered batch is unpaused. Calling again after an operator
     pause preserves those controls and returns the same durable batch identity.
     The caller owns the transaction, including rollback on verification failure.
     """
+    if purpose not in ('update', 'backfill'):
+        raise ValueError('Pipeline purpose must be update or backfill')
+    if purpose == 'backfill' and source_revision is not None:
+        raise ValueError('Fixed backfill cannot change its source mode')
+    if table_change_id is not None:
+        if purpose != 'update' or source_revision is not None or preserve_head or type(table_change_id) is not int or table_change_id < 1:
+            raise ValueError('Invalid current local table change')
+        from app.data_foundation.table_updates import is_current_change
+        source = session.get(SourceRef, source_ref_id)
+        if source is None or not is_current_change(session, source, table_change_id):
+            raise FoundationError('SOURCE_CONTEXT_CHANGED', '本地表变化已非当前行，不能激活当前发布。')
     if not isinstance(preserve_head, bool):
         raise ValueError('Head preservation must be an explicit boolean')
     if source_revision is not None:
@@ -52,13 +64,17 @@ def register_job(session, *, source_ref_id, execution_id, runtime_digest,
     prefix = 'record-update:history:' if preserve_head else 'record-update:'
     if source_revision is not None:
         prefix = f'record-update:current:{source_revision}:'
+    if table_change_id is not None:
+        prefix = f'record-update:table:{table_change_id}:'
+    if purpose == 'backfill':
+        prefix = 'record-backfill:history:' if preserve_head else 'record-backfill:'
     event = prefix + digest('record-update-source-v1', [source_ref_id, execution_id])
     lock_key(session, 'batch', event)
     existing = session.scalar(select(Batch).where(Batch.event_key == event))
     if existing is not None:
         return existing
     document, fingerprint = batch_document(session, scope_key=origin.scope_key,
-        source_ids=[source_ref_id], start='0001-01-01', end='9999-12-31', purpose='catchup')
+        source_ids=[source_ref_id], start='0001-01-01', end='9999-12-31', purpose='backfill' if purpose == 'backfill' else 'catchup')
     batch = register_batch(session, event_key=event, document=document, expected_hash=fingerprint)
     attach_work(session, batch.id, origin.id)
     set_controls(session, batch.id, pause_a=False, pause_b=False)
@@ -69,7 +85,7 @@ def _prepare(session, batch_id, *, publish, runtime_digest, archive_root):
     """Choose at most one step under the batch control transaction lock."""
     lock_key(session, 'batch-control', str(batch_id))
     batch = session.get(Batch, batch_id)
-    if batch is None or not batch.event_key.startswith('record-update:'):
+    if batch is None or not batch.event_key.startswith(('record-update:', 'record-backfill:')):
         raise FoundationError('BATCH_UNAVAILABLE', '持续正式化批次不存在或不属于该执行器。')
     control = session.get(BatchControl, batch_id)
     works = list(session.scalars(select(Work).join(BatchWork, BatchWork.work_id == Work.id)
@@ -97,7 +113,7 @@ def _prepare(session, batch_id, *, publish, runtime_digest, archive_root):
             raise FoundationError('PUBLICATION_MISSING', '治理已结束但未找到对应正式发布，须定位修复。')
         return dict(status='published', work_id=work.id, batch_id=batch_id,
                     release_id=release.id, manifest_hash=release.manifest_hash,
-                    head_activated=not batch.event_key.startswith('record-update:history:'))
+                    head_activated=not batch.event_key.startswith(('record-update:history:', 'record-backfill:history:')))
     verify_execution(session, work, runtime_digest, archive_root)
     if (work.kind == 'A' and work.status != 'succeeded' and control.pause_a) or (work.kind == 'B' and control.pause_b):
         return dict(status='paused', work_id=work.id, batch_id=batch_id)
@@ -110,8 +126,9 @@ def _prepare(session, batch_id, *, publish, runtime_digest, archive_root):
         work = create_governance(session, normalization_id=origin.id, execution_id=origin.execution_id,
             policy_id=policy.id, parent_release_id=head.release_id if head else None,
             expected_head_revision=head.revision if head else 0, expected_issue_epoch=guard.epoch,
-            preserve_head=batch.event_key.startswith('record-update:history:'),
-            source_revision=int(batch.event_key.split(':')[2]) if batch.event_key.startswith('record-update:current:') else None)
+            preserve_head=batch.event_key.startswith(('record-update:history:', 'record-backfill:history:')),
+            source_revision=int(batch.event_key.split(':')[2]) if batch.event_key.startswith(
+                ('record-update:current:', 'record-update:table:')) else None)
         attach_work(session, batch_id, work.id)
         if work.status == 'superseded':
             return dict(status='superseded', work_id=work.id, batch_id=batch_id)

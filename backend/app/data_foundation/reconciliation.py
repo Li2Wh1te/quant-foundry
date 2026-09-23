@@ -195,12 +195,16 @@ def verify_candidate_values(session,work,candidates,raw):
         from app.data_foundation.record_models import CandidateRecord, RecordSubject
         source = session.get(SourceRef, work.source_ref_id)
         rows = rows_for(source, raw)
+        from app.data_foundation.table_updates import is_deleted_change
+        deleted_change = is_deleted_change(session, source)
         for candidate in candidates:
             if candidate.readiness != 'ready':
                 continue
             typed = session.get(CandidateRecord, candidate.id)
             try:
                 value = convert(source, rows[candidate.occurrence])
+                if deleted_change:
+                    value['field_quality']['source_deleted'] = 'FIXED_LOCAL_ROW_REMOVAL'
                 subject = session.get(RecordSubject, typed.subject_id)
                 if (typed.body_json != encode(value['body']) or typed.field_quality_json != encode(value['field_quality'])
                         or typed.business_key != record_key(source, value) or value_hash(typed) != candidate.values_hash

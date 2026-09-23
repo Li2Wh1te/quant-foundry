@@ -1,7 +1,7 @@
 """Typed retention edges for business batches and sealed multi-work inputs."""
 from datetime import datetime
 from uuid import UUID
-from sqlalchemy import CheckConstraint, DateTime, String, Text, UniqueConstraint
+from sqlalchemy import BigInteger, CheckConstraint, DateTime, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 from app.db.base import Base
 from app.data_foundation.models import Record, fk
@@ -87,7 +87,7 @@ class WorkSourcePointer(Base):
     __tablename__ = 'foundation_work_source_pointers'
     work_id: Mapped[UUID] = mapped_column(fk('work'), primary_key=True)
     source_ref_id: Mapped[UUID] = mapped_column(fk('source_refs'), primary_key=True)
-    revision: Mapped[int]
+    revision: Mapped[int] = mapped_column(BigInteger)
 
 
 class MaintenancePlan(Record, Base):

@@ -7,6 +7,41 @@ from app.data_foundation.canonical import FoundationError, normalized
 from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
+    ('tushare', 'etf_code_mapping_audits'): 'operations.etf_mapping_audit',
+    ('tushare', 'etf_daily_revision_audits'): 'operations.etf_daily_revision',
+    ('tushare', 'corporate_action_source_facts'): 'operations.corporate_action_source_fact',
+    ('tushare', 'corporate_action_facts'): 'operations.corporate_action_fact',
+    ('tushare', 'corporate_action_coverage_facts'): 'operations.corporate_action_coverage',
+    ('tushare', 'trading_status_source_facts'): 'operations.trading_status_source_fact',
+    ('tushare', 'trading_status_facts'): 'operations.trading_status_fact',
+    ('tushare', 'trading_status_coverage_facts'): 'operations.trading_status_coverage',
+    ('tushare', 'trading_status_revision_audits'): 'operations.trading_status_revision',
+    ('foundation', 'empty_local_scope'): 'operations.empty_local_scope',
+    ('tonghuashun', 'stock_daily_dump'): 'operations.import_progress',
+    ('tonghuashun', 'stock_recent_dump'): 'operations.import_progress',
+    ('tonghuashun', 'stock_actions_dump'): 'operations.import_progress',
+    ('tonghuashun', 'fund_news'): 'fund.news_window',
+    ('tonghuashun', 'anomaly_stock'): 'market.stock_anomaly_window',
+    ('tonghuashun', 'rank_trend'): 'market.rank_trend_window',
+
+    ('tonghuashun', 'fund_holdings'): 'fund.reported_holdings_window',
+    ('tonghuashun', 'fund_stock_history'): 'fund.reported_stock_holdings_window',
+    ('tonghuashun', 'fund_bond_history'): 'fund.reported_bond_holdings_window',
+
+    ('tonghuashun', 'stock_indicators'): 'market.financial_indicator_window',
+    ('tonghuashun', 'fund_financial_indicators'): 'fund.financial_indicator_window',
+    ('tonghuashun', 'fund_income'): 'fund.income_window',
+    ('tonghuashun', 'fund_balance'): 'fund.balance_window',
+    ('tonghuashun', 'stock_income'): 'market.income_window',
+    ('tonghuashun', 'stock_balance'): 'market.balance_window',
+    ('tonghuashun', 'stock_cash_flow'): 'market.cash_flow_window',
+
+    ('tonghuashun', 'fund_allocation'): 'fund.allocation_window',
+    ('tonghuashun', 'fund_industry'): 'fund.industry_window',
+    ('tonghuashun', 'fund_holders'): 'fund.holder_composition_window',
+    ('tonghuashun', 'fund_top_holders'): 'fund.top_holder_window',
+    ('tonghuashun', 'fund_dividends'): 'fund.dividend_window',
+    ('tonghuashun', 'stock_actions'): 'market.corporate_action_window',
     ('tonghuashun','fund_manager_performance'): 'fund.manager_performance_window',
     ('tonghuashun','fund_manager_style'): 'fund.manager_style_snapshot',
     ('tonghuashun','fund_returns'): 'fund.return_snapshot',
@@ -57,6 +92,10 @@ def dataset_for(source):
 
 
 def rows_for(source, content):
+    if getattr(source, 'representation', None) == 'local_table_baseline' and source.source == 'tonghuashun' and source.dataset in ('stock_daily', 'stock_actions'):
+        if not isinstance(content, list):
+            raise FoundationError('SOURCE_SCHEMA_INVALID', '固定暂存来源缺少明确封装列表。')
+        return content
     if source.representation == 'local_table_baseline':
         rows = content
     else:
@@ -65,6 +104,20 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset in ('stock_daily_dump', 'stock_recent_dump', 'stock_actions_dump'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_news', 'anomaly_stock', 'rank_trend'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_holdings', 'fund_stock_history', 'fund_bond_history'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset == 'stock_indicators':
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_financial_indicators', 'fund_income', 'fund_balance', 'stock_income', 'stock_balance', 'stock_cash_flow'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_allocation', 'fund_industry', 'fund_holders', 'fund_top_holders'):
+        return [dict(content)]
+    if source.source == 'tonghuashun' and source.dataset in ('fund_dividends', 'stock_actions'):
+        return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_performance':
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_style':
@@ -153,6 +206,9 @@ def convert(source, raw):
     guessed stock-code suffix. Container-level failure isolation belongs to the
     caller; optional missing/invalid attributes do not turn an identity into 0.
     """
+    if getattr(source, 'representation', None) == 'local_table_baseline' and source.source == 'tonghuashun' and source.dataset in ('stock_daily', 'stock_actions'):
+        from app.data_foundation.staged_inputs import staged_body
+        return staged_body(source, raw)
     dataset = dataset_for(source)
     if not isinstance(raw, dict):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '来源记录不是字段对象。')
@@ -176,7 +232,44 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if source.source == 'tonghuashun' and source.dataset == 'fund_manager_performance':
+    from app.data_foundation.local_table_contracts import DOMAINS as LOCAL_TABLE_DOMAINS
+    if source.source == 'tushare' and source.dataset in LOCAL_TABLE_DOMAINS:
+        from app.data_foundation.local_table_contracts import table_body
+        body, quality, key = table_body(source, raw)
+        kind = 'source_row:' + source.dataset
+    elif dataset == 'operations.empty_local_scope':
+        from app.data_foundation.scope_settlement import settlement_body
+        body, key, quality = settlement_body(raw)
+        kind = 'local_capture_scope'
+    elif dataset == 'operations.import_progress':
+        from app.data_foundation.import_progress import progress_body
+        body, quality = progress_body(source, raw)
+        key, kind = f'{source.dataset}:{source.subject}', 'import_channel'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_news', 'anomaly_stock', 'rank_trend'):
+        from app.data_foundation.narrative_windows import narrative_body
+        body, quality = narrative_body(source, raw)
+        key, kind = source.subject, 'asset:fund' if source.dataset == 'fund_news' else 'asset:a-share'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_holdings', 'fund_stock_history', 'fund_bond_history'):
+        from app.data_foundation.portfolio_windows import portfolio_body
+        body, quality = portfolio_body(source, raw)
+        key, kind = source.subject, 'asset:fund'
+    elif source.source == 'tonghuashun' and source.dataset == 'stock_indicators':
+        from app.data_foundation.stock_indicators import indicators_body
+        body, quality = indicators_body(source, raw)
+        key, kind = source.subject, 'asset:a-share'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_financial_indicators', 'fund_income', 'fund_balance', 'stock_income', 'stock_balance', 'stock_cash_flow'):
+        from app.data_foundation.financial_windows import financial_body
+        body, quality = financial_body(source, raw)
+        key, kind = source.subject, 'asset:fund' if source.dataset.startswith('fund_') else 'asset:a-share'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_allocation', 'fund_industry', 'fund_holders', 'fund_top_holders'):
+        from app.data_foundation.fund_ownership import ownership_body
+        body, quality = ownership_body(source, raw)
+        key, kind = source.subject, 'asset:fund'
+    elif source.source == 'tonghuashun' and source.dataset in ('fund_dividends', 'stock_actions'):
+        from app.data_foundation.distributions import distribution_body
+        body, quality = distribution_body(source, raw)
+        key, kind = source.subject, 'asset:fund' if source.dataset == 'fund_dividends' else 'asset:a-share'
+    elif source.source == 'tonghuashun' and source.dataset == 'fund_manager_performance':
         from app.data_foundation.manager_performance import performance_body
         body, quality = performance_body(source, raw)
         key, kind = source.subject, 'manager_performance_window'
