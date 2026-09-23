@@ -451,6 +451,87 @@ class IndexDailyWindow(DailyPriceWindow):
     reported_adjustment: Literal['not_applicable']
 
 
+ReportedSigned = Annotated[StrictStr, Field(pattern=r'^-?(0|[1-9][0-9]{0,31})(\.[0-9]{1,32})?$')]
+
+
+class QuoteSnapshot(Body):
+    reported_value_status: Literal['values_reported', 'explicit_null_report']
+    reported_ticker: StrictStr | None
+    reported_name: StrictStr | None
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    reported_at: AwareDatetime | None
+    timestamp_semantics: None = None
+    effective_business_date: None = None
+    reported_open_price: ReportedNav | None
+    reported_high_price: ReportedNav | None
+    reported_low_price: ReportedNav | None
+    reported_last_price: ReportedNav | None
+    reported_prev_price: ReportedNav | None
+    reported_price_change: ReportedSigned | None
+    reported_price_change_ratio_pct: ReportedSigned | None
+    reported_price_amplitude_ratio_pct: ReportedNav | None
+    reported_turnover_ratio_pct: ReportedNav | None
+    reported_volume: ReportedNav | None
+    reported_turnover: ReportedNav | None
+    currency: None = None
+    volume_unit: None = None
+    turnover_unit: None = None
+    executable_quote: None = None
+    trading_status: None = None
+
+
+    @model_validator(mode='after')
+    def value_status_matches_reported_quantities(self):
+        ignored = {'reported_at', 'reported_ticker', 'reported_name', 'reported_value_status'}
+        any_value = any(getattr(self, key) is not None for key in type(self).model_fields
+                        if key.startswith('reported_') and key not in ignored)
+        expected = 'values_reported' if any_value else 'explicit_null_report'
+        if self.reported_value_status != expected:
+            raise ValueError('Reported value status disagrees with typed quantities')
+        return self
+
+
+class StockQuoteSnapshot(QuoteSnapshot):
+    asset_type: Literal['a-share']
+
+
+class EtfQuoteSnapshot(QuoteSnapshot):
+    asset_type: Literal['fund-etf']
+
+
+class IndexQuoteSnapshot(QuoteSnapshot):
+    asset_type: Literal['a-share-index']
+
+
+class StockValuationSnapshot(Body):
+    reported_value_status: Literal['values_reported', 'explicit_null_report']
+    reported_ticker: StrictStr | None
+    reported_name: StrictStr | None
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    asset_type: Literal['a-share']
+    reported_at: AwareDatetime | None
+    timestamp_semantics: None = None
+    effective_business_date: None = None
+    reported_pe_ttm: ReportedSigned | None
+    reported_pe_mrq: ReportedSigned | None
+    reported_pb_mrq: ReportedSigned | None
+    reported_ps_ttm: ReportedSigned | None
+    reported_pcf_ttm: ReportedSigned | None
+    valuation_formula: None = None
+    financial_period: None = None
+
+
+    @model_validator(mode='after')
+    def value_status_matches_reported_quantities(self):
+        ignored = {'reported_at', 'reported_ticker', 'reported_name', 'reported_value_status'}
+        any_value = any(getattr(self, key) is not None for key in type(self).model_fields
+                        if key.startswith('reported_') and key not in ignored)
+        expected = 'values_reported' if any_value else 'explicit_null_report'
+        if self.reported_value_status != expected:
+            raise ValueError('Reported value status disagrees with typed quantities')
+        return self
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -465,6 +546,22 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    Schema('market.stock_quote_snapshot', '股票行情快照观察', StockQuoteSnapshot, 'asset:a-share',
+           ('source_code', 'asset_type', 'reported_value_status'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_timestamp_not_business_date', 'reported_values_only', 'units_and_formulas_unverified')),
+    Schema('market.etf_quote_snapshot', 'ETF行情快照观察', EtfQuoteSnapshot, 'asset:fund-etf',
+           ('source_code', 'asset_type', 'reported_value_status'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_timestamp_not_business_date', 'reported_values_only', 'units_and_formulas_unverified')),
+    Schema('market.index_quote_snapshot', '指数行情快照观察', IndexQuoteSnapshot, 'asset:a-share-index',
+           ('source_code', 'asset_type', 'reported_value_status'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_timestamp_not_business_date', 'reported_values_only', 'units_and_formulas_unverified')),
+    Schema('market.stock_valuation_snapshot', '股票估值快照观察', StockValuationSnapshot, 'asset:a-share',
+           ('source_code', 'asset_type', 'reported_value_status'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_timestamp_not_business_date', 'reported_values_only', 'units_and_formulas_unverified')),
     Schema('instrument.reference', '标的来源目录', InstrumentReference, 'asset', ('source_code', 'asset_type')),
     Schema('fund.company', '基金公司资料', FundCompany, 'fund_company', ('company_id',)),
     Schema('fund.manager', '基金经理资料', FundManager, 'fund_manager', ('manager_id',)),
