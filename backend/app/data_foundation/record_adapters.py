@@ -11,6 +11,7 @@ SOURCE_DATASETS = {
     ('tonghuashun', 'fund_company'): 'fund.company',
     ('tonghuashun', 'fund_manager'): 'fund.manager',
     ('tonghuashun', 'fund_profile'): 'fund.profile',
+    ('tonghuashun', 'fund_nav'): 'fund.nav_snapshot',
     ('tonghuashun', 'fund_manager_experience'): 'fund.manager_experience',
     ('tonghuashun', 'calendar'): 'market.calendar',
     ('tonghuashun', 'index_catalog'): 'index.category_snapshot',
@@ -40,6 +41,14 @@ def rows_for(source, content):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_experience' and len(rows) != 1:
         raise FoundationError('SOURCE_SCHEMA_INVALID', '经理经历须有一个明确的任职集合容器，未猜测缺失或重复容器。')
+    if source.source == 'tonghuashun' and source.dataset == 'fund_nav':
+        # Keep the full observation atomic. A malformed point must not silently
+        # disappear, and a new rolling window must not inherit older points.
+        if not isinstance(content, dict):
+            raise FoundationError('SOURCE_SCHEMA_INVALID', '基金净值必须保留完整来源窗口容器。')
+        if content.get('thscode') not in (None, source.subject):
+            raise FoundationError('IDENTITY_CONFLICT', '基金净值容器主体与固定来源主体不一致。')
+        return [{'points': rows, 'coverage': content.get('coverage')}]
     if source.source == 'tonghuashun' and source.dataset in ('index_catalog', 'index_constituents'):
         # Preserve the entire fixed set as one atomic candidate, including an
         # explicitly empty set. A corrupt child quarantines the collection;
@@ -116,7 +125,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if dataset == 'fund.manager_experience':
+    if dataset == 'fund.nav_snapshot':
+        from app.data_foundation.fund_nav import nav_body
+        body, quality = nav_body(source, raw)
+        key, kind = source.subject, 'fund_share'
+    elif dataset == 'fund.manager_experience':
         from app.data_foundation.manager_experience import experience_body
         body, quality = experience_body(source, raw)
         key, kind = source.subject, 'fund_manager'
