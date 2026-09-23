@@ -7,6 +7,10 @@ from app.data_foundation.canonical import FoundationError, normalized
 from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
+    ('tonghuashun', 'stock_quote'): 'market.stock_quote_snapshot',
+    ('tonghuashun', 'etf_quote'): 'market.etf_quote_snapshot',
+    ('tonghuashun', 'index_quote'): 'market.index_quote_snapshot',
+    ('tonghuashun', 'stock_valuation'): 'market.stock_valuation_snapshot',
     ('tonghuashun', 'tickers'): 'instrument.reference',
     ('tonghuashun', 'fund_company'): 'fund.company',
     ('tonghuashun', 'fund_manager'): 'fund.manager',
@@ -48,6 +52,8 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset in ('stock_quote', 'etf_quote', 'index_quote', 'stock_valuation'):
+        return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_experience' and len(rows) != 1:
         raise FoundationError('SOURCE_SCHEMA_INVALID', '经理经历须有一个明确的任职集合容器，未猜测缺失或重复容器。')
     if source.source == 'tonghuashun' and source.dataset == 'fund_nav':
@@ -147,7 +153,11 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if source.source == 'tonghuashun' and source.dataset in ('hot_list', 'skyrocket', 'hot_history'):
+    if source.source == 'tonghuashun' and source.dataset in ('stock_quote', 'etf_quote', 'index_quote', 'stock_valuation'):
+        from app.data_foundation.quote_snapshots import snapshot_body
+        body, quality = snapshot_body(source, raw)
+        key, kind = source.subject, 'asset:' + body['asset_type']
+    elif source.source == 'tonghuashun' and source.dataset in ('hot_list', 'skyrocket', 'hot_history'):
         from app.data_foundation.popularity import popularity_body
         body, quality = popularity_body(source, raw)
         key, kind = f'{source.dataset}:{source.subject}', 'stock_rank_list'
