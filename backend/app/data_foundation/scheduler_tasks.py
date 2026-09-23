@@ -9,6 +9,8 @@ import structlog
 from app.data_foundation.canonical import encode
 from app.data_foundation.record_adapters import SOURCE_DATASETS
 from app.data_foundation.record_updates import advance_updates
+from app.data_foundation.table_record_updates import advance_changes
+from app.data_foundation.scope_settlement import TABLE_NAMES
 from app.data_ingestion.tonghuashun.contracts import DATASETS
 from app.db.session import get_engine
 if TYPE_CHECKING:
@@ -36,6 +38,54 @@ class LocalUpdateParameters(BaseModel):
 
 class FoundationUpdateError(RuntimeError):
     """A classified Chinese summary; source details stay in durable visit rows."""
+
+
+class TableUpdateParameters(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    native_dataset: str = Field(description='已固定全量表及完成初始差异核对的本地领域键')
+    capture_ref_id: UUID
+    execution_id: UUID
+    runtime_digest: str = Field(pattern=r'^sha256:[0-9a-f]{64}$')
+    source_limit: int = Field(default=4, ge=2, le=20)
+    steps_per_source: int = Field(default=2, ge=1, le=10)
+
+    @field_validator('native_dataset')
+    @classmethod
+    def supported_table(cls, value):
+        if ('tushare', value) not in SOURCE_DATASETS:
+            raise ValueError('该本地表尚无正式业务领域适配器。')
+        return value
+
+
+def summarize_table(native_dataset, result):
+    items = result.get('items', [])
+    dates = sorted(str(item['observed_at'])[:10] for item in items)
+    start, end = (dates[0], dates[-1]) if dates else ('无新增观察', '无新增观察')
+    published = sum(item['status'] == 'published' for item in items)
+    failed = sum(item['status'] in ('failed', 'dependency_missing', 'cancelled', 'superseded', 'unexplained') for item in items)
+    quarantined = sum(item['status'] == 'quarantined' for item in items)
+    busy = sum(item['status'] == 'busy' for item in items)
+    detail = '固定全量或初始差异尚未完成，等待来源结算；' if result['status'] in ('waiting_bootstrap', 'waiting_backfill') else ''
+    message = (f'{TABLE_NAMES[native_dataset]}本地正式化更新，观察日期 {start} 至 {end}，{detail}'
+               f'选中 {len(items)} 条变化，发布 {published} 条、失败 {failed} 条、隔离 {quarantined} 条、等待工作锁 {busy} 条；'
+               + ('正式发布检查点已推进。' if published else '正式发布检查点未推进，已提交工作进度保留。'))
+    return dict(**result, selected=len(items), published=published, failed=failed,
+                quarantined=quarantined, busy=busy, observation_start=start,
+                observation_end=end, message=message)
+
+
+def execute_table(context: TaskContext, parameters: TableUpdateParameters):
+    result = summarize_table(parameters.native_dataset, advance_changes(get_engine(), **parameters.model_dump()))
+    result = json.loads(encode(result))
+    needs_attention = result['failed'] or result['quarantined']
+    event = 'foundation_table_updates_failed' if needs_attention else 'foundation_table_updates_advanced'
+    result['event'] = event
+    log = logger.error if needs_attention else logger.info
+    log(event, **{key: value for key, value in result.items() if key != 'event'},
+        task_id=str(context.task_id), run_id=str(context.run_id), task_type=context.task_type)
+    if needs_attention:
+        raise FoundationUpdateError(result['message'])
+    return result
 
 
 def summarize(native_dataset, result):
@@ -81,3 +131,6 @@ def register_tasks(registry: TaskRegistry):
     registry.register(TaskDefinition(key='foundation.formalize_local_updates',
         name='本地数据持续正式化', english_name='Local Data Formalization Updates',
         parameters_model=LocalUpdateParameters, handler=execute))
+    registry.register(TaskDefinition(key='foundation.formalize_local_table_updates',
+        name='本地表持续正式化', english_name='Local Table Formalization Updates',
+        parameters_model=TableUpdateParameters, handler=execute_table))

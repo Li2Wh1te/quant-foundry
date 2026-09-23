@@ -228,9 +228,13 @@ def publish(session, release_id, epoch):
     changed=False
     for pointer in session.scalars(select(WorkSourcePointer).where(WorkSourcePointer.work_id==release.work_id).order_by(WorkSourcePointer.source_ref_id)):
         source=session.get(SourceRef,pointer.source_ref_id)
-        state=session.scalar(select(State).where(State.dataset==source.dataset,State.subject==source.subject,
-            State.variant==source.variant).with_for_update(read=True).execution_options(populate_existing=True))
-        if state is None or state.revision!=pointer.revision or state.observation_id!=source.observation_id:changed=True
+        if source.representation == 'local_table_baseline':
+            from app.data_foundation.table_updates import is_current_change
+            if not is_current_change(session, source, pointer.revision): changed=True
+        else:
+            state=session.scalar(select(State).where(State.dataset==source.dataset,State.subject==source.subject,
+                State.variant==source.variant).with_for_update(read=True).execution_options(populate_existing=True))
+            if state is None or state.revision!=pointer.revision or state.observation_id!=source.observation_id:changed=True
     scope = session.scalar(select(IssueScope).where(IssueScope.scope_key == release.scope_key).with_for_update(read=True).execution_options(populate_existing=True))
     lock_key(session, 'head', release.scope_key)
     head = session.scalar(select(Head).where(Head.scope_key == release.scope_key).with_for_update().execution_options(populate_existing=True))

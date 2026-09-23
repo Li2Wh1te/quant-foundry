@@ -102,3 +102,23 @@ def test_capture_rejects_non_snapshot_transactions(table_fixture):
     with Session(engine) as s, s.begin():
         with pytest.raises(FoundationError,match='可重复读'):
             capture_tables(s,event_key=uuid4().hex,decoder_id=uuid4(),sources=(spec,))
+
+
+def test_empty_table_receipt_retains_original_capture_after_mutable_table_changes(table_fixture):
+    from app.data_foundation.scope_settlement import freeze_empty_tables
+    from app.data_foundation.record_adapters import convert
+    engine, table, spec = table_fixture
+    with engine.connect().execution_options(isolation_level='REPEATABLE READ') as c, c.begin(), Session(bind=c) as s:
+        ex = local_execution(s, 'a'*40)
+        s.execute(table.delete().where(table.c.source == 'tushare'))
+        ref, doc = capture_tables(s, event_key=uuid4().hex, decoder_id=ex.id, sources=(spec,))
+        receipts = freeze_empty_tables(s, capture_ref_id=ref.id, execution_id=ex.id)
+        assert len(receipts) == 1
+        fixed = receipts[0][1]
+        body = convert(fixed, read_source(s, fixed.id)[0])['body']
+        assert body['fixed_rows'] == 0 and body['market_absence'] is None
+        s.execute(table.insert().values(source='tushare', code='arrived-later', price=99, payload={}))
+        assert freeze_empty_tables(s, capture_ref_id=ref.id, execution_id=ex.id)[0][1].id == fixed.id
+        next_ref, _ = capture_tables(s, event_key=uuid4().hex, decoder_id=ex.id, sources=(spec,))
+        assert freeze_empty_tables(s, capture_ref_id=next_ref.id, execution_id=ex.id) == []
+        c.rollback()
