@@ -737,6 +737,58 @@ class DragonTigerSnapshot(Body):
     period_start: None = None
 
 
+class PerformanceBase(Body):
+    source_code: StrictStr
+    asset_type: Literal['fund']
+    calculation_formula: None = None
+    comparable_units: None = None
+    effective_period_boundaries: None = None
+    complete_history: None = None
+
+
+class PerformancePeriod(Body):
+    provider_period: Literal['week','month','tmonth','hyear','year','twoyear','tyear','fyear','now','nowyear']
+    reported_fields: list[StrictStr]
+
+
+class ReturnPeriod(PerformancePeriod):
+    reported_return: ReportedSigned | None
+    reported_peer_average: ReportedSigned | None
+    reported_rank: StrictInt | None = Field(ge=0)
+    reported_rank_total: StrictInt | None = Field(ge=0)
+
+
+class DrawdownPeriod(PerformancePeriod):
+    reported_drawdown: ReportedSigned | None
+
+
+class PerformanceSnapshot(PerformanceBase):
+    reported_ticker: StrictStr | None
+    reported_timestamp_ms: StrictInt | None = Field(ge=0)
+    timestamp_semantics: None = None
+
+
+class ReturnSnapshot(PerformanceSnapshot):
+    periods: list[ReturnPeriod]
+
+
+class DrawdownSnapshot(PerformanceSnapshot):
+    periods: list[DrawdownPeriod]
+
+
+class PerformancePoint(Body):
+    trading_date: date
+    reported_fields: list[StrictStr]
+    reported_donchian_channel: ReportedSigned | None
+    reported_rsi_pct: ReportedSigned | None
+    reported_track_index_pe_ttm_five_year_percentile: ReportedSigned | None
+
+
+class PerformanceWindow(PerformanceBase):
+    coverage: Literal['observed_rows_only']
+    points: list[PerformancePoint]
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -751,6 +803,12 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    Schema('fund.return_snapshot', '基金区间收益观察', ReturnSnapshot, 'asset:fund', ('source_code','asset_type','periods'),
+           limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified','provider_period_and_formula_unverified','observed_scope_only')),
+    Schema('fund.drawdown_snapshot', '基金最大回撤观察', DrawdownSnapshot, 'asset:fund', ('source_code','asset_type','periods'),
+           limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified','provider_period_and_formula_unverified','observed_scope_only')),
+    Schema('fund.performance_window', '基金历史指标窗口', PerformanceWindow, 'asset:fund', ('source_code','asset_type','points'),
+           limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified','provider_period_and_formula_unverified','observed_scope_only')),
     Schema('market.dragon_tiger_snapshot', '龙虎榜完整观察', DragonTigerSnapshot, 'dragon_tiger_list',
            ('collection_key','trading_date','board_type','stocks','hot_money'),business_fields=('trading_date',),date_field='trading_date',
            limitations=('source_local_identity_only','observed_time_only','historical_public_time_unverified',

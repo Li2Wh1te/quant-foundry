@@ -26,7 +26,7 @@ MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
         for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py',
-                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py')})
+                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py', 'fund_performance.py')})
 
 
 def validation_hash():
