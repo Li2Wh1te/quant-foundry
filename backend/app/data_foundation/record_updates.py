@@ -145,7 +145,7 @@ def _advance_updates(engine, *, native_dataset, backfill_campaign_id, execution_
                     runtime_digest=runtime_digest, archive_root=archive_root,
                     preserve_head=item['preserve_head'], source_revision=item['source_revision']).id
             result = advance_job(engine, batch_id, runtime_digest=runtime_digest,
-                steps=steps_per_source, publish=True, archive_root=archive_root)
+                steps=steps_per_source, publish=True, archive_root=archive_root, lock_wait_seconds=5)
             with Session(engine) as session:
                 result['candidate_counts'] = dict(session.execute(
                     select(Candidate.readiness, func.count()).join(Work, Work.id == Candidate.work_id)

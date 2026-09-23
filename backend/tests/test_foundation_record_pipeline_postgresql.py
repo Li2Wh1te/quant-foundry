@@ -154,6 +154,49 @@ def test_global_worker_contention_yields_without_skipping_source(session, tmp_pa
     assert result['status'] == 'published'
 
 
+def test_periodic_update_can_wait_for_a_backfill_boundary(session, tmp_path):
+    from threading import Event, Thread
+    from app.data_foundation.worker import SINGLETON_KEY
+    (batch, _, _), image = fixture(session, tmp_path)
+    acquired = Event()
+    def backfill_unit():
+        with session.bind.connect().execution_options(isolation_level='AUTOCOMMIT') as owner:
+            owner.execute(text('SELECT pg_advisory_lock(:key)'), {'key': SINGLETON_KEY})
+            acquired.set()
+            # Simulate an in-flight unit, not a permanent fixture lock.
+            Event().wait(0.5)
+            owner.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SINGLETON_KEY})
+    thread = Thread(target=backfill_unit)
+    thread.start()
+    try:
+        assert acquired.wait(5)
+        result = advance_job(session.bind, batch, runtime_digest=image, archive_root=tmp_path,
+                             steps=1, lock_wait_seconds=2)
+        assert result['steps'] == 1 and result['status'] == 'step_ready'
+    finally:
+        thread.join(5)
+
+
+def test_gate_timeout_is_bounded_and_restores_connection_settings(session):
+    from time import monotonic
+    from app.data_foundation.worker import SINGLETON_KEY, acquire_gate
+    with session.bind.connect().execution_options(isolation_level='AUTOCOMMIT') as owner:
+        owner.execute(text('SELECT pg_advisory_lock(:key)'), {'key': SINGLETON_KEY})
+        try:
+            with session.bind.connect().execution_options(isolation_level='AUTOCOMMIT') as waiter:
+                waiter.execute(text("SET lock_timeout='7s'"))
+                started = monotonic()
+                assert acquire_gate(waiter, 1) is False
+                assert monotonic()-started < 4
+                assert waiter.scalar(text('SHOW lock_timeout')) == '7s'
+                assert waiter.scalar(text('SELECT 1')) == 1
+                with pytest.raises(ValueError):
+                    acquire_gate(waiter, True)
+                waiter.execute(text("SET lock_timeout='0'"))
+        finally:
+            owner.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SINGLETON_KEY})
+
+
 def test_terminal_failure_is_reported_without_implicit_retry(session, tmp_path):
     from app.data_foundation.work import claim, finish_batch
     (batch, _, _), image = fixture(session, tmp_path)

@@ -8,6 +8,7 @@ from pathlib import Path
 from threading import Event, Thread
 from uuid import UUID
 from sqlalchemy import text, select
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from app.core.config import get_settings
 from app.db.session import get_engine
@@ -22,7 +23,32 @@ logger = structlog.get_logger(__name__)
 SINGLETON_KEY = 714604920128
 
 
-def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', stop=None, archive_root='/app/data/foundation-runtime-archives'):
+def acquire_gate(connection, wait_seconds=0):
+    """Optionally join PostgreSQL's lock queue instead of racing busy workers.
+
+    The default stays nonblocking for existing workers. A short bounded wait
+    lets periodic updates obtain a turn between backfill units. Restore the
+    pooled connection's timeout even when acquisition times out or fails.
+    """
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 10:
+        raise ValueError('Worker gate wait must be an integer from 0 to 10 seconds')
+    if not wait_seconds:
+        return bool(connection.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': SINGLETON_KEY}))
+    previous = connection.scalar(text('SHOW lock_timeout'))
+    try:
+        connection.execute(text("SELECT set_config('lock_timeout', :value, false)"), {'value': f'{wait_seconds}s'})
+        try:
+            connection.execute(text('SELECT pg_advisory_lock(:key)'), {'key': SINGLETON_KEY})
+            return True
+        except DBAPIError as exc:
+            if getattr(exc.orig, 'sqlstate', None) == '55P03':
+                return False
+            raise
+    finally:
+        connection.execute(text("SELECT set_config('lock_timeout', :value, false)"), {'value': previous})
+
+
+def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', stop=None, archive_root='/app/data/foundation-runtime-archives', lock_wait_seconds=0):
     """A single process owns the singleton advisory connection for this call.
 
     Unit operations have independent short sessions and a fenced lease. The
@@ -31,7 +57,7 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
     """
     stop = stop or Event()
     with engine.connect().execution_options(isolation_level='AUTOCOMMIT') as leader:
-        if not leader.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key':SINGLETON_KEY}):
+        if not acquire_gate(leader, lock_wait_seconds):
             return None
         try:
             if stop.is_set(): return None
