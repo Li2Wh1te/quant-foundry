@@ -17,7 +17,7 @@ from app.data_foundation.projection import projection_for, resolve_projected_rel
 
 class RecordRequirement(BaseModel):
     model_config = ConfigDict(extra='forbid')
-    dataset_id: Literal['market.stock_quote_snapshot', 'market.etf_quote_snapshot', 'market.index_quote_snapshot', 'market.stock_valuation_snapshot', 'instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'fund.manager_experience', 'fund.nav_snapshot', 'fund.offering_snapshot', 'market.stock_daily_window', 'market.etf_daily_window', 'market.index_daily_window', 'fund.quota_summary_snapshot', 'fund.quota_list_snapshot', 'market.popularity_snapshot', 'market.rising_popularity_snapshot', 'market.popularity_history_snapshot', 'market.calendar',
+    dataset_id: Literal['market.auction_snapshot', 'market.auction_benchmark_snapshot', 'market.limit_up_snapshot', 'market.limit_down_snapshot', 'market.limit_break_snapshot', 'market.anomaly_snapshot', 'market.limit_ladder_window', 'market.stock_quote_snapshot', 'market.etf_quote_snapshot', 'market.index_quote_snapshot', 'market.stock_valuation_snapshot', 'instrument.reference', 'fund.company', 'fund.manager', 'fund.profile', 'fund.manager_experience', 'fund.nav_snapshot', 'fund.offering_snapshot', 'market.stock_daily_window', 'market.etf_daily_window', 'market.index_daily_window', 'fund.quota_summary_snapshot', 'fund.quota_list_snapshot', 'market.popularity_snapshot', 'market.rising_popularity_snapshot', 'market.popularity_history_snapshot', 'market.calendar',
                         'market.adjustment_factor', 'market.fund_daily', 'index.category_snapshot', 'index.constituent_snapshot']
     contract_version: str = Field(default='1.0', pattern=r'^[1-9]\d*\.\d+$')
     profile_id: Literal['default'] = 'default'

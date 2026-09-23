@@ -532,6 +532,165 @@ class StockValuationSnapshot(Body):
         return self
 
 
+class ActivityMember(Body):
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    reported_ticker: StrictStr | None = None
+    reported_name: StrictStr | None = None
+
+
+class AuctionSnapshot(ActivityMember):
+    asset_type: Literal['a-share']
+    reported_phase: Literal['closed']
+    reported_status: Literal['final']
+    reported_at: AwareDatetime | None
+    reported_auction_amount: ReportedNav | None
+    reported_auction_pct: ReportedSigned | None
+    reported_auction_price: ReportedNav | None
+    reported_auction_turnover_pct: ReportedNav | None
+    reported_auction_unmatched: ReportedSigned | None
+    reported_auction_volume: ReportedNav | None
+    reported_auction_volume_ratio: ReportedNav | None
+    reported_auction_yesterday_ratio_pct: ReportedNav | None
+    reported_float_market_cap: ReportedNav | None
+    reported_last_price: ReportedNav | None
+    reported_open_price: ReportedNav | None
+    reported_pre_close_price: ReportedNav | None
+    currency: None = None
+    quantity_units: None = None
+    auction_formula: None = None
+    executable_quote: None = None
+    effective_business_date: None = None
+
+
+class AuctionBenchmarkMember(ActivityMember):
+    reported_auction_pct: ReportedSigned | None
+    reported_tags: list[StrictStr]
+
+
+class DatedActivitySet(Body):
+    collection_key: StrictStr = Field(min_length=1, max_length=128)
+    trading_date: date
+    scope_basis: Literal['source_reported_list_only']
+    complete_market_coverage: None = None
+
+
+class AuctionBenchmarkSnapshot(DatedActivitySet):
+    members: list[AuctionBenchmarkMember]
+    selection_formula: None = None
+
+
+class LimitUpMember(ActivityMember):
+    reported_continue_day_cnt: StrictInt | None = Field(ge=0)
+    reported_continue_day_text: StrictStr | None
+    reported_is_new: StrictBool | None
+    reported_is_st: StrictBool | None
+    reported_last_price: ReportedNav | None
+    reported_limit_up_reason: StrictStr | None
+    reported_limit_up_time: StrictStr | None
+    reported_max_seal_money: ReportedNav | None
+    reported_price_change_ratio_pct: ReportedSigned | None
+    reported_seal_money: ReportedNav | None
+
+
+class LimitDownMember(ActivityMember):
+    reported_first_limit_time: StrictStr | None
+    reported_last_limit_time: StrictStr | None
+    reported_last_price: ReportedNav | None
+    reported_price_change_ratio_pct: ReportedSigned | None
+    reported_turnover_ratio_pct: ReportedNav | None
+
+
+class LimitBreakMember(ActivityMember):
+    reported_last_price: ReportedNav | None
+    reported_open_times: StrictInt | None = Field(ge=0)
+    reported_price_change_ratio_pct: ReportedSigned | None
+    reported_turnover: ReportedNav | None
+    reported_turnover_ratio_pct: ReportedNav | None
+
+
+class LimitSet(DatedActivitySet):
+    currency: None = None
+    amount_units: None = None
+    exchange_limit_rule: None = None
+    event_timestamps: None = None
+
+
+class LimitUpSnapshot(LimitSet):
+    members: list[LimitUpMember]
+
+
+class LimitDownSnapshot(LimitSet):
+    members: list[LimitDownMember]
+
+
+class LimitBreakSnapshot(LimitSet):
+    members: list[LimitBreakMember]
+
+
+class AnomalyMember(Body):
+    source_order: StrictInt = Field(ge=0)
+    source_code: StrictStr = Field(min_length=1, max_length=64)
+    reported_name: StrictStr | None
+    reported_tag: StrictStr | None
+    reported_keywords: list[StrictStr]
+    reported_analysis: StrictStr | None
+
+
+class AnomalySnapshot(Body):
+    collection_key: StrictStr = Field(min_length=1, max_length=128)
+    members: list[AnomalyMember]
+    scope_basis: Literal['source_reported_narratives_only']
+    factual_verification: None = None
+    event_timestamps: None = None
+    complete_market_coverage: None = None
+
+
+class LadderMember(ActivityMember):
+    reported_board_num: StrictInt = Field(ge=1)
+    reported_seal_nextday: StrictBool | None
+    reported_sign_level: StrictInt | None
+
+
+class LadderGroups(Body):
+    two_board: list[LadderMember]
+    three_board: list[LadderMember]
+    four_board: list[LadderMember]
+    five_board: list[LadderMember]
+    six_board: list[LadderMember]
+    seven_over: list[LadderMember]
+
+
+class LadderCaps(Body):
+    two_board: StrictInt = Field(ge=0)
+    three_board: StrictInt = Field(ge=0)
+    four_board: StrictInt = Field(ge=0)
+    five_board: StrictInt = Field(ge=0)
+    six_board: StrictInt = Field(ge=0)
+    seven_over: StrictInt = Field(ge=0)
+
+
+class LadderDay(Body):
+    trading_date: date
+    reported_groups: LadderGroups
+
+
+class LimitLadderWindow(Body):
+    collection_key: StrictStr = Field(min_length=1, max_length=128)
+    coverage: Literal['provider_rolling_window']
+    days: list[LadderDay]
+    declared_board_caps: LadderCaps
+    complete_market_coverage: None = None
+    seal_nextday_meaning: None = None
+    sign_level_meaning: None = None
+
+    @model_validator(mode='after')
+    def distinct_chronological_days(self):
+        days = [day.trading_date for day in self.days]
+        if days != sorted(set(days)):
+            raise ValueError('Ladder dates must be distinct and chronological')
+        return self
+
+
 @dataclass(frozen=True)
 class Schema:
     dataset: str
@@ -546,6 +705,31 @@ class Schema:
 
 
 SCHEMAS = {item.dataset: item for item in (
+    Schema('market.auction_snapshot', '竞价终态观察', AuctionSnapshot, 'asset:a-share', ('source_code', 'asset_type', 'reported_phase', 'reported_status'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.auction_benchmark_snapshot', '竞价基准名单观察', AuctionBenchmarkSnapshot, 'auction_benchmark', ('collection_key', 'trading_date', 'scope_basis', 'members'),
+           business_fields=('trading_date',), date_field='trading_date',
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.limit_up_snapshot', '涨停名单观察', LimitUpSnapshot, 'limit_up_list', ('collection_key', 'trading_date', 'scope_basis', 'members'),
+           business_fields=('trading_date',), date_field='trading_date',
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.limit_down_snapshot', '跌停名单观察', LimitDownSnapshot, 'limit_down_list', ('collection_key', 'trading_date', 'scope_basis', 'members'),
+           business_fields=('trading_date',), date_field='trading_date',
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.limit_break_snapshot', '炸板名单观察', LimitBreakSnapshot, 'limit_break_list', ('collection_key', 'trading_date', 'scope_basis', 'members'),
+           business_fields=('trading_date',), date_field='trading_date',
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.anomaly_snapshot', '市场异动叙述观察', AnomalySnapshot, 'anomaly_list', ('collection_key', 'scope_basis', 'members'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
+    Schema('market.limit_ladder_window', '连板梯队观察窗口', LimitLadderWindow, 'limit_ladder', ('collection_key', 'coverage', 'days', 'declared_board_caps'),
+           limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',
+                        'provider_reported_semantics_only', 'not_complete_market_universe')),
     Schema('market.stock_quote_snapshot', '股票行情快照观察', StockQuoteSnapshot, 'asset:a-share',
            ('source_code', 'asset_type', 'reported_value_status'),
            limitations=('source_local_identity_only', 'observed_time_only', 'historical_public_time_unverified',

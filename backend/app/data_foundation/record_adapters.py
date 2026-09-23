@@ -7,6 +7,13 @@ from app.data_foundation.canonical import FoundationError, normalized
 from app.data_foundation.record_schemas import validate_body, schema_for
 
 SOURCE_DATASETS = {
+    ('tonghuashun', 'stock_auction'): 'market.auction_snapshot',
+    ('tonghuashun', 'auction_benchmark'): 'market.auction_benchmark_snapshot',
+    ('tonghuashun', 'limit_up'): 'market.limit_up_snapshot',
+    ('tonghuashun', 'limit_down'): 'market.limit_down_snapshot',
+    ('tonghuashun', 'limit_break'): 'market.limit_break_snapshot',
+    ('tonghuashun', 'anomaly_list'): 'market.anomaly_snapshot',
+    ('tonghuashun', 'limit_ladder'): 'market.limit_ladder_window',
     ('tonghuashun', 'stock_quote'): 'market.stock_quote_snapshot',
     ('tonghuashun', 'etf_quote'): 'market.etf_quote_snapshot',
     ('tonghuashun', 'index_quote'): 'market.index_quote_snapshot',
@@ -52,6 +59,8 @@ def rows_for(source, content):
         rows = content.get('item')
     if not isinstance(rows, list):
         raise FoundationError('SOURCE_SCHEMA_INVALID', '固定来源缺少明确的记录列表，未将缺项当作空结果。')
+    if source.source == 'tonghuashun' and source.dataset in ('stock_auction', 'auction_benchmark', 'limit_up', 'limit_down', 'limit_break', 'anomaly_list', 'limit_ladder'):
+        return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset in ('stock_quote', 'etf_quote', 'index_quote', 'stock_valuation'):
         return [dict(content)]
     if source.source == 'tonghuashun' and source.dataset == 'fund_manager_experience' and len(rows) != 1:
@@ -153,7 +162,12 @@ def convert(source, raw):
         finally:
             if value is None:
                 quality[target] = 'MISSING'
-    if source.source == 'tonghuashun' and source.dataset in ('stock_quote', 'etf_quote', 'index_quote', 'stock_valuation'):
+    if source.source == 'tonghuashun' and source.dataset in ('stock_auction', 'auction_benchmark', 'limit_up', 'limit_down', 'limit_break', 'anomaly_list', 'limit_ladder'):
+        from app.data_foundation.market_activity import activity_body
+        body, quality = activity_body(source, raw)
+        key = source.subject if source.dataset == 'stock_auction' else f'{source.dataset}:{source.subject}'
+        kind = schema_for(dataset).identity_kind
+    elif source.source == 'tonghuashun' and source.dataset in ('stock_quote', 'etf_quote', 'index_quote', 'stock_valuation'):
         from app.data_foundation.quote_snapshots import snapshot_body
         body, quality = snapshot_body(source, raw)
         key, kind = source.subject, 'asset:' + body['asset_type']
