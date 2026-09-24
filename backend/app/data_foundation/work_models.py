@@ -258,3 +258,12 @@ class WorkCoverage(Base):
 # Candidate and decision foreign keys must resolve in standalone worker processes,
 # which can import this module without loading the web application registry.
 from app.data_foundation import record_models as _record_models  # noqa: E402,F401
+
+# Stable reverse lookups and an inexpensive negative-quality existence probe.
+from sqlalchemy import Index as _Index, text as _text
+_Index('ix_foundation_work_source_lookup', Work.source_ref_id,
+       postgresql_where=_text('source_ref_id IS NOT NULL'))
+_Index('ix_foundation_work_manifest_lookup', Work.candidate_manifest_id,
+       postgresql_where=_text('candidate_manifest_id IS NOT NULL'))
+_Index('ix_foundation_candidates_not_ready', Candidate.work_id,
+       postgresql_where=_text("readiness <> 'ready'"))

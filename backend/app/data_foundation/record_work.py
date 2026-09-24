@@ -1,5 +1,5 @@
 """Typed source-local records on the shared fenced normalization/release kernel."""
-from collections import Counter, defaultdict
+from collections import defaultdict
 from pathlib import Path
 from uuid import UUID, uuid4
 import json
@@ -20,18 +20,24 @@ from app.data_foundation.work_models import (Work, Candidate, CandidateManifest,
     Unit, Decision, Release, ReleaseBlock, BlockRef)
 
 DOMAIN_KEY = 'typed-record-v1'
-VALUE_FIELDS = ('subject_id', 'business_key', 'business_date', 'schema_key', 'body_json', 'field_quality_json')
-MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official_id', 'decision_id')
+from app.data_foundation.record_values import (VALUE_FIELDS, MEMBER_FIELDS, fields, value_hash,
+                                               subject_partitioned, partition_key)
 OLDER_SOURCE_RETAINED = 'OLDER_SOURCE_RETAINED'
 
 
 def domain_hash():
     return digest('typed-record-code-v1', {name: (Path(__file__).parent / name).read_text()
         for name in ('record_work.py', 'record_adapters.py', 'record_schemas.py', 'record_models.py',
-                     'record_bulk.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py', 'fund_performance.py', 'manager_style.py', 'manager_performance.py', 'distributions.py', 'fund_ownership.py', 'financial_windows.py', 'stock_indicators.py', 'portfolio_windows.py', 'holdings.py', 'narrative_windows.py', 'staged_inputs.py', 'import_progress.py', 'scope_settlement.py', 'table_updates.py', 'local_table_contracts.py', 'table_bootstrap.py')})
+                     'record_bulk.py', 'record_preparation.py', 'performance_models.py', 'record_values.py',
+                     'record_validation.py', 'record_validation_driver.py', 'record_validation_models.py', 'manager_experience.py', 'fund_nav.py', 'fund_offerings.py', 'popularity.py', 'fund_quotas.py', 'daily_windows.py', 'quote_snapshots.py', 'market_activity.py', 'dragon_tiger.py', 'fund_performance.py', 'manager_style.py', 'manager_performance.py', 'distributions.py', 'fund_ownership.py', 'financial_windows.py', 'stock_indicators.py', 'portfolio_windows.py', 'holdings.py', 'narrative_windows.py', 'staged_inputs.py', 'import_progress.py', 'scope_settlement.py', 'table_updates.py', 'local_table_contracts.py', 'table_bootstrap.py')})
 
 
 def validation_hash():
+    from app.data_foundation.record_validation import validation_hash as block_hash
+    return block_hash()
+
+
+def plan_validation_hash():
     # Include shared canonical helpers and the dependency runtime, not just the
     # adapter, so a changed validator cannot inherit earlier proof results.
     from app.data_foundation.execution import installed_code_hash
@@ -39,14 +45,6 @@ def validation_hash():
     import platform
     return digest('typed-record-validator-v1', [installed_code_hash(), platform.python_version(),
         hashlib.sha256((Path(__file__).resolve().parents[2] / 'uv.lock').read_bytes()).hexdigest()])
-
-
-def fields(row, names=VALUE_FIELDS):
-    return {name: getattr(row, name) for name in names}
-
-
-def value_hash(row):
-    return digest('typed-record-value-v1', fields(row))
 
 
 def series_for(dataset, source):
@@ -145,45 +143,32 @@ def normalize_batch(session, work_id, epoch):
     source = session.get(SourceRef, work.source_ref_id)
     if work.kind != 'A' or dataset_for(source) != params['dataset']:
         raise FoundationError('SCOPE_MISMATCH', '来源与领域契约不一致。')
-    raw_rows = rows_for(source, read_source(session, source.id))
-    from app.data_foundation.table_updates import is_deleted_change
-    deleted_change = is_deleted_change(session, source)
-    parsed = []
-    for raw in raw_rows:
-        try:
-            value = convert(source, raw)
-            if deleted_change:
-                value['field_quality']['source_deleted'] = 'FIXED_LOCAL_ROW_REMOVAL'
-            parsed.append((value, record_key(source, value), None))
-        except (FoundationError, ValueError, TypeError, OverflowError) as exc:
-            parsed.append((None, None, getattr(exc, 'code', 'SOURCE_SCHEMA_INVALID')))
-    counts = Counter(key for _, key, _ in parsed if key is not None)
-    work.total = len(parsed)
-    end = min(work.cursor + BATCH_ROWS, work.total)
+    from app.data_foundation.record_preparation import candidate_page
+    work.total, page = candidate_page(session, work, epoch)
+    end = work.cursor + len(page)
     from app.data_foundation.record_bulk import register_subjects, register_assessments
-    subjects = register_subjects(session, source, [value for value, _, _ in parsed[work.cursor:end]])
+    subjects = register_subjects(session, source, [item['value'] for item in page])
     prepared = []
-    for index in range(work.cursor, end):
-        value, key, reason = parsed[index]
+    for offset, item in enumerate(page):
+        index = work.cursor + offset
+        value, key, reason = item['value'], item['key'], item['reason']
         subject = subjects[(source.source, value['subject_kind'], value['subject_key'])] if value else None
-        if key is not None and counts[key] != 1:
-            reason = 'DUPLICATE_BUSINESS_KEY'
         typed = dict(subject_id=subject.id, business_key=key, business_date=value['business_date'],
             schema_key=params['dataset'], body_json=encode(value['body']),
             field_quality_json=encode(value['field_quality'])) if value else None
-        spec = dict(input_hash=digest('typed-record-input', [work.fingerprint, index, raw_rows[index]]),
+        spec = dict(input_hash=item['input_hash'],
             rule_hash=params['domain_hash'], scope_hash=work.scope_key, status='fail' if reason else 'pass',
             results={'reason': reason, 'reasons': [reason] if reason else [], 'target_key': key, 'occurrence': index,
                 'field_quality': value['field_quality'] if value else {}})
-        prepared.append((index, subject, typed, reason, spec))
+        prepared.append((index, subject, typed, reason, spec, item['quarantine_hash']))
     assessments = register_assessments(session, [entry[4] for entry in prepared])
     candidates, typed_rows, units = [], [], []
-    for index, subject, typed, reason, spec in prepared:
+    for index, subject, typed, reason, spec, quarantine_hash in prepared:
         checked = assessments[(spec['input_hash'], spec['rule_hash'], spec['scope_hash'])]
         candidate = Candidate(id=uuid4(), work_id=work.id, source_ref_id=source.id,
             record_subject_id=subject.id if subject else None, binding_id=None,
             dependency_id=work.dependency_id, unit_key=str(index), occurrence=index,
-            values_hash=digest('typed-record-value-v1', typed) if typed else digest('quarantined-record', raw_rows[index]),
+            values_hash=digest('typed-record-value-v1', typed) if typed else quarantine_hash,
             assessment_id=checked.id, readiness='quarantined' if reason else 'ready', created_at=now())
         candidates.append(candidate)
         if typed:
@@ -208,6 +193,7 @@ def normalize_batch(session, work_id, epoch):
         session.add_all([CandidateEntry(manifest_id=manifest.id, ordinal=i, candidate_id=c.id) for i, c in enumerate(candidates)])
         append_event(session, work, 'quality', 'evaluated', {'ready': sum(c.readiness == 'ready' for c in candidates),
             'quarantined': sum(c.readiness != 'ready' for c in candidates)})
+    fenced(session, work.id, epoch)
     finish_batch(session, work, status='succeeded' if end == work.total else 'queued')
     return end
 
@@ -282,23 +268,6 @@ def effective_parent_sources(session, parents):
     if len(sources) != len(set(source_ids.values())):
         raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING', '正式键的固定来源凭据缺失。')
     return {key: sources[source_id] for key, source_id in source_ids.items()}
-
-
-def subject_partitioned(dataset, partitions):
-    # Time-series source chunks are ordered by subject/date. Subject blocks
-    # avoid copying every historical hash bucket for each 2,000-row chunk.
-    # Existing hash-partitioned lineages retain their original layout; a release
-    # may never mix the two schemes and accidentally expose a key twice.
-    if not partitions:
-        return dataset in ('market.adjustment_factor', 'market.fund_daily')
-    subject_flags = [key.startswith('subject:') for key in partitions]
-    if any(subject_flags) and (not all(subject_flags) or dataset not in ('market.adjustment_factor', 'market.fund_daily')):
-        raise FoundationError('MANIFEST_INVALID', '领域发布分块方式不一致。')
-    return all(subject_flags)
-
-
-def partition_key(key, subject_id, by_subject):
-    return 'subject:' + str(subject_id) if by_subject else key[:2]
 
 
 def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, preserve_head=False,
@@ -428,7 +397,7 @@ def create_governance(session, *, normalization_id, execution_id, policy_id, par
     # The full sealed input and policy were just used to derive every action.
     # Work inputs/parameters and candidate/policy/parent evidence are immutable;
     # record that derivation transactionally instead of repeating it per page.
-    _save_plan_verification(session, work, validation_hash(), len(actions))
+    _save_plan_verification(session, work, plan_validation_hash(), len(actions))
     return work
 
 
@@ -455,7 +424,7 @@ def verify_governance_plan(session, work, *, force=False):
     params = verify(work)
     if work.kind != 'B' or work.candidate_input_set_id:
         raise FoundationError('SCOPE_MISMATCH', '领域治理需要单个固定来源候选清单。')
-    validator = validation_hash()
+    validator = plan_validation_hash()
     receipt = session.get(RecordPlanVerification, (work.id, validator))
     if receipt:
         if (receipt.work_fingerprint != work.fingerprint
@@ -599,6 +568,12 @@ def seal_release(session, work):
     session.flush()
     session.add_all([BlockRef(release_id=release.id, partition_key=key, block_id=bid) for key, bid in blocks.items()])
     session.flush()
+    if session.info.get('foundation_defer_record_validation'):
+        from app.data_foundation.record_validation_driver import freeze_root
+        freeze_root(session, release)
+        # The worker will validate this closed draft in independent bounded
+        # transactions. A draft is never reconciled or published as sealed.
+        return release
     validate_release(session, release, reuse_verified=True)
     release.status = 'sealed'
     session.flush()
@@ -606,92 +581,8 @@ def seal_release(session, work):
 
 
 def validate_release(session, release, *, reuse_verified=False):
-    """Validate the full root and all new blocks; optionally reuse closed proofs.
-
-    Explicit audit calls default to reading and checking every member again.
-    Publication/reconciliation may reuse a receipt only for the exact immutable
-    block, scope, schema and validator. Live issue/head gates remain separate.
-    """
+    """Explicit audits still reread every member; production may reuse proofs."""
+    from app.data_foundation.record_validation import validate_release as validate
     params = verify(session.get(Work, release.work_id))
-    validator_hash = validation_hash()
-    refs = list(session.scalars(select(BlockRef).where(BlockRef.release_id == release.id).order_by(BlockRef.partition_key)))
-    by_subject = subject_partitioned(params['dataset'], [r.partition_key for r in refs])
-    block_ids = [r.block_id for r in refs]
-    blocks = {b.id: b for b in session.scalars(select(ReleaseBlock).where(ReleaseBlock.id.in_(block_ids)))}
-    receipts = {v.block_id: v for v in session.scalars(select(RecordBlockVerification).where(
-        RecordBlockVerification.block_id.in_(block_ids), RecordBlockVerification.validator_hash == validator_hash))}
-    verified = []
-    manifest = []
-    for ref in refs:
-        block = blocks.get(ref.block_id)
-        if block is None or block.partition_key != ref.partition_key:
-            raise FoundationError('MANIFEST_INVALID', '领域发布块范围不一致。')
-        manifest.append([ref.partition_key, ref.block_id, block.content_hash])
-        receipt = receipts.get(block.id)
-        expected = dict(scope_key=release.scope_key, schema_key=params['dataset'],
-            content_hash=block.content_hash, row_count=block.row_count)
-        if receipt and any(getattr(receipt, name) != value for name, value in expected.items()):
-            raise FoundationError('MANIFEST_INVALID', '领域发布块校验凭据与固定范围不一致。')
-        if reuse_verified and receipt:
-            continue
-        members = session.scalars(select(RecordBlockMember).where(RecordBlockMember.block_id == block.id)
-            .order_by(RecordBlockMember.target_key)).all()
-        if block.partition_key != ref.partition_key or len(members) != block.row_count:
-            raise FoundationError('MANIFEST_INVALID', '领域发布块范围或数量不一致。')
-        if digest('typed-record-block-v1', [fields(m, MEMBER_FIELDS) for m in members]) != block.content_hash:
-            raise FoundationError('MANIFEST_INVALID', '领域发布块摘要不一致。')
-        # Verify all cross-references for this hash partition with bounded
-        # bulk queries. Strong references keep SQLAlchemy's weak identity map
-        # from issuing one query per inherited candidate/work/official value.
-        decisions = {d.id: d for d in session.scalars(select(Decision).where(
-            Decision.id.in_({m.decision_id for m in members})))}
-        works = {w.id: w for w in session.scalars(select(Work).where(
-            Work.id.in_({d.work_id for d in decisions.values()})))}
-        officials = {o.id: o for o in session.scalars(select(OfficialRecord).where(
-            OfficialRecord.id.in_({m.official_id for m in members if m.official_id})))}
-        retained = {d.id for d in decisions.values() if d.action == 'retain'}
-        parent_values = dict(session.execute(select(Decision.id, RecordBlockMember.official_id)
-            .join(Work, Work.id == Decision.work_id)
-            .join(BlockRef, BlockRef.release_id == Work.parent_release_id)
-            .join(RecordBlockMember, RecordBlockMember.block_id == BlockRef.block_id)
-            .where(Decision.id.in_(retained), RecordBlockMember.target_key == Decision.target_key,
-                RecordBlockMember.state == 'value')).all()) if retained else {}
-        for member in members:
-            decision = decisions.get(member.decision_id)
-            if decision is None or decision.work_id not in works:
-                raise FoundationError('MANIFEST_INVALID', '领域发布的治理决策缺失。')
-            if (partition_key(member.target_key, member.subject_id, by_subject) != ref.partition_key or decision.target_key != member.target_key
-                    or works[decision.work_id].scope_key != release.scope_key
-                    or member.state != {'select': 'value', 'retain': 'value', 'block': 'blocked', 'gap': 'gap', 'withdraw': 'withdrawn'}[decision.action]):
-                raise FoundationError('MANIFEST_INVALID', '领域成员与决策范围不一致。')
-            if member.official_id:
-                official = officials.get(member.official_id)
-                if (official is None or official.schema_key != params['dataset'] or official.subject_id != member.subject_id
-                        or official.business_key != member.target_key or official.business_date != member.business_date
-                        or value_hash(official) != official.values_hash):
-                    raise FoundationError('MANIFEST_INVALID', '正式领域记录与发布成员不一致。')
-                validate_body(params['dataset'], json.loads(official.body_json))
-                if decision.action == 'retain':
-                    if parent_values.get(decision.id) != official.id or decision.parent_record_id != official.id:
-                        raise FoundationError('MANIFEST_INVALID', '保留记录不属于固定父发布。')
-                elif official.decision_id != decision.id or official.candidate_id != decision.selected_candidate_id:
-                    raise FoundationError('MANIFEST_INVALID', '正式记录与选中候选不一致。')
-        # Preserve actual contributors of this exact block, not all works ever
-        # mentioned by a parent. A forced audit recomputes these lists as well.
-        normalized = set(session.scalars(select(Candidate.work_id).where(
-            Candidate.id.in_({o.candidate_id for o in officials.values()})).distinct()))
-        contributions = dict(governance_work_ids_json=encode(sorted({str(d.work_id) for d in decisions.values()})),
-            normalization_work_ids_json=encode(sorted(str(wid) for wid in normalized)))
-        if receipt and any(getattr(receipt, name) != value for name, value in contributions.items()):
-            raise FoundationError('MANIFEST_INVALID', '领域发布块贡献来源与校验凭据不一致。')
-        if receipt is None:
-            verified.append(dict(block_id=block.id, validator_hash=validator_hash, **expected, verified_at=now(),
-                **contributions))
-    if digest('release-manifest', manifest) != release.manifest_hash:
-        raise FoundationError('MANIFEST_INVALID', '领域发布清单摘要不一致。')
-    if verified:
-        # Persist only after the entire root passes. A transaction rollback also
-        # rolls back the proof; concurrent audits can share the same exact key.
-        from sqlalchemy.dialects.postgresql import insert
-        session.execute(insert(RecordBlockVerification).values(verified).on_conflict_do_nothing(
-            index_elements=['block_id', 'validator_hash']))
+    return validate(session, release, params['dataset'], validation_hash(),
+                    reuse_verified=reuse_verified, body_validator=validate_body)

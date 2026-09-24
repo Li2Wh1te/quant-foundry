@@ -2,7 +2,7 @@ import unittest
 from concurrent.futures import Future
 from datetime import UTC, date, datetime, timedelta
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, call
 from uuid import uuid4
 
 from apscheduler.triggers.cron import CronTrigger
@@ -408,15 +408,13 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
             runtime.scheduler = Mock()
             runtime.start()
 
-        runtime.scheduler.add_job.assert_called_once_with(
-            runtime.dispatch_queued_runs,
-            trigger="interval",
-            seconds=0.5,
-            id="scheduler:dispatch",
-            replace_existing=True,
-            max_instances=1,
-            coalesce=True,
-        )
+        self.assertEqual(runtime.scheduler.add_job.call_count, 2)
+        runtime.scheduler.add_job.assert_has_calls([
+            call(runtime.dispatch_queued_runs, trigger="interval", seconds=0.5,
+                 id="scheduler:dispatch", replace_existing=True, max_instances=1, coalesce=True),
+            call(runtime.resume_foundation_waiters, trigger="interval", seconds=60,
+                 id="foundation-backfill-resumption", replace_existing=True, max_instances=1, coalesce=True),
+        ])
         session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
         runtime.stop()
 

@@ -94,6 +94,11 @@ class SchedulerRuntime:
             max_instances=1,
             coalesce=True,
         )
+        self.scheduler.add_job(
+            self.resume_foundation_waiters,
+            trigger="interval", seconds=60, id="foundation-backfill-resumption",
+            replace_existing=True, max_instances=1, coalesce=True,
+        )
         self.scheduler.resume()
         logger.info(
             "scheduler_started",
@@ -102,6 +107,20 @@ class SchedulerRuntime:
             interrupted_runs=interrupted,
             max_workers=self.settings.scheduler_max_workers,
         )
+
+    def resume_foundation_waiters(self) -> None:
+        """Resume only explicitly enrolled backfill pauses; other pauses stay put."""
+        from app.data_foundation.update_resumption import advance, acknowledge
+        for task_id in advance(get_engine(), self.registry,
+                               runtime_digest=getattr(self.settings, 'foundation_runtime_image_digest', '')):
+            try:
+                self.sync_task(task_id)
+                acknowledge(get_engine(), task_id)
+                logger.info("foundation_update_resumed", task_id=str(task_id),
+                            message="固定来源已全部合格发布，已恢复明确接管的持续更新任务。")
+            except Exception:
+                logger.exception("foundation_update_sync_deferred", task_id=str(task_id),
+                                 message="恢复状态已保留，调度同步将在下次检查重试。")
 
     def stop(self) -> None:
         if self.running:
