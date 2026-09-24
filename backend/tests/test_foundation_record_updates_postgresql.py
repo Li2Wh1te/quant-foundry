@@ -100,3 +100,42 @@ def test_late_history_failure_rotation_and_published_receipts_survive_new_decode
     remaining = updates.discover(session, native_dataset='fund_company', backfill_campaign_id=campaign_id,
                                  execution_id=newer_execution)
     assert [item['observation_id'] for item in remaining['items']] == [broken_id]
+
+
+def test_quarantined_release_is_not_a_business_receipt_or_a_domain_barrier(session, tmp_path):
+    (_, _, execution), image = fixture(session, tmp_path)
+    bad = observation(session, current=True)
+    bad_body = {'item': [{'company_name': 'Missing source identity'}]}
+    bad.data_json, bad.content_hash = exact_json(bad_body), content_hash(bad_body)
+    good = observation(session, current=True)
+    empty = observation(session, current=True)
+    empty_body = {'item': []}
+    empty.data_json, empty.content_hash, empty.row_count = exact_json(empty_body), content_hash(empty_body), 0
+    campaign_id = campaign(session, execution)
+    bad_id, good_id, empty_id = bad.id, good.id, empty.id
+    session.commit()
+
+    from app.data_foundation.full_formalization import run_campaign
+    result = run_campaign(session.bind, campaign_id=campaign_id, execution_id=execution,
+        runtime_digest=image, archive_root=tmp_path, datasets=['fund_company'], publish=True, steps=100)
+    assert result['status'] == 'completed_with_issues'
+    session.expire_all()
+    receipts = updates.publication_receipts('fund_company')
+    accepted = set(session.scalars(select(receipts.c.observation_id)))
+    assert bad_id not in accepted and {good_id, empty_id} <= accepted
+    found = updates.discover(session, native_dataset='fund_company',
+        backfill_campaign_id=campaign_id, execution_id=execution)
+    assert found['status'] == 'ready' and found['pending_backfill'] == 0
+    assert found['backfill_issues'] == 1
+    assert bad_id in {item['observation_id'] for item in found['items']}
+    session.rollback()
+
+    advanced = updates.advance_updates(session.bind, native_dataset='fund_company',
+        backfill_campaign_id=campaign_id, execution_id=execution, runtime_digest=image,
+        archive_root=tmp_path, source_limit=20, steps_per_source=10)
+    by_id = {item['observation_id']: item for item in advanced['items']}
+    assert by_id[bad_id]['status'] == 'quarantined'
+    assert by_id[bad_id]['candidate_counts']['quarantined'] >= 1
+    assert bad_id in {item['observation_id'] for item in updates.discover(session,
+        native_dataset='fund_company', backfill_campaign_id=campaign_id,
+        execution_id=execution)['items']}

@@ -8,6 +8,7 @@ use a distinct batch purpose so a later update-runtime handoff cannot drain an
 entire historical backfill accidentally.
 """
 import argparse
+import json
 from collections import Counter, deque
 from time import sleep
 from uuid import UUID
@@ -40,7 +41,8 @@ def published_sources(session, source_ids, source, dataset):
         .join(governance, governance.candidate_manifest_id == CandidateManifest.id)\
         .join(Release, Release.work_id == governance.id).where(origin.source_ref_id.in_(source_ids),
             origin.kind == 'A', origin.status == 'succeeded', Release.scope_key == scope,
-            Release.status == 'published', ~quarantined).distinct()
+            Release.status == 'published', ~quarantined,
+            ~governance.parameters_json.contains(record_work.OLDER_SOURCE_RETAINED)).distinct()
     return set(session.scalars(query))
 
 
@@ -87,11 +89,15 @@ def advance_source(engine, source_id, *, execution_id, runtime_digest, archive_r
         counts = dict(session.execute(select(Candidate.readiness, func.count())
             .join(Work, Work.id == Candidate.work_id).join(BatchWork, BatchWork.work_id == Work.id)
             .where(BatchWork.batch_id == batch_id, Work.kind == 'A').group_by(Candidate.readiness)).all())
+        governance = session.get(Work, result['work_id']) if result['status'] == 'published' else None
+        requires_history = bool(governance and not preserve_head and any(
+            action.get('reason') == record_work.OLDER_SOURCE_RETAINED
+            for action in json.loads(governance.parameters_json).get('actions', [])))
     if result['status'] == 'published' and counts.get('quarantined', 0):
         # An empty/partial release does not prove this source's business values
         # were accepted. Keep its release receipt but surface the quarantine.
         result['status'] = 'quarantined'
-    return dict(result, candidate_counts=counts)
+    return dict(result, candidate_counts=counts, requires_history=requires_history)
 
 
 def run_campaign(engine, *, campaign_id, execution_id, runtime_digest, archive_root,
@@ -158,17 +164,19 @@ def run_campaign(engine, *, campaign_id, execution_id, runtime_digest, archive_r
         group.setdefault('result_key', group.get('staged_channel', group['native_dataset']))
         group.setdefault('display_name', DATASETS[group['native_dataset']].name if group['native_dataset'] in DATASETS else group['native_dataset'])
     counts = {group['result_key']: Counter() for group in groups}
+    history_pending = set()
     dates = sorted(value for group in groups for value in (group['start'], group['end']) if value)
     start, end = (dates[0], dates[-1]) if dates else ('无固定观察', '无固定观察')
     logger.info('foundation_full_started', campaign_id=str(campaign_id), execution_id=str(execution_id),
                 selected=len(queue), message=f'本地全量正式化已启动，观察日期 {start} 至 {end}，覆盖 {len(groups)} 个领域、待处理 {len(queue)} 个固定来源；尚未推进发布检查点。')
     while queue:
         group, source = queue.popleft()
+        preserve_head = group.get('preserve_head', False) or source.id in history_pending
         require_space(archive_root, minimum_free_bytes)
         try:
             result = advance_source(engine, source.id, execution_id=execution_id, runtime_digest=runtime_digest,
                                     archive_root=archive_root, steps=steps, publish=True,
-                                    preserve_head=group.get('preserve_head', False))
+                                    preserve_head=preserve_head)
         except FoundationError as exc:
             result = dict(status='failed', error_code=exc.code, message=str(exc))
         except Exception as exc:
@@ -181,6 +189,19 @@ def run_campaign(engine, *, campaign_id, execution_id, runtime_digest, archive_r
             queue.append((group, source))
             if result['status'] == 'busy':
                 sleep(0.25)
+            continue
+        if (not preserve_head and result['status'] == 'failed'
+                and result.get('error_code') in ('SOURCE_OLDER_THAN_PARENT_NONVALUE',
+                                                  'SOURCE_ORDER_AMBIGUOUS')):
+            history_pending.add(source.id)
+            queue.append((group, source))
+            continue
+        if result['status'] == 'published' and result.get('requires_history') and not preserve_head:
+            # The current release kept newer overlapping keys. Complete a
+            # separate immutable historical release for this older source;
+            # a restart rediscovers it until that second receipt exists.
+            history_pending.add(source.id)
+            queue.append((group, source))
             continue
         native = group['native_dataset']
         counts[group['result_key']][result['status']] += 1
