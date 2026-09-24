@@ -1,0 +1,21 @@
+name: Foundation repair workspace
+on:
+  push:
+    branches: [codex/foundation-throughput-20260924]
+    paths: [.github/workflows/foundation-edit-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Export tracked source without Git credentials
+        run: git archive --format=tar HEAD | gzip > /tmp/foundation-source.tar.gz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: foundation-source
+          path: /tmp/foundation-source.tar.gz
+          retention-days: 1
