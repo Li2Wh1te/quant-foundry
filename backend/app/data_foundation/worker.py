@@ -16,29 +16,33 @@ from app.data_foundation.work import claim, heartbeat, fenced, finish_batch, HEA
 from app.data_foundation.bars import normalize_batch
 from app.data_foundation.publication import stage_decisions, publish
 from app.data_foundation.execution import verify_execution
-from app.data_foundation.canonical import FoundationError
+from app.data_foundation.canonical import FoundationError, digest
 from app.data_foundation.work_models import Work, Release
 
 logger = structlog.get_logger(__name__)
 SINGLETON_KEY = 714604920128
+SCOPED_SLOT_KEYS = tuple(SINGLETON_KEY + offset for offset in range(1, 7))
 
 
-def acquire_gate(connection, wait_seconds=0):
+def acquire_gate(connection, wait_seconds=0, *, shared=False):
     """Optionally join PostgreSQL's lock queue instead of racing busy workers.
 
-    The default stays nonblocking for existing workers. A short bounded wait
-    lets periodic updates obtain a turn between backfill units. Restore the
-    pooled connection's timeout even when acquisition times out or fails.
+    The unscoped worker retains its exclusive singleton gate. Explicit work
+    drivers share that gate, then take one bounded slot and one scope lock.
+    A short bounded wait lets periodic updates obtain a turn between units.
+    Restore the pooled connection's timeout even on a failed acquisition.
     """
-    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 10:
+    if type(wait_seconds) is not int or not 0 <= wait_seconds <= 10 or type(shared) is not bool:
         raise ValueError('Worker gate wait must be an integer from 0 to 10 seconds')
+    try_name = 'pg_try_advisory_lock_shared' if shared else 'pg_try_advisory_lock'
+    wait_name = 'pg_advisory_lock_shared' if shared else 'pg_advisory_lock'
     if not wait_seconds:
-        return bool(connection.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': SINGLETON_KEY}))
+        return bool(connection.scalar(text(f'SELECT {try_name}(:key)'), {'key': SINGLETON_KEY}))
     previous = connection.scalar(text('SHOW lock_timeout'))
     try:
         connection.execute(text("SELECT set_config('lock_timeout', :value, false)"), {'value': f'{wait_seconds}s'})
         try:
-            connection.execute(text('SELECT pg_advisory_lock(:key)'), {'key': SINGLETON_KEY})
+            connection.execute(text(f'SELECT {wait_name}(:key)'), {'key': SINGLETON_KEY})
             return True
         except DBAPIError as exc:
             if getattr(exc.orig, 'sqlstate', None) == '55P03':
@@ -48,18 +52,47 @@ def acquire_gate(connection, wait_seconds=0):
         connection.execute(text("SELECT set_config('lock_timeout', :value, false)"), {'value': previous})
 
 
-def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', stop=None, archive_root='/app/data/foundation-runtime-archives', lock_wait_seconds=0):
-    """A single process owns the singleton advisory connection for this call.
+def acquire_scoped_slot(connection):
+    """Cap all explicit update and backfill workers at six simultaneous units."""
+    for key in SCOPED_SLOT_KEYS:
+        if connection.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': key}):
+            return key
+    return None
 
-    Unit operations have independent short sessions and a fenced lease. The
-    heartbeat is also independent, with a bounded lock timeout, so loss of a
-    worker never creates an immortal running job.
+
+def scoped_gate_key(scope):
+    return int(digest('foundation-worker-scope-gate', scope)[:15], 16)
+
+
+def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', stop=None, archive_root='/app/data/foundation-runtime-archives', lock_wait_seconds=0):
+    """Own the advisory connection for one fenced work unit.
+
+    Unscoped workers retain the old exclusive singleton behavior. Explicit
+    drivers may run on independent scopes under six total slots; work in the
+    same scope stays serialized even across scheduler and backfill processes.
+    Unit operations use independent short sessions and a fenced lease.
     """
     stop = stop or Event()
     with engine.connect().execution_options(isolation_level='AUTOCOMMIT') as leader:
-        if not acquire_gate(leader, lock_wait_seconds):
+        scoped = work_id is not None
+        if not acquire_gate(leader, lock_wait_seconds, shared=scoped):
             return None
+        slot_key = None
+        scope_key = None
+        scope_locked = False
         try:
+            if scoped:
+                slot_key = acquire_scoped_slot(leader)
+                if slot_key is None:
+                    return None
+                with Session(engine) as session:
+                    target = session.get(Work, work_id)
+                    if target is None:
+                        return None
+                    scope_key = scoped_gate_key(target.scope_key)
+                scope_locked = bool(leader.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': scope_key}))
+                if not scope_locked:
+                    return None
             if stop.is_set(): return None
             with Session(engine) as session, session.begin():
                 row = claim(session,preferred_kind,work_id)
@@ -131,7 +164,12 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
                 finished.set();thread.join(timeout=6)
             return kind
         finally:
-            leader.execute(text('SELECT pg_advisory_unlock(:key)'),{'key':SINGLETON_KEY})
+            if scope_locked:
+                leader.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': scope_key})
+            if slot_key is not None:
+                leader.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': slot_key})
+            unlock_name = 'pg_advisory_unlock_shared' if scoped else 'pg_advisory_unlock'
+            leader.execute(text(f'SELECT {unlock_name}(:key)'), {'key': SINGLETON_KEY})
 
 
 def main():

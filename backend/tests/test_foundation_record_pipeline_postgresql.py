@@ -5,6 +5,7 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from uuid import uuid4
 import pytest
@@ -179,6 +180,45 @@ def test_global_worker_contention_yields_without_skipping_source(session, tmp_pa
             owner.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SINGLETON_KEY})
     result = advance_job(session.bind, batch, runtime_digest=image, archive_root=tmp_path, steps=10, publish=True)
     assert result['status'] == 'published'
+
+
+def test_scoped_worker_slots_and_scope_exclusion_are_database_enforced(session, tmp_path):
+    from app.data_foundation.worker import (
+        SCOPED_SLOT_KEYS, acquire_gate, acquire_scoped_slot, scoped_gate_key)
+    (batch, _, _), image = fixture(session, tmp_path)
+    origin = session.scalar(select(Work).join(BatchWork, BatchWork.work_id == Work.id)
+        .where(BatchWork.batch_id == batch, Work.kind == 'A'))
+    scope_gate = scoped_gate_key(origin.scope_key)
+    with ExitStack() as stack:
+        owners = []
+        for _ in SCOPED_SLOT_KEYS:
+            owner = stack.enter_context(session.bind.connect().execution_options(isolation_level='AUTOCOMMIT'))
+            stack.callback(lambda connection=owner: connection.execute(text('SELECT pg_advisory_unlock_all()')))
+            assert acquire_gate(owner, shared=True)
+            slot = acquire_scoped_slot(owner)
+            assert slot is not None
+            owners.append((owner, slot))
+        assert {slot for _, slot in owners} == set(SCOPED_SLOT_KEYS)
+        assert acquire_gate(owners[0][0]) is False
+        extra = stack.enter_context(session.bind.connect().execution_options(isolation_level='AUTOCOMMIT'))
+        stack.callback(lambda: extra.execute(text('SELECT pg_advisory_unlock_all()')))
+        assert acquire_gate(extra, shared=True)
+        assert acquire_scoped_slot(extra) is None
+        assert owners[0][0].scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': scope_gate})
+        # A different business scope is independently eligible to run.
+        other_scope_gate = scoped_gate_key(origin.scope_key + ':independent')
+        assert other_scope_gate != scope_gate
+        assert extra.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': other_scope_gate})
+        # Releasing one slot leaves the target scope protected by the other
+        # connection, so the work cannot be claimed or partly advanced.
+        owners[0][0].execute(text('SELECT pg_advisory_unlock(:key)'), {'key': owners[0][1]})
+        result = advance_job(session.bind, batch, runtime_digest=image,
+            archive_root=tmp_path, steps=1, publish=True)
+        assert result['status'] == 'busy' and result['steps'] == 0
+        session.expire_all()
+        assert session.get(Work, origin.id).status == 'queued'
+    assert advance_job(session.bind, batch, runtime_digest=image,
+        archive_root=tmp_path, steps=10, publish=True)['status'] == 'published'
 
 
 def test_periodic_update_can_wait_for_a_backfill_boundary(session, tmp_path):
