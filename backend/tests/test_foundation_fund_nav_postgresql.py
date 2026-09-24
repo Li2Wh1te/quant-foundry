@@ -14,6 +14,7 @@ from app.data_ingestion.models.tonghuashun import TonghuashunObservation as Obse
 from app.data_ingestion.tonghuashun.contracts import content_hash, exact_json
 from app.data_foundation.source_refs import register_observation
 from app.data_foundation.record_work import create_normalization, validate_release
+from app.data_foundation.models import SourceRef
 from app.data_foundation.record_models import RecordSubject, OfficialRecord
 from app.data_foundation.record_models import RecordBlockMember
 from app.data_foundation.work_models import BlockRef
@@ -110,6 +111,19 @@ def test_nested_issue_requires_reviewed_replacement_after_unrelated_member_chang
     blocked = json.loads(svc.query_official(request.model_copy(update={'release': later.id})))
     assert blocked['items'] == [] and blocked['excluded'][0]['reason'] == 'CURRENT_ISSUE'
 
+    # Re-registering the same immutable observation under a new decoder makes
+    # a distinct SourceRef, but it is still the same questioned evidence.
+    source = session.get(SourceRef, base[0].source_ref_id)
+    redecoded = register_observation(session, source.observation_id, changed[1].id)
+    assert redecoded.id != source.id
+    repeated_work, repeated_policy = create_normalization(session,
+        source_ref_id=redecoded.id, execution_id=changed[1].id)
+    with patch('app.data_foundation.record_work.convert', side_effect=unrelated):
+        lease = claim(session, work_id=repeated_work.id)
+        normalize_batch(session, repeated_work.id, lease.lease_epoch)
+    repeated = release_records(session, (repeated_work, changed[1], repeated_policy), later)
+    assert json.loads(svc.query_official(request.model_copy(update={'release': repeated.id})))['items'] == []
+
     def corrected(source, raw):
         value = original(source, raw)
         value['body']['points'][0]['reported_unit_nav'] = '4'
@@ -117,7 +131,7 @@ def test_nested_issue_requires_reviewed_replacement_after_unrelated_member_chang
 
     with patch('app.data_foundation.record_work.convert', side_effect=corrected):
         fixed = replay(session, base, normalize_batch)
-    final = release_records(session, fixed, later)
+    final = release_records(session, fixed, repeated)
     assert json.loads(svc.query_official(request.model_copy(update={'release': final.id})))['items'] == []
     with pytest.raises(FoundationError, match='替代修订'):
         record_issue(session, **args, state='resolved', issue_id=issue.issue_id,
@@ -128,3 +142,4 @@ def test_nested_issue_requires_reviewed_replacement_after_unrelated_member_chang
     assert json.loads(svc.query_official(request.model_copy(update={'release': final.id})))['items'][0]['points'][0]['reported_unit_nav'] == '4'
     assert json.loads(svc.query_official(request.model_copy(update={'release': old.id})))['items'] == []
     assert json.loads(svc.query_official(request.model_copy(update={'release': later.id})))['items'] == []
+    assert json.loads(svc.query_official(request.model_copy(update={'release': repeated.id})))['items'] == []

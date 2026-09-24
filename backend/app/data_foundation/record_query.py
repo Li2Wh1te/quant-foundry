@@ -113,7 +113,8 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
     rows = session.scalars(select(OfficialRecord).where(OfficialRecord.id.in_(ids))).all() if ids else []
     official = {r.id: r for r in rows}
     bodies = {r.id: json.loads(r.body_json) for r in rows}
-    source_ids = dict(session.execute(select(Candidate.id, Candidate.source_ref_id)
+    sources = dict(session.execute(select(Candidate.id, SourceRef)
+        .join(SourceRef, SourceRef.id == Candidate.source_ref_id)
         .where(Candidate.id.in_([r.candidate_id for r in rows]))).all()) if rows else {}
     readable = []
     for member in members:
@@ -128,7 +129,17 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
             # An active nested issue survives changes to unrelated members or
             # their ordering. A resolved issue only accepts the reviewed
             # replacement collection; the old immutable revision stays barred.
-            if old and row and source_ids[old.candidate_id] == source_ids[row.candidate_id]:
+            old_source = sources.get(old.candidate_id) if old else None
+            current_source = sources.get(row.candidate_id) if row else None
+            # A new decoder may register a new SourceRef for the same immutable
+            # native observation; that must not clear an existing restriction.
+            same_evidence = (old_source is not None and current_source is not None and
+                (old_source.id == current_source.id or
+                 (old_source.observation_id is not None and
+                  old_source.observation_id == current_source.observation_id) or
+                 (old_source.baseline_id is not None and
+                  old_source.baseline_id == current_source.baseline_id)))
+            if old and row and same_evidence:
                 replacement = official.get(replacements.get(issue.issue_id))
                 for field in fields:
                     old_value, new_value = bodies[old.id].get(field), bodies[row.id].get(field)

@@ -286,9 +286,12 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
     for key, group in sorted(groups.items()):
         parent, previous, previous_source = parents.get(key, (None, None, None))
         source = group[0][2]
+        same_native_evidence = (previous_source is not None and
+            ((source.observation_id is not None and source.observation_id == previous_source.observation_id)
+             or (source.baseline_id is not None and source.baseline_id == previous_source.baseline_id)))
         if (not preserve_head and source_revision is None
                 and parent is not None and previous_source is not None
-                and source.id != previous_source.id
+                and source.id != previous_source.id and not same_native_evidence
                 and all(candidate.readiness == 'ready' for candidate, _, _ in group)
                 and (source.source, source.dataset, source.subject, source.variant) ==
                     (previous_source.source, previous_source.dataset,
