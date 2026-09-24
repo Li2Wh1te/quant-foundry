@@ -5,10 +5,11 @@ import platform
 import subprocess
 import sys
 from pathlib import Path
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from uuid import uuid4
 import pytest
-from sqlalchemy import create_engine, select, func, text
+from sqlalchemy import create_engine, event, select, func, text
 from sqlalchemy.orm import Session
 from tests.test_foundation_publication_postgresql import pytestmark
 from app.core.config import get_settings
@@ -18,7 +19,7 @@ from app.data_foundation.source_refs import register_baseline
 from app.data_foundation.record_pipeline import register_job, advance_job
 from app.data_foundation.batches import set_controls
 from app.data_foundation.batch_models import BatchControl, BatchWork
-from app.data_foundation.work_models import Work, Release
+from app.data_foundation.work_models import Work, Release, BlockRef
 from app.data_foundation.canonical import FoundationError
 
 
@@ -121,6 +122,33 @@ def test_bounded_restart_requires_explicit_publication_then_is_idempotent(sessio
         runtime_digest=image, archive_root=tmp_path).id == batch
 
 
+def test_child_release_loads_inherited_block_hashes_in_bounded_queries(session, tmp_path):
+    # A growing scope has many unchanged partitions. Publishing one new key
+    # must validate the same inherited manifest without fetching every parent
+    # block in a separate database round trip.
+    (first_batch, _, _), first_image = fixture(session, tmp_path, 80)
+    first = advance_job(session.bind, first_batch, runtime_digest=first_image,
+                        archive_root=tmp_path, steps=10, publish=True)
+    assert first['status'] == 'published'
+    partitions = session.scalar(select(func.count()).select_from(BlockRef)
+        .where(BlockRef.release_id == first['release_id']))
+    assert partitions >= 25
+
+    (child_batch, _, _), child_image = fixture(session, tmp_path)
+    block_reads = []
+    def count_block_reads(connection, cursor, statement, parameters, context, executemany):
+        if 'FROM foundation_release_blocks' in statement:
+            block_reads.append(statement)
+    event.listen(session.bind, 'before_cursor_execute', count_block_reads)
+    try:
+        child = advance_job(session.bind, child_batch, runtime_digest=child_image,
+                            archive_root=tmp_path, steps=10, publish=True)
+    finally:
+        event.remove(session.bind, 'before_cursor_execute', count_block_reads)
+    assert child['status'] == 'published'
+    assert len(block_reads) <= 10
+
+
 def test_repeated_registration_preserves_pause_and_missing_archive_never_advances(session, tmp_path):
     (batch, source, execution), image = fixture(session, tmp_path)
     set_controls(session, batch, pause_a=True, pause_b=True)
@@ -152,6 +180,45 @@ def test_global_worker_contention_yields_without_skipping_source(session, tmp_pa
             owner.execute(text('SELECT pg_advisory_unlock(:key)'), {'key': SINGLETON_KEY})
     result = advance_job(session.bind, batch, runtime_digest=image, archive_root=tmp_path, steps=10, publish=True)
     assert result['status'] == 'published'
+
+
+def test_scoped_worker_slots_and_scope_exclusion_are_database_enforced(session, tmp_path):
+    from app.data_foundation.worker import (
+        SCOPED_SLOT_KEYS, acquire_gate, acquire_scoped_slot, scoped_gate_key)
+    (batch, _, _), image = fixture(session, tmp_path)
+    origin = session.scalar(select(Work).join(BatchWork, BatchWork.work_id == Work.id)
+        .where(BatchWork.batch_id == batch, Work.kind == 'A'))
+    scope_gate = scoped_gate_key(origin.scope_key)
+    with ExitStack() as stack:
+        owners = []
+        for _ in SCOPED_SLOT_KEYS:
+            owner = stack.enter_context(session.bind.connect().execution_options(isolation_level='AUTOCOMMIT'))
+            stack.callback(lambda connection=owner: connection.execute(text('SELECT pg_advisory_unlock_all()')))
+            assert acquire_gate(owner, shared=True)
+            slot = acquire_scoped_slot(owner)
+            assert slot is not None
+            owners.append((owner, slot))
+        assert {slot for _, slot in owners} == set(SCOPED_SLOT_KEYS)
+        assert acquire_gate(owners[0][0]) is False
+        extra = stack.enter_context(session.bind.connect().execution_options(isolation_level='AUTOCOMMIT'))
+        stack.callback(lambda: extra.execute(text('SELECT pg_advisory_unlock_all()')))
+        assert acquire_gate(extra, shared=True)
+        assert acquire_scoped_slot(extra) is None
+        assert owners[0][0].scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': scope_gate})
+        # A different business scope is independently eligible to run.
+        other_scope_gate = scoped_gate_key(origin.scope_key + ':independent')
+        assert other_scope_gate != scope_gate
+        assert extra.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': other_scope_gate})
+        # Releasing one slot leaves the target scope protected by the other
+        # connection, so the work cannot be claimed or partly advanced.
+        owners[0][0].execute(text('SELECT pg_advisory_unlock(:key)'), {'key': owners[0][1]})
+        result = advance_job(session.bind, batch, runtime_digest=image,
+            archive_root=tmp_path, steps=1, publish=True)
+        assert result['status'] == 'busy' and result['steps'] == 0
+        session.expire_all()
+        assert session.get(Work, origin.id).status == 'queued'
+    assert advance_job(session.bind, batch, runtime_digest=image,
+        archive_root=tmp_path, steps=10, publish=True)['status'] == 'published'
 
 
 def test_periodic_update_can_wait_for_a_backfill_boundary(session, tmp_path):

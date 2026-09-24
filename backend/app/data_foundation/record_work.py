@@ -544,7 +544,17 @@ def seal_release(session, work):
     decisions = {d.target_key: d for d in session.scalars(select(Decision).where(Decision.work_id == work.id))}
     if work.cursor != work.total or len(decisions) != len(params['actions']):
         raise FoundationError('PUBLICATION_INCOMPLETE', '领域治理单元尚未完整提交。')
-    blocks = {r.partition_key: r.block_id for r in session.scalars(select(BlockRef).where(BlockRef.release_id == work.parent_release_id))}
+    # Carry inherited block hashes with their references. Looking up every
+    # inherited block separately turns a one-record publication into hundreds
+    # of database round trips once a scope has accumulated many partitions.
+    blocks, block_hashes = {}, {}
+    for partition, block_id, content_hash in session.execute(select(
+            BlockRef.partition_key, BlockRef.block_id, ReleaseBlock.content_hash)
+            .outerjoin(ReleaseBlock, ReleaseBlock.id == BlockRef.block_id)
+            .where(BlockRef.release_id == work.parent_release_id)):
+        if content_hash is None:
+            raise FoundationError('MANIFEST_INVALID', '父发布块缺失。')
+        blocks[partition], block_hashes[block_id] = block_id, content_hash
     by_subject = subject_partitioned(params['dataset'], blocks)
     changed = {}
     # Decisions and retained revisions form a finite set. Read them once rather
@@ -581,7 +591,8 @@ def seal_release(session, work):
         session.add_all([RecordBlockMember(block_id=block.id, **member) for member in members])
         session.flush()
         blocks[partition] = block.id
-    manifest = [[key, bid, session.get(ReleaseBlock, bid).content_hash] for key, bid in sorted(blocks.items())]
+        block_hashes[block.id] = block.content_hash
+    manifest = [[key, bid, block_hashes[bid]] for key, bid in sorted(blocks.items())]
     release = Release(work_id=work.id, scope_key=work.scope_key, parent_id=work.parent_release_id,
         manifest_hash=digest('release-manifest', manifest), status='draft', created_at=now())
     session.add(release)

@@ -152,8 +152,9 @@ def advance_job(engine, batch_id, *, runtime_digest, steps=1, publish=False,
 
     A separate session advisory lock serializes drivers for this batch without
     holding a database transaction across the worker's own short transactions.
-    The worker's global gate remains authoritative; contention yields 'busy'
-    rather than falsely completing or skipping the source.
+    The worker's bounded slot and per-scope gate remain authoritative;
+    contention yields 'busy' rather than falsely completing or skipping the
+    source.
     """
     if isinstance(steps, bool) or not isinstance(steps, int) or not 1 <= steps <= 100:
         raise ValueError('A pipeline invocation requires 1 to 100 worker steps')
