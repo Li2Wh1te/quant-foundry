@@ -105,18 +105,31 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
                         with Session(engine) as session, session.begin():
                             session.execute(text("SET LOCAL lock_timeout = '5s'"))
                             heartbeat(session,wid,epoch)
-                    except Exception:
-                        # A long unit may briefly hold the same row lock. Lease
-                        # expiry is still checked before commit; no unbounded retry.
+                    except FoundationError:
+                        # A lost/cancelled epoch cannot be revived.
                         return
+                    except DBAPIError:
+                        # A transient lock timeout during a short commit is not
+                        # permission to abandon all future renewals. A later
+                        # heartbeat/final fence still rejects an expired epoch.
+                        logger.warning('foundation_heartbeat_retry', work_id=str(wid))
             thread = Thread(target=pulse,daemon=True)
             thread.start()
             try:
                 with Session(engine) as session:
                     row=session.get(Work,wid)
                     verify_execution(session,row,runtime_digest,archive_root)
+                params = json.loads(row.parameters_json)
+                typed_record = params['domain'] == 'typed-record-v1'
+                if kind == 'A' and typed_record:
+                    from app.data_foundation.record_preparation import prepare_step
+                    if not prepare_step(engine, wid, epoch, stop=stop):
+                        with Session(engine) as session, session.begin():
+                            finish_batch(session, fenced(session, wid, epoch), status='queued')
+                        return kind
                 leader.execute(text('SELECT 1'))
                 with Session(engine) as session, session.begin():
+                    session.info['foundation_defer_record_validation'] = typed_record
                     session.execute(text("SET LOCAL statement_timeout = '30s'"))
                     if kind=='A':
                         normalize_batch(session,wid,epoch)
@@ -126,6 +139,14 @@ def run_once(engine, *, preferred_kind='A', work_id=None, runtime_digest='', sto
                         release= row or stage_decisions(session,wid,epoch)
                         release_id=release.id if release else None
                     leader.execute(text('SELECT 1'))
+                    if release_id:
+                        fenced(session, wid, epoch)
+                if release_id and typed_record:
+                    from app.data_foundation.record_validation_driver import advance_validation
+                    if not advance_validation(engine, wid, epoch, stop=stop):
+                        with Session(engine) as session, session.begin():
+                            finish_batch(session, fenced(session, wid, epoch), status='queued')
+                        return kind
                 if release_id:
                     # Publish in a fresh transaction with the approved lock order;
                     # the potentially expensive decode/staging transaction is over.

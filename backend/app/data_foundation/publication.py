@@ -283,6 +283,10 @@ def publish(session, release_id, epoch):
         head.revision += 1
     else:
         session.add(Head(scope_key=release.scope_key, release_id=release.id, revision=1))
+    if params.get('domain') == 'typed-record-v1':
+        from app.data_foundation.backfill_settlement import record_publication
+        record_publication(session, release)
+    fenced(session, work.id, epoch)
     finish_batch(session, work, status='succeeded')
     append_event(session, work, 'publication', 'published', {'release_id': release.id,
         'manifest_hash': release.manifest_hash, 'head_activated': not preserve_head})

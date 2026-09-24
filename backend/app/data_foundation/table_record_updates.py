@@ -64,17 +64,10 @@ def ready_capture(session, *, capture_ref_id, native_dataset):
     if domain is None:
         raise FoundationError('DOMAIN_NOT_IMPLEMENTED', '非空本地表缺少正式业务领域契约。')
     ids = [UUID(item['source_ref_id']) for item in group['chunks']]
-    origin, governance = aliased(Work), aliased(Work)
     scope_key_value = scope_key(domain, 1, 'default', record_work.series_for(domain, 'tushare'))
-    quarantined = exists(select(1).select_from(Candidate).where(
-        Candidate.work_id == origin.id, Candidate.readiness != 'ready'))
-    published = select(origin.source_ref_id).join(CandidateManifest, CandidateManifest.work_id == origin.id)\
-        .join(governance, governance.candidate_manifest_id == CandidateManifest.id)\
-        .join(Release, Release.work_id == governance.id).where(
-            origin.source_ref_id.in_(ids), origin.kind == 'A', origin.status == 'succeeded',
-            Release.scope_key == scope_key_value, Release.status == 'published', ~quarantined).distinct()
-    settled = set(session.scalars(published))
-    pending = len(ids) - len(settled)
+    from app.data_foundation.table_settlement import probe_page
+    pending = probe_page(session, capture_ref_id=capture_ref_id, native_dataset=native_dataset,
+                         scope_key=scope_key_value, source_ids=ids)
     return dict(status='waiting_backfill' if pending else 'ready',
                 pending_backfill=pending, items=[])
 
@@ -117,7 +110,7 @@ def advance_changes(engine, *, native_dataset, capture_ref_id, execution_id,
         if not leader.scalar(text('SELECT pg_try_advisory_lock(:key)'), {'key': key}):
             return dict(status='busy', items=[])
         try:
-            with Session(engine) as session:
+            with Session(engine) as session, session.begin():
                 found = discover(session, native_dataset=native_dataset,
                     capture_ref_id=capture_ref_id, execution_id=execution_id, limit=source_limit)
             if found['status'] != 'ready':

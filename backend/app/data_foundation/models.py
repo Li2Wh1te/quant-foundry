@@ -128,3 +128,7 @@ class DependencyEntry(Base):
     content_hash: Mapped[str] = mapped_column(String(64))
     purpose: Mapped[str] = mapped_column(String(128))
     __table_args__ = (CheckConstraint('(CASE WHEN source_ref_id IS NULL THEN 0 ELSE 1 END + CASE WHEN binding_id IS NULL THEN 0 ELSE 1 END + CASE WHEN execution_id IS NULL THEN 0 ELSE 1 END + CASE WHEN definition_id IS NULL THEN 0 ELSE 1 END) = 1', name='one_dependency'),)
+
+from sqlalchemy import Index as _Index, text as _text
+_Index('ix_foundation_source_refs_observation_lookup', SourceRef.observation_id,
+       postgresql_where=_text('observation_id IS NOT NULL'))

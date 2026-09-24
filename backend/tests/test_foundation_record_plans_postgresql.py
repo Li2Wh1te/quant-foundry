@@ -31,7 +31,7 @@ def test_pages_reuse_derivation_and_explicit_audit_rederives(session, monkeypatc
     assert work.cursor == 210 and len(calls) == 1
     record_work.verify_governance_plan(session, work, force=True)
     assert len(calls) == 2
-    monkeypatch.setattr(record_work, 'validation_hash', lambda: 'f'*64)
+    monkeypatch.setattr(record_work, 'plan_validation_hash', lambda: 'f'*64)
     record_work.verify_governance_plan(session, work)
     assert len(calls) == 3
 

@@ -27,7 +27,7 @@ from app.data_ingestion.tonghuashun.contracts import CollectionError, DATASETS
 logger = structlog.get_logger(__name__)
 
 
-def publication_receipts(native_dataset, *, include_quarantined=False):
+def publication_receipts(native_dataset, *, include_quarantined=False, observation_ids=None):
     """Return processed releases or only fully accepted business inputs."""
     domain = SOURCE_DATASETS.get(('tonghuashun', native_dataset))
     if domain is None:
@@ -36,7 +36,7 @@ def publication_receipts(native_dataset, *, include_quarantined=False):
     origin, governance = aliased(Work), aliased(Work)
     quarantined = exists(select(1).select_from(Candidate).where(
         Candidate.work_id == origin.id, Candidate.readiness != 'ready'))
-    return select(SourceRef.observation_id.label('observation_id'),
+    return select(SourceRef.observation_id.label('observation_id'), Release.id.label('release_id'),
         cast(governance.parameters_json, JSONB)['source_revision'].as_integer().label('source_revision'))\
         .select_from(SourceRef).join(origin, origin.source_ref_id == SourceRef.id)\
         .join(CandidateManifest, CandidateManifest.work_id == origin.id)\
@@ -44,6 +44,7 @@ def publication_receipts(native_dataset, *, include_quarantined=False):
         .join(Release, Release.work_id == governance.id)\
         .where(SourceRef.source == 'tonghuashun', SourceRef.dataset == native_dataset,
             SourceRef.observation_id.is_not(None), origin.status == 'succeeded',
+            *([SourceRef.observation_id.in_(observation_ids)] if observation_ids is not None else []),
             Release.scope_key == scope, Release.status == 'published',
             ~governance.parameters_json.contains(record_work.OLDER_SOURCE_RETAINED),
             *([] if include_quarantined else [~quarantined])).subquery()
@@ -58,20 +59,21 @@ def discover(session, *, native_dataset, backfill_campaign_id, execution_id, lim
     if type(limit) is not int or not 2 <= limit <= 20:
         raise ValueError('Discovery limit must be 2 to 20 sources')
     receipts = publication_receipts(native_dataset)
-    processed = publication_receipts(native_dataset, include_quarantined=True)
     link = session.get(CampaignScan, (backfill_campaign_id, native_dataset))
     if link is None:
         raise FoundationError('BACKFILL_REQUIRED', '持续更新缺少该领域的固定全量捕获依据。')
     scan, seal = session.get(Scan, link.scan_id), session.get(ScanSeal, link.scan_id)
     failures = session.scalar(select(func.count()).select_from(ScanFailure).where(ScanFailure.scan_id == scan.id))
-    pending = session.scalar(select(func.count()).select_from(ScanTarget).where(ScanTarget.scan_id == scan.id,
-        ~exists(select(1).select_from(processed).where(processed.c.observation_id == ScanTarget.observation_id))))
-    backfill_issues = session.scalar(select(func.count()).select_from(ScanTarget).where(ScanTarget.scan_id == scan.id,
-        exists(select(1).select_from(processed).where(processed.c.observation_id == ScanTarget.observation_id)),
-        ~exists(select(1).select_from(receipts).where(receipts.c.observation_id == ScanTarget.observation_id))))
-    if scan.status != 'completed' or seal is None or failures or pending:
-        return dict(status='waiting_backfill', pending_backfill=pending, backfill_issues=backfill_issues,
-                    scan_failures=failures, items=[])
+    if scan.status != 'completed' or seal is None or failures:
+        return dict(status='waiting_backfill', pending_backfill=seal.target_count if seal else None,
+                    backfill_issues=0, scan_failures=failures, items=[])
+    from app.data_foundation.backfill_settlement import probe_page
+    domain = SOURCE_DATASETS[('tonghuashun', native_dataset)]
+    scope = scope_key(domain, 1, 'default', record_work.series_for(domain, 'tonghuashun'))
+    settlement = probe_page(session, native_dataset=native_dataset, scan_id=scan.id, scope=scope)
+    backfill_issues = settlement['backfill_issues']
+    if not settlement['processed_complete']:
+        return dict(status='waiting_backfill', scan_failures=0, items=[], **settlement)
     current = list(session.execute(select(Observation.id, State.revision, Observation.observed_at)
         .join(State, State.observation_id == Observation.id)
         .outerjoin(UpdateVisit, and_(UpdateVisit.observation_id == Observation.id,
@@ -129,7 +131,7 @@ def _advance_updates(engine, *, native_dataset, backfill_campaign_id, execution_
     """
     if type(steps_per_source) is not int or not 1 <= steps_per_source <= 10:
         raise ValueError('Each update source requires 1 to 10 bounded steps')
-    with Session(engine) as session:
+    with Session(engine) as session, session.begin():
         found = discover(session, native_dataset=native_dataset,
             backfill_campaign_id=backfill_campaign_id, execution_id=execution_id, limit=source_limit)
     if found['status'] != 'ready':
