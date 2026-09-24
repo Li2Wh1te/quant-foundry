@@ -12,10 +12,17 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - name: Export tracked source without Git credentials
-        run: git archive --format=tar HEAD | gzip > /tmp/foundation-source.tar.gz
+      - name: Build disposable offline test runtimes
+        run: |
+          docker build -f backend/Dockerfile -t qf-offline-test .
+          docker run --name qf-test-python --user root qf-offline-test /bin/sh -c 'uv pip install --python /app/.venv/bin/python pytest'
+          docker export qf-test-python | gzip -1 > /tmp/qf-python-root.tar.gz
+          docker pull postgres:17-bookworm
+          docker create --name qf-test-pg postgres:17-bookworm
+          docker export qf-test-pg | gzip -1 > /tmp/qf-pg-root.tar.gz
       - uses: actions/upload-artifact@v4
         with:
-          name: foundation-source
-          path: /tmp/foundation-source.tar.gz
+          name: foundation-runtimes
+          path: /tmp/qf-*-root.tar.gz
+          compression-level: 0
           retention-days: 1
