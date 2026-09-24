@@ -5,6 +5,7 @@ from uuid import UUID, uuid4
 import json
 
 from sqlalchemy import select
+from sqlalchemy.orm import aliased
 
 from app.data_foundation.canonical import FoundationError, digest, encode
 from app.data_foundation.catalog import now, lock_key, register_definition, register_dependencies
@@ -21,6 +22,7 @@ from app.data_foundation.work_models import (Work, Candidate, CandidateManifest,
 DOMAIN_KEY = 'typed-record-v1'
 VALUE_FIELDS = ('subject_id', 'business_key', 'business_date', 'schema_key', 'body_json', 'field_quality_json')
 MEMBER_FIELDS = ('target_key', 'subject_id', 'business_date', 'state', 'official_id', 'decision_id')
+OLDER_SOURCE_RETAINED = 'OLDER_SOURCE_RETAINED'
 
 
 def domain_hash():
@@ -234,7 +236,8 @@ def partition_key(key, subject_id, by_subject):
     return 'subject:' + str(subject_id) if by_subject else key[:2]
 
 
-def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
+def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, preserve_head=False,
+                 source_revision=None):
     from app.data_foundation.governance import choose
     manifest = session.get(CandidateManifest, manifest_id)
     origin = session.get(Work, manifest.work_id) if manifest else None
@@ -260,14 +263,54 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
     # governance page by the entire source directory/calendar size.
     parents = {}
     if parent_release_id and groups:
-        parents = {m.target_key: (m, o) for m, o in session.execute(
-            select(RecordBlockMember, OfficialRecord)
+        parents = {m.target_key: (m, o, s) for m, o, s in session.execute(
+            select(RecordBlockMember, OfficialRecord, SourceRef)
             .outerjoin(OfficialRecord, OfficialRecord.id == RecordBlockMember.official_id)
+            .outerjoin(Candidate, Candidate.id == OfficialRecord.candidate_id)
+            .outerjoin(SourceRef, SourceRef.id == Candidate.source_ref_id)
             .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
             .where(BlockRef.release_id == parent_release_id, RecordBlockMember.target_key.in_(groups),
                 RecordBlockMember.subject_id.in_(subject_ids)))}
+        missing = [m.decision_id for m, previous, _ in parents.values() if previous is None]
+        if missing:
+            governance, origin_work = aliased(Work), aliased(Work)
+            blocked_sources = dict(session.execute(select(Decision.id, SourceRef)
+                .join(governance, governance.id == Decision.work_id)
+                .join(CandidateManifest, CandidateManifest.id == governance.candidate_manifest_id)
+                .join(origin_work, origin_work.id == CandidateManifest.work_id)
+                .join(SourceRef, SourceRef.id == origin_work.source_ref_id)
+                .where(Decision.id.in_(missing))).all())
+            parents = {key: (member, previous, source or blocked_sources.get(member.decision_id))
+                       for key, (member, previous, source) in parents.items()}
     actions = []
     for key, group in sorted(groups.items()):
+        parent, previous, previous_source = parents.get(key, (None, None, None))
+        source = group[0][2]
+        same_native_evidence = (previous_source is not None and
+            ((source.observation_id is not None and source.observation_id == previous_source.observation_id)
+             or (source.baseline_id is not None and source.baseline_id == previous_source.baseline_id)))
+        if (not preserve_head and source_revision is None
+                and parent is not None and previous_source is not None
+                and source.id != previous_source.id and not same_native_evidence
+                and all(candidate.readiness == 'ready' for candidate, _, _ in group)
+                and (source.source, source.dataset, source.subject, source.variant) ==
+                    (previous_source.source, previous_source.dataset,
+                     previous_source.subject, previous_source.variant)):
+            # Compare immutable observation times only within one source-local
+            # lineage. A requeued older backfill may merge new keys, but it
+            # must never replace a newer value for an overlapping key.
+            if source.observed_at == previous_source.observed_at:
+                raise FoundationError('SOURCE_ORDER_AMBIGUOUS', '相同来源的固定观察时间相同，无法安全确定正式值先后。')
+            if source.observed_at < previous_source.observed_at:
+                if previous is None:
+                    raise FoundationError('SOURCE_OLDER_THAN_PARENT_NONVALUE',
+                        '较旧固定来源不能覆盖较新观察的非值状态，须单独保留历史发布。')
+                typed = group[0][1]
+                actions.append(dict(target_key=key, subject_id=str(typed.subject_id),
+                    business_date=str(typed.business_date) if typed.business_date else None,
+                    action='retain', candidate_id=None, parent_record_id=str(previous.id),
+                    reason=OLDER_SOURCE_RETAINED))
+                continue
         removals = [json.loads(typed.field_quality_json).get('source_deleted') == 'FIXED_LOCAL_ROW_REMOVAL'
                     for _, typed, _ in group]
         if any(removals):
@@ -281,7 +324,6 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None):
             continue
         action, cid, reason = choose([{'id': str(c.id), 'source': s.source, 'series': params['series'],
             'ready': c.readiness == 'ready'} for c, _, s in group], definition)
-        parent, previous = parents.get(key, (None, None))
         retained = None
         if action == 'select' and parent and parent.state == 'value':
             selected = next(c for c, _, _ in group if str(c.id) == cid)
@@ -305,7 +347,8 @@ def create_governance(session, *, normalization_id, execution_id, policy_id, par
     if origin is None or manifest is None:
         raise FoundationError('CANDIDATE_NOT_SEALED', '领域候选尚未封存。')
     params = verify(origin)
-    actions = plan_actions(session, manifest.id, policy_id, parent_release_id)
+    actions = plan_actions(session, manifest.id, policy_id, parent_release_id,
+                           preserve_head=preserve_head, source_revision=source_revision)
     mode = {'head_mode': 'preserve'} if preserve_head else {}
     if source_revision is not None:
         if preserve_head or type(source_revision) is not int or source_revision < 1:
@@ -368,7 +411,9 @@ def verify_governance_plan(session, work, *, force=False):
             return params['actions']
     manifest = session.get(CandidateManifest, work.candidate_manifest_id)
     origin = session.get(Work, manifest.work_id)
-    actions = plan_actions(session, manifest.id, work.policy_id, work.parent_release_id)
+    actions = plan_actions(session, manifest.id, work.policy_id, work.parent_release_id,
+                           preserve_head=params.get('head_mode') == 'preserve',
+                           source_revision=params.get('source_revision'))
     mode = {'head_mode': 'preserve'} if params.get('head_mode') == 'preserve' else {}
     if 'source_revision' in params:
         from app.data_foundation.batch_models import WorkSourcePointer

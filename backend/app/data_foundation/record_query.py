@@ -58,8 +58,10 @@ def restrictions(session, scope):
         .order_by(RecordIssue.revision)).all()
     latest = {r.issue_id: r for r in rows}
     # Resolving a confirmed issue does not rehabilitate its old immutable value.
-    return [r for r in latest.values() if r.state in ('suspected', 'confirmed')] + [
-        r for r in rows if r.state == 'confirmed' and r.official_id is not None]
+    active = [r for r in latest.values() if r.state in ('suspected', 'confirmed')]
+    historical = [r for r in rows if r.state == 'confirmed' and r.official_id is not None
+                  and latest[r.issue_id].state == 'resolved']
+    return active + historical, latest
 
 
 def evaluate(session, request, authenticate, *, expected_epoch=None, after=None, page_size=100, check_only=False):
@@ -94,12 +96,25 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
     # the first page. Larger callers partition their subject/date/key requests.
     if len(members) > 1000:
         raise FoundationError('INVALID_REQUIREMENT', '一次领域请求最多1000个对象，请缩小主体、日期或对象键范围。')
-    issues = restrictions(session, release.scope_key)
-    ids = {m.official_id for m in members if m.official_id} | {i.official_id for i in issues if i.official_id}
+    issues, latest_issues = restrictions(session, release.scope_key)
+    replacements = {}
+    for issue_id, latest in latest_issues.items():
+        if latest.state == 'resolved':
+            evidence = json.loads(latest.evidence_json)
+            value = evidence.get('replacement_official_id') if isinstance(evidence, dict) else None
+            if value:
+                try:
+                    replacements[issue_id] = UUID(value)
+                except (TypeError, ValueError):
+                    pass
+    ids = ({m.official_id for m in members if m.official_id}
+           | {i.official_id for i in issues if i.official_id}
+           | set(replacements.values()))
     rows = session.scalars(select(OfficialRecord).where(OfficialRecord.id.in_(ids))).all() if ids else []
     official = {r.id: r for r in rows}
     bodies = {r.id: json.loads(r.body_json) for r in rows}
-    source_ids = dict(session.execute(select(Candidate.id, Candidate.source_ref_id)
+    sources = dict(session.execute(select(Candidate.id, SourceRef)
+        .join(SourceRef, SourceRef.id == Candidate.source_ref_id)
         .where(Candidate.id.in_([r.candidate_id for r in rows]))).all()) if rows else {}
     readable = []
     for member in members:
@@ -111,10 +126,30 @@ def evaluate(session, request, authenticate, *, expected_epoch=None, after=None,
                 continue
             old = official.get(issue.official_id)
             same = issue.official_id is None or issue.official_id == member.official_id
-            # A new revision ID over unchanged evidence and an unchanged issue
-            # field is not a correction, even if unrelated attributes changed.
-            if old and row and source_ids[old.candidate_id] == source_ids[row.candidate_id]:
-                same = same or any(bodies[old.id].get(f) == bodies[row.id].get(f) for f in fields)
+            # An active nested issue survives changes to unrelated members or
+            # their ordering. A resolved issue only accepts the reviewed
+            # replacement collection; the old immutable revision stays barred.
+            old_source = sources.get(old.candidate_id) if old else None
+            current_source = sources.get(row.candidate_id) if row else None
+            # A new decoder may register a new SourceRef for the same immutable
+            # native observation; that must not clear an existing restriction.
+            same_evidence = (old_source is not None and current_source is not None and
+                (old_source.id == current_source.id or
+                 (old_source.observation_id is not None and
+                  old_source.observation_id == current_source.observation_id) or
+                 (old_source.baseline_id is not None and
+                  old_source.baseline_id == current_source.baseline_id)))
+            if old and row and same_evidence:
+                replacement = official.get(replacements.get(issue.issue_id))
+                for field in fields:
+                    old_value, new_value = bodies[old.id].get(field), bodies[row.id].get(field)
+                    if isinstance(old_value, (list, dict)):
+                        reviewed = (latest_issues[issue.issue_id].state == 'resolved'
+                            and replacement is not None and new_value != old_value
+                            and new_value == bodies[replacement.id].get(field))
+                        same = same or not reviewed
+                    else:
+                        same = same or old_value == new_value
             if same:
                 reason = 'CURRENT_ISSUE'
         if row and any(bodies[row.id].get(f) is None for f in request.fields):
