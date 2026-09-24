@@ -1,7 +1,8 @@
 """Persist object-level source/candidate/decision/release settlement evidence."""
 import json
 from collections import defaultdict
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
+from sqlalchemy.orm import aliased
 from app.data_foundation.canonical import FoundationError, digest, encode
 from app.data_foundation.catalog import lock_key, now
 from app.data_foundation.models import SourceRef
@@ -136,11 +137,23 @@ def reconcile_batch(session,batch_id):
             add('release',work.id,'pending','PUBLICATION_NOT_SEALED');continue
         for release in produced:
             validate_release(session,release,reuse_verified=True)
-            blocks=select(BlockRef.block_id).where(BlockRef.release_id==release.id)
-            represented=set(session.scalars(select(BlockMember.decision_id).where(BlockMember.block_id.in_(blocks))))
-            represented.update(session.scalars(select(ReportBlockMember.decision_id).where(ReportBlockMember.block_id.in_(blocks))))
-            represented.update(session.scalars(select(RecordBlockMember.decision_id).where(RecordBlockMember.block_id.in_(blocks))))
-            for decision in (d for d in decisions if d.work_id==work.id):
+            current_decisions=[decision for decision in decisions if decision.work_id==work.id]
+            represented=set()
+            if current_decisions:
+                current, parent = aliased(BlockRef), aliased(BlockRef)
+                # A newly sealed decision cannot occur in an unchanged parent
+                # block. Checking only new/replaced blocks avoids rereading the
+                # full inherited history at every publication boundary.
+                changed_blocks=list(session.scalars(select(current.block_id)
+                    .outerjoin(parent, and_(parent.release_id==release.parent_id,
+                        parent.partition_key==current.partition_key))
+                    .where(current.release_id==release.id,
+                        or_(parent.block_id.is_(None), current.block_id!=parent.block_id))))
+                ids=[decision.id for decision in current_decisions]
+                for member in (BlockMember, ReportBlockMember, RecordBlockMember):
+                    represented.update(session.scalars(select(member.decision_id).where(
+                        member.block_id.in_(changed_blocks), member.decision_id.in_(ids))))
+            for decision in current_decisions:
                 add('decision',decision.id,'explained' if decision.id in represented else 'unexplained',
                     'DECISION_MANIFEST_MATCH' if decision.id in represented else 'DECISION_MISSING',
                     release_id=str(release.id),publication_status=release.status,action=decision.action,business_key=decision.target_key)
