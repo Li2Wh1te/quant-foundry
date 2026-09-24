@@ -136,17 +136,26 @@ def test_child_release_loads_inherited_block_hashes_in_bounded_queries(session, 
 
     (child_batch, _, _), child_image = fixture(session, tmp_path)
     block_reads = []
+    reconciliation_rows = []
     def count_block_reads(connection, cursor, statement, parameters, context, executemany):
         if 'FROM foundation_release_blocks' in statement:
             block_reads.append(statement)
+    def count_reconciliation_rows(connection, cursor, statement, parameters, context, executemany):
+        if 'SELECT foundation_record_block_members.decision_id' in statement:
+            reconciliation_rows.append(cursor.rowcount)
     event.listen(session.bind, 'before_cursor_execute', count_block_reads)
+    event.listen(session.bind, 'after_cursor_execute', count_reconciliation_rows)
     try:
         child = advance_job(session.bind, child_batch, runtime_digest=child_image,
                             archive_root=tmp_path, steps=10, publish=True)
     finally:
         event.remove(session.bind, 'before_cursor_execute', count_block_reads)
+        event.remove(session.bind, 'after_cursor_execute', count_reconciliation_rows)
     assert child['status'] == 'published'
     assert len(block_reads) <= 10
+    # Reconciliation must transfer only this child's decision, even though the
+    # published release inherits many complete parent blocks.
+    assert reconciliation_rows and all(0 <= count <= 1 for count in reconciliation_rows)
 
 
 def test_repeated_registration_preserves_pause_and_missing_archive_never_advances(session, tmp_path):
