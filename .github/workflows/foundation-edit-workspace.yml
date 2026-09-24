@@ -4,25 +4,56 @@ on:
     branches: [codex/foundation-throughput-20260924]
     paths: [.github/workflows/foundation-edit-workspace.yml]
 permissions:
-  contents: read
+  contents: write
+concurrency:
+  group: foundation-repair-transfer
+  cancel-in-progress: false
 jobs:
-  snapshot:
+  apply:
+    if: github.ref == 'refs/heads/codex/foundation-throughput-20260924'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: Build disposable offline test runtimes
+      - name: Apply checksum-verified source patch on the repair branch only
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          docker build -f backend/Dockerfile -t qf-offline-test .
-          docker run --name qf-test-python --user root qf-offline-test /bin/sh -c 'uv pip install --python /app/.venv/bin/python pytest'
-          docker export qf-test-python | gzip -1 > /tmp/qf-python-root.tar.gz
-          docker pull postgres:17-bookworm
-          docker create --name qf-test-pg postgres:17-bookworm
-          docker export qf-test-pg | gzip -1 > /tmp/qf-pg-root.tar.gz
-      - uses: actions/upload-artifact@v4
-        with:
-          name: foundation-runtimes
-          path: /tmp/qf-*-root.tar.gz
-          compression-level: 0
-          retention-days: 1
+          set -euo pipefail
+          test "$(git ls-remote origin refs/heads/main | cut -f1)" = 0eb0f6d84895efc5d180e4e272b9682284182e28
+          payload="$RUNNER_TEMP/foundation.patch.xz"
+          patch="$RUNNER_TEMP/foundation.patch"
+          : > "$payload"
+          for blob in \
+            471858ab210a642a90106801f74ef0d21ea49b79 \
+            a79f629ee84516d9ea417e8bd091994bc0a87757 \
+            585a54f2f6596c283238d347d3a28c45ece1e473 \
+            941ad452795f77cad20f8ed4a22b003f77b88bba \
+            9f76f98dcacbac2503d7dd653b82835c0904da83 \
+            771dd46dc700dece0aaf14a13b828e35f7f75ff7
+          do
+            gh api "repos/$GITHUB_REPOSITORY/git/blobs/$blob" --jq .content | base64 --decode >> "$payload"
+          done
+          xz --decompress --stdout "$payload" > "$patch"
+          printf 'fc55fcc22fcdf7f24ebf028fce6a495e8693919546edb31cdb9df7783ce5c6ff  %s\n' "$patch" | sha256sum --check -
+          git apply --numstat "$patch" > "$RUNNER_TEMP/changed-paths.tsv"
+          python - "$RUNNER_TEMP/changed-paths.tsv" <<'PY'
+          import sys
+          from pathlib import PurePosixPath
+          rows = open(sys.argv[1]).read().splitlines()
+          assert len(rows) == 29
+          for row in rows:
+              added, removed, path = row.split('\t')
+              assert added.isdecimal() and removed.isdecimal()
+              assert '..' not in PurePosixPath(path).parts
+              assert path.startswith('backend/') or path == 'ops/foundation-throughput-cutover.md', path
+          PY
+          git apply --check "$patch"
+          git apply --index "$patch"
+          git diff --cached --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'fix: bound foundation preparation, validation and backfill settlement'
+          git push origin HEAD:codex/foundation-throughput-20260924
+          git rev-parse HEAD HEAD^{tree}
+          git diff HEAD^ HEAD --stat
