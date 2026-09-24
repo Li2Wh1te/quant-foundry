@@ -290,7 +290,16 @@ def seal_release(session, work):
     params = json.loads(work.parameters_json)
     if work.cursor != work.total:
         raise FoundationError('PUBLICATION_INCOMPLETE', '报告治理尚未完成。')
-    blocks = {r.partition_key: r.block_id for r in session.scalars(select(BlockRef).where(BlockRef.release_id == work.parent_release_id))}
+    # Read inherited hashes with the block references instead of resolving
+    # each unchanged report with a separate database query.
+    blocks, block_hashes = {}, {}
+    for partition, block_id, content_hash in session.execute(select(
+            BlockRef.partition_key, BlockRef.block_id, ReleaseBlock.content_hash)
+            .outerjoin(ReleaseBlock, ReleaseBlock.id == BlockRef.block_id)
+            .where(BlockRef.release_id == work.parent_release_id)):
+        if content_hash is None:
+            raise FoundationError('MANIFEST_INVALID', '父发布块缺失。')
+        blocks[partition], block_hashes[block_id] = block_id, content_hash
     decisions = {d.target_key: d for d in session.scalars(select(Decision).where(Decision.work_id == work.id))}
     if len(decisions) != len(params['actions']):
         raise FoundationError('PUBLICATION_INCOMPLETE', '报告治理决策未收齐。')
@@ -316,7 +325,8 @@ def seal_release(session, work):
         session.add(member)
         session.flush()
         blocks[block.partition_key] = block.id
-    summary = [[key, bid, session.get(ReleaseBlock, bid).content_hash] for key, bid in sorted(blocks.items())]
+        block_hashes[block.id] = block.content_hash
+    summary = [[key, bid, block_hashes[bid]] for key, bid in sorted(blocks.items())]
     release = Release(work_id=work.id, scope_key=work.scope_key, parent_id=work.parent_release_id,
                       manifest_hash=digest('release-manifest', summary), status='draft', created_at=now())
     session.add(release)

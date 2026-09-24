@@ -124,7 +124,17 @@ def seal_release(session, work):
     decisions = {d.target_key: d for d in session.scalars(select(Decision).where(Decision.work_id == work.id))}
     if work.cursor != work.total or len(decisions) != len(params['actions']):
         raise FoundationError('PUBLICATION_INCOMPLETE', '治理单元尚未全部提交，不能封存发布。')
-    blocks = {r.partition_key: r.block_id for r in session.scalars(select(BlockRef).where(BlockRef.release_id == work.parent_release_id))} if work.parent_release_id else {}
+    # Preserve parent block hashes in the initial read so a child release does
+    # not issue one SELECT for every inherited partition in its manifest.
+    blocks, block_hashes = {}, {}
+    if work.parent_release_id:
+        for parent_partition, block_id, content_hash in session.execute(select(
+                BlockRef.partition_key, BlockRef.block_id, ReleaseBlock.content_hash)
+                .outerjoin(ReleaseBlock, ReleaseBlock.id == BlockRef.block_id)
+                .where(BlockRef.release_id == work.parent_release_id)):
+            if content_hash is None:
+                raise FoundationError('MANIFEST_INVALID', '父发布块缺失。')
+            blocks[parent_partition], block_hashes[block_id] = block_id, content_hash
     changed = {}
     for action in params['actions']:
         iid, business_date = UUID(action['instrument_id']), date.fromisoformat(action['trade_date'])
@@ -149,7 +159,8 @@ def seal_release(session, work):
         session.add(block); session.flush()
         session.add_all([BlockMember(block_id=block.id, **member) for member in members]); session.flush()
         blocks[pk] = block.id
-    manifest = [[pk, block_id, session.get(ReleaseBlock, block_id).content_hash] for pk, block_id in sorted(blocks.items())]
+        block_hashes[block.id] = block.content_hash
+    manifest = [[pk, block_id, block_hashes[block_id]] for pk, block_id in sorted(blocks.items())]
     release = Release(work_id=work.id, scope_key=work.scope_key, parent_id=work.parent_release_id,
         manifest_hash=digest('release-manifest', manifest), status='draft', created_at=now())
     session.add(release); session.flush()

@@ -8,7 +8,7 @@ from pathlib import Path
 from datetime import datetime, timezone
 from uuid import uuid4
 import pytest
-from sqlalchemy import create_engine, select, func, text
+from sqlalchemy import create_engine, event, select, func, text
 from sqlalchemy.orm import Session
 from tests.test_foundation_publication_postgresql import pytestmark
 from app.core.config import get_settings
@@ -18,7 +18,7 @@ from app.data_foundation.source_refs import register_baseline
 from app.data_foundation.record_pipeline import register_job, advance_job
 from app.data_foundation.batches import set_controls
 from app.data_foundation.batch_models import BatchControl, BatchWork
-from app.data_foundation.work_models import Work, Release
+from app.data_foundation.work_models import Work, Release, BlockRef
 from app.data_foundation.canonical import FoundationError
 
 
@@ -119,6 +119,33 @@ def test_bounded_restart_requires_explicit_publication_then_is_idempotent(sessio
     assert again['release_id'] == result['release_id'] and again['steps'] == 0
     assert register_job(session, source_ref_id=source, execution_id=execution,
         runtime_digest=image, archive_root=tmp_path).id == batch
+
+
+def test_child_release_loads_inherited_block_hashes_in_bounded_queries(session, tmp_path):
+    # A growing scope has many unchanged partitions. Publishing one new key
+    # must validate the same inherited manifest without fetching every parent
+    # block in a separate database round trip.
+    (first_batch, _, _), first_image = fixture(session, tmp_path, 80)
+    first = advance_job(session.bind, first_batch, runtime_digest=first_image,
+                        archive_root=tmp_path, steps=10, publish=True)
+    assert first['status'] == 'published'
+    partitions = session.scalar(select(func.count()).select_from(BlockRef)
+        .where(BlockRef.release_id == first['release_id']))
+    assert partitions >= 25
+
+    (child_batch, _, _), child_image = fixture(session, tmp_path)
+    block_reads = []
+    def count_block_reads(connection, cursor, statement, parameters, context, executemany):
+        if 'FROM foundation_release_blocks' in statement:
+            block_reads.append(statement)
+    event.listen(session.bind, 'before_cursor_execute', count_block_reads)
+    try:
+        child = advance_job(session.bind, child_batch, runtime_digest=child_image,
+                            archive_root=tmp_path, steps=10, publish=True)
+    finally:
+        event.remove(session.bind, 'before_cursor_execute', count_block_reads)
+    assert child['status'] == 'published'
+    assert len(block_reads) <= 10
 
 
 def test_repeated_registration_preserves_pause_and_missing_archive_never_advances(session, tmp_path):
