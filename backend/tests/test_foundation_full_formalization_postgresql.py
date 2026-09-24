@@ -7,13 +7,13 @@ from sqlalchemy.orm import aliased
 from tests.test_foundation_publication_postgresql import pytestmark
 from tests.test_foundation_record_pipeline_postgresql import pipeline_engine, session, fixture, isolated_series
 from tests.test_foundation_record_updates_postgresql import observation, campaign
-from app.data_foundation.full_formalization import plan_campaign, run_campaign, advance_source
+from app.data_foundation.full_formalization import plan_campaign, run_campaign, advance_source, published_sources
 from app.data_foundation.record_pipeline import register_job
 from app.data_foundation.canonical import FoundationError
 from app.data_foundation.source_refs import register_baseline
-from app.data_foundation.record_models import OfficialRecord, RecordBlockMember
+from app.data_foundation.record_models import OfficialRecord, RecordBlockMember, RecordSubject, CandidateRecord
 from app.data_foundation.work_models import Head, BlockRef
-from app.data_foundation.work_models import Work, Release, CandidateManifest
+from app.data_foundation.work_models import Work, Release, CandidateManifest, Candidate, Decision
 from app.data_foundation.models import SourceRef
 from app.data_ingestion.models.tonghuashun import TonghuashunObservation as Observation
 from app.data_ingestion.tonghuashun.contracts import exact_json, content_hash
@@ -205,3 +205,134 @@ def test_older_source_cannot_reopen_newer_blocked_key(session, tmp_path):
     assert history['status'] == 'published' and not history['head_activated']
     session.expire_all()
     assert session.scalar(select(Head).where(Head.release_id == current['release_id'])) is not None
+
+
+def _company_versions(session, execution, subject, versions):
+    """Freeze real source observations with one source-local business key."""
+    base = datetime.now(timezone.utc) - timedelta(days=len(versions) + 1)
+    observations = {}
+    for ordinal, (label, names) in enumerate(versions):
+        rows = [{'company_id': subject, 'company_name': name} for name in names]
+        body = {'item': rows}
+        row = Observation(id=uuid4(), dataset='fund_company', subject=subject, variant='default',
+            observed_at=base + timedelta(days=ordinal), request_json='{}',
+            data_json=exact_json(body), content_hash=content_hash(body),
+            row_count=len(rows), chain_depth=0)
+        session.add(row)
+        observations[label] = row.id
+    session.flush()
+    campaign(session, execution)
+    return {label: session.scalar(select(SourceRef.id).where(SourceRef.observation_id == observation_id))
+            for label, observation_id in observations.items()}
+
+
+def _company_member(session, subject):
+    domain = SOURCE_DATASETS[('tonghuashun', 'fund_company')]
+    scope = scope_key(domain, 1, 'default', record_work.series_for(domain, 'tonghuashun'))
+    session.expire_all()
+    head = session.get(Head, scope)
+    assert head is not None
+    row = session.execute(select(RecordBlockMember, OfficialRecord)
+        .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
+        .join(RecordSubject, RecordSubject.id == RecordBlockMember.subject_id)
+        .outerjoin(OfficialRecord, OfficialRecord.id == RecordBlockMember.official_id)
+        .where(BlockRef.release_id == head.release_id, RecordSubject.source_key == subject)).one()
+    return row, head
+
+
+def test_unchanged_newer_observation_keeps_its_order_after_older_replays(session, tmp_path, monkeypatch):
+    (_, _, execution), image = fixture(session, tmp_path)
+    subject = 'same-value-' + uuid4().hex
+    ids = _company_versions(session, execution, subject,
+        [('T0', ['Before']), ('T1', ['X']), ('T2', ['Y']), ('T3', ['X']), ('T4', ['Z'])])
+    options = dict(execution_id=execution, runtime_digest=image, archive_root=tmp_path,
+                   steps=100, publish=True)
+    session.commit()
+
+    first = advance_source(session.bind, ids['T1'], **options)
+    original_encode = record_work.encode
+    def legacy_decision_evidence(value):
+        # Older immutable decisions have no explicit selected-source receipt.
+        # Only the test's decision writer is adapted to exercise that read path.
+        if isinstance(value, dict) and 'policy_id' in value and 'effective_source_ref_id' in value:
+            value = {key: item for key, item in value.items() if key != 'effective_source_ref_id'}
+        return original_encode(value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(record_work, 'encode', legacy_decision_evidence)
+        same = advance_source(session.bind, ids['T3'], **options)
+    assert first['status'] == same['status'] == 'published'
+    same_evidence = json.loads(session.scalar(select(Decision.evidence_json)
+        .where(Decision.work_id == session.get(Release, same['release_id']).work_id)))
+    assert same_evidence['reason'] == 'UNCHANGED_CANONICAL_RECORD'
+    assert 'effective_source_ref_id' not in same_evidence
+    (member, value), _ = _company_member(session, subject)
+    assert member.state == 'value' and json.loads(value.body_json)['name'] == 'X'
+
+    # A restarted older backfill must compare against T3's confirmation, not
+    # the T1 official value that the unchanged decision reused.
+    options_without_steps = {key: value for key, value in options.items() if key != 'steps'}
+    with monkeypatch.context() as patch:
+        patch.setattr(record_work, 'encode', legacy_decision_evidence)
+        assert advance_source(session.bind, ids['T2'], steps=1, **options_without_steps)['status'] == 'step_ready'
+        older = advance_source(session.bind, ids['T2'], **options)
+    assert older['status'] == 'published' and older['requires_history']
+    (member, value), _ = _company_member(session, subject)
+    assert json.loads(value.body_json)['name'] == 'X'
+    assert json.loads(session.get(Decision, member.decision_id).evidence_json)['reason'] == record_work.OLDER_SOURCE_RETAINED
+    assert 'effective_source_ref_id' not in json.loads(session.get(Decision, member.decision_id).evidence_json)
+
+    # A second stale retain inherits T3 as well, while T2 remains readable in
+    # an independent historical release and the original T1 release survives.
+    assert advance_source(session.bind, ids['T0'], steps=1, **options_without_steps)['status'] == 'step_ready'
+    oldest = advance_source(session.bind, ids['T0'], **options)
+    assert oldest['status'] == 'published' and oldest['requires_history']
+    (member, value), _ = _company_member(session, subject)
+    assert json.loads(value.body_json)['name'] == 'X'
+    assert json.loads(session.get(Decision, member.decision_id).evidence_json)['effective_source_ref_id'] == str(ids['T3'])
+    history = advance_source(session.bind, ids['T2'], preserve_head=True, **options)
+    assert history['status'] == 'published' and not history['head_activated']
+
+    def historical_name(release_id):
+        value = session.scalar(select(OfficialRecord).join(RecordBlockMember,
+            RecordBlockMember.official_id == OfficialRecord.id)
+            .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
+            .join(RecordSubject, RecordSubject.id == RecordBlockMember.subject_id)
+            .where(BlockRef.release_id == release_id, RecordSubject.source_key == subject))
+        return json.loads(value.body_json)['name']
+
+    assert historical_name(first['release_id']) == 'X'
+    assert historical_name(history['release_id']) == 'Y'
+    latest = advance_source(session.bind, ids['T4'], **options)
+    assert latest['status'] == 'published'
+    (_, value), head = _company_member(session, subject)
+    assert head.release_id == latest['release_id'] and json.loads(value.body_json)['name'] == 'Z'
+
+
+def test_older_locatable_quarantine_cannot_block_newer_value(session, tmp_path):
+    (_, _, execution), image = fixture(session, tmp_path)
+    subject = 'duplicate-order-' + uuid4().hex
+    ids = _company_versions(session, execution, subject,
+        [('T1', ['Bad A', 'Bad B']), ('T2', ['Good']), ('T3', ['Later A', 'Later B'])])
+    options = dict(execution_id=execution, runtime_digest=image, archive_root=tmp_path,
+                   steps=100, publish=True)
+    session.commit()
+
+    healthy = advance_source(session.bind, ids['T2'], **options)
+    assert healthy['status'] == 'published'
+    older = advance_source(session.bind, ids['T1'], **options)
+    assert older['status'] == 'quarantined' and older['candidate_counts']['quarantined'] == 2
+    assert older['requires_history']
+    (member, value), _ = _company_member(session, subject)
+    assert member.state == 'value' and json.loads(value.body_json)['name'] == 'Good'
+    assert session.scalar(select(func.count()).select_from(CandidateRecord)
+        .join(Candidate, Candidate.id == CandidateRecord.candidate_id)
+        .where(Candidate.source_ref_id == ids['T1'], Candidate.readiness == 'quarantined')) == 2
+    domain = SOURCE_DATASETS[('tonghuashun', 'fund_company')]
+    assert ids['T1'] not in published_sources(session, [ids['T1']], 'tonghuashun', domain)
+
+    # A genuinely later duplicate still blocks the current key by policy.
+    newer_bad = advance_source(session.bind, ids['T3'], **options)
+    assert newer_bad['status'] == 'quarantined'
+    (member, value), head = _company_member(session, subject)
+    assert member.state == 'blocked' and value is None and head.release_id == newer_bad['release_id']

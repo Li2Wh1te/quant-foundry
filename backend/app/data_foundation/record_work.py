@@ -219,6 +219,71 @@ def parent_member(session, release_id, key):
         .where(BlockRef.release_id == release_id, RecordBlockMember.target_key == key))
 
 
+def effective_parent_sources(session, parents):
+    """Resolve the observation that last justified each current key state.
+
+    A retained official value may originate in an older observation. New
+    decisions carry the selected observation explicitly. For immutable releases
+    created before that receipt existed, follow only older-source retain edges
+    through the parent releases; an unchanged-value retain confirms its own
+    input observation and ends the walk.
+    """
+    partitions = {key: partition for key, (_, _, partition) in parents.items()}
+    pending = {key: member.decision_id for key, (member, _, _) in parents.items()}
+    source_ids, visited = {}, set()
+    governance, origin = aliased(Work), aliased(Work)
+    while pending:
+        decisions = {decision.id: (decision, work.parent_release_id, source.id)
+            for decision, work, source in session.execute(select(Decision, governance, SourceRef)
+                .join(governance, governance.id == Decision.work_id)
+                .join(CandidateManifest, CandidateManifest.id == governance.candidate_manifest_id)
+                .join(origin, origin.id == CandidateManifest.work_id)
+                .join(SourceRef, SourceRef.id == origin.source_ref_id)
+                .where(Decision.id.in_(pending.values())))}
+        inherited = {}
+        for key, decision_id in pending.items():
+            if (key, decision_id) in visited or decision_id not in decisions:
+                raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING',
+                    '正式键的固定来源先后依据缺失或形成循环。')
+            visited.add((key, decision_id))
+            decision, parent_release_id, input_source_id = decisions[decision_id]
+            evidence = json.loads(decision.evidence_json)
+            selected_id = evidence.get('effective_source_ref_id')
+            if selected_id is not None:
+                try:
+                    source_ids[key] = UUID(selected_id)
+                except (TypeError, ValueError) as exc:
+                    raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING',
+                        '正式键的固定来源先后依据无效。') from exc
+            elif evidence.get('reason') == OLDER_SOURCE_RETAINED:
+                if parent_release_id is None:
+                    raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING',
+                        '较旧来源保留决策缺少父发布。')
+                inherited[key] = (parent_release_id, partitions[key])
+            else:
+                source_ids[key] = input_source_id
+        if not inherited:
+            break
+        prior = {(ref.release_id, ref.partition_key, member.target_key): member.decision_id
+            for ref, member in session.execute(select(BlockRef, RecordBlockMember)
+                .join(RecordBlockMember, RecordBlockMember.block_id == BlockRef.block_id)
+                .where(BlockRef.release_id.in_({release for release, _ in inherited.values()}),
+                    BlockRef.partition_key.in_({partition for _, partition in inherited.values()}),
+                    RecordBlockMember.target_key.in_(inherited)))}
+        pending = {}
+        for key, (release_id, partition) in inherited.items():
+            decision_id = prior.get((release_id, partition, key))
+            if decision_id is None:
+                raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING',
+                    '较旧来源保留决策的父正式键缺失。')
+            pending[key] = decision_id
+    sources = {source.id: source for source in session.scalars(select(SourceRef)
+        .where(SourceRef.id.in_(source_ids.values())))}
+    if len(sources) != len(set(source_ids.values())):
+        raise FoundationError('SOURCE_ORDER_EVIDENCE_MISSING', '正式键的固定来源凭据缺失。')
+    return {key: sources[source_id] for key, source_id in source_ids.items()}
+
+
 def subject_partitioned(dataset, partitions):
     # Time-series source chunks are ordered by subject/date. Subject blocks
     # avoid copying every historical hash bucket for each 2,000-row chunk.
@@ -263,28 +328,18 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
     # governance page by the entire source directory/calendar size.
     parents = {}
     if parent_release_id and groups:
-        parents = {m.target_key: (m, o, s) for m, o, s in session.execute(
-            select(RecordBlockMember, OfficialRecord, SourceRef)
+        parents = {m.target_key: (m, o, partition) for m, o, partition in session.execute(
+            select(RecordBlockMember, OfficialRecord, BlockRef.partition_key)
             .outerjoin(OfficialRecord, OfficialRecord.id == RecordBlockMember.official_id)
-            .outerjoin(Candidate, Candidate.id == OfficialRecord.candidate_id)
-            .outerjoin(SourceRef, SourceRef.id == Candidate.source_ref_id)
             .join(BlockRef, BlockRef.block_id == RecordBlockMember.block_id)
             .where(BlockRef.release_id == parent_release_id, RecordBlockMember.target_key.in_(groups),
                 RecordBlockMember.subject_id.in_(subject_ids)))}
-        missing = [m.decision_id for m, previous, _ in parents.values() if previous is None]
-        if missing:
-            governance, origin_work = aliased(Work), aliased(Work)
-            blocked_sources = dict(session.execute(select(Decision.id, SourceRef)
-                .join(governance, governance.id == Decision.work_id)
-                .join(CandidateManifest, CandidateManifest.id == governance.candidate_manifest_id)
-                .join(origin_work, origin_work.id == CandidateManifest.work_id)
-                .join(SourceRef, SourceRef.id == origin_work.source_ref_id)
-                .where(Decision.id.in_(missing))).all())
-            parents = {key: (member, previous, source or blocked_sources.get(member.decision_id))
-                       for key, (member, previous, source) in parents.items()}
+    parent_sources = effective_parent_sources(session, parents) if (parents and
+        not preserve_head and source_revision is None) else {}
     actions = []
     for key, group in sorted(groups.items()):
-        parent, previous, previous_source = parents.get(key, (None, None, None))
+        parent, previous, _ = parents.get(key, (None, None, None))
+        previous_source = parent_sources.get(key)
         source = group[0][2]
         same_native_evidence = (previous_source is not None and
             ((source.observation_id is not None and source.observation_id == previous_source.observation_id)
@@ -292,7 +347,6 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
         if (not preserve_head and source_revision is None
                 and parent is not None and previous_source is not None
                 and source.id != previous_source.id and not same_native_evidence
-                and all(candidate.readiness == 'ready' for candidate, _, _ in group)
                 and (source.source, source.dataset, source.subject, source.variant) ==
                     (previous_source.source, previous_source.dataset,
                      previous_source.subject, previous_source.variant)):
@@ -309,7 +363,7 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
                 actions.append(dict(target_key=key, subject_id=str(typed.subject_id),
                     business_date=str(typed.business_date) if typed.business_date else None,
                     action='retain', candidate_id=None, parent_record_id=str(previous.id),
-                    reason=OLDER_SOURCE_RETAINED))
+                    reason=OLDER_SOURCE_RETAINED, effective_source_ref_id=str(previous_source.id)))
                 continue
         removals = [json.loads(typed.field_quality_json).get('source_deleted') == 'FIXED_LOCAL_ROW_REMOVAL'
                     for _, typed, _ in group]
@@ -320,7 +374,7 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
             actions.append(dict(target_key=key, subject_id=str(typed.subject_id),
                 business_date=str(typed.business_date) if typed.business_date else None,
                 action='withdraw', candidate_id=None, parent_record_id=None,
-                reason='FIXED_LOCAL_ROW_REMOVAL'))
+                reason='FIXED_LOCAL_ROW_REMOVAL', effective_source_ref_id=str(source.id)))
             continue
         action, cid, reason = choose([{'id': str(c.id), 'source': s.source, 'series': params['series'],
             'ready': c.readiness == 'ready'} for c, _, s in group], definition)
@@ -332,7 +386,8 @@ def plan_actions(session, manifest_id, policy_id, parent_release_id=None, *, pre
         typed = group[0][1]
         actions.append(dict(target_key=key, subject_id=str(typed.subject_id),
             business_date=str(typed.business_date) if typed.business_date else None,
-            action=action, candidate_id=cid, parent_record_id=retained, reason=reason))
+            action=action, candidate_id=cid, parent_record_id=retained, reason=reason,
+            effective_source_ref_id=str(source.id)))
     # Unlocatable inputs remain quarantined in the candidate ledger. This API
     # advertises published-key coverage only, never whole-source completeness.
     return actions
@@ -454,7 +509,8 @@ def stage_decisions(session, work_id, epoch):
         decision = Decision(id=uuid4(), work_id=work.id, assessment_id=checked.id, target_key=action['target_key'],
             candidate_manifest_id=manifest.id, selected_candidate_id=cid, parent_record_id=retained,
             action=action['action'], evidence_json=encode({'reason': action['reason'], 'policy_id': policy.id,
-                'comparison': 'not_applicable', 'fallback': 'disabled'}), created_at=now())
+                'comparison': 'not_applicable', 'fallback': 'disabled',
+                'effective_source_ref_id': action['effective_source_ref_id']}), created_at=now())
         decisions.append(decision)
         if cid:
             candidate, typed = selected.get(cid, (None, None))
