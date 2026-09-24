@@ -1,9 +1,9 @@
 """Full publication resumes exact work and never treats capture as publication."""
 import json
 from datetime import datetime, timezone, timedelta
-from uuid import uuid4
+from uuid import UUID, uuid4
 from sqlalchemy import select, func
-from sqlalchemy.orm import aliased
+from sqlalchemy.orm import Session, aliased
 from tests.test_foundation_publication_postgresql import pytestmark
 from tests.test_foundation_record_pipeline_postgresql import pipeline_engine, session, fixture, isolated_series
 from tests.test_foundation_record_updates_postgresql import observation, campaign
@@ -55,6 +55,44 @@ def test_campaign_reads_full_denominator_and_restart_uses_real_release_edges(ses
     again = run_campaign(session.bind, **options)
     assert again['domains'][0]['already_published'] == groups[0]['fixed_versions']
     assert again['domains'][0]['results'] == {}
+
+
+def test_campaign_publishes_nonempty_fixed_table_chunks_and_unblocks_updates(session, tmp_path):
+    from tests.test_foundation_table_changes_postgresql import bar
+    from app.data_foundation.table_intake import capture_tables, TABLE_SOURCES
+    from app.data_foundation.table_bootstrap import bootstrap_all
+    from app.data_foundation.table_record_updates import ready_capture
+
+    (_, _, execution), image = fixture(session, tmp_path)
+    code = uuid4().hex[:12]
+    session.add(bar(code))
+    observation(session, current=True)
+    campaign_id = campaign(session, execution)
+    session.commit()
+    spec = next(item for item in TABLE_SOURCES if item.dataset == 'etf_daily')
+    with session.bind.connect().execution_options(isolation_level='REPEATABLE READ') as connection, connection.begin():
+        with Session(bind=connection) as capture_session:
+            capture, manifest = capture_tables(capture_session, event_key=uuid4().hex,
+                decoder_id=execution, sources=(spec,))
+            capture_id = capture.id
+            source_id = UUID(manifest['tables'][0]['chunks'][0]['source_ref_id'])
+    bootstrap = bootstrap_all(session.bind, capture_ref_id=capture_id, execution_id=execution,
+        runtime_digest=image, archive_root=tmp_path, datasets=['etf_daily'], minimum_free_bytes=0)
+    assert bootstrap['status'] == 'completed'
+    assert ready_capture(session, capture_ref_id=capture_id, native_dataset='etf_daily')['status'] == 'waiting_backfill'
+
+    options = dict(campaign_id=campaign_id, execution_id=execution, runtime_digest=image,
+                   archive_root=tmp_path, datasets=['fund_company'], table_capture_ref_id=capture_id,
+                   minimum_free_bytes=0, publish=True, steps=100)
+    result = run_campaign(session.bind, **options)
+    table = next(group for group in result['domains'] if group['result_key'] == 'tushare:etf_daily')
+    assert table['fixed_versions'] == 1 and table['results']['published'] == 1
+    assert source_id in published_sources(session, [source_id], 'tushare',
+        SOURCE_DATASETS[('tushare', 'etf_daily')])
+    assert ready_capture(session, capture_ref_id=capture_id, native_dataset='etf_daily')['status'] == 'ready'
+    again = run_campaign(session.bind, **options)
+    table_again = next(group for group in again['domains'] if group['result_key'] == 'tushare:etf_daily')
+    assert table_again['already_published'] == 1 and table_again['results'] == {}
 
 
 def test_quarantined_source_is_reported_and_does_not_stop_healthy_source(session, tmp_path):

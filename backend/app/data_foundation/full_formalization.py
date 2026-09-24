@@ -25,6 +25,7 @@ from app.data_foundation.batch_models import BatchWork
 from app.data_foundation.record_adapters import SOURCE_DATASETS
 from app.data_foundation import record_work
 from app.data_foundation.record_pipeline import register_job, advance_job
+from app.data_foundation.source_refs import read_source
 from app.data_foundation.work import scope_key
 from app.data_ingestion.tonghuashun.contracts import DATASETS
 
@@ -129,6 +130,29 @@ def run_campaign(engine, *, campaign_id, execution_id, runtime_digest, archive_r
             require_space(archive_root, minimum_free_bytes)
             for native, ref in freeze_empty_tables(session, capture_ref_id=table_capture_ref_id, execution_id=execution_id):
                 groups.append(scope_group(native, ref, 'tushare'))
+            # The empty-scope freezer validates every immutable capture chunk.
+            # Read its manifest once more to queue the nonempty business inputs;
+            # a bootstrap difference receipt is not their publication receipt.
+            capture = read_source(session, table_capture_ref_id)[0]
+            for table in capture['tables']:
+                if table['rows'] == 0:
+                    continue
+                native = table['dataset']
+                domain = SOURCE_DATASETS.get(('tushare', native))
+                if domain is None:
+                    raise FoundationError('DOMAIN_NOT_IMPLEMENTED', '非空本地表缺少正式业务领域契约。')
+                ids = [UUID(chunk['source_ref_id']) for chunk in table['chunks']]
+                rows = {row.id: row for row in session.execute(select(SourceRef.id, SourceRef.observed_at)
+                    .where(SourceRef.id.in_(ids)))}
+                if len(rows) != len(ids) or len(set(ids)) != len(ids):
+                    raise FoundationError('CAPTURE_COUNT_MISMATCH', '固定本地表分块与来源清单不一致。')
+                published = published_sources(session, ids, 'tushare', domain)
+                groups.append(dict(native_dataset=native, result_key=f'tushare:{native}',
+                    display_name=TABLE_NAMES[native] + '固定本地分块',
+                    fixed_versions=len(ids), already_published=len(published),
+                    sources=[rows[ref] for ref in ids if ref not in published],
+                    start=str(table['start'])[:10] if table['start'] else None,
+                    end=str(table['end'])[:10] if table['end'] else None))
         # Detach the minimal work locators before committing. ORM receipt
         # objects would otherwise expire when this planning session closes.
         from types import SimpleNamespace
