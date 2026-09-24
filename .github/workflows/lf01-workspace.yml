@@ -1,0 +1,39 @@
+name: LF-01 development workspace
+on:
+  push:
+    branches: [codex/lf01-lightweight-data-store]
+    paths: [.github/workflows/lf01-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  workspace:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.12.2
+      - uses: astral-sh/setup-uv@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.19.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Export source and pinned development dependencies
+        run: |
+          mkdir -p /tmp/lf01-workspace/wheels
+          git archive --format=tar HEAD | gzip > /tmp/lf01-workspace/source.tar.gz
+          (cd backend && uv add --no-sync 'duckdb==1.5.5')
+          cp backend/pyproject.toml backend/uv.lock /tmp/lf01-workspace/
+          python -m pip download --only-binary=:all: --no-deps 'duckdb==1.5.5' -d /tmp/lf01-workspace/wheels
+          (cd frontend && pnpm install --frozen-lockfile)
+          tar -czf /tmp/lf01-workspace/frontend-deps.tar.gz -C frontend node_modules
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lf01-workspace
+          path: /tmp/lf01-workspace/
+          retention-days: 1
+          compression-level: 0
