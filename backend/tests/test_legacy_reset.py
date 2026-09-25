@@ -61,7 +61,7 @@ def isolated():
 
 
 def name():
-    return 'lfd01_test'
+    return test_url().database
 
 
 def _task(engine, task_type='foundation.formalize_local_updates', state='active'):
