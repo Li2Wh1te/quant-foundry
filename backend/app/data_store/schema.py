@@ -75,6 +75,9 @@ class DatasetSpec:
                 or type(self.report_prefix) is not int
                 or not 0 <= self.report_prefix < len(self.key)):
             raise DataStoreError('INVALID_CONFIGURATION')
+        for f in self.schema:
+            if pa.types.is_string(f.type):
+                self.string_limit(f)
         if any(not supported_type(f.type) for f in self.schema):
             raise DataStoreError('SCHEMA_UNSUPPORTED')
         if any(self.schema.field(k).nullable for k in self.key):
@@ -136,6 +139,30 @@ class DatasetSpec:
         if any(self.partitioner(tuple(k)) != partition for k in zip(*columns)):
             raise DataStoreError('KEY_ORDER_INVALID')
 
+    @staticmethod
+    def string_limit(field: pa.Field) -> int:
+        raw = (field.metadata or {}).get(b'max_utf8_bytes', b'65536')
+        try:
+            value = int(raw)
+            if not 1 <= value <= 65536 or str(value).encode('ascii') != raw:
+                raise ValueError()
+            return value
+        except (ValueError, TypeError):
+            raise DataStoreError('INVALID_CONFIGURATION') from None
+
+    def bounded_rows(self, requested: int, byte_limit: int) -> int:
+        """Bound Arrow materialization BEFORE decoding variable-width columns.
+
+        Native DuckDB memory limits do not cover caller-owned Arrow buffers.
+        String bounds are explicit contract metadata, never inferred from a
+        sample/average. Adapters can declare small symbol/code widths; an
+        undeclared string is conservatively allowed at most 64 KiB per value.
+        """
+        per_row = 8 * len(self.schema)  # offsets/null bitmap/alignment allowance
+        for f in self.schema:
+            per_row += self.string_limit(f) if pa.types.is_string(f.type) else 16
+        return max(1, min(requested, byte_limit // max(1, per_row)))
+
     def validate_batch(self, batch: pa.RecordBatch, *, max_rows: int, max_bytes: int) -> list[bytes]:
         if (not isinstance(batch, pa.RecordBatch)
                 or not batch.schema.equals(self.schema, check_metadata=True)):
@@ -149,7 +176,7 @@ class DatasetSpec:
                     raise DataStoreError('INVALID_VALUE')
                 if pa.types.is_string(f.type) and batch.num_rows:
                     longest = pc.max(pc.binary_length(column)).as_py()
-                    if longest is not None and longest > 65_536:
+                    if longest is not None and longest > self.string_limit(f):
                         raise DataStoreError('BATCH_BUDGET_EXCEEDED')
             columns = [batch.column(batch.schema.get_field_index(k)).to_pylist() for k in self.key]
             keys = [self.key_bytes(v) for v in zip(*columns)]

@@ -87,5 +87,14 @@ def upgrade():
 
 
 def downgrade():
-    # Destruction is an operator maintenance action, never an ordinary downgrade.
-    raise RuntimeError("LF-D01 catalog downgrade requires an explicit reviewed maintenance plan")
+    # Only a completely unused installation can roll back additively-created
+    # empty structures. Any current state requires the reviewed D03 maintenance
+    # path. No existing legacy/shared table is touched by this revision.
+    tables = ('data_store_garbage', 'data_store_issues', 'data_store_scopes',
+              'data_store_files', 'data_store_datasets', 'data_store_runtime')
+    connection = op.get_bind()
+    for table in tables:
+        if connection.execute(sa.text(f'SELECT EXISTS(SELECT 1 FROM {table})')).scalar_one():
+            raise RuntimeError('current store contains persisted evidence; reviewed maintenance is required')
+    for table in tables:
+        op.drop_table(table)

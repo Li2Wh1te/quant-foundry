@@ -264,7 +264,7 @@ class CurrentStore:
                                     sql = ('SELECT * FROM (SELECT o.* FROM old o WHERE ' + keep
                                            + ' UNION ALL BY NAME SELECT * FROM incoming) ORDER BY ' + order)
                                     stream = con.execute(sql, params if mode == 'report' else []).fetch_record_batch(
-                                        self.limits.batch_rows)
+                                        spec.bounded_rows(self.limits.batch_rows, self.limits.batch_bytes))
                                     new = self._stage_output(spec, partition, stream, space)
                         # Output is durable and recoverable BEFORE the directory can refer to it.
                         for f in new:
@@ -320,7 +320,7 @@ class CurrentStore:
 
     def _input_batches(self, path, spec):
         with pq.ParquetFile(path) as source:
-            yield from source.iter_batches(batch_size=self.limits.batch_rows)
+            yield from source.iter_batches(batch_size=spec.bounded_rows(self.limits.batch_rows, self.limits.batch_bytes))
 
     def _stage_output(self, spec, partition, batches, space):
         files, writer, sink, path = [], None, None, None
@@ -340,7 +340,7 @@ class CurrentStore:
             # Full readability/type/key validation in bounded Arrow batches.
             seen, previous = 0, None
             with pq.ParquetFile(path, page_checksum_verification=True) as source:
-                for check_batch in source.iter_batches(batch_size=self.limits.batch_rows):
+                for check_batch in source.iter_batches(batch_size=spec.bounded_rows(self.limits.batch_rows, self.limits.batch_bytes)):
                     keys = spec.validate_batch(check_batch, max_rows=self.limits.batch_rows,
                                                max_bytes=self.limits.batch_bytes)
                     if keys and previous is not None and keys[0] <= previous:

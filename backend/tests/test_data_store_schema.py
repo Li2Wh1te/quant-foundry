@@ -57,3 +57,17 @@ def test_semantics_partition_rule_and_required_fields_never_implicitly_compatibl
     assert not replace(s,partitioning='new').accepts(s)
     assert not replace(s,schema=s.schema.append(pa.field('required',pa.string(),False))).accepts(s)
     assert replace(s,schema=s.schema.append(pa.field('optional',pa.string(),True))).accepts(s)
+
+
+def test_variable_width_materialization_has_a_declared_byte_bound():
+    text = pa.field('text',pa.string(),False)
+    spec = DatasetSpec('wide',pa.schema([pa.field('id',pa.int64(),False),text]),('id',),'r1')
+    assert spec.bounded_rows(65536,65536) == 1
+    tight = DatasetSpec('tight',pa.schema([pa.field('id',pa.int64(),False),
+        pa.field('text',pa.string(),False,{b'max_utf8_bytes':b'8'})]),('id',),'r1')
+    assert 1 < tight.bounded_rows(65536,65536) < 65536
+    with pytest.raises(DataStoreError):
+        tight.validate_batch(pa.RecordBatch.from_pydict({'id':[1],'text':['too many characters']},schema=tight.schema),
+                             max_rows=10,max_bytes=65536)
+    with pytest.raises(DataStoreError):
+        DatasetSpec('invalid',pa.schema([pa.field('id',pa.string(),False,{b'max_utf8_bytes':b'0'})]),('id',),'r1')

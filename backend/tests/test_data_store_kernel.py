@@ -639,3 +639,88 @@ def test_catalog_and_native_paths_are_not_exposed(store, monkeypatch):
         store.describe_capability(spec())
     assert error.value.code == 'CATALOG_UNAVAILABLE'
     assert 'secret' not in str(error.value) and 'private' not in str(error.value)
+
+
+def test_cancel_at_last_commit_boundary_keeps_current_and_checkpoint(store):
+    contract = spec()
+    store.register(contract)
+    put(store)
+    previous = store.source_state('bars','range')
+    cancelled = threading.Event()
+    store.fault = lambda point: cancelled.set() if point == 'before_catalog_commit' else None
+    with pytest.raises(DataStoreError) as error:
+        store.upsert(contract,'default',batches(contract,add=100),source(store,token='new'),
+                     lower=(0,),upper=(20,),source_check=lambda _:True,cancelled=cancelled.is_set)
+    assert error.value.code == 'OPERATION_CANCELLED'
+    assert store.catalog.dataset('bars')['generation'] == 1
+    assert store.source_state('bars','range')['revision'] == previous['revision']
+    store.fault = lambda _:None
+    assert query_all(store)[0]['price'] == '0'
+
+
+def test_problem_commit_exceeding_budget_rolls_back_all_state(store,monkeypatch):
+    contract=spec(); store.register(contract)
+    monkeypatch.setattr(store,'limits',replace(store.limits,write_timeout_ms=10))
+    def delay(point):
+        if point == 'before_catalog_commit': time.sleep(.02)
+    store.fault=delay
+    issue=Issue('bad','range','INVALID_VALUE',fingerprint('bad'),{'member':'exact'},{})
+    with pytest.raises(DataStoreError) as error:
+        store.record_problems(contract,'default',source(store,token='bad',qualified=False),(issue,),
+                              lower=(0,),upper=(20,),source_check=lambda _:True)
+    assert error.value.code == 'QUERY_TIMEOUT'
+    assert store.source_state('bars','range') is None
+    assert store.catalog.issues('bars') == []
+    assert store.catalog.dataset('bars')['generation'] == 0
+
+
+def test_wide_column_small_response_budget_fails_without_large_arrow_batch(store):
+    contract = DatasetSpec('wide', pa.schema([pa.field('id',pa.int64(),False),
+                          pa.field('body',pa.string(),False)]),('id',),'r1')
+    store.register(contract)
+    batch = pa.RecordBatch.from_pydict({'id':list(range(10)),'body':['x'*65536]*10},schema=contract.schema)
+    store.upsert(contract,'default',[batch],source(store,'wide'),lower=(0,),upper=(10,),source_check=lambda _:True)
+    old = store.limits
+    store.limits = replace(old,query_bytes=1024)
+    try:
+        with pytest.raises(DataStoreError) as error:
+            store.read(contract, Query(page_size=1000))
+        assert error.value.code == 'QUERY_BUDGET_EXCEEDED'
+        assert store.catalog.dataset('wide')['generation'] == 1
+    finally:
+        store.limits = old
+
+
+def test_new_migration_only_downgrades_completely_unused_tables(database):
+    import importlib.util
+    from alembic.migration import MigrationContext
+    from alembic.operations import Operations
+    from sqlalchemy import inspect
+    path=Path(__file__).parents[1]/'app/db/migrations/versions/20261005_01_current_data_store.py'
+    loader=importlib.util.spec_from_file_location('lfd01_additive_migration',path)
+    migration=importlib.util.module_from_spec(loader); loader.loader.exec_module(migration)
+    engine=database[0]
+    with engine.begin() as c:
+        migration.op=Operations(MigrationContext.configure(c))
+        migration.downgrade()
+        assert not any(t.startswith('data_store_') for t in inspect(c).get_table_names())
+        migration.upgrade()
+    with engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_runtime VALUES (1,:id,'{}')"),{'id':uuid4()})
+    with engine.begin() as c:
+        migration.op=Operations(MigrationContext.configure(c))
+        with pytest.raises(RuntimeError,match='contains persisted evidence'):
+            migration.downgrade()
+        assert len([t for t in inspect(c).get_table_names() if t.startswith('data_store_')])==6
+
+
+def test_unresolved_problem_never_exposes_old_value_as_qualified_current(store):
+    contract=spec(); store.register(contract); put(store)
+    issue=Issue('bad','range','INVALID_VALUE',fingerprint('bad'),{'member':'exact'},{})
+    store.record_problems(contract,'default',source(store,token='bad',qualified=False),(issue,),
+                          lower=(0,),upper=(20,),source_check=lambda _:True)
+    assert_error('DATA_RESTRICTED',lambda:store.read(contract,Query()))
+    page=store.read(contract,Query(require_qualified=False))
+    assert page.to_dict()['quality_status']=='restricted'
+    assert page.to_dict()['unresolved_issues']==1
+    assert page.rows[0]['price']=='0'

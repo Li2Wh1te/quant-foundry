@@ -71,7 +71,8 @@ garbage = Table('data_store_garbage', metadata,
     CheckConstraint("reason IN ('prepared', 'retired')"))
 Index('ix_data_store_garbage_retry', garbage.c.dataset, garbage.c.retry_after, garbage.c.path)
 
-from sqlalchemy import PrimaryKeyConstraint
+from sqlalchemy import PrimaryKeyConstraint, ForeignKeyConstraint, UniqueConstraint
+from sqlalchemy.schema import conv
 scopes.append_constraint(PrimaryKeyConstraint('dataset','scope_key'))
 issues.append_constraint(PrimaryKeyConstraint('dataset','issue_key'))
 
@@ -84,3 +85,16 @@ for _table in metadata.tables.values():
             _columns = [c.name for c in _table.columns
                         if re.search(r'\b'+c.name+r'\b', _expression)]
             _check.name = _table.name + ('_'+_columns[0] if len(_columns) == 1 else '') + '_check'
+
+# Keep these PostgreSQL names when Alembic combines metadata with the existing
+# application's naming convention. In particular, CHECK names are final names.
+for _table in metadata.tables.values():
+    for _constraint in _table.constraints:
+        if isinstance(_constraint, PrimaryKeyConstraint):
+            _constraint.name = _table.name + '_pkey'
+        elif isinstance(_constraint, ForeignKeyConstraint):
+            _constraint.name = _table.name + '_' + '_'.join(_constraint.column_keys) + '_fkey'
+        elif isinstance(_constraint, UniqueConstraint):
+            _constraint.name = _table.name + '_' + '_'.join(c.name for c in _constraint.columns) + '_key'
+        if _constraint.name:
+            _constraint.name = conv(_constraint.name)

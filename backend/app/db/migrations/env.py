@@ -14,7 +14,12 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = [Base.metadata, current_store_metadata]
+# Preserve the application's existing naming convention for historical Alembic
+# operations. A metadata list would change names created by old op helpers.
+for current_table in current_store_metadata.sorted_tables:
+    if current_table.name not in Base.metadata.tables:
+        current_table.to_metadata(Base.metadata)
+target_metadata = Base.metadata
 
 
 def run_migrations_offline() -> None:

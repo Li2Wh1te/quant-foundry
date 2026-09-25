@@ -18,6 +18,7 @@ from typing import Any
 
 import pyarrow as pa
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy import text
 
 from .budget import Metrics
 from .errors import DataStoreError
@@ -35,6 +36,7 @@ class Query:
     cursor: str | None = None
     release: str | None = None
     snapshot: str | None = None
+    require_qualified: bool = True
 
     def __post_init__(self):
         if self.release is not None or self.snapshot is not None:
@@ -42,6 +44,7 @@ class Query:
         if (type(self.partitions) not in (tuple,list) or not 1 <= len(self.partitions) <= 64
                 or type(self.columns) not in (tuple,list) or len(self.columns) > 128
                 or not self.partitions or len(set(self.partitions)) != len(self.partitions)
+                or type(self.require_qualified) is not bool
                 or type(self.page_size) is not int or self.page_size < 1
                 or len(set(self.columns)) != len(self.columns)):
             raise DataStoreError('INVALID_VALUE')
@@ -64,19 +67,23 @@ class Page:
     schema_id: str
     semantics: dict[str, str]
     metrics: Metrics
+    quality_status: str = 'available'
+    unresolved_issues: int = 0
 
     def to_dict(self):
         """Exact internal transport contract for D04, not a registered endpoint."""
         return {'dataset': self.dataset, 'generation': self.generation,
                 'generations': self.generations, 'rows': self.rows,
                 'next_cursor': self.next_cursor, 'schema_id': self.schema_id,
-                'semantics': self.semantics}
+                'semantics': self.semantics, 'quality_status': self.quality_status,
+                'unresolved_issues': self.unresolved_issues}
 
 
 def _request(spec, query):
     return fingerprint({'dataset': spec.name, 'schema': spec.schema_id, 'rule': spec.rule,
                         'partitions': sorted(query.partitions), 'lower': query.lower,
-                        'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size})
+                        'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size,
+                        'require_qualified': query.require_qualified})
 
 
 def _encode(store, request, generations, last):
@@ -154,6 +161,11 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                     raise DataStoreError('DATA_CHANGED')
                 pages, output_bytes = [], 0
                 for spec, query in queries:
+                    with store.catalog.transaction() as c:
+                        issue_count = c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
+                                                {'d':spec.name}).scalar_one()
+                    if issue_count and query.require_qualified:
+                        raise DataStoreError('DATA_RESTRICTED')
                     store._spec_current(spec, states[spec.name])
                     request, last = _request(spec, query), None
                     if query.cursor:
@@ -205,7 +217,8 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                             sql += ' WHERE ' + ' AND '.join(where)
                         sql += ' ORDER BY ' + order + ' LIMIT ?'
                         params.append(query.page_size+1)
-                        reader = con.execute(sql, params).fetch_record_batch(min(1024, query.page_size+1))
+                        reader = con.execute(sql, params).fetch_record_batch(
+                            spec.bounded_rows(min(1024, query.page_size+1), store.limits.query_bytes))
                         raw_last = None
                         for batch in reader:
                             space.check()
@@ -225,7 +238,8 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                                 break
                     space.check()
                     pages.append(Page(spec.name, generations[spec.name], dict(generations), rows,
-                                      next_cursor, spec.schema_id, dict(spec.semantics), metrics))
+                                      next_cursor, spec.schema_id, dict(spec.semantics), metrics,
+                                      'restricted' if issue_count else 'available', issue_count))
                 # Response construction/serialization remains inside ALL read locks.
                 for page in pages:
                     json.dumps(page.to_dict(), ensure_ascii=False, separators=(',', ':'), allow_nan=False)

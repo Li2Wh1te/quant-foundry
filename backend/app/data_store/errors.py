@@ -1,6 +1,7 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'DATA_RESTRICTED': '当前数据存在未解决的问题，未返回可用数据。',
     'DATA_CHANGED': '当前数据已改变，请放弃本次分页并重新读取。',
     'REBUILD_REQUIRED': '当前字段、规则或口径不兼容，需要重建受影响分区。',
     'SCHEMA_UNSUPPORTED': '当前存储不支持该字段类型或精度，请使用明确的精确编码。',
