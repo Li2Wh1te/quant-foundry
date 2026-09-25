@@ -76,6 +76,10 @@ from sqlalchemy.schema import conv
 scopes.append_constraint(PrimaryKeyConstraint('dataset','scope_key'))
 issues.append_constraint(PrimaryKeyConstraint('dataset','issue_key'))
 
+entry_status = Table('data_store_entry_status', metadata,
+    C('entry_id', String(16), primary_key=True), small('summary_json'), instant('updated_at'),
+    CheckConstraint("entry_id ~ '^(E[0-9]{2}|B05(-M)?)$'"), *bounded('summary_json'))
+
 # Match the stable PostgreSQL names from the frozen additive DDL. Unnamed
 # metadata checks would make autogenerate propose dropping real safeguards.
 for _table in metadata.tables.values():

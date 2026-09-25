@@ -213,6 +213,8 @@ class CurrentStore:
                                    cancelled=cancelled) as guard:
                 state = self.catalog.dataset(spec.name)
                 self._spec_current(spec, state)
+                if source.expected_generation is not None and state['generation'] != source.expected_generation:
+                    raise DataStoreError('SOURCE_CONFLICT')
                 old = self.catalog.files(spec.name, partition, lower, upper)
                 scope = self.catalog.scope(spec.name, source.scope_key)
                 if source_check(scope) is not True:
@@ -241,8 +243,17 @@ class CurrentStore:
                         changed = bool(count or old)
                         if mode == 'partition':
                             # Rebuild must not interpret bytes under an incompatible rule/schema.
-                            output = self._input_batches(incoming, spec)
-                            new = self._stage_output(spec, partition, output, space)
+                            compatible = all(spec.accepts(DatasetSpec.from_descriptor(json.loads(f['contract_json']))) for f in old)
+                            if old and compatible:
+                                # D02 rescans may confirm identical complete
+                                # partitions while updating only issue/checkpoint
+                                # state. Never rewrite cold business files for that.
+                                with self._relations(spec, old, incoming, space) as con:
+                                    changed = con.execute('SELECT EXISTS(SELECT * FROM incoming EXCEPT ALL SELECT * FROM old) '
+                                                          'OR EXISTS(SELECT * FROM old EXCEPT ALL SELECT * FROM incoming)').fetchone()[0]
+                            if changed:
+                                output = self._input_batches(incoming, spec)
+                                new = self._stage_output(spec, partition, output, space)
                         else:
                             with self._relations(spec, old, incoming, space) as con:
                                 equality = ' AND '.join(f'i."{k}"=o."{k}"' for k in spec.key)
@@ -542,6 +553,8 @@ class CurrentStore:
         with self.locks.writer(spec.name, timeout_ms=self.limits.lock_timeout_ms) as guard:
             state = self.catalog.dataset(spec.name)
             self._spec_current(spec, state)
+            if source.expected_generation is not None and state['generation'] != source.expected_generation:
+                raise DataStoreError('SOURCE_CONFLICT')
             scope = self.catalog.scope(spec.name, source.scope_key)
             return self._commit(spec, partition, source, lo, hi, state, [], [], scope, guard,
                                 source_check, issues, {}, Metrics(), False, None)

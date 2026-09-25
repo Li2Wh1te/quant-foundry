@@ -44,7 +44,10 @@ def test_migration_is_self_contained_and_matches_current_ddl():
     assert ddl==DDL
     assert 'from app.' not in path.read_text()
     from app.data_store.tables import metadata
-    assert len(metadata.tables)==6
+    # D01's frozen DDL still has six tables. D02 adds one independent current
+    # operational table in its own migration, not a rewrite of D01's history.
+    assert len(metadata.tables)==7
+    assert 'data_store_entry_status' in metadata.tables
     assert all(not foreign.column.table.name.startswith('foundation_')
                for table in metadata.tables.values() for foreign in table.foreign_keys)
 
