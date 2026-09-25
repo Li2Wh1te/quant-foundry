@@ -1,0 +1,48 @@
+# Isolated acceptance ONLY. No production env file, external network or host port.
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: isolated-test-password
+      POSTGRES_DB: lfd01_test
+    volumes:
+      - test_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U postgres -d lfd01_test]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    mem_limit: 512m
+    cpus: 1
+  kernel:
+    build:
+      context: ../../..
+      dockerfile: ops/lf01/compose/Dockerfile
+    user: "${LF_TEST_UID:?}:${LF_TEST_GID:?}"
+    environment:
+      QF_ENVIRONMENT: test
+      QF_DATABASE_HOST: postgres
+      QF_DATABASE_PORT: "5432"
+      QF_DATABASE_USER: postgres
+      QF_DATABASE_PASSWORD: isolated-test-password
+      QF_DATABASE_NAME: lfd01_test
+      QF_API_TOKEN: isolated-test-api-token-at-least-32-characters
+      QF_CURSOR_SIGNING_KEY: isolated-test-cursor-key-at-least-32-characters
+      POSTGRES_TEST_ENABLED: "1"
+      OPENBLAS_NUM_THREADS: "1"
+      OMP_NUM_THREADS: "1"
+    volumes:
+      - type: bind
+        source: ${LF_TEST_ROOT:?}
+        target: /work
+    depends_on:
+      postgres:
+        condition: service_healthy
+    mem_limit: 2g
+    cpus: 1
+networks:
+  default:
+    internal: true
+volumes:
+  test_pg:

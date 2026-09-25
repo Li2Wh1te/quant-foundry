@@ -1,0 +1,37 @@
+name: Current store isolated acceptance
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - backend/app/data_store/**
+      - backend/app/db/migrations/**
+      - backend/tests/test_data_store_*.py
+      - backend/pyproject.toml
+      - backend/uv.lock
+      - scripts/benchmark_current_store.py
+      - scripts/check_current_store_containers.py
+      - ops/lf01/**
+      - .github/workflows/current-store-acceptance.yml
+permissions:
+  contents: read
+jobs:
+  isolated:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Cross-container locks, supported-filesystem kernel tests and synthetic capacity
+        run: |
+          mkdir -m 700 "$RUNNER_TEMP/lfd01-root"
+          python3 scripts/check_current_store_containers.py \
+            --root "$RUNNER_TEMP/lfd01-root" \
+            --output "$RUNNER_TEMP/lfd01-result.json" --with-suite
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lf-d01-isolated-acceptance
+          path: ${{ runner.temp }}/lfd01-result.json
+          if-no-files-found: error
+          retention-days: 7

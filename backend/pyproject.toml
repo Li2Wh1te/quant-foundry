@@ -10,6 +10,7 @@ dependencies = [
     "apscheduler>=3.11,<4.0",
     "concurrent-log-handler>=0.9.28,<1.0",
     "cryptography>=46,<47",
+    "duckdb==1.4.3",
     "fastapi>=0.141.1,<1.0",
     "psycopg[binary]>=3.2,<4.0",
     "pyarrow>=19,<24",
