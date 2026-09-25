@@ -13,6 +13,20 @@ GiB = 1024**3
 
 @dataclass(frozen=True, slots=True)
 class StoreLimits:
+    commit_rows: int = 1_000_000
+    commit_bytes: int = 256 * MiB
+    file_rows: int = 262_144
+    file_bytes: int = 128 * MiB
+    changed_files: int = 64
+    query_scan_bytes: int = 512 * MiB
+    query_files: int = 128
+    query_partitions: int = 64
+    operation_slots: int = 16
+    process_memory_bytes: int = 2 * GiB
+    write_timeout_ms: int = 300_000
+    garbage_count: int = 2048
+    cleanup_batch: int = 128
+    orphan_grace_seconds: int = 60
     scratch_bytes: int = 4 * GiB       # staging + DuckDB spill, one shared budget
     minimum_free_bytes: int = GiB
     garbage_bytes: int = 512 * MiB
@@ -38,7 +52,9 @@ class StoreLimits:
             if type(value) is not int or not 0 < value <= 2**63 - 1:
                 raise DataStoreError('INVALID_CONFIGURATION')
         if (self.batch_bytes > self.scratch_bytes
-                or self.query_bytes > self.duckdb_memory_bytes):
+                or self.query_bytes > self.duckdb_memory_bytes
+                or self.parallel_writers > self.operation_slots
+                or self.operation_slots > 128):
             raise DataStoreError('INVALID_CONFIGURATION')
 
     def check_write(self, *, staging_bytes: int, spill_bytes: int,
