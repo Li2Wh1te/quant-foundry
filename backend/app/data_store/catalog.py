@@ -106,6 +106,8 @@ class SourceUpdate:
     confirmation: Mapping = field(default_factory=dict)
     checkpoint: Mapping = field(default_factory=dict)
     qualified: bool = True
+    confirmation_json: str = field(init=False, repr=False, compare=False)
+    checkpoint_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         identifier(self.scope_key)
@@ -117,8 +119,11 @@ class SourceUpdate:
             raise DataStoreError('INVALID_VALUE')
         if type(self.qualified) is not bool:
             raise DataStoreError('INVALID_VALUE')
-        control_json(dict(self.confirmation))
-        control_json(dict(self.checkpoint))
+        # Capture nested caller-owned values once. A lazy batch iterator may run
+        # arbitrary adapter code; it cannot mutate the confirmation/checkpoint
+        # after admission and silently change what this commit acknowledges.
+        object.__setattr__(self, 'confirmation_json', control_json(dict(self.confirmation)))
+        object.__setattr__(self, 'checkpoint_json', control_json(dict(self.checkpoint)))
 
 
 @dataclass(frozen=True)
@@ -130,14 +135,18 @@ class Issue:
     evidence_token: str
     target: Mapping
     resolution: Mapping
+    target_json: str = field(init=False, repr=False, compare=False)
+    resolution_json: str = field(init=False, repr=False, compare=False)
 
     def __post_init__(self):
         for v in (self.key, self.scope, self.reason):
             identifier(v)
-        if len(self.reason) > 64 or len(self.evidence_token) != 64:
+        if (len(self.reason) > 64 or type(self.evidence_token) is not str
+                or len(self.evidence_token) != 64
+                or any(c not in '0123456789abcdef' for c in self.evidence_token)):
             raise DataStoreError('INVALID_VALUE')
-        control_json(dict(self.target))
-        control_json(dict(self.resolution))
+        object.__setattr__(self, 'target_json', control_json(dict(self.target)))
+        object.__setattr__(self, 'resolution_json', control_json(dict(self.resolution)))
 
 
 class Catalog:
@@ -269,15 +278,17 @@ class Catalog:
             return [dict(r) for r in rows]
 
     def change_issues(self, c, dataset: str, issues: tuple[Issue, ...],
-                      resolved: Mapping[str, str]):
+                      resolved: Mapping[str, str], *, check=lambda: None):
         if len(issues) + len(resolved) > 1000:
             raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
         c.execute(text('SELECT singleton FROM data_store_runtime WHERE singleton=1 FOR UPDATE'))
         for key, evidence in resolved.items():
+            check()
             # Clearing one member's error cannot clear another member/field.
             c.execute(text('DELETE FROM data_store_issues WHERE dataset=:d AND issue_key=:k '
                            'AND evidence_token=:e'), {'d': dataset, 'k': identifier(key), 'e': evidence})
         for issue in issues:
+            check()
             c.execute(text('INSERT INTO data_store_issues '
                            '(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) '
                            'VALUES (:d,:k,:s,:r,:e,:t,:v) ON CONFLICT (dataset,issue_key) DO UPDATE SET '
@@ -287,8 +298,8 @@ class Catalog:
                            'attempts=LEAST(data_store_issues.attempts,9223372036854775806)+1,'
                            'last_seen=clock_timestamp()'),
                       {'d': dataset, 'k': issue.key, 's': issue.scope, 'r': issue.reason,
-                       'e': issue.evidence_token, 't': control_json(dict(issue.target)),
-                       'v': control_json(dict(issue.resolution))})
+                       'e': issue.evidence_token, 't': issue.target_json,
+                       'v': issue.resolution_json})
         total = c.execute(text('SELECT count(*) FROM data_store_issues')).scalar_one()
         if total > self.limits.issue_count:
             raise DataStoreError('ISSUE_BUDGET_EXCEEDED')

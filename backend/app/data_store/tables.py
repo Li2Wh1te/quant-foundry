@@ -1,4 +1,6 @@
 """Current-only SQLAlchemy metadata for Alembic inspection, no legacy imports."""
+import re
+
 from sqlalchemy import (MetaData, Table, Column as C, String, Text, Integer, BigInteger,
                         Boolean, DateTime, LargeBinary, Uuid, ForeignKey, CheckConstraint,
                         Index, text)
@@ -72,3 +74,13 @@ Index('ix_data_store_garbage_retry', garbage.c.dataset, garbage.c.retry_after, g
 from sqlalchemy import PrimaryKeyConstraint
 scopes.append_constraint(PrimaryKeyConstraint('dataset','scope_key'))
 issues.append_constraint(PrimaryKeyConstraint('dataset','issue_key'))
+
+# Match the stable PostgreSQL names from the frozen additive DDL. Unnamed
+# metadata checks would make autogenerate propose dropping real safeguards.
+for _table in metadata.tables.values():
+    for _check in _table.constraints:
+        if isinstance(_check, CheckConstraint) and _check.name is None:
+            _expression = str(_check.sqltext)
+            _columns = [c.name for c in _table.columns
+                        if re.search(r'\b'+c.name+r'\b', _expression)]
+            _check.name = _table.name + ('_'+_columns[0] if len(_columns) == 1 else '') + '_check'
