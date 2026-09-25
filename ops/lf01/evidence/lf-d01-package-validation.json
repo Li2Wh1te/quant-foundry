@@ -1,0 +1,66 @@
+{
+  "algorithm": "sha256",
+  "passed": true,
+  "files": [
+    {
+      "path": "ACCEPTANCE.md",
+      "bytes": 2556,
+      "sha256": "88557fb2d92afe5f73b6b29835c625008844dbd7588688cb45cc87eedfa191aa",
+      "passed": true
+    },
+    {
+      "path": "COMMON.md",
+      "bytes": 3802,
+      "sha256": "993942a5ee42a4a8e7c5d5278cb6b11987e27649ba9878f864e0b86efcacda3e",
+      "passed": true
+    },
+    {
+      "path": "PACKAGE.json",
+      "bytes": 3993,
+      "sha256": "9064e19783e82f945b505889e388635534b567b2f2547b339ecb74480debca93",
+      "passed": true
+    },
+    {
+      "path": "README.md",
+      "bytes": 2073,
+      "sha256": "50255027e7b733c1cb601742049c492bf68011b78cf415fd28029eb2472f8713",
+      "passed": true
+    },
+    {
+      "path": "RESULT_TEMPLATE.md",
+      "bytes": 834,
+      "sha256": "40975642988c2b60a429ebce51241e584fbcff426ca2a04a9c2e8d71a4300cbc",
+      "passed": true
+    },
+    {
+      "path": "TASK.md",
+      "bytes": 3078,
+      "sha256": "a0002d6dbc29560e80616a0cb7439e61ff490fa2bfcb84f263ff8828e1d260d7",
+      "passed": true
+    },
+    {
+      "path": "references/CODE_BASELINE.md",
+      "bytes": 4277,
+      "sha256": "62dde609e86adeb4e74f1a766cdfe4d400acfaa7d7e79b3e46a026745459ad3c",
+      "passed": true
+    },
+    {
+      "path": "references/SOURCE_REQUIREMENTS.md",
+      "bytes": 17385,
+      "sha256": "36d0deb98ccfe48777059e5a9b79a59a9fe902704129aad496be6086fa3cbfdc",
+      "passed": true
+    },
+    {
+      "path": "references/TECHNICAL_REFERENCES.md",
+      "bytes": 1298,
+      "sha256": "9ee5f2ac1243ffd1d32a0fe7be754e64295702233a4c2094cb9649a5fe7aafab",
+      "passed": true
+    },
+    {
+      "path": "references/baseline.json",
+      "bytes": 5286,
+      "sha256": "624a328002597e3e8ca469c8b0a3e705f16acd387bc7fce5a0fdafd6fe6d8280",
+      "passed": true
+    }
+  ]
+}

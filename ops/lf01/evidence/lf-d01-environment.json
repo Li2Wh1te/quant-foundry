@@ -1,0 +1,33 @@
+{
+  "observed_at": "2026-09-25T03:29:57.416777+00:00",
+  "scope": "isolated development; no production access",
+  "cpu_max": "400000 100000",
+  "memory_max": "4294967296",
+  "test_filesystem": "overlayfs",
+  "core_commit": "cb523fe8e1c7a02a20f66841a54920adc939adfb",
+  "core_tree": "2d67de63f2bc99fa81a53a440e17a2fa22508174",
+  "remote_input_commit": "e09f41d093c665ea6ca34af05168864f79445f9f",
+  "remote_input_tree": "df1abe658ec8487b575cddaac162958e12878b01",
+  "github_cli_available": false,
+  "docker_cli_available": false,
+  "filesystem_probe_injected_for_mechanics_tests": true,
+  "supported_filesystem_acceptance_executed": false,
+  "cross_container_acceptance_executed": false,
+  "frontend_tests_executed_this_delivery": false,
+  "new_remote_ci_executed": false,
+  "pushed": false,
+  "merged": false,
+  "harness_static_checks": {
+    "python_ast": true,
+    "yaml_parse": true,
+    "behavior": "not executed"
+  },
+  "notes": [
+    "4 CPU quota / 4 GiB cgroup includes local PostgreSQL and concurrent final regression tests. Benchmark process affinity fixed to four CPUs.",
+    "Source filesystem probe only was injected for overlay mechanics tests. Real kernel flock, processes, PostgreSQL, Arrow, DuckDB and fsync calls ran.",
+    "No guarantee of supported-filesystem/power-loss durability or cross-container mount coordination is derived from overlay runs.",
+    "Native library allocations/RSS are measured by watchdog with admitted memory/threads/spill caps; production cgroup limits still required.",
+    "Metrics current_read_bytes/written_bytes describe affected compressed files, not total device I/O. process_io_delta is separate and excludes PostgreSQL server I/O.",
+    "B02 no-op reports zero storage-operation RSS samples because it does not enter the native processing stage; it is not a zero-memory process."
+  ]
+}

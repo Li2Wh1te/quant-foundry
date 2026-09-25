@@ -1,0 +1,594 @@
+{
+  "task": "LF-D01-v1.1",
+  "synthetic": true,
+  "started_at": "2026-09-25T03:20:55.022076+00:00",
+  "environment": {
+    "python": "3.12.2",
+    "arrow": "23.0.1",
+    "duckdb": "1.4.3",
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "filesystem": "overlay",
+    "filesystem_probe_injected": true,
+    "cgroup_memory_max": "4294967296",
+    "postgres_in_same_isolated_runtime": true
+  },
+  "limits": {
+    "commit_rows": 1000000,
+    "commit_bytes": 268435456,
+    "file_rows": 262144,
+    "file_bytes": 134217728,
+    "changed_files": 64,
+    "query_scan_bytes": 536870912,
+    "query_files": 128,
+    "query_partitions": 64,
+    "operation_slots": 16,
+    "process_memory_bytes": 2147483648,
+    "write_timeout_ms": 300000,
+    "garbage_count": 2048,
+    "cleanup_batch": 128,
+    "orphan_grace_seconds": 60,
+    "scratch_bytes": 4294967296,
+    "minimum_free_bytes": 1073741824,
+    "garbage_bytes": 536870912,
+    "batch_rows": 16384,
+    "batch_bytes": 2097152,
+    "query_rows": 10000,
+    "query_bytes": 16777216,
+    "query_timeout_ms": 30000,
+    "lock_timeout_ms": 5000,
+    "duckdb_memory_bytes": 536870912,
+    "duckdb_threads": 2,
+    "parallel_writers": 1,
+    "issue_count": 10000,
+    "issue_sample_bytes": 67108864,
+    "log_bytes": 268435456,
+    "log_days": 7,
+    "completed_run_days": 30,
+    "completed_runs_per_task": 1000
+  },
+  "results": [
+    {
+      "case": "B01",
+      "size": 100000,
+      "passed": true,
+      "seconds": 2.246775,
+      "metrics": {
+        "input_rows": 100000,
+        "input_bytes": 8800000,
+        "current_read_bytes": 0,
+        "written_bytes": 840321,
+        "files_read": 0,
+        "files_written": 1,
+        "files_retired": 0,
+        "catalog_file_changes": 1,
+        "scratch_peak_bytes": 1526316,
+        "rss_peak_bytes": 235663360
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 1,
+          "data_store_scopes": 1,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 100000,
+        "file_count": 1,
+        "content_bytes": 840321,
+        "current_file_set_hash": "23b679817be3db604b392329987588295bdd730d778851d4141be129b45aba0a",
+        "log_bytes": 301,
+        "scratch_bytes": 38
+      },
+      "process_io_delta": {
+        "rchar": 12160252,
+        "wchar": 1526655,
+        "syscr": 1388,
+        "syscw": 220,
+        "read_bytes": 0,
+        "write_bytes": 1634304,
+        "cancelled_write_bytes": 688128
+      }
+    },
+    {
+      "case": "B01",
+      "size": 1000000,
+      "passed": true,
+      "seconds": 20.405517,
+      "metrics": {
+        "input_rows": 1000000,
+        "input_bytes": 88000000,
+        "current_read_bytes": 0,
+        "written_bytes": 8269553,
+        "files_read": 0,
+        "files_written": 4,
+        "files_retired": 0,
+        "catalog_file_changes": 4,
+        "scratch_peak_bytes": 15214074,
+        "rss_peak_bytes": 450924544
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 4,
+          "data_store_scopes": 1,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1000000,
+        "file_count": 4,
+        "content_bytes": 8269553,
+        "current_file_set_hash": "e9c055762912e9d53d1f348407251681d56bbad3e3dff8627133d74159edf2e8",
+        "log_bytes": 305,
+        "scratch_bytes": 38
+      },
+      "process_io_delta": {
+        "rchar": 30700312,
+        "wchar": 15214417,
+        "syscr": 7245,
+        "syscw": 1968,
+        "read_bytes": 0,
+        "write_bytes": 15306752,
+        "cancelled_write_bytes": 6946816
+      }
+    },
+    {
+      "case": "B02",
+      "size": 1,
+      "passed": true,
+      "seconds": 0.011965,
+      "metrics": {
+        "input_rows": 0,
+        "input_bytes": 0,
+        "current_read_bytes": 0,
+        "written_bytes": 0,
+        "files_read": 0,
+        "files_written": 0,
+        "files_retired": 0,
+        "catalog_file_changes": 0,
+        "scratch_peak_bytes": 0,
+        "rss_peak_bytes": 0
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 4,
+          "data_store_scopes": 1,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1000000,
+        "file_count": 4,
+        "content_bytes": 8269553,
+        "current_file_set_hash": "e9c055762912e9d53d1f348407251681d56bbad3e3dff8627133d74159edf2e8",
+        "log_bytes": 571,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B02",
+      "size": 10,
+      "passed": true,
+      "seconds": 0.067034,
+      "metrics": {
+        "input_rows": 0,
+        "input_bytes": 0,
+        "current_read_bytes": 0,
+        "written_bytes": 0,
+        "files_read": 0,
+        "files_written": 0,
+        "files_retired": 0,
+        "catalog_file_changes": 0,
+        "scratch_peak_bytes": 0,
+        "rss_peak_bytes": 0
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 4,
+          "data_store_scopes": 1,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1000000,
+        "file_count": 4,
+        "content_bytes": 8269553,
+        "current_file_set_hash": "e9c055762912e9d53d1f348407251681d56bbad3e3dff8627133d74159edf2e8",
+        "log_bytes": 3231,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B02",
+      "size": 100,
+      "passed": true,
+      "seconds": 0.565658,
+      "metrics": {
+        "input_rows": 0,
+        "input_bytes": 0,
+        "current_read_bytes": 0,
+        "written_bytes": 0,
+        "files_read": 0,
+        "files_written": 0,
+        "files_retired": 0,
+        "catalog_file_changes": 0,
+        "scratch_peak_bytes": 0,
+        "rss_peak_bytes": 0
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 4,
+          "data_store_scopes": 1,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1000000,
+        "file_count": 4,
+        "content_bytes": 8269553,
+        "current_file_set_hash": "e9c055762912e9d53d1f348407251681d56bbad3e3dff8627133d74159edf2e8",
+        "log_bytes": 29831,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B03",
+      "size": 10000,
+      "kind": "append",
+      "passed": true,
+      "seconds": 0.233687,
+      "process_io_delta": {
+        "rchar": 471413,
+        "wchar": 201542,
+        "syscr": 139,
+        "syscw": 38,
+        "read_bytes": 0,
+        "write_bytes": 208896,
+        "cancelled_write_bytes": 106496
+      },
+      "metrics": {
+        "input_rows": 10000,
+        "input_bytes": 880000,
+        "current_read_bytes": 0,
+        "written_bytes": 100603,
+        "files_read": 0,
+        "files_written": 1,
+        "files_retired": 0,
+        "catalog_file_changes": 1,
+        "scratch_peak_bytes": 201206,
+        "rss_peak_bytes": 209784832
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 5,
+          "data_store_scopes": 2,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 65536,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1010000,
+        "file_count": 5,
+        "content_bytes": 8370156,
+        "current_file_set_hash": "8410c8aad4c8619447019599416262856bf5f80e6c102a6fb4376d91d7e9fcf2",
+        "log_bytes": 30129,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B03",
+      "size": 1000,
+      "kind": "correct",
+      "passed": true,
+      "seconds": 3.289976,
+      "process_io_delta": {
+        "rchar": 8998633,
+        "wchar": 2207945,
+        "syscr": 1285,
+        "syscw": 304,
+        "read_bytes": 0,
+        "write_bytes": 2215936,
+        "cancelled_write_bytes": 2183168
+      },
+      "metrics": {
+        "input_rows": 1000,
+        "input_bytes": 88000,
+        "current_read_bytes": 2166749,
+        "written_bytes": 2192918,
+        "files_read": 1,
+        "files_written": 1,
+        "files_retired": 1,
+        "catalog_file_changes": 2,
+        "scratch_peak_bytes": 2207603,
+        "rss_peak_bytes": 257957888
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 5,
+          "data_store_scopes": 3,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 32768,
+          "data_store_files": 98304,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1010000,
+        "file_count": 5,
+        "content_bytes": 8396325,
+        "current_file_set_hash": "fbca0662073dc0d50d94294c9bba62d017ac49df2193deb48eaae99fb91dd83a",
+        "log_bytes": 30433,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B01",
+      "size": 10000000,
+      "passed": true,
+      "seconds": 204.825188,
+      "metrics": {
+        "input_rows": 10000000,
+        "input_bytes": 880000000,
+        "current_read_bytes": 0,
+        "written_bytes": 82695558,
+        "files_read": 0,
+        "files_written": 40,
+        "files_retired": 0,
+        "catalog_file_changes": 40,
+        "scratch_peak_bytes": 15214090,
+        "rss_peak_bytes": 476372992
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 40,
+          "data_store_scopes": 10,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 73728,
+          "data_store_files": 147456,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 10000000,
+        "file_count": 40,
+        "content_bytes": 82695558,
+        "current_file_set_hash": "a66fd1cb09828cc7160c61cdcce30028ee0573691cf7f189cc57a78f833b3c2c",
+        "log_bytes": 3050,
+        "scratch_bytes": 38
+      },
+      "process_io_delta": {
+        "rchar": 306945871,
+        "wchar": 152144281,
+        "syscr": 68900,
+        "syscw": 19680,
+        "read_bytes": 0,
+        "write_bytes": 152334336,
+        "cancelled_write_bytes": 61083648
+      }
+    },
+    {
+      "case": "B04",
+      "size": 10,
+      "passed": true,
+      "seconds": 0.039125,
+      "process_io_delta": {
+        "rchar": 31591,
+        "wchar": 7562,
+        "syscr": 165,
+        "syscw": 38,
+        "read_bytes": 0,
+        "write_bytes": 16384,
+        "cancelled_write_bytes": 12288
+      },
+      "metrics": {
+        "input_rows": 1,
+        "input_bytes": 88,
+        "current_read_bytes": 4235,
+        "written_bytes": 4511,
+        "files_read": 1,
+        "files_written": 1,
+        "files_retired": 1,
+        "catalog_file_changes": 2,
+        "scratch_peak_bytes": 7235,
+        "rss_peak_bytes": 213032960
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 11,
+          "data_store_scopes": 12,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 81920,
+          "data_store_files": 106496,
+          "data_store_scopes": 32768,
+          "data_store_issues": 24576,
+          "data_store_garbage": 40960
+        },
+        "rows": 1100,
+        "file_count": 11,
+        "content_bytes": 46901,
+        "current_file_set_hash": "ac3d04b27c6d5fb0bb72b3920785d2dbe0f2e805d0a54637a9fc5fd1e4f9485c",
+        "log_bytes": 3479,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B04",
+      "size": 100,
+      "passed": true,
+      "seconds": 0.045909,
+      "process_io_delta": {
+        "rchar": 31591,
+        "wchar": 7562,
+        "syscr": 165,
+        "syscw": 38,
+        "read_bytes": 0,
+        "write_bytes": 16384,
+        "cancelled_write_bytes": 12288
+      },
+      "metrics": {
+        "input_rows": 1,
+        "input_bytes": 88,
+        "current_read_bytes": 4235,
+        "written_bytes": 4511,
+        "files_read": 1,
+        "files_written": 1,
+        "files_retired": 1,
+        "catalog_file_changes": 2,
+        "scratch_peak_bytes": 7235,
+        "rss_peak_bytes": 208035840
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 101,
+          "data_store_scopes": 102,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 270336,
+          "data_store_files": 278528,
+          "data_store_scopes": 106496,
+          "data_store_issues": 24576,
+          "data_store_garbage": 65536
+        },
+        "rows": 10100,
+        "file_count": 101,
+        "content_bytes": 428402,
+        "current_file_set_hash": "445d9739586e9c34f5c2234752677f369958d6fd17cc5e4503505bc1f24857bb",
+        "log_bytes": 30157,
+        "scratch_bytes": 38
+      }
+    },
+    {
+      "case": "B04",
+      "size": 1000,
+      "passed": true,
+      "seconds": 0.042536,
+      "process_io_delta": {
+        "rchar": 31592,
+        "wchar": 7562,
+        "syscr": 165,
+        "syscw": 38,
+        "read_bytes": 0,
+        "write_bytes": 16384,
+        "cancelled_write_bytes": 12288
+      },
+      "metrics": {
+        "input_rows": 1,
+        "input_bytes": 88,
+        "current_read_bytes": 4235,
+        "written_bytes": 4511,
+        "files_read": 1,
+        "files_written": 1,
+        "files_retired": 1,
+        "catalog_file_changes": 2,
+        "scratch_peak_bytes": 7235,
+        "rss_peak_bytes": 204836864
+      },
+      "state": {
+        "catalog_rows": {
+          "data_store_runtime": 1,
+          "data_store_datasets": 1,
+          "data_store_files": 1001,
+          "data_store_scopes": 1002,
+          "data_store_issues": 0,
+          "data_store_garbage": 0
+        },
+        "catalog_relation_bytes": {
+          "data_store_runtime": 32768,
+          "data_store_datasets": 2113536,
+          "data_store_files": 2015232,
+          "data_store_scopes": 565248,
+          "data_store_issues": 24576,
+          "data_store_garbage": 286720
+        },
+        "rows": 100100,
+        "file_count": 1001,
+        "content_bytes": 4243452,
+        "current_file_set_hash": "f3908079441df1e669783549f7bd1041efa1cc14129c4ad5b840b73bfe732ac4",
+        "log_bytes": 291735,
+        "scratch_bytes": 38
+      }
+    }
+  ],
+  "complete": true,
+  "finished_at": "2026-09-25T03:25:25.485513+00:00"
+}
