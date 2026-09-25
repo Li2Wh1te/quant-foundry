@@ -1,0 +1,118 @@
+name: LF-D02 verified development transfer
+on:
+  push:
+    branches: [codex/lf-d02-transfer-20260925]
+    paths: [.github/workflows/lf-d02-verified-transfer.yml]
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 1f155a8a975e9107f1246a1698a5a21cb7a21642
+          fetch-depth: 0
+      - name: Verify exact source files and publish two development commits
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, os, pathlib, subprocess
+          BASE = '1f155a8a975e9107f1246a1698a5a21cb7a21642'
+          BRANCH = 'codex/lf-d02-local-adapters'
+          chunks = [
+              ('2874d53b1456f98eb57949d45361e370db69710f', 8100),
+              ('e1c6ed640f59792cf4bbb7b519d6ef8e9ff7bf9a', 8100),
+              ('1f69332933a5ca46638d274f2efeaf03b2e1a506', 8100),
+              ('60e3a1bc986e9358cf48e0c659b86263add3e7a9', 8100),
+              ('3ac7a349500d3d7a823e5326250624c35fea9f18', 8100),
+              ('3b9ebabb872e44c890991dfc4c7f76619eb83b2e', 8100),
+              ('4178c76f8fcb940e22738ca0b07b5f2af44a4abe', 4376),
+          ]
+          def git(*args):
+              return subprocess.check_output(['git', *args])
+          def digest(raw):
+              return hashlib.sha1(b'blob ' + str(len(raw)).encode() + b'\0' + raw).hexdigest()
+          assert git('rev-parse', 'HEAD').decode().strip() == BASE
+          assert git('rev-parse', 'HEAD^{tree}').decode().strip() == '94af1830709a5270209681962af737ca5d9740b6'
+          assert not git('status', '--porcelain')
+          parts = []
+          for sha, size in chunks:
+              result = json.loads(subprocess.check_output(['gh', 'api', f'repos/Li2Wh1te/quant-foundry/git/blobs/{sha}']))
+              raw = base64.b64decode(''.join(result['content'].split()), validate=True)
+              assert len(raw) == size and digest(raw) == sha
+              parts.append(raw)
+          archive = b''.join(parts)
+          assert len(archive) == 52976
+          assert hashlib.sha256(archive).hexdigest() == '5ff2818b69fae0a9941775699c6b1fe658c89dc9d716331a5cd30d7c648fa952'
+          decoder = lzma.LZMADecompressor(memlimit=256 * 1024 * 1024)
+          decoded = decoder.decompress(archive, max_length=272755)
+          assert decoder.eof and not decoder.unused_data and len(decoded) == 272754
+          data = json.loads(decoded)
+          assert data['base'] == BASE and len(data['stages']) == 2
+          assert [len(s['files']) for s in data['stages']] == [36, 19]
+          git('config', 'user.name', 'LF-D02 development')
+          git('config', 'user.email', 'development@localhost')
+          expected = {}
+          for stage in data['stages']:
+              paths = []
+              for item in stage['files']:
+                  name = item['path']
+                  path = pathlib.Path(name)
+                  assert not path.is_absolute() and '..' not in path.parts
+                  assert name == '.gitattributes' or name.startswith(('backend/app/', 'backend/scripts/', 'backend/tests/', 'ops/lf01/'))
+                  assert not name.startswith(('docs/', '.github/'))
+                  assert item['mode'] == '100644'
+                  assert not path.is_symlink()
+                  if 'source' in item:
+                      original = git('show', BASE + ':' + item['source'])
+                      assert digest(original) == item['source_sha']
+                      text = original.decode('utf-8')
+                      for old, new in item['replace']:
+                          text = text.replace(old, new)
+                      lines = text.splitlines(keepends=True)
+                      pieces = []
+                      for piece in item['pieces']:
+                          if isinstance(piece, list):
+                              start, end = piece
+                              assert 0 <= start <= end <= len(lines)
+                              pieces.append(''.join(lines[start:end]))
+                          else:
+                              assert isinstance(piece, str)
+                              pieces.append(piece)
+                      raw = ''.join(pieces).encode('utf-8')
+                  else:
+                      raw = item['text'].encode('utf-8')
+                  assert digest(raw) == item['sha'], name
+                  path.parent.mkdir(parents=True, exist_ok=True)
+                  path.write_bytes(raw)
+                  os.chmod(path, 0o644)
+                  expected[name] = item['sha']
+                  paths.append(name)
+              git('add', '--', *paths)
+              staged = git('diff', '--cached', '--name-only').decode().splitlines()
+              assert set(staged) == set(paths)
+              git('diff', '--cached', '--check')
+              for name in paths:
+                  assert git('rev-parse', ':' + name).decode().strip() == expected[name], name
+              git('commit', '-m', stage['message'])
+          assert len(expected) == 55
+          assert set(git('diff', '--name-only', BASE, 'HEAD').decode().splitlines()) == set(expected)
+          for name, sha in expected.items():
+              assert git('rev-parse', 'HEAD:' + name).decode().strip() == sha, name
+          assert not git('status', '--porcelain')
+          git('diff', BASE, 'HEAD', '--check')
+          assert git('rev-list', '--count', BASE + '..HEAD').decode().strip() == '2'
+          remote = git('ls-remote', 'origin', 'refs/heads/' + BRANCH).decode().split()
+          assert remote and remote[0] == BASE, 'Target branch changed; refuse overwrite'
+          assert git('ls-remote', 'origin', 'refs/heads/main').decode().split()[0] == BASE, 'Main changed; reconcile before push'
+          git('push', 'origin', 'HEAD:refs/heads/' + BRANCH)
+          print('Published two commits, 55 exact verified files; no PR, merge, tests, migration or deployment.')
+          print(git('log', '--oneline', '-2').decode())
+          print('HEAD:', git('rev-parse', 'HEAD').decode().strip())
+          print('TREE:', git('rev-parse', 'HEAD^{tree}').decode().strip())
+          PY
