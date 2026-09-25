@@ -1,0 +1,357 @@
+[
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_daily_dump",
+    "old_domain": "operations.import_progress"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_recent_dump",
+    "old_domain": "operations.import_progress"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_actions_dump",
+    "old_domain": "operations.import_progress"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_news",
+    "old_domain": "fund.news_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "anomaly_stock",
+    "old_domain": "market.stock_anomaly_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "rank_trend",
+    "old_domain": "market.rank_trend_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_holdings",
+    "old_domain": "fund.reported_holdings_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_stock_history",
+    "old_domain": "fund.reported_stock_holdings_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_bond_history",
+    "old_domain": "fund.reported_bond_holdings_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_indicators",
+    "old_domain": "market.financial_indicator_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_financial_indicators",
+    "old_domain": "fund.financial_indicator_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_income",
+    "old_domain": "fund.income_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_balance",
+    "old_domain": "fund.balance_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_income",
+    "old_domain": "market.income_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_balance",
+    "old_domain": "market.balance_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_cash_flow",
+    "old_domain": "market.cash_flow_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_allocation",
+    "old_domain": "fund.allocation_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_industry",
+    "old_domain": "fund.industry_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_holders",
+    "old_domain": "fund.holder_composition_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_top_holders",
+    "old_domain": "fund.top_holder_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_dividends",
+    "old_domain": "fund.dividend_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_actions",
+    "old_domain": "market.corporate_action_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_manager_performance",
+    "old_domain": "fund.manager_performance_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_manager_style",
+    "old_domain": "fund.manager_style_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_returns",
+    "old_domain": "fund.return_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_drawdowns",
+    "old_domain": "fund.drawdown_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_performance_history",
+    "old_domain": "fund.performance_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "dragon_tiger",
+    "old_domain": "market.dragon_tiger_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_auction",
+    "old_domain": "market.auction_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "auction_benchmark",
+    "old_domain": "market.auction_benchmark_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "limit_up",
+    "old_domain": "market.limit_up_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "limit_down",
+    "old_domain": "market.limit_down_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "limit_break",
+    "old_domain": "market.limit_break_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "anomaly_list",
+    "old_domain": "market.anomaly_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "limit_ladder",
+    "old_domain": "market.limit_ladder_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_quote",
+    "old_domain": "market.stock_quote_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "etf_quote",
+    "old_domain": "market.etf_quote_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "index_quote",
+    "old_domain": "market.index_quote_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_valuation",
+    "old_domain": "market.stock_valuation_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "tickers",
+    "old_domain": "instrument.reference"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_company",
+    "old_domain": "fund.company"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_manager",
+    "old_domain": "fund.manager"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_profile",
+    "old_domain": "fund.profile"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_nav",
+    "old_domain": "fund.nav_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "hot_list",
+    "old_domain": "market.popularity_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "skyrocket",
+    "old_domain": "market.rising_popularity_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "hot_history",
+    "old_domain": "market.popularity_history_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_quota_summary",
+    "old_domain": "fund.quota_summary_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_quota_list",
+    "old_domain": "fund.quota_list_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "stock_daily",
+    "old_domain": "market.stock_daily_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "etf_daily",
+    "old_domain": "market.etf_daily_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "index_daily",
+    "old_domain": "market.index_daily_window"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_offerings",
+    "old_domain": "fund.offering_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "fund_manager_experience",
+    "old_domain": "fund.manager_experience"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "calendar",
+    "old_domain": "market.calendar"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "index_catalog",
+    "old_domain": "index.category_snapshot"
+  },
+  {
+    "source": "tonghuashun",
+    "native_dataset": "index_constituents",
+    "old_domain": "index.constituent_snapshot"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "etf_code_mapping_audits",
+    "old_domain": "operations.etf_mapping_audit"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "etf_daily_revision_audits",
+    "old_domain": "operations.etf_daily_revision"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "corporate_action_source_facts",
+    "old_domain": "operations.corporate_action_source_fact"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "corporate_action_facts",
+    "old_domain": "operations.corporate_action_fact"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "corporate_action_coverage_facts",
+    "old_domain": "operations.corporate_action_coverage"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "trading_status_source_facts",
+    "old_domain": "operations.trading_status_source_fact"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "trading_status_facts",
+    "old_domain": "operations.trading_status_fact"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "trading_status_coverage_facts",
+    "old_domain": "operations.trading_status_coverage"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "trading_status_revision_audits",
+    "old_domain": "operations.trading_status_revision"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "etf_directory",
+    "old_domain": "instrument.reference"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "exchange_calendar",
+    "old_domain": "market.calendar"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "etf_adjustment_factors",
+    "old_domain": "market.adjustment_factor"
+  },
+  {
+    "source": "tushare",
+    "native_dataset": "etf_daily",
+    "old_domain": "market.fund_daily"
+  },
+  {
+    "source": "foundation",
+    "native_dataset": "empty_local_scope",
+    "old_domain": "operations.empty_local_scope"
+  }
+]

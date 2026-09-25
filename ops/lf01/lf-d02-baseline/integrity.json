@@ -1,0 +1,13 @@
+{
+  "task": "LF-D02 v1.1",
+  "baseline_files": {
+    "SOURCE_DISPOSITION.csv": {
+      "bytes": 19527,
+      "sha256": "c657a6deebff9a1f55613490ce3352de5cb3645ec984b1f2f5e1652e51630c80"
+    },
+    "source_mapping.json": {
+      "bytes": 8866,
+      "sha256": "e5c8f5da8b4ba0b8b40c427995aaa73c5d48dd3a0a39617b4662018ba5ac4cfc"
+    }
+  }
+}
