@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+import gzip
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -414,7 +415,7 @@ class RescueSources:
     def iter_entry(self, entry):
         self.summary={'entry_id':entry.id,'source_rows':0,'state':'reading','complete':False,
                       'scan_policy':'self_contained_rescue_rescan'}
-        started=time.monotonic(); total=0; tracker=EffectiveBasis()
+        started=time.monotonic(); self._total=0; tracker=EffectiveBasis()
         for path in self.paths:
             fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW)
             try:
@@ -422,64 +423,116 @@ class RescueSources:
                 if not stat.S_ISREG(info.st_mode) or info.st_size>self.limits.rescue_bytes:
                     raise NativeInputError('SOURCE_BUDGET_EXCEEDED','救回来源不是有界普通文件。')
                 with os.fdopen(fd,'rb',closefd=False) as handle:
-                    while True:
-                        line=handle.readline(self.limits.chain_bytes+1)
-                        if not line: break
-                        total+=len(line)
-                        if (len(line)>self.limits.chain_bytes or total>self.limits.rescue_bytes or
-                                time.monotonic()-started>self.limits.pass_seconds):
-                            raise NativeInputError('SOURCE_BUDGET_EXCEEDED','救回来源达到预算，未完成读取。')
-                        if self.cancelled and self.cancelled():
-                            raise NativeInputError('OPERATION_CANCELLED','救回来源读取已取消。')
-                        record=loads(line.decode('utf-8'))
-                        if record.get('format')!='qf-local-rescue-v1' or record.get('kind') not in ('ths_observation','table_row'):
-                            raise NativeInputError('SOURCE_SCHEMA_INVALID','不支持该救回格式；旧正式数据不能冒充原件。')
-                        if record.get('entry_id')!=entry.id: continue
-                        raw=record['record']; self.summary['source_rows']+=1
-                        if not entry.business: continue
-                        if record['kind']=='ths_observation':
-                            if entry.source!='tonghuashun' or raw.get('dataset')!=entry.native:
-                                raise NativeInputError('IDENTITY_CONFLICT','救回入口与原生范围不一致。')
-                            deps=record.get('dependencies',[])
-                            if len(deps)>30 or len({str(d['id']) for d in deps})!=len(deps):
-                                raise NativeInputError('SOURCE_DEPENDENCY_INVALID','救回依赖不完整或重复。')
-                            lookup={str(r['id']):r for r in deps}
-                            body,basis,field=materialize_observation(raw,lookup.get,self.limits)
-                            basis,uncertain=tracker.apply(raw,body,basis,field,_requests(raw,self.limits))
-                            # Rescue records may provide original sparse confirmations,
-                            # but every supplied tuple must name a retained native input.
-                            tokens={digest([_scope(r),r['content_hash'],r['observed_at'],_requests(r,self.limits)]):instant_ns(r['observed_at'])
-                                    for r in [raw,*deps]}
-                            for k,v in record.get('row_basis',{}).items():
-                                if not isinstance(v,list) or len(v)!=2 or tokens.get(v[1])!=v[0]:
-                                    raise NativeInputError('SOURCE_ORDER_UNPROVEN','救回确认依据没有对应原件。')
-                                origin=next(r for r in [raw,*deps] if digest([_scope(r),r['content_hash'],r['observed_at'],_requests(r,self.limits)])==v[1])
-                                original,_,_=materialize_observation(origin,lookup.get,self.limits)
-                                selected=[r for r in original.get('item',[]) if isinstance(r,dict) and str(r.get(field))==k]
-                                current=[r for r in body.get('item',[]) if isinstance(r,dict) and str(r.get(field))==k]
-                                if (not selected or digest(selected)!=digest(current) or
-                                        not _confirmed(field,selected[0].get(field),_requests(origin,self.limits))):
-                                    raise NativeInputError('SOURCE_ORDER_UNPROVEN','救回依据没有证明目标键确实返回并确认。')
-                                basis[k]=tuple(v)
-                            yield LocalInput(entry.source,entry.native,raw['subject'],raw['variant'],raw['observed_at'],
-                                             body,digest([_scope(raw),raw['content_hash'],raw['observed_at'],_requests(raw,self.limits)]),
-                                             row_basis=basis,basis_field=field,representation='rescue_observation',
-                                             unconfirmed_keys=tuple(k for k in uncertain if k not in record.get('row_basis',{})))
-                        else:
-                            if entry.source!='tushare':
-                                raise NativeInputError('IDENTITY_CONFLICT','救回本地表来源不一致。')
-                            when=record['snapshot_started_at']; instant_ns(when)
-                            if record.get('content_hash')!=digest(raw):
-                                raise NativeInputError('SOURCE_HASH_MISMATCH','救回本地表内容摘要不符。')
-                            subject=str(raw.get('ts_code') or raw.get('instrument_id') or raw.get('exchange') or 'market')
-                            basis={}; kind='current_table_snapshot'
-                            if entry.native=='corporate_action_facts':
-                                version=raw.get('fact_version')
-                                if type(version) is not int or not 0<version<2**63:
-                                    raise NativeInputError('SOURCE_ORDER_UNPROVEN','公司行动缺少来源修订顺序。')
-                                basis[str(raw.get('logical_fact_key'))]=(version,digest(raw)); kind='source_revision'
-                            yield LocalInput(entry.source,entry.native,subject,'default',when,raw,digest(raw),
-                                             order_kind=kind,row_basis=basis,representation='rescue_table')
+                    reader=gzip.GzipFile(fileobj=handle) if path.suffix=='.gz' else handle
+                    try:
+                        yield from self._file_records(reader,entry,tracker,started)
+                    finally:
+                        if reader is not handle: reader.close()
             finally:
                 os.close(fd)
         self.summary.update(complete=True,state='present' if self.summary['source_rows'] else 'empty')
+
+    def _file_records(self,reader,entry,tracker,started):
+        while True:
+            line=reader.readline(self.limits.chain_bytes+1)
+            if not line: break
+            self._total+=len(line)
+            if (len(line)>self.limits.chain_bytes or self._total>self.limits.rescue_bytes or
+                    time.monotonic()-started>self.limits.pass_seconds):
+                raise NativeInputError('SOURCE_BUDGET_EXCEEDED','救回来源达到预算，未完成读取。')
+            if self.cancelled and self.cancelled():
+                raise NativeInputError('OPERATION_CANCELLED','救回来源读取已取消。')
+            record=loads(line.decode('utf-8'))
+            if not isinstance(record,dict) or record.get('format')!='qf-local-rescue-v1' or record.get('kind') not in ('ths_observation','table_row','staged_dump','table_change','unresolved_request'):
+                raise NativeInputError('SOURCE_SCHEMA_INVALID','不支持该救回格式；旧正式数据不能冒充原件。')
+            if record.get('kind')=='unresolved_request':
+                self.summary['unresolved_requests']=self.summary.get('unresolved_requests',0)+1
+                continue
+            if record.get('entry_id')!=entry.id: continue
+            if record['kind']=='table_change':
+                self.summary['historical_changes']=self.summary.get('historical_changes',0)+1
+                continue
+            self.summary['source_rows']+=1
+            raw=record['record']
+            if not entry.business: continue
+            if record['kind']=='staged_dump':
+                body=raw.get('content') if isinstance(raw,dict) else None
+                meta=body.get('bulk_source') if isinstance(body,dict) else None
+                when=meta.get('collected_at') if isinstance(meta,dict) else None
+                if (not isinstance(raw,dict) or not isinstance(body,dict) or not isinstance(meta,dict)
+                        or entry.source!='tonghuashun' or raw.get('format')!='local-staged-dump-v1'
+                        or raw.get('native_dataset')!=entry.native or not isinstance(body.get('item'),list)
+                        or not isinstance(raw.get('subject'),str) or not meta.get('sha256')
+                        or when is None or instant_ns(when)>instant_ns(record['observed_at'])):
+                    raise NativeInputError('SOURCE_ORDER_UNPROVEN','救回暂存原件缺少可验证的采集时间或身份。')
+                yield LocalInput('tonghuashun',entry.native,raw['subject'],'default',when,body,
+                                 digest([raw['subject'],entry.native,body,when]),
+                                 representation='rescued_staged_dump')
+                continue
+            if record['kind']=='ths_observation':
+                if entry.source!='tonghuashun' or raw.get('dataset')!=entry.native:
+                    raise NativeInputError('IDENTITY_CONFLICT','救回入口与原生范围不一致。')
+                deps=record.get('dependencies',[])
+                if len(deps)>30 or len({str(d['id']) for d in deps})!=len(deps):
+                    raise NativeInputError('SOURCE_DEPENDENCY_INVALID','救回依赖不完整或重复。')
+                lookup={str(r['id']):r for r in deps}
+                body,basis,field=materialize_observation(raw,lookup.get,self.limits)
+                basis,uncertain=tracker.apply(raw,body,basis,field,_requests(raw,self.limits))
+                # Rescue records may provide original sparse confirmations,
+                # but every supplied tuple must name a retained native input.
+                tokens={digest([_scope(r),r['content_hash'],r['observed_at'],_requests(r,self.limits)]):instant_ns(r['observed_at'])
+                        for r in [raw,*deps]}
+                for k,v in record.get('row_basis',{}).items():
+                    if not isinstance(v,list) or len(v)!=2 or tokens.get(v[1])!=v[0]:
+                        raise NativeInputError('SOURCE_ORDER_UNPROVEN','救回确认依据没有对应原件。')
+                    origin=next(r for r in [raw,*deps] if digest([_scope(r),r['content_hash'],r['observed_at'],_requests(r,self.limits)])==v[1])
+                    original,_,_=materialize_observation(origin,lookup.get,self.limits)
+                    selected=[r for r in original.get('item',[]) if isinstance(r,dict) and str(r.get(field))==k]
+                    current=[r for r in body.get('item',[]) if isinstance(r,dict) and str(r.get(field))==k]
+                    if (not selected or digest(selected)!=digest(current) or
+                            not _confirmed(field,selected[0].get(field),_requests(origin,self.limits))):
+                        raise NativeInputError('SOURCE_ORDER_UNPROVEN','救回依据没有证明目标键确实返回并确认。')
+                    basis[k]=tuple(v)
+                yield LocalInput(entry.source,entry.native,raw['subject'],raw['variant'],raw['observed_at'],
+                                 body,digest([_scope(raw),raw['content_hash'],raw['observed_at'],_requests(raw,self.limits)]),
+                                 row_basis=basis,basis_field=field,representation='rescue_observation',
+                                 unconfirmed_keys=tuple(k for k in uncertain if k not in record.get('row_basis',{})))
+            else:
+                if entry.source!='tushare':
+                    raise NativeInputError('IDENTITY_CONFLICT','救回本地表来源不一致。')
+                when=record['snapshot_started_at']; instant_ns(when)
+                if record.get('content_hash')!=digest(raw):
+                    raise NativeInputError('SOURCE_HASH_MISMATCH','救回本地表内容摘要不符。')
+                subject=str(raw.get('ts_code') or raw.get('instrument_id') or raw.get('exchange') or 'market')
+                basis={}; kind='current_table_snapshot'
+                if entry.native=='corporate_action_facts':
+                    version=raw.get('fact_version')
+                    if type(version) is not int or not 0<version<2**63:
+                        raise NativeInputError('SOURCE_ORDER_UNPROVEN','公司行动缺少来源修订顺序。')
+                    basis[str(raw.get('logical_fact_key'))]=(version,digest(raw)); kind='source_revision'
+                yield LocalInput(entry.source,entry.native,subject,'default',when,raw,digest(raw),
+                                 order_kind=kind,row_basis=basis,representation='rescue_table')
+
+
+class CombinedSources:
+    """Read retained native sources and proven rescued gaps in one D02 pass.
+
+    A rescue file supplements native rows. It never replaces the current native
+    snapshot or turns a historical table change into a present source row.
+    """
+    def __init__(self, native: NativeSources, rescue: RescueSources):
+        self.native,self.rescue = native,rescue
+        self.summary = {}
+
+    def iter_entry(self, entry):
+        for value in self.rescue.iter_entry(entry):
+            yield value
+        rescued = dict(self.rescue.summary)
+        for value in self.native.iter_entry(entry):
+            yield value
+        native = dict(self.native.summary)
+        self.summary = dict(native, source_rows=native.get('source_rows',0)+rescued.get('source_rows',0),
+                            rescue_rows=rescued.get('source_rows',0),
+                            rescue_historical_changes=rescued.get('historical_changes',0),
+                            rescue_unresolved_requests=rescued.get('unresolved_requests',0),
+                            complete=bool(native.get('complete') and rescued.get('complete')))

@@ -7,6 +7,7 @@ import app.models  # noqa: F401
 from app.core.config import get_settings
 from app.db.base import Base
 from app.data_store.tables import metadata as current_store_metadata
+from app.legacy_reset.tables import metadata as legacy_maintenance_metadata
 
 
 config = context.config
@@ -16,7 +17,7 @@ if config.config_file_name is not None:
 
 # Preserve the application's existing naming convention for historical Alembic
 # operations. A metadata list would change names created by old op helpers.
-for current_table in current_store_metadata.sorted_tables:
+for current_table in (*current_store_metadata.sorted_tables, *legacy_maintenance_metadata.sorted_tables):
     if current_table.name not in Base.metadata.tables:
         current_table.to_metadata(Base.metadata)
 target_metadata = Base.metadata
