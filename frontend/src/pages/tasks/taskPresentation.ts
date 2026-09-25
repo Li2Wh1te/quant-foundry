@@ -38,10 +38,22 @@ export function runSummary(run: TaskRun): string {
   // Only explicit Chinese messages are eligible as the operator summary.
   const message = run.result?.message;
   if (typeof message === "string" && /[\u4e00-\u9fff]/.test(message) && message.length < 500) return message;
+  if (run.task_type === "data_store.update_local") {
+    return ({
+      queued: "本地数据更新已排队；如处于维护态，将等待维护结束。",
+      running: "正在处理已有本地数据，当前结果尚未确认。",
+      succeeded: "本地数据更新已完成，当前目录和处理断点已保存。",
+      failed: "本地数据更新失败；已有当前数据仍按各自状态提供，请查看日志。",
+      skipped: "本地数据更新已跳过，未更改当前数据。",
+      interrupted: "本地数据更新已中断，请核查当前断点后重试。",
+      cancelled: "本地数据更新已取消。",
+      timed_out: "本地数据更新超时，请查看日志。",
+      indeterminate: "本地数据更新结果未确认，请核查当前目录和日志。"
+    })[run.status];
+  }
   // CollectionError is authored by the source-local collector, which records
   // only classified errors and counts, never vendor messages or credentials.
-  if (((run.task_type?.startsWith("data.ths.") && run.error_type === "CollectionError")
-    || (run.task_type === "foundation.formalize_local_updates" && run.error_type === "FoundationUpdateError"))
+  if ((run.task_type?.startsWith("data.ths.") && run.error_type === "CollectionError")
     && typeof run.error_message === "string" && /[\u4e00-\u9fff]/.test(run.error_message)
     && run.error_message.length < 500) return run.error_message;
   const event = typeof run.result?.event === "string" ? collectionEvents[run.result.event] : undefined;

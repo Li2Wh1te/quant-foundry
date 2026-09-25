@@ -488,17 +488,18 @@ def test_task_retention_does_not_touch_other_types_or_running(database,store):
         c.execute(text('CREATE TABLE task_runs(id uuid PRIMARY KEY, task_id uuid, task_type text, status text, finished_at timestamptz)'))
         task=uuid4()
         rows=[{'id':uuid4(),'task':task} for _ in range(1005)]
-        c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'data_store.update','succeeded',clock_timestamp())"),rows)
+        c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'data_store.update_local','succeeded',clock_timestamp())"),rows)
         c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'other.task','succeeded',clock_timestamp()-interval '60 days')"),
                   {'id':uuid4(),'task':task})
-        c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'data_store.update','running',NULL)"),{'id':uuid4(),'task':task})
+        c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'data_store.update_local','running',NULL)"),{'id':uuid4(),'task':task})
         c.execute(text("INSERT INTO task_runs VALUES (:id,:task,'data_store.retry','failed',clock_timestamp()-interval '60 days')"),
                   {'id':uuid4(),'task':uuid4()})
-    assert prune_completed_runs(store.catalog)==6
+    assert prune_completed_runs(store.catalog)==5
     with store.catalog.transaction() as c:
-        assert c.execute(text('SELECT count(*) FROM task_runs')).scalar_one()==1002
+        assert c.execute(text('SELECT count(*) FROM task_runs')).scalar_one()==1003
         assert c.execute(text("SELECT count(*) FROM task_runs WHERE status='running'")).scalar_one()==1
         assert c.execute(text("SELECT count(*) FROM task_runs WHERE task_type='other.task'")).scalar_one()==1
+        assert c.execute(text("SELECT count(*) FROM task_runs WHERE task_type='data_store.retry'")).scalar_one()==1
 
 
 def test_current_metadata_cannot_bind_another_root_or_different_policy(store,database,tmp_path):

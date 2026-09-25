@@ -21,7 +21,8 @@ from app.scheduling.schemas import (
     TaskUpdate,
     TriggerType,
 )
-from app.scheduling.service import SchedulerService, TaskConflictError
+from app.scheduling.service import SchedulerService, TaskConflictError, UnknownTaskTypeError
+from app.data_store.errors import DataStoreError
 from app.scheduling.triggers import build_trigger
 from app.data_ingestion.scheduler_tasks.trade_calendar import (
     TradeCalendarSyncParameters,
@@ -247,6 +248,42 @@ class SchedulerServiceTestCase(unittest.TestCase):
         call = self.service.repository.add_run.call_args
         self.assertEqual(call.kwargs["status"], RunStatus.QUEUED)
 
+    def test_retired_task_cannot_be_queued_manually_or_on_schedule(self) -> None:
+        task = make_task(task_type="foundation.formalize_local_updates")
+        self.service.repository.get_task.return_value = task
+
+        for trigger in (TriggerType.MANUAL, TriggerType.SCHEDULED):
+            with self.subTest(trigger=trigger):
+                with self.assertRaisesRegex(TaskConflictError, "已退役"):
+                    self.service.enqueue_run(task.id, trigger_type=trigger,
+                                             max_queued_runs=100)
+
+        self.service.repository.add_run.assert_not_called()
+
+    def test_unknown_task_type_cannot_leave_an_unclaimable_queue_item(self) -> None:
+        task = make_task(task_type="removed.plugin.task")
+        self.service.repository.get_task.return_value = task
+
+        with self.assertRaises(UnknownTaskTypeError):
+            self.service.enqueue_run(task.id, trigger_type=TriggerType.MANUAL,
+                                     max_queued_runs=100)
+        self.service.repository.add_run.assert_not_called()
+
+    def test_local_update_cannot_queue_during_legacy_maintenance(self) -> None:
+        registry = make_test_registry()
+        registry.register(task_registry.require("data_store.update_local"))
+        service = SchedulerService(self.session, registry)
+        service.repository = Mock()
+        task = make_task(task_type="data_store.update_local")
+        service.repository.get_task.return_value = task
+
+        with patch("app.scheduling.service.require_ready",
+                   side_effect=DataStoreError("DATA_STORE_REBUILDING")):
+            with self.assertRaisesRegex(TaskConflictError, "维护"):
+                service.enqueue_run(task.id, trigger_type=TriggerType.MANUAL,
+                                    max_queued_runs=100)
+        service.repository.add_run.assert_not_called()
+
     def test_completed_task_must_be_rescheduled_before_resume(self) -> None:
         task = make_task(state="completed")
         self.service.repository.get_task.return_value = task
@@ -408,12 +445,10 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
             runtime.scheduler = Mock()
             runtime.start()
 
-        self.assertEqual(runtime.scheduler.add_job.call_count, 2)
+        self.assertEqual(runtime.scheduler.add_job.call_count, 1)
         runtime.scheduler.add_job.assert_has_calls([
             call(runtime.dispatch_queued_runs, trigger="interval", seconds=0.5,
                  id="scheduler:dispatch", replace_existing=True, max_instances=1, coalesce=True),
-            call(runtime.resume_foundation_waiters, trigger="interval", seconds=60,
-                 id="foundation-backfill-resumption", replace_existing=True, max_instances=1, coalesce=True),
         ])
         session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
         runtime.stop()

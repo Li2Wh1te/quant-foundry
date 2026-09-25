@@ -21,7 +21,7 @@ COPY VERSION ./VERSION
 COPY backend/alembic.ini ./
 COPY backend/app ./app
 
-RUN mkdir -p /app/data/logs && chown -R app:app /app
+RUN mkdir -p /app/data/logs /app/data/current-store && chown -R app:app /app
 
 USER app
 

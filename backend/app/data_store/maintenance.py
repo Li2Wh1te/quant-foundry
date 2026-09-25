@@ -17,8 +17,8 @@ from .locking import _deadline, _scope_key
 from .schema import identifier
 from .values import control_json
 
-# D04 registers these same names; no task or timer is registered by this module.
-TASK_TYPES = ('data_store.update', 'data_store.rebuild', 'data_store.retry')
+# Keep completed-run retention scoped to the one registered local task type.
+TASK_TYPES = ('data_store.update_local',)
 _LOG = re.compile(r'(\d{20})-[0-9a-f]{32}\.jsonl\Z')
 
 
@@ -166,7 +166,7 @@ def prune_completed_runs(catalog, *, batch: int = 1000) -> int:
             WITH terminal AS (
                 SELECT id, finished_at,
                     row_number() OVER (PARTITION BY task_id ORDER BY finished_at DESC, id DESC) AS ordinal
-                FROM task_runs WHERE task_type IN ('data_store.update','data_store.rebuild','data_store.retry')
+                FROM task_runs WHERE task_type = :task_type
                   AND status IN ('succeeded','failed','skipped','interrupted','cancelled','timed_out','indeterminate')
                   AND finished_at IS NOT NULL
             ), expired AS (
@@ -175,6 +175,6 @@ def prune_completed_runs(catalog, *, batch: int = 1000) -> int:
                 ORDER BY finished_at,id LIMIT :batch
             )
             DELETE FROM task_runs WHERE id IN (SELECT id FROM expired) RETURNING id
-        """), {'cap': catalog.limits.completed_runs_per_task,
+        """), {'task_type': TASK_TYPES[0], 'cap': catalog.limits.completed_runs_per_task,
                  'days': catalog.limits.completed_run_days, 'batch': batch})
         return len(result.all())

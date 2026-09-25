@@ -1,5 +1,8 @@
 /** Operator-facing event copy is separate from stable structured log keys. */
 export const collectionEvents: Record<string, { title: string; summary: string }> = {
+  data_store_local_update: { title: "本地数据更新", summary: "本地来源的当前数据处理结果已保存，请查看任务运行详情。" },
+  data_store_local_update_failed: { title: "本地数据更新失败", summary: "本地处理未完成，已提交分区和断点保留，请查看错误详情。" },
+  data_store_local_update_incomplete: { title: "本地数据更新未合格", summary: "部分数据仍有问题，当前数据按各自状态提供。" },
   foundation_full_stopped: { title: "全量执行未完成", summary: "执行条件未满足，原发布检查点与来源证据保留，请查看停止原因。" },
   foundation_full_started: { title: "全量正式化启动", summary: "已固定本次处理范围，发布检查点尚未推进。" },
   foundation_full_source_processed: { title: "全量来源处理结果", summary: "来源发布或隔离结果已保存，具体计数及检查点请查看详情。" },

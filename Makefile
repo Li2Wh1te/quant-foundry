@@ -1,4 +1,4 @@
-.PHONY: backend-test frontend-test frontend-build root-test test release-check release-set-version selfhost selfhost-deploy-backend selfhost-deploy-frontend selfhost-down selfhost-logs selfhost-migrate selfhost-psql selfhost-reset selfhost-restart-postgres selfhost-status
+.PHONY: backend-test frontend-test frontend-build root-test test release-check release-set-version selfhost selfhost-deploy-backend selfhost-deploy-frontend selfhost-down selfhost-logs selfhost-migrate selfhost-psql selfhost-restart-postgres selfhost-status
 
 root-test:
 	@python3 -m unittest discover -s tests -v
@@ -44,9 +44,6 @@ selfhost-migrate:
 
 selfhost-psql:
 	@./scripts/selfhost.sh psql
-
-selfhost-reset:
-	@./scripts/selfhost.sh reset
 
 selfhost-status:
 	@./scripts/selfhost.sh status
