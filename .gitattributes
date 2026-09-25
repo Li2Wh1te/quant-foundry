@@ -1,0 +1,2 @@
+# Keep the user-supplied LF-D02 baseline byte-identical (original CRLF).
+ops/lf01/lf-d02-baseline/SOURCE_DISPOSITION.csv -text whitespace=cr-at-eol

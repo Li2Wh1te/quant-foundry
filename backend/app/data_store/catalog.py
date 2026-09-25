@@ -106,6 +106,7 @@ class SourceUpdate:
     confirmation: Mapping = field(default_factory=dict)
     checkpoint: Mapping = field(default_factory=dict)
     qualified: bool = True
+    expected_generation: int | None = None
     confirmation_json: str = field(init=False, repr=False, compare=False)
     checkpoint_json: str = field(init=False, repr=False, compare=False)
 
@@ -116,6 +117,9 @@ class SourceUpdate:
                     or any(c not in '0123456789abcdef' for c in token)):
                 raise DataStoreError('INVALID_VALUE')
         if type(self.expected_revision) is not int or not 0 <= self.expected_revision < 2**63-1:
+            raise DataStoreError('INVALID_VALUE')
+        if (self.expected_generation is not None and (type(self.expected_generation) is not int
+                or not 0 <= self.expected_generation < 2**63)):
             raise DataStoreError('INVALID_VALUE')
         if type(self.qualified) is not bool:
             raise DataStoreError('INVALID_VALUE')

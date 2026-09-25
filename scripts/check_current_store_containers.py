@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import time
 from uuid import uuid4
 
@@ -35,7 +36,21 @@ def main():
     result={'task':'LF-D01','case':'C12-cross-container','synthetic':True,'passed':False,'steps':[]}
 
     def cmd(parts,timeout=120):
-        return subprocess.run(parts,env=env,check=True,capture_output=True,text=True,timeout=timeout).stdout.strip()
+        try:
+            return subprocess.run(parts,env=env,check=True,capture_output=True,text=True,timeout=timeout).stdout.strip()
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+            # These commands run only isolated synthetic tests. Keep a bounded
+            # diagnostic tail instead of losing the actual pytest assertion when
+            # capture_output=True raises; never print the inherited environment.
+            failure={'type':type(error).__name__,'returncode':getattr(error,'returncode',None)}
+            for stream in ('stdout','stderr'):
+                value=getattr(error,stream,None) or ''
+                if isinstance(value,bytes):
+                    value=value.decode('utf-8',errors='replace')
+                failure[stream+'_tail']=value[-16384:]
+            result['command_failure']=failure
+            print(json.dumps(failure,ensure_ascii=False),file=sys.stderr,flush=True)
+            raise
 
     def run(mode):
         output=cmd(base+['run','--rm','--no-deps','kernel','python','/app/container_probe.py',mode])

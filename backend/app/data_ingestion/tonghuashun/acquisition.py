@@ -32,8 +32,14 @@ class Acquisition:
             data, request_id = response.data, response.request_id
         # Store only allowlisted request parameters and the sanitized trace ID;
         # neither connection URL nor headers can enter source versions.
-        self.requests.append({"interface": interface, "parameters": params,
-                              "request_id": request_id})
+        # Compact *actual returned-key* evidence. A requested date range alone
+        # cannot reconfirm an old point omitted by a sparse response. D02 reads
+        # these raw receipts without invoking this client or changing a source
+        # toggle. No prices/member payloads or credentials are copied here.
+        receipt = {"interface": interface, "parameters": params, "request_id": request_id}
+        from app.data_ingestion.tonghuashun.confirmation import returned_keys
+        receipt.update(returned_keys(data))
+        self.requests.append(receipt)
         records = data.get("item", data.get("abilities", []))
         if isinstance(records, list):
             self.fetched_count += len(records)

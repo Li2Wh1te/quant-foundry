@@ -311,6 +311,8 @@ def publish_batch(dataset,generation,params,engine,now):
             # A full bootstrap only fills missing dates in established history.
             # Recent dumps can revise overlaps unless a newer REST run won first.
             fill_only=newer or dataset=='stock_daily_dump' and params.mode!='reconcile'
+            # Actual accepted date groups, not all inherited merged history.
+            accepted_keys=set(merged)-set(known) if fill_only else set(merged)
             if fill_only:
                 merged.update(known)
             else:
@@ -322,8 +324,12 @@ def publish_batch(dataset,generation,params,engine,now):
                 'requested_end':max(metadata['observed_end'],(old.data or {}).get('requested_end',metadata['observed_end']))}
             if target=='stock_actions':
                 data['thscode']=staged.subject
+            from app.data_ingestion.tonghuashun.confirmation import returned_keys
+            receipt=returned_keys({'item':[{date_key:k} for k in sorted(accepted_keys)]})
             result=repo.publish(target,staged.subject,'default',expected=old.revision,data=data,
-                requests=[{'interface':DATASETS[dataset].interface,'parameters':{},'artifact_sha256':slot.digest}],now=now)
+                requests=[{'interface':DATASETS[dataset].interface,'parameters':{},
+                           'artifact_sha256':slot.digest,'source_observed_at':aware(slot.started_at).isoformat(),
+                           **receipt}],now=now)
             changed+=result['changed'];unchanged+=result['unchanged'];received+=len(new)
             session.delete(staged)
         slot.imported_subjects+=len(rows)

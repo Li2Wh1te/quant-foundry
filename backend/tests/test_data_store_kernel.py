@@ -593,12 +593,33 @@ def test_actual_duckdb_interrupt_and_native_memory_cap(database, tmp_path, limit
 
 
 def test_catalog_metadata_matches_frozen_ddl(database):
+    from importlib import import_module
     from alembic.migration import MigrationContext
     from alembic.autogenerate import compare_metadata
+    from alembic.operations import Operations
+    from sqlalchemy import MetaData
     from app.data_store.tables import metadata
-    with database[0].connect() as c:
-        # The fixture's search_path is a private empty store schema, not public.
-        context = MigrationContext.configure(c, opts={'compare_type': True, 'compare_server_default': True})
+
+    # The fixture deliberately creates D01's frozen six-table schema. Check it
+    # without rewriting the historical DDL to include D02's independent table.
+    frozen_metadata = MetaData()
+    for table in metadata.sorted_tables:
+        if table.name != 'data_store_entry_status':
+            table.to_metadata(frozen_metadata)
+    assert len(frozen_metadata.tables) == 6
+    assert len(metadata.tables) == 7
+    migration = import_module('app.db.migrations.versions.20261006_01_local_entry_status')
+    assert migration.down_revision == '20261005_01'
+    with database[0].begin() as c:
+        # Both checks use the fixture's private schema, never shared/public.
+        options = {'compare_type': True, 'compare_server_default': True}
+        context = MigrationContext.configure(c, opts=options)
+        assert compare_metadata(context, frozen_metadata) == []
+        # Run the actual additive migration rather than metadata.create_all(),
+        # which would hide a mismatch between deployed DDL and current models.
+        with Operations.context(context):
+            migration.upgrade()
+        context = MigrationContext.configure(c, opts=options)
         assert compare_metadata(context, metadata) == []
 
 

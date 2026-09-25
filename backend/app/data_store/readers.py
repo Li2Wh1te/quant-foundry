@@ -129,11 +129,22 @@ def _restore(value, t):
 
 
 def _predicate(spec, values, operator):
-    if len(values) > len(spec.key) or not values:
+    """Scalar lexicographic bounds avoid DuckDB struct-BETWEEN rewrites.
+
+    Parameters remain bound values, not rendered literals. The disjunction is
+    bounded by the static key length, and never treats a prefix as a timestamp.
+    """
+    if len(values)>len(spec.key) or not values or operator not in ('>=','>','<','<='):
         raise DataStoreError('INVALID_VALUE')
-    names = ','.join('"'+k+'"' for k in spec.key[:len(values)])
-    placeholders = ','.join('?' for _ in values)
-    return f'({names}) {operator} ({placeholders})'
+    strict='>' if operator.startswith('>') else '<'
+    terms=[];params=[]
+    for index in range(len(values)):
+        term=[]
+        for earlier in range(index):
+            term.append('"'+spec.key[earlier]+'"=?');params.append(values[earlier])
+        term.append('"'+spec.key[index]+'" '+(operator if index==len(values)-1 else strict)+' ?')
+        params.append(values[index]);terms.append('('+' AND '.join(term)+')')
+    return '('+' OR '.join(terms)+')', params
 
 
 def read_many(store, queries, *, expected_generations=None, cancelled=None):
@@ -161,9 +172,8 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                     raise DataStoreError('DATA_CHANGED')
                 pages, output_bytes = [], 0
                 for spec, query in queries:
-                    with store.catalog.transaction() as c:
-                        issue_count = c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
-                                                {'d':spec.name}).scalar_one()
+                    from .issue_scope import relevant_issue_count
+                    issue_count = relevant_issue_count(store, spec, query, space.check)
                     if issue_count and query.require_qualified:
                         raise DataStoreError('DATA_RESTRICTED')
                     store._spec_current(spec, states[spec.name])
@@ -205,11 +215,14 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                         else:
                             con.execute('CREATE TEMP VIEW current_data AS SELECT * FROM _layout')
                         where, params = [], []
+                        if spec.semantics.get('tombstones') == 'explicit-current-state' and query.require_qualified:
+                            where.append("basis_state='valid' AND basis_valid=true")
                         for values, operator in ((query.lower, '>='), (query.upper, '<'), (last, '>')):
                             if values is not None:
                                 spec.key_bytes(values)
-                                where.append(_predicate(spec, values, operator))
-                                params.extend(values)
+                                predicate, bound_values = _predicate(spec, values, operator)
+                                where.append(predicate)
+                                params.extend(bound_values)
                         fields = ','.join('"'+f+'"' for f in selected)
                         order = ','.join('"'+k+'"' for k in spec.key)
                         sql = 'SELECT ' + fields + ' FROM current_data'
