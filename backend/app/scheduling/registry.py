@@ -83,7 +83,7 @@ def _register_application_tasks() -> None:
     from app.data_ingestion.scheduler_tasks.corporate_action import register_tasks as register_corporate_action_tasks
     from app.data_ingestion.scheduler_tasks.trading_status import register_tasks as register_trading_status_tasks
     from app.data_ingestion.scheduler_tasks.tonghuashun import register_tasks as register_tonghuashun_tasks
-    from app.data_foundation.scheduler_tasks import register_tasks as register_foundation_tasks
+    from app.data_store.scheduler_tasks import register_tasks as register_data_store_tasks
 
     register_tasks(task_registry)
     register_etf_tasks(task_registry)
@@ -92,7 +92,7 @@ def _register_application_tasks() -> None:
     register_corporate_action_tasks(task_registry)
     register_trading_status_tasks(task_registry)
     register_tonghuashun_tasks(task_registry)
-    register_foundation_tasks(task_registry)
+    register_data_store_tasks(task_registry)
 
 
 _register_application_tasks()

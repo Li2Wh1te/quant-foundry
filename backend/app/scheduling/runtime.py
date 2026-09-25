@@ -9,6 +9,7 @@ from uuid import UUID
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.schedulers.base import STATE_STOPPED
 from sqlalchemy.orm import Session
+from sqlalchemy import select, update
 import structlog
 from structlog.contextvars import bound_contextvars
 
@@ -27,6 +28,9 @@ from app.scheduling.schemas import (
     schedule_adapter,
 )
 from app.scheduling.service import SchedulerService, TaskConflictError
+from app.scheduling.models import TaskRun
+from app.data_store.availability import RETIRED_TASK_TYPES, read_availability
+from app.data_store.scheduler_tasks import TASK_KEY as LOCAL_UPDATE_TASK_KEY
 from app.scheduling.triggers import build_trigger
 
 
@@ -75,6 +79,15 @@ class SchedulerRuntime:
         with Session(get_engine()) as session:
             repository = SchedulerRepository(session)
             interrupted = repository.interrupt_running_runs()
+            retired = session.execute(
+                update(TaskRun)
+                .where(TaskRun.task_type.in_(RETIRED_TASK_TYPES),
+                       TaskRun.status == RunStatus.QUEUED.value)
+                .values(status=RunStatus.SKIPPED.value,
+                        finished_at=datetime.now(UTC),
+                        error_type="LegacyFoundationRemoved",
+                        error_message="旧数据底座任务已退役，本次等待运行已跳过。")
+            ).rowcount
             active_task_ids = repository.list_active_task_ids()
             session.commit()
 
@@ -94,33 +107,19 @@ class SchedulerRuntime:
             max_instances=1,
             coalesce=True,
         )
-        self.scheduler.add_job(
-            self.resume_foundation_waiters,
-            trigger="interval", seconds=60, id="foundation-backfill-resumption",
-            replace_existing=True, max_instances=1, coalesce=True,
-        )
         self.scheduler.resume()
         logger.info(
             "scheduler_started",
-            message=f"调度器已启动，加载 {len(active_task_ids)} 个活动任务并标记 {interrupted} 个遗留运行中断。",
+            message=(
+                f"调度器已启动：检查 {len(active_task_ids)} 个活动任务，"
+                f"标记 {interrupted} 个原运行中断，"
+                f"跳过 {retired} 个旧数据底座等待运行。"
+            ),
             active_tasks=len(active_task_ids),
             interrupted_runs=interrupted,
+            retired_runs=retired,
             max_workers=self.settings.scheduler_max_workers,
         )
-
-    def resume_foundation_waiters(self) -> None:
-        """Resume only explicitly enrolled backfill pauses; other pauses stay put."""
-        from app.data_foundation.update_resumption import advance, acknowledge
-        for task_id in advance(get_engine(), self.registry,
-                               runtime_digest=getattr(self.settings, 'foundation_runtime_image_digest', '')):
-            try:
-                self.sync_task(task_id)
-                acknowledge(get_engine(), task_id)
-                logger.info("foundation_update_resumed", task_id=str(task_id),
-                            message="固定来源已全部合格发布，已恢复明确接管的持续更新任务。")
-            except Exception:
-                logger.exception("foundation_update_sync_deferred", task_id=str(task_id),
-                                 message="恢复状态已保留，调度同步将在下次检查重试。")
 
     def stop(self) -> None:
         if self.running:
@@ -134,7 +133,8 @@ class SchedulerRuntime:
         with Session(get_engine()) as session:
             task = SchedulerRepository(session).get_task(task_id)
             job_id = self.task_job_id(task_id)
-            if task is None or task.state != TaskState.ACTIVE.value:
+            if (task is None or task.state != TaskState.ACTIVE.value
+                    or self.registry.get(task.task_type) is None):
                 self._remove_job_if_present(job_id)
                 return
 
@@ -205,7 +205,16 @@ class SchedulerRuntime:
                         not sources[item.source_key].enabled or not configured(sources[item.source_key]))]
                 skip_source_queue(session, blocked_types, "数据源已停用或尚未配置，本次等待运行已跳过。")
                 repository = SchedulerRepository(session)
-                run_ids = repository.claim_queued_runs(slots)
+                allowed_types = [item.key for item in self.registry.list()]
+                queued_local = session.scalar(
+                    select(TaskRun.id).where(
+                        TaskRun.task_type == LOCAL_UPDATE_TASK_KEY,
+                        TaskRun.status == RunStatus.QUEUED.value,
+                    ).limit(1)
+                )
+                if queued_local and not read_availability(session).ready:
+                    allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
+                run_ids = repository.claim_queued_runs(slots, task_types=allowed_types)
                 run_context = {
                     run.id: (run.task_id, run.task_type)
                     for run in (repository.get_run(run_id) for run_id in run_ids)

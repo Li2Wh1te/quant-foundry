@@ -1,148 +1,411 @@
-import { RecordAssetsPage } from './RecordAssetsPage';
-import { FoundationBatchLedger, FoundationIntakeLedger } from './FoundationBatchLedger';
-import { ReportAssetsPage, FoundationCatalog } from "./ReportAssetsPage";
-import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
-import { Link, useLocation, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { RefreshCw, X } from "lucide-react";
+import { RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
+
+import {
+  dataStoreApi, DataStoreApiError,
+  type CurrentDataset, type DatasetList, type IssueList,
+  type PreviewRequest, type PreviewResult
+} from "../api/dataStore";
 import { useAuth } from "../auth/AuthContext";
-import { foundationApi, FoundationApiError, type Dataset, type ReadResult, type ReadRequest, type DetailedProcess, type ReleaseItem, type Lineage } from "../api/foundation";
 import { Select } from "../components/controls/Select";
 import "./DataAssets.css";
 
-const ROOT="/admin/data-assets";
-// Retain only navigation positions, never authorized records or signed tokens.
-const scrollPositions=new Map<string,number>();
-const names: Record<string,string>={available:"满足请求",partial:"部分满足",unavailable:"不满足请求",unknown:"证据不足",awaiting_publication:"已封存待发布",queued:"等待处理",running:"运行中",succeeded:"已完成",failed:"失败",cancelled:"已取消",dependency_missing:"依赖缺失",superseded:"依据已更新",evidence_missing:"记录不足",fixed:"输入已固定",evaluated:"已评估",published:"已发布",reused:"已复用",not_applicable:"不适用",added:"新增",inherited:"继承未变",value_changed:"值已变化",basis_changed:"依据已变化",restricted_comparison:"当前限制下不能完整比较",withdrawn:"已撤回",gap:"缺口",blocked:"已阻断",absent:"未包含"};
-const stepNames:Record<string,string>={input:"读取本地来源",normalization:"清洗与标准化",quality:"校验候选",governance:"对账统一",publication:"正式发布"};
-const count=(v:number|null|undefined)=>v==null?"待确认":v.toLocaleString("zh-CN");
-const time=(v:string|null|undefined)=>v?new Date(v).toLocaleString("zh-CN",{hour12:false}):"暂无记录";
+const ROOT = "/admin/data-assets";
+const PAGE_SIZE = 20;
+const statusNames: Record<string, string> = {
+  rebuilding: "维护重建中",
+  not_checked: "尚未检查",
+  empty: "当前为空",
+  available: "当前可用",
+  restricted: "存在限制",
+  rebuild_required: "需要重建",
+  processed: "处理完成",
+  processed_with_issues: "处理完成，存在问题",
+  incomplete: "处理未完成",
+  running: "处理中"
+};
+const issueNames: Record<string, string> = {
+  LEGACY_RESTRICTION: "旧数据限制待核对",
+  SOURCE_CONFIRMATION_UNPROVEN: "来源确认依据不足",
+  REPORT_INCOMPLETE: "报告内容不完整",
+  ISSUE_BUDGET_EXCEEDED: "问题数量超过处理上限"
+};
+const frequencies: Record<string, string> = {
+  daily: "日频", minute: "分钟", tick: "逐笔", report: "报告", object: "按对象"
+};
 
-/** Render the server's settled-input conclusion without guessing from counts.
- * Keeping this context independently renderable lets CI exercise both states
- * with real React markup while preserving the page's existing layout. */
-export function DatasetContext({dataset}:{dataset:Dataset}) {
-  return <div className="qf-assets-context"><p>当前正式版本：<code>{dataset.current_release||'暂无正式发布'}</code></p><p>业务截至：{dataset.business_as_of||'待确认'} · 发布于 {time(dataset.published_at)}</p><p>来源观察：{time(dataset.source_observed_at)} · 来源至候选 {count(dataset.normalization_delay_seconds)} 秒 · 候选至正式 {count(dataset.publication_delay_seconds)} 秒</p>{dataset.pending_governance&&<p>最新候选尚未形成当前正式发布；候选数量与正式数量分别统计。</p>}</div>;
+function time(value: string | null | undefined): string {
+  if (!value) return "暂无记录";
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? "时间未知" : parsed.toLocaleString("zh-CN", { hour12: false });
 }
 
-/** Native modal focus containment with one close path for Escape and backdrop. */
-export function EvidencePanel({title,children,onClose,wide=false}:{title:string;children:ReactNode;onClose:()=>void;wide?:boolean}) {
-  const ref=useRef<HTMLDialogElement>(null);
-  useEffect(()=>{const element=ref.current!,previous=document.activeElement as HTMLElement|null;const overflow=document.body.style.overflow;
-    document.body.style.overflow="hidden";element.showModal();return()=>{element.close();document.body.style.overflow=overflow;previous?.focus();};},[]);
-  return <dialog ref={ref} className={`qf-assets-panel ${wide?"is-wide":""}`} aria-labelledby="foundation-panel-title" onCancel={e=>{e.preventDefault();onClose();}} onClick={e=>{if(e.target===e.currentTarget){const r=e.currentTarget.getBoundingClientRect();if(e.clientX<r.left||e.clientX>r.right||e.clientY<r.top||e.clientY>r.bottom)onClose();}}}>
-    <header><h2 id="foundation-panel-title">{title}</h2><button className="qfo-secondary-btn" aria-label="关闭详情" onClick={onClose}><X size={18}/></button></header><div className="qf-assets-panel-body">{children}</div><footer><button className="qfo-secondary-btn" onClick={onClose}>关闭</button></footer>
-  </dialog>;
+function count(value: number | null | undefined): string {
+  return value == null ? "未检查" : value.toLocaleString("zh-CN");
 }
-const referenceLabels:Record<string,string>={value_decision_id:'原值生成决策',value_policy_id:'原值生成政策',candidate_id:'候选修订',decision_id:'治理决策',official_id:'正式修订',atomic_unit:'原子处理单位',comparison:'来源比较',policy_id:'政策版本',reason:'选取原因',representation:'数据层次',source:'数据来源',source_hash:'来源内容摘要',source_observed_at:'来源观察时间',source_report_key:'来源报告标识',work_id:'处理工作',binding_id:'身份绑定',assessment_id:'质量评估',contract_id:'契约版本',open:'开盘价',high:'最高价',low:'最低价',close:'收盘价',volume:'成交量',turnover:'成交额',source_ref_id:'固定来源',candidate_manifest_id:'候选清单',candidate_input_set_id:'多输入候选清单',governance_work_id:'治理工作',normalization_work_id:'标准化工作',dependency_id:'依赖清单',execution_id:'执行版本',fingerprint:'输入摘要',contract:'契约',execution:'执行依据',governance:'治理版本',parser:'解析版本',policy:'治理规则',quality:'质量规则',transform:'转换规则',version:'版本',hash:'内容摘要',id:'标识',name:'规则名称'};
-export function References({values}:{values:Record<string,unknown>}) {return <dl>{Object.entries(values).map(([key,value])=><div key={key}><dt>{referenceLabels[key]||key}</dt><dd>{value&&typeof value==='object'&&!Array.isArray(value)?<References values={value as Record<string,unknown>}/>:<code>{value==null?'不适用':Array.isArray(value)?value.join('、'):({ 'whole-report':'整份报告',not_applicable:'不适用',SINGLE_SOURCE:'单一准入来源',official:'正式数据',tonghuashun:'同花顺',tushare:'Tushare' } as Record<string,string>)[String(value)]||String(value)}</code>}</dd></div>)}</dl>;}
 
-
-/** The URL stores intent and immutable references, never signed tokens or data.
- * Request controllers fence stale responses; current authorization wins over
- * any previously cached page, evidence panel, or diagnostic clipboard preview. */
-function DailyAssetsPage() {
-  const {datasetId}=useParams(), location=useLocation(), [params,setParams]=useSearchParams();
-  const view=location.pathname.endsWith('/processing')?'process':params.get('view')||'data';
-  const [dataset,setDataset]=useState<Dataset|null>(null),[busy,setBusy]=useState(true),[error,setError]=useState(''),[refresh,setRefresh]=useState(0);
-  const [result,setResult]=useState<ReadResult|null>(null),[checking,setChecking]=useState(false),[readError,setReadError]=useState('');
-  const [process,setProcess]=useState<DetailedProcess|null>(null),[works,setWorks]=useState<DetailedProcess[]>([]),[workNext,setWorkNext]=useState<string|null>(null);
-  const [releases,setReleases]=useState<ReleaseItem[]>([]),[releaseNext,setReleaseNext]=useState<string|null>(null),[auxError,setAuxError]=useState('');
-  const [panel,setPanel]=useState<{title:string;content:ReactNode;wide?:boolean}|null>(null),[notice,setNotice]=useState('');
-  const [page,setPage]=useState(0),[cursors,setCursors]=useState<(string|null)[]>([null]),[clock,setClock]=useState(Date.now());
-  const query=useRef<AbortController|null>(null), auxiliary=useRef<AbortController|null>(null), evidence=useRef<AbortController|null>(null);
-  const {logout}=useAuth(),navigate=useNavigate();
-  const release=params.get('release')||dataset?.current_release||'';
-  const work=params.get('work')||dataset?.work_ids[0]||'';
-  const from=params.get('from')||dataset?.range.from||'',to=params.get('to')||dataset?.range.to||'';
-  const fields=(params.has('fields')?params.get('fields')!:'close').split(',').filter(Boolean);
-  const subjects=params.has('subjects')?(params.get('subjects')||'').split(',').filter(Boolean):dataset?.subjects.map(s=>s.instrument_id)||[];
-  const complete=params.get('complete')!=='false',partial=params.get('partial')==='true',size=[20,50,100].includes(Number(params.get('size')))?Number(params.get('size')):50;
-  const timeMode=params.get('time')||'observed',freshness=params.get('freshness')||'';
-  const intent=JSON.stringify([datasetId,release,from,to,fields,subjects,complete,partial,timeMode,freshness]);
-  const handleError=useCallback((caught:unknown)=>{
-    if(caught instanceof FoundationApiError&&[409,410].includes(caught.status)){setResult(null);setPanel(null);setCursors([null]);setPage(0);}
-    if(caught instanceof FoundationApiError&&[401,403].includes(caught.status)){
-      query.current?.abort();auxiliary.current?.abort();evidence.current?.abort();setDataset(null);setResult(null);setProcess(null);setReleases([]);setWorks([]);setPanel(null);setNotice('');logout();navigate('/login',{replace:true});
+function useFailure(clear: () => void) {
+  const { logout } = useAuth();
+  const navigate = useNavigate();
+  return useCallback((error: unknown): string => {
+    if (error instanceof DataStoreApiError && [401, 403].includes(error.status)) {
+      clear();
+      logout();
+      navigate("/login", { replace: true });
     }
-    return caught instanceof Error?caught.message:'读取失败，请重试。';
-  },[logout,navigate]);
-  function update(key:string,value:string){const next=new URLSearchParams(params);next.set(key,value);next.delete('page');setParams(next);}
-  function invalidate(){query.current?.abort();evidence.current?.abort();setResult(null);setPanel(null);setChecking(false);setReadError('');setPage(0);setCursors([null]);}
-  useEffect(()=>{invalidate();return()=>{query.current?.abort();evidence.current?.abort();};},[intent]);
-  useEffect(()=>{evidence.current?.abort();setPanel(null);setProcess(null);},[view,work]);
-  useEffect(()=>{if(busy)return;const scroller=document.querySelector<HTMLElement>('.qfo-main');if(!scroller)return;const key=location.pathname+location.search;scroller.scrollTop=scrollPositions.get(key)||0;const remember=()=>scrollPositions.set(key,scroller.scrollTop);scroller.addEventListener('scroll',remember);return()=>scroller.removeEventListener('scroll',remember);},[busy,location.pathname,location.search]);
-  useEffect(()=>{const timer=setInterval(()=>setClock(Date.now()),1000);return()=>clearInterval(timer);},[]);
-  useEffect(()=>{if(!notice)return;const timer=setTimeout(()=>setNotice(''),4000);return()=>clearTimeout(timer);},[notice]);
-  useEffect(()=>{const controller=new AbortController();setBusy(true);setError('');
-    foundationApi<Dataset>(`/datasets/${encodeURIComponent(datasetId||'market.bar.daily')}`,controller.signal)
-      .then(d=>{if(!controller.signal.aborted)setDataset(d);}).catch(e=>{if(!controller.signal.aborted)setError(handleError(e));}).finally(()=>{if(!controller.signal.aborted)setBusy(false);});
-    return()=>controller.abort();},[datasetId,refresh,handleError]);
-  useEffect(()=>{if(datasetId&&dataset?.current_release&&!params.get('release')){const next=new URLSearchParams(params);next.set('release',dataset.current_release);setParams(next,{replace:true});}},[dataset,datasetId,params,setParams]);
-  useEffect(()=>{if(!datasetId)return;const controller=new AbortController();auxiliary.current=controller;setAuxError('');
-    Promise.all([foundationApi<{items:ReleaseItem[];next_cursor:string|null}>(`/datasets/${datasetId}/releases`,controller.signal),foundationApi<{items:DetailedProcess[];next_cursor:string|null}>(`/datasets/${datasetId}/processing`,controller.signal)])
-    .then(([r,w])=>{if(!controller.signal.aborted){setReleases(r.items);setReleaseNext(r.next_cursor);setWorks(w.items);setWorkNext(w.next_cursor);}})
-    .catch(e=>{if(!controller.signal.aborted)setAuxError(handleError(e));});return()=>controller.abort();},[datasetId,refresh,handleError]);
-  useEffect(()=>{if(view!=='process'||!work){setProcess(null);return;}const controller=new AbortController();setAuxError('');
-    foundationApi<{items:DetailedProcess[]}>(`/datasets/${datasetId}/processing?work_id=${work}`,controller.signal).then(d=>{if(!controller.signal.aborted)setProcess(d.items[0]||null);}).catch(e=>{if(!controller.signal.aborted)setAuxError(handleError(e));});return()=>controller.abort();},[work,view,datasetId,refresh,handleError]);
-  // Keep the last authorized page on transient failure; authorization and
-  // issue changes still clear it through the guarded read error path.
-  function refreshView(){evidence.current?.abort();setPanel(null);setRefresh(v=>v+1);if(result?.resolution_token)void read(page);}
-  function request():ReadRequest {return {dataset_id:dataset!.dataset,contract_version:dataset!.version,profile_id:dataset!.profile,semantic_series_id:dataset!.series,subjects,business_range:{from,to},fields,release,require_complete:complete,allow_partial:partial,time_mode:timeMode,...(freshness===''?{}:{max_staleness_days:Number(freshness)})};}
-  async function check(){if(!dataset)return;query.current?.abort();const controller=new AbortController();query.current=controller;setChecking(true);setReadError('');setResult(null);setPage(0);setCursors([null]);
-    try{const data=await foundationApi<ReadResult>('/capability-checks',controller.signal,request());if(!controller.signal.aborted)setResult(data);}
-    catch(e){if(!controller.signal.aborted)setReadError(handleError(e));}finally{if(!controller.signal.aborted)setChecking(false);}}
-  async function read(target=0,pageSize=size,excludedCursor?:string){if(!result?.resolution_token)return;query.current?.abort();const controller=new AbortController();query.current=controller;setChecking(true);setReadError('');setPanel(null);
-    try{const data=await foundationApi<ReadResult>('/queries',controller.signal,{resolution_token:result.resolution_token,cursor:cursors[target]||null,page_size:pageSize,...(excludedCursor?{excluded_cursor:excludedCursor}:{})});if(!controller.signal.aborted){setResult(data);setPage(target);setCursors(old=>{const next=old.slice(0,target+1);if(data.next_cursor)next.push(data.next_cursor);return next;});}}
-    catch(e){if(!controller.signal.aborted){setReadError(handleError(e));if(e instanceof FoundationApiError&&[409,410,401,403].includes(e.status)){setResult(null);setCursors([null]);setPage(0);setPanel(null);}}}finally{if(!controller.signal.aborted)setChecking(false);}}
-  async function showLineage(id:string){evidence.current?.abort();const controller=new AbortController();evidence.current=controller;setAuxError('');try{const d=await foundationApi<Lineage>(`/revisions/${id}/lineage`,controller.signal);if(!controller.signal.aborted)setPanel({title:'血缘依据',content:<><p>正式值来自已发布治理决策；来源候选不替代正式读取。</p><References values={{'正式修订':d.official_id,'治理决策':d.decision_id,'候选':d.candidate_id,'来源':d.source,'固定来源':d.source_ref_id,'来源摘要':d.source_hash,'身份绑定':d.binding_id,'质量评估':d.assessment_id}}/></>});}catch(e){if(!controller.signal.aborted)setAuxError(handleError(e));}}
-  async function more(kind:'work'|'release'){const next=kind==='work'?workNext:releaseNext;if(!next)return;const controller=new AbortController();auxiliary.current?.abort();auxiliary.current=controller;try{if(kind==='work'){const d=await foundationApi<{items:DetailedProcess[];next_cursor:string|null}>(`/datasets/${datasetId}/processing?before=${next}`,controller.signal);if(!controller.signal.aborted){setWorks(old=>[...old,...d.items]);setWorkNext(d.next_cursor);}}else{const d=await foundationApi<{items:ReleaseItem[];next_cursor:string|null}>(`/datasets/${datasetId}/releases?before=${next}`,controller.signal);if(!controller.signal.aborted){setReleases(old=>[...old,...d.items]);setReleaseNext(d.next_cursor);}}}catch(e){if(!controller.signal.aborted)setAuxError(handleError(e));}}
-  async function inspect(after?:number){if(!dataset?.candidate_work_id)return;setAuxError('');evidence.current?.abort();const controller=new AbortController();evidence.current=controller;try{const d=await foundationApi<{items:{readiness:string;id:string}[];total?:number;next_occurrence?:number|null}>('/candidate-inspections',controller.signal,{work_id:dataset.candidate_work_id,...(after===undefined?{}:{after_occurrence:after})});if(!controller.signal.aborted)setPanel({title:'候选诊断',content:<><p>候选数据，仅供诊断，不是正式发布。以下展示 {d.items.length} 条。</p><References values={{'标准化工作':dataset.candidate_work_id,'候选记录':d.total??d.items.length}}/><ul>{d.items.map(i=><li key={i.id}><code>{i.id}</code> · {i.readiness==='ready'?'候选合格':'已隔离'}</li>)}</ul>{d.next_occurrence!=null&&<button className="qfo-secondary-btn" onClick={()=>inspect(d.next_occurrence!)}>下一页候选</button>}</>});}catch(e){if(!controller.signal.aborted)setAuxError(handleError(e));}}
-  async function compare(previous:string,current:string,cursor?:string){if(!dataset)return;evidence.current?.abort();const controller=new AbortController();evidence.current=controller;setAuxError('');try{const d=await foundationApi<{items:{trade_date:string;instrument_id:string;kind:string;before:Record<string,string>;after:Record<string,string>;restricted_fields:string[];basis:{before:Record<string,unknown>|null;after:Record<string,unknown>|null}}[];has_more:boolean;next_cursor?:string;rules:{before:Record<string,unknown>;after:Record<string,unknown>}}> (`/datasets/${datasetId}/release-changes`,controller.signal,{...request(),previous_release:previous,current_release:current,page_size:50,...(cursor?{cursor}:{})});if(!controller.signal.aborted)setPanel({title:'版本变化',wide:true,content:<><p>按当前查询范围和字段比较；受限原值不展示。本页 {d.items.length} 项{d.has_more?'，还有下一页':''}。</p><details><summary>版本协调工作依据</summary><h3>原版依据</h3><References values={d.rules.before}/><h3>新版依据</h3><References values={d.rules.after}/></details>{d.items.map(i=><section key={i.trade_date+i.instrument_id}><h3>{i.trade_date} · {names[i.kind]||'变化待核验'}</h3><References values={{'标的':dataset.subjects.find(s=>s.instrument_id===i.instrument_id)?.code||i.instrument_id,'当前受限字段':i.restricted_fields.map(f=>referenceLabels[f]||f).join('、')||'无','原版可读值':i.before,'新版可读值':i.after}}/><details><summary>本条数据的实际依据</summary><h3>原版依据</h3><References values={i.basis.before||{说明:'原版不存在该对象'}}/><h3>新版依据</h3><References values={i.basis.after||{说明:'新版不存在该对象'}}/></details></section>)}{d.next_cursor&&<button className="qfo-secondary-btn" onClick={()=>compare(previous,current,d.next_cursor)}>下一页变化</button>}</>});}catch(e){if(!controller.signal.aborted)setAuxError(handleError(e));}}
-  async function copyDiagnostic(){const summary={dataset:dataset?.dataset,release,work:view==='process'?work:undefined,range:{from,to},fields,state:result?.state,checked_at:result?.checked_at,issue_state_version:result?.issue_state_version,reasons:result?.requirements.map(r=>({id:r.id,message:r.message}))};try{await navigator.clipboard.writeText(JSON.stringify(summary,null,2));setNotice('已复制脱敏诊断摘要');}catch{setAuxError('无法写入剪贴板，请检查浏览器权限。');}}
-  const expired=!!result?.expires_at&&clock>=result.expires_at*1000;
-  const detail=`${ROOT}/${datasetId||dataset?.dataset||'market.bar.daily'}`;
-  function tabLink(key:string){const next=new URLSearchParams(params);next.set('view',key);return (key==='process'?`${detail}/processing`:detail)+`?${next}`;}
-  const search=params.get('search')||'',filter=params.get('status')||'all';
-  const matches=dataset&&`${dataset.name} ${dataset.dataset}`.toLowerCase().includes(search.toLowerCase())&&(filter==='all'||(filter==='published'?!!dataset.current_release:!dataset.current_release));
+    return error instanceof Error ? error.message : "读取失败，请稍后重试。";
+  }, [clear, logout, navigate]);
+}
+
+function saveCatalogScroll() {
+  try {
+    const main = document.querySelector(".qfo-main");
+    sessionStorage.setItem("qf-assets-scroll", String(main?.scrollTop ?? 0));
+  } catch { /* Session storage is optional. */ }
+}
+
+function Catalog() {
+  const [params, setParams] = useSearchParams();
+  const [catalog, setCatalog] = useState<DatasetList | null>(null);
+  const [loadedAt, setLoadedAt] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const clear = useCallback(() => setCatalog(null), []);
+  const failure = useFailure(clear);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setBusy(true);
+    setError("");
+    dataStoreApi<DatasetList>("/datasets?limit=100", controller.signal)
+      .then(result => {
+        if (controller.signal.aborted) return;
+        setCatalog(result);
+        setLoadedAt(new Date().toISOString());
+      })
+      .catch(problem => {
+        if (!controller.signal.aborted) setError(failure(problem));
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setBusy(false);
+      });
+    return () => controller.abort();
+  }, [refresh, failure]);
+
+  useEffect(() => {
+    const main = document.querySelector(".qfo-main");
+    if (!main || !catalog) return;
+    try { main.scrollTop = Number(sessionStorage.getItem("qf-assets-scroll") ?? 0); }
+    catch { /* Keep the browser's default scroll position. */ }
+  }, [catalog]);
+
+  const search = params.get("search") ?? "";
+  const filter = params.get("status") ?? "all";
+  const requestedPage = Number(params.get("page") ?? "1");
+  const page = Number.isInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1;
+  const filtered = catalog?.items.filter(item => {
+    const matchingText = `${item.name} ${item.dataset}`.toLowerCase().includes(search.trim().toLowerCase());
+    return matchingText && (filter === "all" || item.status === filter);
+  }) ?? [];
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
+  const visiblePage = Math.min(page, pages);
+  const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
+
+  function update(key: string, value: string) {
+    const next = new URLSearchParams(params);
+    next.set(key, value);
+    next.set("page", "1");
+    setParams(next);
+  }
+  function go(pageNumber: number) {
+    const next = new URLSearchParams(params);
+    next.set("page", String(pageNumber));
+    setParams(next);
+  }
+
   return <section className="qf-assets" aria-busy={busy}>
-    <header className="qf-assets-heading"><div>{datasetId&&<Link to={`${ROOT}?search=${encodeURIComponent(search)}&status=${filter}`}>数据资产</Link>}<h1>{datasetId?dataset?.name||'数据集详情':'数据资产'}</h1><p>查看正式数据的版本、覆盖范围与处理依据。</p></div><button className="qfo-secondary-btn" disabled={busy} onClick={refreshView}><RefreshCw size={16}/>{busy?'读取中…':'刷新'}</button></header>
-    {notice&&<div className="qf-assets-toast" role="status">{notice}</div>}{error&&<p role="alert" className="qf-assets-error">{error}{dataset&&' 当前保留上次资产摘要及其时间。'}</p>}
-    {!dataset&&!error&&<p role="status">正在读取数据资产…</p>}
-    {dataset&&(!datasetId?<><div className="qf-assets-controls"><label>搜索数据集<input value={search} onChange={e=>update('search',e.target.value)} placeholder="名称或数据集"/></label><label>发布状态<Select value={filter} onChange={e=>update('status',e.target.value)}><option value="all">全部</option><option value="published">已正式发布</option><option value="pending">暂无正式发布</option></Select></label></div>{matches?<div className="qf-assets-sheet"><table><thead><tr><th>数据集</th><th>契约与口径</th><th>业务截至</th><th>正式记录</th><th>状态</th></tr></thead><tbody><tr><td><Link to={detail+`?${params}`}>{dataset.name}</Link></td><td>1.0 · 未复权 · CNY</td><td>{dataset.business_as_of||'暂无正式数据'}</td><td>{count(dataset.official_keys)} 行</td><td>{dataset.current_release?'已正式发布':dataset.candidate_records?'有候选待治理':'暂无正式发布'}<small>成交量单位待验证</small></td></tr></tbody></table></div>:<p>没有匹配的数据集，请调整筛选条件。</p>}</>:<>
-      <nav className="qf-assets-tabs" aria-label="数据集视图">{[['data','概况与数据'],['fields','字段与口径'],['versions','来源与版本'],['process','处理过程']].map(([key,label])=><Link key={key} aria-current={view===key?'page':undefined} to={tabLink(key)}>{label}</Link>)}</nav>
-      <div className="qf-assets-metrics">{[['来源记录',dataset.source_records],['候选记录',dataset.candidate_records],['正式业务键',dataset.official_keys],['应有业务键',dataset.expected_business_keys]].map(([label,v])=><div key={String(label)}><span>{label}</span><strong>{count(v as number|null)}</strong><small>行</small></div>)}</div>
-      <DatasetContext dataset={dataset}/>
-      {view==='versions'&&datasetId&&<FoundationIntakeLedger datasetId={datasetId} refresh={refresh} onError={handleError}/>}
-      {(view==='process'||view==='versions')&&datasetId&&<FoundationBatchLedger datasetId={datasetId} refresh={refresh} onError={handleError}/>}
-      {auxError&&<p role="alert" className="qf-assets-error">{auxError}</p>}
-      {view==='data'&&<><div className="qf-assets-note">{dataset.limitations.map(s=><p key={s}>{s}</p>)}</div><section className="qf-assets-sheet"><h2>检查与正式读取</h2><p>所选版本：<code>{release||'暂无正式发布'}</code></p>{release!==dataset.current_release&&<p>当前存在其他发布，本次仍固定所选版本。</p>}
-        <fieldset><legend>标的</legend><div className="qf-assets-checks">{dataset.subjects.map(s=><label key={s.instrument_id}><input type="checkbox" checked={subjects.includes(s.instrument_id)} onChange={e=>update('subjects',(e.target.checked?[...subjects,s.instrument_id]:subjects.filter(i=>i!==s.instrument_id)).join(','))}/>{s.code} · {s.name}</label>)}</div></fieldset>
-        <div className="qf-assets-form"><label>开始日期<input type="date" value={from} onChange={e=>update('from',e.target.value)}/></label><label>结束日期<input type="date" value={to} onChange={e=>update('to',e.target.value)}/></label></div>
-        <fieldset><legend>读取字段</legend><div className="qf-assets-checks">{dataset.fields.map(f=><label key={f.key}><input type="checkbox" checked={fields.includes(f.key)} onChange={e=>update('fields',(e.target.checked?[...fields,f.key]:fields.filter(i=>i!==f.key)).join(','))}/>{f.name}（{f.unit}）</label>)}</div></fieldset>
-        <div className="qf-assets-checks"><label><input type="checkbox" checked={complete} onChange={e=>update('complete',String(e.target.checked))}/>要求区间完整覆盖</label><label><input type="checkbox" checked={partial} onChange={e=>update('partial',String(e.target.checked))}/>请求未满足时允许读取已证明的子集</label></div>
-        {!complete&&<p className="qf-assets-note">本次未要求完整覆盖；字段、时间与当前问题限制仍然生效。</p>}
-        <details><summary>时间与新鲜度要求</summary><div className="qf-assets-form"><label>时间依据<Select value={timeMode} onChange={e=>update('time',e.target.value)}><option value="observed">本地观察</option><option value="latest_known">最新知识完整性（尚无证据）</option><option value="strict_public_pit">历史公开时点（尚无证据）</option></Select></label><label>最多落后结束日（自然日）<input type="number" min="0" step="1" value={freshness} placeholder="不要求新鲜度" onChange={e=>update('freshness',e.target.value)}/></label></div></details>
-        <div className="qf-assets-controls"><button className="qfo-primary-btn" disabled={checking||!subjects.length||!fields.length||!from||!to||!release} onClick={check}>{checking?'处理中…':'检查是否满足'}</button><button className="qfo-secondary-btn" disabled={checking||!result?.resolution_token||expired||!(result.state==='available'||result.state==='partial'&&partial)} onClick={()=>read()}>读取正式数据</button></div>
-        {readError&&<p role="alert" className="qf-assets-error">{readError}{!!result?.items.length&&' 当前保留上次获准页面，请核对原检查时间。'}</p>}{expired&&<p role="alert" className="qf-assets-note">检查已过期，请重新检查原正式版本。</p>}
-        {result&&<><h3 aria-live="polite">{names[result.state]}</h3><p>当前可读 {count(result.scope_summary.currently_readable_keys)} / 应有 {count(result.scope_summary.expected_business_keys)} · 正式记录 {count(result.scope_summary.official_keys)} · 检查于 {time(result.checked_at)}</p>{result.requirements.map(r=><p key={r.id}>{r.message}</p>)}{!result.request_satisfied&&<p>原请求未满足；部分读取不等于完整覆盖。</p>}
-          {!!result.excluded_total&&<details><summary>缺口与限制（{result.excluded_total}项）</summary><ul>{result.excluded?.map((g,i)=><li key={i}>{g.trade_date} · {dataset.subjects.find(s=>s.instrument_id===g.instrument_id)?.code||g.instrument_id} · {({field_unavailable:'字段缺失或单位未验证',current_issue:'当前问题限制',COVERAGE_GAP:'缺少正式记录',STALE_BUSINESS_DATE:'业务截至不满足新鲜度'} as Record<string,string>)[g.reason]||names[g.reason]||'范围受限'}</li>)}</ul>{result.next_excluded_cursor&&<button className="qfo-secondary-btn" disabled={checking||expired} onClick={()=>read(page,size,result.next_excluded_cursor!)}>下一组限制</button>}</details>}
-          {!!result.items.length&&<><div className="qf-assets-scroll"><table><thead><tr><th>日期</th><th>标的</th>{fields.map(f=><th key={f}>{dataset.fields.find(v=>v.key===f)?.name}</th>)}<th>依据</th></tr></thead><tbody>{result.items.map(row=><tr key={row.official_id}><td>{row.trade_date}</td><td>{dataset.subjects.find(s=>s.instrument_id===row.instrument_id)?.code||row.instrument_id}</td>{fields.map(f=><td className="qf-assets-number" key={f}>{row[f as keyof typeof row]}</td>)}<td><button className="qfo-secondary-btn" onClick={()=>showLineage(row.official_id)}>查看血缘</button></td></tr>)}</tbody></table></div><div className="qf-assets-controls"><button className="qfo-secondary-btn" disabled={checking||expired||page===0} onClick={()=>read(page-1)}>上一页</button><span>第 {page+1} 页 · 本页 {result.items.length} 行 / 可读 {result.total_readable} 行</span><button className="qfo-secondary-btn" disabled={checking||expired||!result.next_cursor} onClick={()=>read(page+1)}>下一页</button><Select aria-label="每页条数" value={String(size)} onChange={e=>{update('size',e.target.value);setCursors([null]);setPage(0);read(0,Number(e.target.value));}}>{[20,50,100].map(n=><option key={n} value={String(n)}>{n} 条/页</option>)}</Select></div></>}
-          <button className="qfo-secondary-btn" onClick={copyDiagnostic}>复制脱敏诊断</button>
-        </>}</section></>}
-      {view==='fields'&&<section className="qf-assets-sheet"><h2>契约 1.0 · 默认配置 · 未复权</h2><p>正式读取已实现；当前仅固定范围手动发布。来源重放能力与正式读取分开，需查看来源执行归档。</p><div className="qf-assets-scroll"><table><thead><tr><th>字段</th><th>单位</th><th>类型</th><th>精度</th><th>要求与限制</th></tr></thead><tbody>{dataset.fields.map(f=>{const core=dataset.contract?.core_fields[f.key],spec=core||dataset.contract?.optional_fields[f.key];return <tr key={f.key}><td>{f.name}</td><td>{f.unit}</td><td>Decimal</td><td>{spec?`${spec.precision}, ${spec.scale}`:'待确认'}</td><td>{core?'核心必需':'可选'}{f.key==='volume'?'；当前单位证据不足，正式值为空':''}</td></tr>;})}</tbody></table></div><p>当前仅有本地观察依据，不提供历史公开时点保证。请求最多1000个“标的×自然日”。</p><details><summary>读取投影依据</summary><References values={{'契约':dataset.version,'投影版本':dataset.projection?.version,'投影摘要':dataset.projection?.hash}}/></details></section>}
-      {view==='versions'&&<section className="qf-assets-sheet"><h2>正式版本</h2>{!releases.length?<p>暂无正式发布记录。</p>:releases.map(r=><article key={r.id} className="qf-assets-version"><h3>{time(r.published_at)}</h3><p><code>{r.id}</code></p><p>{r.parent_id?'基于父发布形成新版本':'首次正式发布，无历史版本可比较。'}</p><div className="qf-assets-controls"><button className="qfo-secondary-btn" onClick={()=>{const next=new URLSearchParams(params);next.set('release',r.id);next.set('view','data');setParams(next);}}>读取此版本</button>{r.parent_id&&<button className="qfo-secondary-btn" onClick={()=>compare(r.parent_id!,r.id)}>查看版本变化</button>}<button className="qfo-secondary-btn" onClick={()=>{const next=new URLSearchParams(params);next.set('work',r.work_id);navigate(`${detail}/processing?${next}`);}}>查看处理依据</button></div></article>)}{releaseNext&&<button className="qfo-secondary-btn" onClick={()=>more('release')}>更多历史版本</button>}<h3>来源候选</h3><p>候选与正式数据分别存储，候选合格不代表正式请求满足。</p><button className="qfo-secondary-btn" disabled={!dataset.candidate_work_id} onClick={()=>inspect()}>查看候选诊断</button></section>}
-      {view==='process'&&<section className="qf-assets-sheet"><h2>所选处理工作</h2>{!works.length?<p>暂无处理记录，来源登记不代表正式发布。</p>:<><label>工作记录<Select value={work} onChange={e=>update('work',e.target.value)}>{(process&&!works.some(w=>w.id===process.id)?[process,...works]:works).map(w=><option key={w.id} value={w.id}>{w.kind==='A'?'标准化':'治理发布'} · {names[w.status]||'待核实'} · {w.id.slice(0,8)}</option>)}</Select></label>{workNext&&<button className="qfo-secondary-btn" onClick={()=>more('work')}>更多历史工作</button>}</>}{process&&<><p>{process.kind==='A'?'标准化':'治理发布'} · {names[process.status]} · 已提交 {count(process.counters.processed)} / {count(process.counters.total)} 行</p><p>本工作输出：<code>{process.output_releases.join('、')||'暂无正式输出'}</code></p><ol className="qf-assets-steps">{process.steps.map(step=><li key={step.step}><h3>{stepNames[step.step]} · {names[step.status]||'处理中'}</h3>{step.events.length?step.events.map(e=><p key={`${e.work_id||'legacy'}:${e.sequence}`}>{e.message}<small>{time(e.at)}</small></p>):<p>该节点缺少已提交记录，不能推断已完成。</p>}<button className="qfo-secondary-btn" onClick={()=>setPanel({title:stepNames[step.step],content:<><h3>处理</h3><p>{step.detail.processing}</p><h3>输入</h3><References values={step.detail.input}/><h3>输出</h3><p>{step.detail.output.events} 条事件；正式输出 {step.detail.output.releases.length} 个</p><h3>当次依据</h3>{step.detail.input_works?.length?step.detail.input_works.map(i=><section key={i.work_id}><h3>标准化工作 {i.work_id.slice(0,8)}</h3><References values={i.input}/><References values={i.basis}/></section>):<References values={step.detail.basis}/>}<h3>影响</h3><p>{step.detail.impact}</p><h3>下一步</h3><p>{step.detail.next_step}</p></>})}>查看节点详情</button></li>)}</ol><button className="qfo-secondary-btn" onClick={copyDiagnostic}>复制脱敏诊断</button></>}</section>}
-    </>)}
-    {dataset&&<p className="qf-assets-asof">资产摘要读取于 {time(dataset.as_of)}。来源、候选与正式数量分别统计。</p>}
-    {panel&&<EvidencePanel title={panel.title} wide={panel.wide} onClose={()=>setPanel(null)}>{auxError&&<p role="alert" className="qf-assets-error">{auxError}</p>}{panel.content}</EvidencePanel>}
+    <header className="qf-assets-heading">
+      <div><p className="qf-assets-eyebrow">CURRENT DATA / 01</p><h1>数据资产</h1>
+        <p>查看当前数据、处理状态与限制；历史发布和候选流程已退役。</p></div>
+      <button className="qfo-secondary-btn" type="button" onClick={() => setRefresh(value => value + 1)} disabled={busy}>
+        <RefreshCw size={16} aria-hidden="true" />{busy ? "刷新中…" : "刷新"}
+      </button>
+    </header>
+    {catalog?.phase !== "ready" && catalog &&
+      <div className="qf-assets-banner" role="status">数据底座处于维护重建状态。目录可查看，当前数据读取暂不可用。</div>}
+    {error && <p role="alert" className="qf-assets-error">{error}{catalog && ` 当前保留 ${time(loadedAt)} 读取的目录。`}</p>}
+    {!catalog && !error && <p role="status">正在读取当前数据目录…</p>}
+    {catalog && <>
+      <div className="qf-assets-metrics" aria-label="数据目录摘要">
+        <div><span>已登记数据集</span><strong>{count(catalog.total)}</strong></div>
+        <div><span>当前可用</span><strong>{count(catalog.items.filter(item => item.status === "available").length)}</strong></div>
+        <div><span>需要处理</span><strong>{count(catalog.items.filter(item => ["restricted", "rebuild_required"].includes(item.status)).length)}</strong></div>
+        <div><span>尚未检查</span><strong>{count(catalog.items.filter(item => item.status === "not_checked").length)}</strong></div>
+      </div>
+      <div className="qf-assets-toolbar">
+        <label>搜索数据集<input value={search} placeholder="名称或数据集标识" onChange={event => update("search", event.target.value)} /></label>
+        <label>当前状态<Select value={filter} onChange={event => update("status", event.target.value)}>
+          <option value="all">全部</option>
+          <option value="available">当前可用</option>
+          <option value="empty">当前为空</option>
+          <option value="not_checked">尚未检查</option>
+          <option value="restricted">存在限制</option>
+          <option value="rebuild_required">需要重建</option>
+          <option value="rebuilding">维护重建中</option>
+        </Select></label>
+      </div>
+      {visible.length ? <div className="qf-assets-sheet qf-assets-scroll"><table>
+        <thead><tr><th>数据集</th><th>频率 / 口径</th><th>当前分区范围</th><th className="qf-assets-number">当前记录</th><th>更新时间</th><th>状态</th></tr></thead>
+        <tbody>{visible.map(item => <tr key={item.dataset}>
+          <td><Link onClick={saveCatalogScroll} to={`${ROOT}/${encodeURIComponent(item.dataset)}?${params}`}>{item.name}</Link><small><code>{item.dataset}</code></small></td>
+          <td>{frequencies[item.frequency] ?? "未声明"}<small>{item.source} · 类型化对象</small></td>
+          <td>{item.partition_range.from ?? "未检查"}{item.partition_range.to && ` ～ ${item.partition_range.to}`}<small>按存储分区统计</small></td>
+          <td className="qf-assets-number">{count(item.row_count)}</td>
+          <td>{time(item.updated_at)}</td>
+          <td><span className={`qf-assets-state state-${item.status}`}>{statusNames[item.status] ?? "状态未知"}</span></td>
+        </tr>)}</tbody>
+      </table></div> : <div className="qf-assets-empty" role="status">
+        {catalog.items.length ? "没有符合筛选条件的数据集，请调整搜索或状态。" : "当前目录未登记业务数据集。"}
+      </div>}
+      <div className="qf-assets-pager">
+        <span>第 {visiblePage} / {pages} 页 · 共 {filtered.length} 个数据集</span>
+        <button className="qfo-secondary-btn" type="button" onClick={() => go(visiblePage - 1)} disabled={visiblePage === 1}>上一页</button>
+        <button className="qfo-secondary-btn" type="button" onClick={() => go(visiblePage + 1)} disabled={visiblePage === pages}>下一页</button>
+      </div>
+      <p className="qf-assets-asof">目录读取于 {time(loadedAt)}。分区范围不等于逐条业务日期覆盖。</p>
+    </>}
   </section>;
 }
 
-/** Select a domain page before mounting its request state. */
+function DatasetDetail({ datasetId }: { datasetId: string }) {
+  const [params] = useSearchParams();
+  const [dataset, setDataset] = useState<CurrentDataset | null>(null);
+  const [issues, setIssues] = useState<IssueList | null>(null);
+  const [issuesError, setIssuesError] = useState("");
+  const [error, setError] = useState("");
+  const [previewError, setPreviewError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [reading, setReading] = useState(false);
+  const [refresh, setRefresh] = useState(0);
+  const [preview, setPreview] = useState<PreviewResult | null>(null);
+  const [page, setPage] = useState(0);
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [representation, setRepresentation] = useState("");
+  const [subject, setSubject] = useState("");
+  const [fromKey, setFromKey] = useState("");
+  const [toKey, setToKey] = useState("");
+  const [allowPartial, setAllowPartial] = useState(false);
+  const initialized = useRef(false);
+  const active = useRef<AbortController | null>(null);
+  const clear = useCallback(() => {
+    active.current?.abort();
+    setDataset(null);
+    setIssues(null);
+    setPreview(null);
+  }, []);
+  const failure = useFailure(clear);
+  const back = `${ROOT}?${new URLSearchParams([...params].filter(([key]) => ["search", "status", "page"].includes(key)))}`;
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setBusy(true);
+    setError("");
+    dataStoreApi<CurrentDataset>(`/datasets/${encodeURIComponent(datasetId)}`, controller.signal)
+      .then(result => {
+        if (controller.signal.aborted) return;
+        setDataset(result);
+        if (!initialized.current && result.preview_key) {
+          setRepresentation(result.preview_key.representation);
+          setSubject(result.preview_key.subject);
+          setFromKey(result.preview_key.object_key);
+          setToKey(result.preview_key.object_key);
+          initialized.current = true;
+        }
+        if (preview && (result.generation !== preview.generation || result.status === "rebuilding")) {
+          setPreview(null);
+          setPage(0);
+          setCursors([null]);
+          setPreviewError("当前数据已改变，请重新读取预览。");
+        }
+      })
+      .catch(problem => { if (!controller.signal.aborted) setError(failure(problem)); })
+      .finally(() => { if (!controller.signal.aborted) setBusy(false); });
+    return () => controller.abort();
+  }, [datasetId, refresh, failure]);
+
+  useEffect(() => {
+    if (!dataset?.issues && !dataset?.legacy_restrictions) {
+      setIssues(null);
+      setIssuesError("");
+      return;
+    }
+    const controller = new AbortController();
+    setIssuesError("");
+    dataStoreApi<IssueList>(`/issues?dataset=${encodeURIComponent(datasetId)}&limit=20`, controller.signal)
+      .then(result => { if (!controller.signal.aborted) setIssues(result); })
+      .catch(problem => { if (!controller.signal.aborted) setIssuesError(failure(problem)); });
+    return () => controller.abort();
+  }, [dataset?.issues, dataset?.legacy_restrictions, datasetId, refresh, failure]);
+
+  useEffect(() => () => active.current?.abort(), []);
+
+  async function read(target: number) {
+    if (!dataset || !representation || !subject || !fromKey || !toKey) return;
+    active.current?.abort();
+    const controller = new AbortController();
+    active.current = controller;
+    setReading(true);
+    setPreviewError("");
+    const columns = [...new Set([
+      "representation", "subject", "object_key", "member_key", "basis_state",
+      ...dataset.fields.filter(field => /^f\d+_/.test(field.column))
+        .slice(0, 6).map(field => field.column)
+    ])];
+    const body: PreviewRequest = {
+      dataset: dataset.dataset,
+      frequency: dataset.frequency,
+      representation, subject, from_key: fromKey, to_key: toKey,
+      columns, page_size: 20, cursor: cursors[target], allow_partial: allowPartial
+    };
+    try {
+      const result = await dataStoreApi<PreviewResult>("/query", controller.signal, body);
+      if (controller.signal.aborted) return;
+      setPreview(result);
+      setPage(target);
+      setCursors(old => target === 0
+        ? [null, ...(result.next_cursor ? [result.next_cursor] : [])]
+        : [...old.slice(0, target + 1), ...(result.next_cursor ? [result.next_cursor] : [])]);
+    } catch (problem) {
+      if (controller.signal.aborted) return;
+      if (problem instanceof DataStoreApiError && ["DATA_CHANGED", "REBUILD_REQUIRED", "DATA_STORE_REBUILDING"].includes(problem.code)) {
+        setPreview(null); setPage(0); setCursors([null]);
+      }
+      setPreviewError(failure(problem));
+    } finally {
+      if (!controller.signal.aborted) setReading(false);
+    }
+  }
+
+  function changeScope(update: () => void) {
+    active.current?.abort();
+    update();
+    setReading(false);
+    setPreview(null);
+    setPreviewError("");
+    setPage(0);
+    setCursors([null]);
+  }
+
+  const fields = preview?.rows[0] ? Object.keys(preview.rows[0]) : [];
+  return <section className="qf-assets" aria-busy={busy}>
+    <header className="qf-assets-heading"><div>
+      <Link className="qf-assets-back" to={back}>← 数据资产</Link>
+      <h1>{dataset?.name ?? "数据集详情"}</h1>
+      <p>{dataset ? <code>{dataset.dataset}</code> : "正在读取当前数据集…"}</p>
+    </div><button className="qfo-secondary-btn" type="button" disabled={busy} onClick={() => setRefresh(value => value + 1)}>
+      <RefreshCw size={16} aria-hidden="true" />{busy ? "刷新中…" : "刷新"}
+    </button></header>
+    {error && <p role="alert" className="qf-assets-error">{error}{dataset && " 当前保留上次读取的数据集摘要及时间。"}</p>}
+    {!dataset && !error && <p role="status">正在读取数据集详情…</p>}
+    {dataset && <>
+      {dataset.status === "rebuilding" && <div className="qf-assets-banner" role="status">
+        数据底座正在维护重建。当前目录可查看，预览需等待显式重建验收完成。
+      </div>}
+      <div className="qf-assets-metrics">
+        <div><span>当前状态</span><strong className="qf-assets-metric-label">{statusNames[dataset.status] ?? "状态未知"}</strong></div>
+        <div><span>当前记录</span><strong>{count(dataset.row_count)}</strong></div>
+        <div><span>当前代次</span><strong>{count(dataset.generation)}</strong></div>
+        <div><span>未解决问题</span><strong>{count(dataset.issues)}</strong></div>
+      </div>
+      <div className="qf-assets-grid">
+        <section className="qf-assets-sheet"><h2>当前数据</h2>
+          <dl className="qf-assets-properties">
+            <div><dt>数据来源</dt><dd>{dataset.source}</dd></div>
+            <div><dt>频率</dt><dd>{frequencies[dataset.frequency] ?? "未声明"}</dd></div>
+            <div><dt>存储口径</dt><dd>类型化对象节点 · {dataset.representation}</dd></div>
+            <div><dt>当前分区</dt><dd>{dataset.partition_range.from ?? "未检查"}{dataset.partition_range.to && ` ～ ${dataset.partition_range.to}`}</dd></div>
+            <div><dt>最近提交</dt><dd>{time(dataset.updated_at)}</dd></div>
+          </dl>
+          <p className="qf-assets-asof">分区范围是存储范围，不证明每个业务日期均有数据。Schema {dataset.schema_id}。</p>
+          {dataset.status === "empty" && <p className="qf-assets-empty">当前数据集已登记，尚无正式记录。</p>}
+          {dataset.status === "not_checked" && <p className="qf-assets-empty">本地来源尚未检查，不能将未检查视为空。</p>}
+        </section>
+        <section className="qf-assets-sheet"><h2>处理与限制</h2>
+          {dataset.last_update ? <dl className="qf-assets-properties">
+            <div><dt>最近更新</dt><dd>{statusNames[dataset.last_update.state] ?? "状态待核对"}</dd></div>
+            <div><dt>来源记录</dt><dd>{count(dataset.last_update.source_rows)}</dd></div>
+            <div><dt>提交分区</dt><dd>{count(dataset.last_update.committed_partitions)}</dd></div>
+            <div><dt>执行时间</dt><dd>{time(dataset.last_update.updated_at)}</dd></div>
+          </dl> : <p>尚无本地处理记录。</p>}
+          {dataset.last_update && !dataset.last_update.complete &&
+            <p className="qf-assets-warning">最近一次更新未完成；已有当前数据是否可用请以左侧状态和查询结果为准。</p>}
+          {!!dataset.legacy_restrictions && <p className="qf-assets-warning">旧数据限制仍待定位或处理，相关查询不会绕过限制。</p>}
+          {dataset.limitations.length > 0 && <details><summary>已知能力边界</summary>
+            <ul>{dataset.limitations.map(item => <li key={item}>{item}</li>)}</ul>
+          </details>}
+        </section>
+      </div>
+      {issuesError && <p role="alert" className="qf-assets-error">问题详情读取失败：{issuesError}{issues && " 当前保留上次读取的问题列表。"}</p>}
+      {(issues?.items.length ?? 0) > 0 && <section className="qf-assets-sheet">
+        <h2>当前问题与限制</h2><p>显示最近 {issues?.items.length} 项；共 {issues?.total} 项。</p>
+        <ul className="qf-assets-issues">{issues?.items.map((issue, index) => <li key={`${issue.kind}-${issue.scope_key}-${index}`}>
+          <strong>{issueNames[issue.reason] ?? "当前数据限制"}</strong>
+          <span>{issue.scope_key ?? "范围待定位"} · {time(issue.updated_at)}</span>
+          <details><summary>技术原因</summary><code>{issue.reason}</code></details>
+        </li>)}</ul>
+      </section>}
+      <section className="qf-assets-sheet"><h2>基本预览</h2>
+        <p>按当前口径、标的和业务键范围读取。默认要求范围内数据无未解决限制；跨页时会检查代次。</p>
+        {!dataset.preview_key && <p className="qf-assets-asof">暂无可自动填写的预览起点；可手动输入已知的口径、标的和业务键。</p>}
+        <form className="qf-assets-form" onSubmit={event => { event.preventDefault(); void read(0); }}>
+          <label>口径标识<input value={representation} onChange={event => changeScope(() => setRepresentation(event.target.value))} /></label>
+          <label>标的标识<input value={subject} onChange={event => changeScope(() => setSubject(event.target.value))} /></label>
+          <label>起始业务键<input value={fromKey} onChange={event => changeScope(() => setFromKey(event.target.value))} /></label>
+          <label>结束业务键<input value={toKey} onChange={event => changeScope(() => setToKey(event.target.value))} /></label>
+          <label className="qf-assets-check"><input type="checkbox" checked={allowPartial}
+            onChange={event => changeScope(() => setAllowPartial(event.target.checked))} />
+            明确允许部分结果及有问题的范围</label>
+          <button className="qfo-primary-btn" type="submit"
+            disabled={reading || dataset.status === "rebuilding" || !representation || !subject || !fromKey || !toKey}>
+            {reading ? "读取中…" : "读取当前预览"}
+          </button>
+        </form>
+        {previewError && <p role="alert" className="qf-assets-error">{previewError}{preview && " 当前保留上次获准预览。"}</p>}
+        {preview && <>
+          <p role="status" className="qf-assets-preview-meta">
+            {preview.status === "restricted" ? "部分结果，存在当前问题" : preview.rows.length ? "当前预览" : "所选范围没有匹配记录"}
+            {" · "}代次 {count(preview.generation)}{" · "}本页业务键 {preview.actual_range.from ?? "无"} ～ {preview.actual_range.to ?? "无"}
+          </p>
+          {preview.rows.length > 0 && <div className="qf-assets-scroll"><table><thead><tr>
+            {fields.map(field => <th key={field}>{field}</th>)}
+          </tr></thead><tbody>{preview.rows.map((row, index) => <tr key={index}>
+            {fields.map(field => <td key={field} className={typeof row[field] === "number" ? "qf-assets-number" : undefined}>
+              {row[field] == null ? "—" : String(row[field])}
+            </td>)}
+          </tr>)}</tbody></table></div>}
+          <div className="qf-assets-pager">
+            <span>第 {page + 1} 页 · 本页 {preview.rows.length} 行</span>
+            <button className="qfo-secondary-btn" type="button" disabled={reading || page === 0} onClick={() => void read(page - 1)}>上一页</button>
+            <button className="qfo-secondary-btn" type="button" disabled={reading || !preview.next_cursor} onClick={() => void read(page + 1)}>下一页</button>
+          </div>
+          {preview.partial_requested && <p className="qf-assets-warning">已明确允许部分结果；此预览不代表原范围完整可用。</p>}
+        </>}
+      </section>
+      <section className="qf-assets-sheet"><h2>字段与口径</h2>
+        <div className="qf-assets-scroll"><table><thead><tr><th>字段</th><th>类型</th><th>字段含义</th><th>计算能力</th></tr></thead>
+          <tbody>{dataset.fields.map(field => <tr key={field.column}>
+            <td><code>{field.column}</code></td><td>{field.type}</td>
+            <td>{field.meaning}</td><td>{field.arithmetic === "unsupported" ? "不支持直接计算" : "以领域契约为准"}</td>
+          </tr>)}</tbody>
+        </table></div>
+      </section>
+    </>}
+  </section>;
+}
+
 export function DataAssetsPage() {
-  const {datasetId}=useParams();
-  if (!datasetId) return <FoundationCatalog/>;
-  if (datasetId==='fund.holdings_report') return <ReportAssetsPage/>;
-  if (datasetId !== 'market.bar.daily') return <RecordAssetsPage key={datasetId} datasetId={datasetId}/>;
-  return <DailyAssetsPage/>;
+  const { datasetId } = useParams();
+  return datasetId ? <DatasetDetail key={datasetId} datasetId={datasetId} /> : <Catalog />;
 }

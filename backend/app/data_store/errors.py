@@ -1,6 +1,9 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'DATA_STORE_REBUILDING': '数据底座正在维护或重建，当前数据暂不可读取。',
+    'DATA_STORE_NOT_INITIALIZED': '当前数据目录尚未初始化，请先完成本地初始化。',
+    'PARTIAL_SCOPE_REQUIRED': '所选分区未覆盖请求范围；如需读取子集，请明确允许部分结果。',
     'DATA_RESTRICTED': '当前数据存在未解决的问题，未返回可用数据。',
     'DATA_CHANGED': '当前数据已改变，请放弃本次分页并重新读取。',
     'REBUILD_REQUIRED': '当前字段、规则或口径不兼容，需要重建受影响分区。',

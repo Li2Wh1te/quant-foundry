@@ -21,7 +21,6 @@ Commands:
   logs              Follow PostgreSQL, Backend, Runner, and Frontend logs
   migrate           Apply pending Alembic migrations
   psql              Open a psql shell in the PostgreSQL container
-  reset             Delete local data and deploy a clean stack
   status            Show container status
 EOF
 }
@@ -116,18 +115,6 @@ restart_postgres() {
     echo "PostgreSQL is healthy."
 }
 
-reset_stack() {
-    local answer
-    read -r -p "Delete PostgreSQL data and Backend logs? [y/N] " answer
-    if [[ ! "${answer}" =~ ^[Yy]$ ]]; then
-        echo "Reset cancelled."
-        return
-    fi
-
-    compose down --volumes --remove-orphans
-    deploy
-}
-
 main() {
     local command="${1:-up}"
 
@@ -136,7 +123,7 @@ main() {
             usage
             return
             ;;
-        up|deploy-frontend|deploy-backend|restart-postgres|down|logs|migrate|psql|reset|status)
+        up|deploy-frontend|deploy-backend|restart-postgres|down|logs|migrate|psql|status)
             ;;
         *)
             usage >&2
@@ -182,9 +169,6 @@ main() {
             ;;
         psql)
             compose exec postgres sh -c 'exec psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"'
-            ;;
-        reset)
-            reset_stack
             ;;
         status)
             compose ps postgres backend runner frontend

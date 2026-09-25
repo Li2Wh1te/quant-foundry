@@ -47,7 +47,7 @@ export function App() {
           </RequireAuth>
         }
       />
-      {["/admin/data-assets", "/admin/data-assets/:datasetId", "/admin/data-assets/:datasetId/processing"].map(path => <Route key={path} path={path} element={<RequireAuth><OverviewShell title="数据资产" section="MARKET DATA" className="qf-assets-root"><DataAssetsPage /></OverviewShell></RequireAuth>} />)
+      {["/admin/data-assets", "/admin/data-assets/:datasetId"].map(path => <Route key={path} path={path} element={<RequireAuth><OverviewShell title="数据资产" section="MARKET DATA" className="qf-assets-root"><DataAssetsPage /></OverviewShell></RequireAuth>} />)
       }
       <Route path="/admin/data-sources" element={<RequireAuth><OverviewShell title="数据源" section="DATA OPS"><DataSourcesPage /></OverviewShell></RequireAuth>} />
       <Route

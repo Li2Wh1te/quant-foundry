@@ -66,6 +66,9 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
     log_retention_days: int = Field(default=30, ge=1, le=365)
     log_queue_size: int = Field(default=10_000, ge=100, le=100_000)
+    # Both API and runner resolve this to the same host bind mount. The old
+    # foundation settings are accepted only for existing .env compatibility.
+    data_store_root: Path = PROJECT_ROOT / "data" / "current-store"
     foundation_worker_enabled: bool = False
     foundation_runtime_image_digest: str = ""
     foundation_archive_gid: int = Field(default=1000, ge=1)
@@ -109,6 +112,11 @@ class Settings(BaseSettings):
     @field_validator("log_dir")
     @classmethod
     def resolve_log_dir(cls, value: Path) -> Path:
+        return value if value.is_absolute() else PROJECT_ROOT / value
+
+    @field_validator("data_store_root")
+    @classmethod
+    def resolve_data_store_root(cls, value: Path) -> Path:
         return value if value.is_absolute() else PROJECT_ROOT / value
 
     @field_validator(*_BACKTEST_INTEGER_FIELDS, mode="before")

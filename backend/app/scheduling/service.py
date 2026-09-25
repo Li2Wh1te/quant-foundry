@@ -23,6 +23,9 @@ from app.scheduling.schemas import (
 )
 from app.scheduling.triggers import build_trigger
 from app.data_sources.service import configured, lock_source_gates
+from app.data_store.availability import RETIRED_TASK_TYPES, require_ready
+from app.data_store.errors import DataStoreError
+from app.data_store.scheduler_tasks import TASK_KEY as LOCAL_UPDATE_TASK_KEY
 
 
 class TaskNotFoundError(Exception):
@@ -164,6 +167,21 @@ class SchedulerService:
                 f"task state {task.state!r} does not allow {trigger_type.value} runs"
             )
 
+        definition = self.registry.get(task.task_type)
+        if definition is None:
+            if task.task_type in RETIRED_TASK_TYPES:
+                raise TaskConflictError("旧数据底座任务已退役，不能再次运行。")
+            raise UnknownTaskTypeError(task.task_type)
+
+        # A new local update cannot queue while the old database awaits its
+        # explicit reset/rebuild handoff. Collector source switches are not
+        # consulted: an existing local source is still independently readable.
+        if task.task_type == LOCAL_UPDATE_TASK_KEY:
+            try:
+                require_ready(self.session)
+            except DataStoreError as exc:
+                raise TaskConflictError(str(exc)) from None
+
         running = self.repository.count_runs(
             task_id=task.id, statuses=(RunStatus.RUNNING.value,)
         )
@@ -174,7 +192,6 @@ class SchedulerService:
             task_id=None, statuses=(RunStatus.QUEUED.value,)
         )
 
-        definition = self.registry.get(task.task_type)
         source = sources.get(definition.source_key) if definition else None
         skip_reason: str | None = None
         if source is not None and (not source.enabled or not configured(source)):

@@ -1,4 +1,4 @@
-"""Explicit LF-D02 CLI. No default scheduler/API switch, reset, or remote fetch."""
+"""Explicit current-store CLI; no command triggers a legacy reset or vendor fetch."""
 from __future__ import annotations
 
 import argparse
@@ -11,7 +11,8 @@ import sys
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
-    parser.add_argument('command',choices=('describe','status','rebuild','update','retry'))
+    parser.add_argument('command',choices=('describe','status','rebuild','update','retry',
+                                           'cleanup','audit-export'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
@@ -26,10 +27,14 @@ def main(argv=None):
     from .adapters.canonical import NativeInputError
     from .errors import DataStoreError
     try:
-        selected=[BY_ID[v] for v in args.entry] if args.entry else list(ENTRIES)
+        selected=([BY_ID[v] for v in args.entry] if args.entry else
+                  [e for e in ENTRIES if e.business] if args.command in ('cleanup','audit-export')
+                  else list(ENTRIES))
     except KeyError:
         parser.error('Unknown entry; use describe to list E01–E71')
     if len(set(e.id for e in selected))!=len(selected): parser.error('Duplicate entry')
+    if args.command in ('cleanup','audit-export') and any(not e.business for e in selected):
+        parser.error('cleanup and audit-export accept business entries only')
     if args.command=='describe':
         result={'entries':[e.describe_capability() for e in selected],
                 'source_entry_count':len(ENTRIES),'business_entries':sum(e.business for e in ENTRIES),
@@ -65,6 +70,27 @@ def main(argv=None):
                 seen.add(entry.id)
                 if args.command=='status':
                     output['entries'].append(read_entry_status(store,entry.id));continue
+                if args.command=='cleanup':
+                    try:
+                        result=store.cleanup(entry.spec.name)
+                        output['entries'].append({'entry_id':entry.id,'dataset':entry.spec.name,
+                                                  'complete':True,**result})
+                    except DataStoreError as error:
+                        output['entries'].append({'entry_id':entry.id,'dataset':entry.spec.name,
+                                                  'complete':False,'reason':error.code})
+                        output['complete']=False
+                    continue
+                if args.command=='audit-export':
+                    try:
+                        descriptor=store.describe_capability(entry.spec)
+                    except DataStoreError as error:
+                        if error.code!='DATASET_MISSING': raise
+                        descriptor={'dataset':entry.spec.name,'status':'not_checked',
+                                    'row_count':None,'generation':None,'issues':None}
+                    output['entries'].append({'entry_id':entry.id,'complete':True,
+                                              'descriptor':descriptor,
+                                              'processing':read_entry_status(store,entry.id)})
+                    continue
                 try:
                     result=run_entry(store,entry,sources,options=options,cancelled=lambda:cancelled[0])
                 except (NativeInputError,DataStoreError) as error:

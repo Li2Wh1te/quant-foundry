@@ -209,10 +209,9 @@ class OverviewContractTest(unittest.TestCase):
         definitions = task_registry.list()
         self.assertTrue(definitions)
         for definition in definitions:
-            if definition.key in ('foundation.formalize_local_updates',
-                                  'foundation.formalize_local_table_updates'):
-                # Both local formalization channels read committed evidence
-                # without a provider admission gate or ingestion counter.
+            if definition.key == 'data_store.update_local':
+                # Local current-store updates read already staged evidence
+                # without an external provider admission gate.
                 self.assertIsNone(definition.source_key)
                 continue
             self.assertEqual(definition.source_key,

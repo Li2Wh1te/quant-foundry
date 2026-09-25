@@ -53,11 +53,7 @@ def backtest_main() -> None:
 
 
 def main() -> None:
-    if get_settings().foundation_worker_enabled:
-        from app.runner.coordinator import main as coordinated_main
-        coordinated_main()
-    else:
-        backtest_main()
+    backtest_main()
 
 
 if __name__ == "__main__":  # pragma: no cover - launched by deployment

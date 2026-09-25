@@ -15,7 +15,7 @@ from app.data_ingestion.router import router as data_ingestion_router
 from app.data_ingestion.tonghuashun.router import router as tonghuashun_data_router
 from app.data_ingestion.watchlist_router import router as etf_watchlist_router
 from app.data_sources.router import router as data_sources_router
-from app.data_foundation.router import router as foundation_router
+from app.data_store.router import router as data_store_router, legacy_router
 from app.data_sources.service import initialize_sources
 from app.backtesting.router import router as backtesting_router
 from app.backtesting.fee_catalog import router as fee_catalog_router
@@ -51,10 +51,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         with Session(get_engine()) as session:
             initialize_sources(session, app.state.settings)
         scheduler_runtime.start()
-        logger.info("application_started")
+        logger.info("application_started", message="应用已启动，当前数据接口和共享业务服务可按各自维护状态提供。")
         yield
     finally:
-        logger.info("application_stopped")
+        logger.info("application_stopped", message="应用正在停止，调度器和数据库连接将依次关闭。")
         scheduler_runtime.stop()
         dispose_engine()
         logging_runtime.stop()
@@ -78,7 +78,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(tonghuashun_data_router)
     protected_router.include_router(etf_watchlist_router)
     protected_router.include_router(data_sources_router)
-    protected_router.include_router(foundation_router)
+    protected_router.include_router(data_store_router)
+    protected_router.include_router(legacy_router)
     protected_router.include_router(strategies_router)
     protected_router.include_router(backtesting_router)
     protected_router.include_router(fee_catalog_router)
