@@ -1,0 +1,61 @@
+name: LF-D01 verified development transfer
+on:
+  push:
+    branches: [codex/lf-d01-transfer-20260925]
+    paths: [.github/workflows/lf-d01-verified-transfer.yml]
+permissions:
+  contents: write
+jobs:
+  transfer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: e09f41d093c665ea6ca34af05168864f79445f9f
+          fetch-depth: 0
+      - name: Verify and apply the five reviewed source patches
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, hashlib, json, lzma, pathlib, subprocess
+          chunks = [
+              '3d7424883e1a994b9408d398b8c894a5d53d2672',
+              '4edb93760b2fba86413db4cc4e1b2c7bc4f6f502',
+              '9833a4b74681d4fc6ad887cf82b61909f419ef4d',
+              '6c10117aeb9765de5273eb0f1544482fdeea7039',
+              '583e07d32df85a2228052f29a6fd2956fe92d0cc',
+              '3f8ade56c50ba43d1e90136d1b4077b76dcf83ad',
+              '0edcb3c659f806d6ebafcbc673d8f0b685f1429e',
+              'aa22aea0cf2d68a06e1d3de6bc97151abe94cbb8',
+          ]
+          parts = []
+          for sha in chunks:
+              response = json.loads(subprocess.check_output([
+                  'gh', 'api', f'repos/Li2Wh1te/quant-foundry/git/blobs/{sha}'
+              ]))
+              data = base64.b64decode(''.join(response['content'].split()), validate=True)
+              assert len(data) == 8100
+              assert hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == sha
+              parts.append(data)
+          archive = b''.join(parts)
+          assert len(archive) == 64800
+          assert hashlib.sha256(archive).hexdigest() == 'f810163bfa1f28ee5583daf1e4ac7292ee466f56c63ff8f012b7ca5a9949f2cc'
+          patches = lzma.decompress(archive)
+          assert len(patches) == 291120
+          pathlib.Path('/tmp/lf-d01.mbox').write_bytes(patches)
+          PY
+          test "$(git rev-parse HEAD^{tree})" = df1abe658ec8487b575cddaac162958e12878b01
+          git config user.name 'LF-D01 development'
+          git config user.email 'development@localhost'
+          git am /tmp/lf-d01.mbox
+          test "$(git rev-parse HEAD^{tree})" = 998ff5da39af4d1a77f142b7052770370b3f27ef
+          git diff e09f41d093c665ea6ca34af05168864f79445f9f --check
+          test "$(git ls-remote origin refs/heads/codex/lf-d01-current-store | cut -f1)" = e09f41d093c665ea6ca34af05168864f79445f9f
+          git push origin HEAD:refs/heads/codex/lf-d01-current-store
+          printf 'Published development head: '
+          git rev-parse HEAD
+          git log --oneline -5
