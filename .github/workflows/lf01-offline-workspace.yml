@@ -1,0 +1,34 @@
+name: LF01 offline workspace
+on:
+  push:
+    branches: [codex/lf01-lightweight-foundation]
+    paths: [.github/workflows/lf01-offline-workspace.yml]
+permissions:
+  contents: read
+jobs:
+  export:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: 3.12.2
+      - uses: astral-sh/setup-uv@v5
+        with:
+          version: 0.11.7
+          enable-cache: false
+      - name: Export source and exact optional query dependency for isolated tests
+        run: |
+          mkdir -p /tmp/lf01-workspace/wheels
+          git archive --format=tar HEAD | gzip > /tmp/lf01-workspace/source.tar.gz
+          cd backend
+          uv add --no-sync 'duckdb==1.4.3'
+          cp pyproject.toml uv.lock /tmp/lf01-workspace/
+          python -m pip download --only-binary=:all: --no-deps 'duckdb==1.4.3' -d /tmp/lf01-workspace/wheels
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lf01-offline-workspace
+          path: /tmp/lf01-workspace/
+          retention-days: 1
