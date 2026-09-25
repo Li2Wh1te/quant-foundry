@@ -42,7 +42,7 @@ def main(argv=None):
     # Source configuration enabled/disabled flags are neither read nor changed.
     from app.db.session import get_engine
     from .storage import CurrentStore
-    from .local_sources import NativeSources,RescueSources,SourceLimits
+    from .local_sources import NativeSources,RescueSources,CombinedSources,SourceLimits
     from .pipeline import PipelineOptions,run_entry,read_entry_status
     cancelled=[False]
     def cancel(*_): cancelled[0]=True
@@ -55,8 +55,9 @@ def main(argv=None):
         engine=get_engine()
         with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
             source_limits=SourceLimits(pass_seconds=args.pass_seconds)
-            sources=(RescueSources(args.rescue,limits=source_limits,cancelled=lambda:cancelled[0]) if args.rescue else
-                     NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0]))
+            native=NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0])
+            sources=(CombinedSources(native,RescueSources(args.rescue,limits=source_limits,
+                     cancelled=lambda:cancelled[0])) if args.rescue else native)
             seen=set()
             queue=list(selected)
             for entry in queue:
