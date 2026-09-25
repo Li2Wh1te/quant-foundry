@@ -14,7 +14,7 @@ jobs:
         with:
           ref: e09f41d093c665ea6ca34af05168864f79445f9f
           fetch-depth: 0
-      - name: Verify and apply the five reviewed source patches
+      - name: Verify and apply the five reviewed source patches without workflow changes
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -51,8 +51,10 @@ jobs:
           test "$(git rev-parse HEAD^{tree})" = df1abe658ec8487b575cddaac162958e12878b01
           git config user.name 'LF-D01 development'
           git config user.email 'development@localhost'
-          git am /tmp/lf-d01.mbox
-          test "$(git rev-parse HEAD^{tree})" = 998ff5da39af4d1a77f142b7052770370b3f27ef
+          # GITHUB_TOKEN has no workflows permission. Workflow additions/deletions
+          # are submitted separately through the authorized GitHub connector.
+          git am --exclude='.github/workflows/*' /tmp/lf-d01.mbox
+          test "$(git rev-parse HEAD^{tree})" = 839ba31ce476ca65afc3b6fd7817e8ccae3185b0
           git diff e09f41d093c665ea6ca34af05168864f79445f9f --check
           test "$(git ls-remote origin refs/heads/codex/lf-d01-current-store | cut -f1)" = e09f41d093c665ea6ca34af05168864f79445f9f
           git push origin HEAD:refs/heads/codex/lf-d01-current-store
