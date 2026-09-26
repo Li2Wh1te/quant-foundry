@@ -15,12 +15,15 @@ from decimal import Decimal
 import json
 import os
 from pathlib import Path
+import sqlite3
 import sys
 import time
+import traceback
 from uuid import uuid4
 
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
+import duckdb
 from sqlalchemy import create_engine,text,URL
 from sqlalchemy.exc import DBAPIError
 from app.data_store.adapters.contracts import LocalInput,digest
@@ -156,13 +159,20 @@ def main(argv=None):
             result['filesystem']=locking._filesystem_name(store.files.fd)
             result['filesystem_probe_injected']=False
     except Exception as error:
-        result.update(complete=False,reason=getattr(error,'code',type(error).__name__))
+        result.update(complete=False,reason=getattr(error,'code',type(error).__name__),
+                      error_module=type(error).__module__,
+                      error_frames=[f'{frame.name}:{frame.lineno}'
+                                    for frame in traceback.extract_tb(error.__traceback__)[-8:]])
         if isinstance(error,DBAPIError):
             # Error text may include a full DSN or source payload. SQLSTATE and
             # driver class identify a connection failure without exposing it.
             result.update(db_error_type=type(error.orig).__name__,
                           sqlstate=getattr(error.orig,'sqlstate',None),
                           connection_invalidated=error.connection_invalidated)
+        if isinstance(error,(duckdb.Error,sqlite3.Error)):
+            # The benchmark creates only synthetic files. A bounded first
+            # line identifies a native capacity failure without any DB DSN.
+            result['native_error']=str(error).splitlines()[0][:300]
     finally:
         if engine:engine.dispose()
         if created:

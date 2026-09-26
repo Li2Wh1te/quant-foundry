@@ -19,6 +19,9 @@ from .errors import DataStoreError
 from .adapters.contracts import Unit, digest, native_json, loads
 from .adapters.canonical import NativeInputError
 
+_REBUILT_METADATA = frozenset(('representation','subject','object_key','basis_ns',
+                               'basis_group','basis_token','basis_valid','basis_state','value_hash'))
+
 
 def restore_row(schema, row):
     out={}
@@ -165,7 +168,14 @@ class MergeSpool:
             # returned by qualified business reads. Their old basis is not kept.
             body=old['body']
         else:
-            body=native_json(list(rows))
+            # Current Parquet batches use the full union schema and therefore
+            # contain many null columns. Keep only actual value columns here;
+            # provenance is reconstructed from the winner record in rows().
+            # This prevents a bounded hot-partition merge from multiplying
+            # sparse source rows into a much larger temporary SQLite file.
+            body=native_json([{k:v for k,v in row.items()
+                               if v is not None and k not in _REBUILT_METADATA}
+                              for row in rows])
         if len(body.encode())>self.spec.semantics.get('max_object_bytes',32*1024*1024):
             raise DataStoreError('BATCH_BUDGET_EXCEEDED')
         self.db.execute('INSERT OR REPLACE INTO objects VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
