@@ -22,6 +22,7 @@ from uuid import uuid4
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 
 from sqlalchemy import create_engine,text,URL
+from sqlalchemy.exc import DBAPIError
 from app.data_store.adapters.contracts import LocalInput,digest
 from app.data_store.adapters.normalize import normalize
 from app.data_store.adapters.registry import SYNTHETIC
@@ -64,9 +65,14 @@ class Range:
         self.summary.update(complete=True,source_rows=self.end-self.start)
 
 
-def execute(store,total,cold_count):
-    result={'case':'B05','requested_rows':total,'complete':False,'full_B05_executed':total==10000000,
-            'supplier_connected':False,'production_executed':False,'atomic_ranges':0,'metrics':{}}
+def execute(store,total,cold_count,result=None):
+    # Tests may call the in-process harness directly; the CLI supplies a
+    # mutable result so a failed long run can retain its completed range.
+    if result is None:
+        result={'case':'B05','complete':False,'production_executed':False}
+    result.update(requested_rows=total,full_B05_requested=total==10000000,
+                  full_B05_executed=False,
+                  supplier_connected=False,atomic_ranges=0,completed_stream_rows=0,metrics={})
     def process(source):
         raw=event(source.start,subject=source.subject,changed=source.changed)
         unit=next(normalize(ENTRY,raw));partition=ENTRY.spec.partitioner((*unit.key,'root'))
@@ -77,13 +83,18 @@ def execute(store,total,cold_count):
         for k,v in outcome['metrics'].items():
             result['metrics'][k]=max(result['metrics'].get(k,0),v) if k.endswith('peak_bytes') else result['metrics'].get(k,0)+v
         return partition
-    for n in range(cold_count):process(Range(0,1,subject=f'COLD{n:04}.SH'))
+    for n in range(cold_count):
+        result.update(phase='cold_seed',range_start=n)
+        process(Range(0,1,subject=f'COLD{n:04}.SH'))
     cold={r['path']:r['content_hash'] for r in catalog_files(store)}
     started=time.monotonic()
     for first in range(0,total,100000):
+        result.update(phase='stream',range_start=first)
         process(Range(first,min(first+100000,total)))
+        result['completed_stream_rows']=min(first+100000,total)
     result['stream_seconds']=time.monotonic()-started
     # Check exact large Decimal and duplicate timestamp/distinct event identities.
+    result['phase']='precision_sample'
     first=next(normalize(ENTRY,event(0)))
     p=ENTRY.spec.partitioner((*first.key,'root'))
     sample=store.read(ENTRY.spec,Query(partitions=(p,),lower=first.key,page_size=2)).rows
@@ -92,6 +103,7 @@ def execute(store,total,cold_count):
     assert all(str(r['f0_event_ns'])==str(START_NS) for r in sample)
     if len(sample)==2:assert sample[0]['f0_sequence']!=sample[1]['f0_sequence']
     hot=(total-1)//100000*100000
+    result['phase']='hot_correction'
     hot_part=process(Range(hot,min(total,hot+100),changed=True))
     after={r['path']:r['content_hash'] for r in catalog_files(store)}
     # Cold test inputs may hash to the same bucket but are never in the changed
@@ -99,11 +111,14 @@ def execute(store,total,cold_count):
     unchanged={r['path']:r['content_hash'] for r in catalog_files(store) if r['partition_key']!=hot_part}
     if hot>0:assert all(after.get(k)==v for k,v in cold.items())
     with store.catalog.transaction() as c:
-        count=c.execute(text('SELECT coalesce(sum(row_count),0) FROM data_store_files WHERE dataset=:d'),{'d':ENTRY.spec.name}).scalar_one()
+        # PostgreSQL SUM(bigint) is numeric; keep the result JSON serializable.
+        count=int(c.execute(text('SELECT coalesce(sum(row_count),0) FROM data_store_files WHERE dataset=:d'),
+                            {'d':ENTRY.spec.name}).scalar_one())
     assert count==total+cold_count
-    result.update(complete=True,current_rows=count,current_files=len(after),cold_fixture_files=len(cold),
+    result.update(complete=True,full_B05_executed=total==10000000,
+                  current_rows=count,current_files=len(after),cold_fixture_files=len(cold),
                   unchanged_partition_files=len(unchanged),exact_event_samples=True,
-                  limits=asdict(store.limits))
+                  limits=asdict(store.limits),phase='complete')
     return result
 
 
@@ -137,11 +152,17 @@ def main(argv=None):
         # Real supported mount required. This harness contains no probe injection.
         limits=replace(StoreLimits(),duckdb_threads=1)
         with CurrentStore(engine,root,cursor_key=b'isolated-b05-key-not-production-32chars',initialize=True,limits=limits) as store:
-            result=execute(store,args.rows,args.cold_partitions)
+            execute(store,args.rows,args.cold_partitions,result)
             result['filesystem']=locking._filesystem_name(store.files.fd)
             result['filesystem_probe_injected']=False
     except Exception as error:
         result.update(complete=False,reason=getattr(error,'code',type(error).__name__))
+        if isinstance(error,DBAPIError):
+            # Error text may include a full DSN or source payload. SQLSTATE and
+            # driver class identify a connection failure without exposing it.
+            result.update(db_error_type=type(error.orig).__name__,
+                          sqlstate=getattr(error.orig,'sqlstate',None),
+                          connection_invalidated=error.connection_invalidated)
     finally:
         if engine:engine.dispose()
         if created:

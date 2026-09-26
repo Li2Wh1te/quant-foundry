@@ -79,6 +79,40 @@ def test_C03_C04_old_bad_does_not_block_new_good_and_new_bad_is_scoped(ready):
     assert rows(ready,e,u)[0]['f0_name']=='fixed'
 
 
+def test_C05_conversion_rule_failure_is_not_completion_and_can_retry(ready, monkeypatch):
+    from app.data_store import pipeline
+
+    entry = BY_ID['E41']
+    source = company('rule-repair', 1)
+    original = pipeline.normalize
+
+    def incompatible_rule(candidate, raw):
+        # Model a parsable source reaching a broken domain conversion rule.
+        # The real pipeline still records the issue and guards publication.
+        for unit in original(candidate, raw):
+            yield replace(unit, rows=(), failure='CORE_VALUE_INVALID')
+
+    monkeypatch.setattr(pipeline, 'normalize', incompatible_rule)
+    failed = run_entry(ready, entry, Inputs(source))
+    assert failed['complete'] and not failed['qualified']
+    assert failed['input_failures'] == 1
+    assert ready.catalog.issues(entry.spec.name, limit=10)
+    failed_unit = next(original(entry, source))
+    with pytest.raises(DataStoreError) as error:
+        rows(ready, entry, failed_unit)
+    assert error.value.code == 'DATA_RESTRICTED'
+
+    # The same retained native input is reprocessed after the converter fix;
+    # no new provider request or historical formal snapshot is required.
+    monkeypatch.setattr(pipeline, 'normalize', original)
+    corrected = run_entry(ready, entry, Inputs(source),
+                          options=PipelineOptions(mode='retry'))
+    assert corrected['complete'] and corrected['qualified']
+    unit = next(normalize(entry, source))
+    assert rows(ready, entry, unit)[0]['f0_name'] == 'rule-repair'
+    assert ready.catalog.issues(entry.spec.name, limit=10) == []
+
+
 def test_C08_explicit_withdrawal_never_resurrected_by_old_input(ready):
     e=BY_ID['E41'];raw=company('X',1)
     run_entry(ready,e,Inputs(raw))

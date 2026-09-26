@@ -1,0 +1,10 @@
+# Override the test work mount with a disposable Docker-managed ext4 volume.
+# The base Compose file still provides isolated PostgreSQL and no host ports.
+services:
+  kernel:
+    volumes:
+      - type: volume
+        source: test_work
+        target: /work
+volumes:
+  test_work:
