@@ -358,6 +358,15 @@ def run_local(store,sources,*,entries=None,options=PipelineOptions(),cancelled=N
     """All baseline entries have a real disposition; imports share target writes."""
     selected=list(entries or ENTRIES)
     if len(selected)>len(ENTRIES): raise ValueError('Too many source entries')
+    # Drain retained work first. Among other entries, serve the least recently
+    # attempted entry before starting a fresh sweep of an already completed one.
+    # This uses the existing one-row current status, not a campaign/history table.
+    # Otherwise early entries could refill finite slots and starve later domains.
+    pending=store.budget.pending_keys()
+    with store.catalog.transaction() as c:
+        age={row[0]:rank for rank,row in enumerate(c.execute(text(
+            'SELECT entry_id FROM data_store_entry_status ORDER BY updated_at,entry_id')))}
+    selected.sort(key=lambda e:('pipeline.'+e.id not in pending,age.get(e.id,-1)))
     seen=set();results=[]
     for entry in selected:
         if entry.id in seen: continue

@@ -408,15 +408,20 @@ def test_real_process_death_after_commit_resumes_without_source_scan(ready, data
 def test_idle_continuations_remain_charged_and_are_reclaimed_only_when_done(ready):
     from app.data_store.budget import Budget
     from app.data_store.limits import MiB
-    budget=Budget(ready.files,ready.locks,replace(ready.limits,scratch_bytes=128*MiB))
+    budget=Budget(ready.files,ready.locks,replace(ready.limits,scratch_bytes=64*MiB,
+        duckdb_memory_bytes=16*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,
+        operation_slots=3))
     for key in ('pipeline.E68','pipeline.E70'):
         with budget.reserve('read',pending=key) as reservation:
             (reservation.spill/'pending.sqlite').write_bytes(b'pending current work')
     budget.sweep()
     with pytest.raises(DataStoreError) as error:
-        with budget.reserve('read'):
+        with budget.reserve('read',pending='pipeline.E69'):
             pass
     assert error.value.code == 'SCRATCH_BUDGET_EXCEEDED'
+    # At capacity a writer still fits, so the retained continuations can drain.
+    with budget.reserve('write'):
+        pass
     with budget.reserve('read',pending='pipeline.E68') as reservation:
         assert (reservation.spill/'pending.sqlite').read_bytes()==b'pending current work'
         reservation.discard=True
@@ -443,3 +448,32 @@ def test_mutable_trading_status_snapshot_noop_and_deletion(ready):
         c.execute(text("DELETE FROM trading_status_facts WHERE ts_code='B.SH'"))
     assert run_entry(ready,entry,NativeSources(ready.catalog.engine))['complete']
     assert len(calendar_rows(ready,entry))==1
+
+
+def test_run_local_drains_continuations_and_does_not_starve_later_entries(ready):
+    from app.data_store.budget import Budget
+    from app.data_store.limits import MiB
+    from app.data_store.pipeline import run_local
+    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
+                   query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,operation_slots=3)
+    ready.limits=policy
+    ready.budget=Budget(ready.files,ready.locks,policy)
+    entries=[]
+    for number in range(41,47):
+        entry=replace(BY_ID['E41'],id=f'E{number}')
+        object.__setattr__(entry,'spec',replace(entry.spec,name=f'resume.e{number}'))
+        entries.append(entry)
+    source=Inputs(company(subject='C1'),company(subject='C2'))
+    assert len({entries[0].spec.partitioner((*next(normalize(entries[0],r)).key,'root'))
+                for r in source.rows}) == 2
+    for _ in range(8):
+        try:
+            run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
+        except DataStoreError as error:
+            assert error.code=='SCRATCH_BUDGET_EXCEEDED'
+        with ready.catalog.transaction() as c:
+            counts=dict(c.execute(text('SELECT dataset,sum(row_count) FROM data_store_files GROUP BY dataset')).all())
+        if len(counts)==6 and all(value==2 for value in counts.values()):
+            break
+    else:
+        pytest.fail('Later entries never received both partitions under bounded continuation capacity')

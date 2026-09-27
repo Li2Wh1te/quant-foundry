@@ -99,6 +99,12 @@ class Budget:
                         os.unlink(e.name, dir_fd=fd)
                 os.fsync(fd)
 
+    def pending_keys(self) -> set[str]:
+        """Return only current continuation owners, never an execution history."""
+        with self._hold('admission', self.limits.lock_timeout_ms):
+            return {owner for i in range(self.limits.operation_slots)
+                    if (owner := self._quota(i)[2]) is not None}
+
     def sweep(self) -> int:
         """Recover only inactive scratch slots, including below the free-space floor."""
         cleaned = 0
@@ -162,6 +168,14 @@ class Budget:
                         else:
                             self._clean_slot(i)
                             available_slots.append(i)
+                if pending is not None and slot is None:
+                    # A sealed continuation needs a separate kernel writer to
+                    # drain it. Idle pending scans must never occupy every slot
+                    # or every byte and permanently prevent their own commits.
+                    writer_quota=min(self.limits.scratch_bytes,
+                                     self.limits.commit_bytes*3+self.limits.duckdb_memory_bytes)
+                    if len(available_slots)<2 or used+quota+writer_quota>self.limits.scratch_bytes:
+                        raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
                 if slot is None and available_slots:
                     slot = available_slots[0]
                 if slot is None or used + quota > self.limits.scratch_bytes:
