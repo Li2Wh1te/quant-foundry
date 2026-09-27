@@ -1,0 +1,1201 @@
+[
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.news.reported",
+    "entry_id": "E04",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "source_reports_not_verified_market_events",
+      "source_window_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.stock_anomaly.reported",
+    "entry_id": "E05",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "source_reports_not_verified_market_events",
+      "source_window_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.rank_trend.reported",
+    "entry_id": "E06",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "source_reports_not_verified_market_events",
+      "source_window_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.reported_holdings.reported",
+    "entry_id": "E07",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "historical_member_identity_unresolved",
+      "portfolio_completeness_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.reported_stock_holdings.reported",
+    "entry_id": "E08",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "historical_member_identity_unresolved",
+      "portfolio_completeness_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.reported_bond_holdings.reported",
+    "entry_id": "E09",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "historical_member_identity_unresolved",
+      "portfolio_completeness_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.financial_indicator.reported",
+    "entry_id": "E10",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_indicator_formula_and_units_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.financial_indicator.reported",
+    "entry_id": "E11",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.income.reported",
+    "entry_id": "E12",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.balance.reported",
+    "entry_id": "E13",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.income.reported",
+    "entry_id": "E14",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.balance.reported",
+    "entry_id": "E15",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.cash_flow.reported",
+    "entry_id": "E16",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_accounting_basis_unverified",
+      "historical_vintages_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.allocation.reported",
+    "entry_id": "E17",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_units_unverified",
+      "source_occurrences_not_resolved"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.industry.reported",
+    "entry_id": "E18",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_units_unverified",
+      "source_occurrences_not_resolved"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.holder_composition.reported",
+    "entry_id": "E19",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_units_unverified",
+      "source_occurrences_not_resolved"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.top_holder.reported",
+    "entry_id": "E20",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_units_unverified",
+      "source_occurrences_not_resolved"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.dividend.reported",
+    "entry_id": "E21",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "reported_events_not_execution",
+      "provider_units_and_tax_basis_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.corporate_action.reported",
+    "entry_id": "E22",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "reported_events_not_execution",
+      "source_occurrences_not_resolved"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.manager_performance.reported",
+    "entry_id": "E23",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_period_and_formula_unverified",
+      "reported_series_not_proven_comparable"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.manager_style.reported",
+    "entry_id": "E24",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_vector_labels_unverified",
+      "source_narrative_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.return.reported",
+    "entry_id": "E25",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_period_and_formula_unverified",
+      "observed_scope_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.drawdown.reported",
+    "entry_id": "E26",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_period_and_formula_unverified",
+      "observed_scope_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.performance.reported",
+    "entry_id": "E27",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_period_and_formula_unverified",
+      "observed_scope_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.dragon_tiger.reported",
+    "entry_id": "E28",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "source_occurrences_not_resolved",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.auction.reported",
+    "entry_id": "E29",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.auction_benchmark.reported",
+    "entry_id": "E30",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.limit_up.reported",
+    "entry_id": "E31",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.limit_down.reported",
+    "entry_id": "E32",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.limit_break.reported",
+    "entry_id": "E33",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.anomaly.reported",
+    "entry_id": "E34",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.limit_ladder.reported",
+    "entry_id": "E35",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_semantics_only",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.stock_quote.reported",
+    "entry_id": "E36",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_timestamp_not_business_date",
+      "reported_values_only",
+      "units_and_formulas_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.etf_quote.reported",
+    "entry_id": "E37",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_timestamp_not_business_date",
+      "reported_values_only",
+      "units_and_formulas_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.index_quote.reported",
+    "entry_id": "E38",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_timestamp_not_business_date",
+      "reported_values_only",
+      "units_and_formulas_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.stock_valuation.reported",
+    "entry_id": "E39",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_timestamp_not_business_date",
+      "reported_values_only",
+      "units_and_formulas_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "instrument.reference.provider_reported",
+    "entry_id": "E40",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": true,
+    "current_file_bytes": 7091,
+    "current_file_count": 1,
+    "current_key_count": 1,
+    "dataset": "fund.company.reported",
+    "entry_id": "E41",
+    "generation": 1,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 1,
+    "status": "available",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.manager.reported",
+    "entry_id": "E42",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.profile.reported",
+    "entry_id": "E43",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.nav.reported",
+    "entry_id": "E44",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_nav_categories_only",
+      "currency_and_share_basis_unverified",
+      "adjustment_formula_unverified",
+      "cumulative_nav_and_return_derivation_not_supported",
+      "rolling_window_not_complete_fund_history"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.popularity.reported",
+    "entry_id": "E45",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_returned_list_only",
+      "heat_method_unverified",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.rising_popularity.reported",
+    "entry_id": "E46",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_returned_list_only",
+      "heat_method_unverified",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.popularity_history.reported",
+    "entry_id": "E47",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_returned_list_only",
+      "heat_method_unverified",
+      "not_complete_market_universe"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.quota_summary.reported",
+    "entry_id": "E48",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "requested_category_only",
+      "quota_currency_units_and_formula_unverified",
+      "source_display_text_not_comparable_amounts",
+      "current_subscription_eligibility_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.quota_list.reported",
+    "entry_id": "E49",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "requested_category_only",
+      "quota_currency_units_and_formula_unverified",
+      "source_display_text_not_comparable_amounts",
+      "current_subscription_eligibility_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.stock_daily.reported",
+    "entry_id": "E50",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "observed_rows_not_full_requested_range",
+      "currency_volume_and_turnover_units_unverified",
+      "adjustment_anchor_and_formula_unverified",
+      "captured_numeric_precision_not_provider_precision"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.etf_daily.forward_unanchored",
+    "entry_id": "E51",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "observed_rows_not_full_requested_range",
+      "currency_volume_and_turnover_units_unverified",
+      "adjustment_anchor_and_formula_unverified",
+      "captured_numeric_precision_not_provider_precision"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.index_daily.reported",
+    "entry_id": "E52",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "observed_rows_not_full_requested_range",
+      "currency_volume_and_turnover_units_unverified",
+      "adjustment_anchor_and_formula_unverified",
+      "captured_numeric_precision_not_provider_precision"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.offering.reported",
+    "entry_id": "E53",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "provider_reported_subscription_windows_only",
+      "current_subscription_eligibility_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "fund.manager_experience.reported",
+    "entry_id": "E54",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "assignment_effective_dates_unverified",
+      "performance_units_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.calendar.reported",
+    "entry_id": "E55",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "index.category.reported",
+    "entry_id": "E56",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "membership_effective_dates_unverified",
+      "provider_reported_set_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "index.constituent.reported",
+    "entry_id": "E57",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "membership_effective_dates_unverified",
+      "provider_reported_set_only"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.corporate_action.local",
+    "entry_id": "E61",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_observation_not_public_availability"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.trading_status.local",
+    "entry_id": "E64",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_observation_not_public_availability"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "instrument.reference.local",
+    "entry_id": "E67",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.calendar.local",
+    "entry_id": "E68",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.adjustment_factor.local",
+    "entry_id": "E69",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "adjustment_anchor_unverified",
+      "adjusted_price_derivation_not_supported"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  },
+  {
+    "api_sampled": false,
+    "current_file_bytes": 0,
+    "current_file_count": 0,
+    "current_key_count": 0,
+    "dataset": "market.fund_daily.local",
+    "entry_id": "E70",
+    "generation": 0,
+    "legacy_restrictions": 0,
+    "limitations": [
+      "source_local_identity_only",
+      "observed_time_only",
+      "historical_public_time_unverified",
+      "share_quantity_conversion_not_supported",
+      "adjusted_price_derivation_not_supported"
+    ],
+    "source_scope_count": 0,
+    "status": "empty",
+    "unresolved_issues": 0
+  }
+]

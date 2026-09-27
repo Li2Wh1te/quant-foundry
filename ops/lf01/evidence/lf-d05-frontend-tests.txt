@@ -1,0 +1,520 @@
+TAP version 13
+# Subtest: unchanged editor omits all mutations and includes concurrency token
+ok 1 - unchanged editor omits all mutations and includes concurrency token
+  ---
+  duration_ms: 22.641417
+  type: 'test'
+  ...
+# Subtest: metadata edit does not touch fee history and retains fee metadata
+ok 2 - metadata edit does not touch fee history and retains fee metadata
+  ---
+  duration_ms: 0.224542
+  type: 'test'
+  ...
+# Subtest: copy has no account identity or version fields and keeps exact decimals
+ok 3 - copy has no account identity or version fields and keeps exact decimals
+  ---
+  duration_ms: 0.089542
+  type: 'test'
+  ...
+# Subtest: rule updates do not erase custom category or condition dictionary keys
+ok 4 - rule updates do not erase custom category or condition dictionary keys
+  ---
+  duration_ms: 0.07675
+  type: 'test'
+  ...
+# Subtest: validation identifies the relevant step and rule without numeric coercion
+ok 5 - validation identifies the relevant step and rule without numeric coercion
+  ---
+  duration_ms: 0.559791
+  type: 'test'
+  ...
+# Subtest: missing historical rounding is shown missing, never silently defaulted
+ok 6 - missing historical rounding is shown missing, never silently defaulted
+  ---
+  duration_ms: 0.070792
+  type: 'test'
+  ...
+# Subtest: structured metadata is detected and an unchanged patch preserves it
+ok 7 - structured metadata is detected and an unchanged patch preserves it
+  ---
+  duration_ms: 0.277583
+  type: 'test'
+  ...
+# Subtest: permanent deletion uses its explicit endpoint, version and current token
+ok 8 - permanent deletion uses its explicit endpoint, version and current token
+  ---
+  duration_ms: 0.162208
+  type: 'test'
+  ...
+# Subtest: deletion checks preserve cancellation and conflicts never become success
+ok 9 - deletion checks preserve cancellation and conflicts never become success
+  ---
+  duration_ms: 0.957375
+  type: 'test'
+  ...
+# Subtest: comparison requires matching periods and actual calculation evidence
+ok 10 - comparison requires matching periods and actual calculation evidence
+  ---
+  duration_ms: 1.225584
+  type: 'test'
+  ...
+# Subtest: ambiguous metric versions cannot be selected or ranked
+ok 11 - ambiguous metric versions cannot be selected or ranked
+  ---
+  duration_ms: 0.090917
+  type: 'test'
+  ...
+# Subtest: canonical conventions ignore object insertion order but preserve member order
+ok 12 - canonical conventions ignore object insertion order but preserve member order
+  ---
+  duration_ms: 12.483042
+  type: 'test'
+  ...
+# Subtest: selection links preserve order and baseline and reject invalid membership
+ok 13 - selection links preserve order and baseline and reject invalid membership
+  ---
+  duration_ms: 1.862334
+  type: 'test'
+  ...
+# Subtest: saved comparison requests retain optimistic versions, order and explicit baseline
+ok 14 - saved comparison requests retain optimistic versions, order and explicit baseline
+  ---
+  duration_ms: 54.183667
+  type: 'test'
+  ...
+# Subtest: missing annualization, sample and risk-free conventions cannot establish comparability
+ok 15 - missing annualization, sample and risk-free conventions cannot establish comparability
+  ---
+  duration_ms: 0.180042
+  type: 'test'
+  ...
+# Subtest: evidence preserves zero and false values and escapes untrusted markup
+ok 16 - evidence preserves zero and false values and escapes untrusted markup
+  ---
+  duration_ms: 8.496
+  type: 'test'
+  ...
+# Subtest: creation requires completed current server gates, including degraded confirmation
+ok 17 - creation requires completed current server gates, including degraded confirmation
+  ---
+  duration_ms: 4.408042
+  type: 'test'
+  ...
+# Subtest: strategy workspace retains run filters and cursor
+ok 18 - strategy workspace retains run filters and cursor
+  ---
+  duration_ms: 114.545459
+  type: 'test'
+  ...
+# Subtest: monthly compounds preserve zero, signs and partial boundaries
+ok 19 - monthly compounds preserve zero, signs and partial boundaries
+  ---
+  duration_ms: 40.479875
+  type: 'test'
+  ...
+# Subtest: missing valuation crossing month blocks both affected monthly returns
+ok 20 - missing valuation crossing month blocks both affected monthly returns
+  ---
+  duration_ms: 1.136375
+  type: 'test'
+  ...
+# Subtest: duplicate dates and missing returns are never silently compounded
+ok 21 - duplicate dates and missing returns are never silently compounded
+  ---
+  duration_ms: 0.510542
+  type: 'test'
+  ...
+# Subtest: reader follows opaque cursors and returns all records
+ok 22 - reader follows opaque cursors and returns all records
+  ---
+  duration_ms: 0.924375
+  type: 'test'
+  ...
+# Subtest: reader rejects truncated, missing and repeated cursors and cancellation
+ok 23 - reader rejects truncated, missing and repeated cursors and cancellation
+  ---
+  duration_ms: 0.389667
+  type: 'test'
+  ...
+# Subtest: equity queries use the canonical backend route
+ok 24 - equity queries use the canonical backend route
+  ---
+  duration_ms: 0.431875
+  type: 'test'
+  ...
+# Subtest: copy preserves exact financial inputs but removes old admission and identity
+ok 25 - copy preserves exact financial inputs but removes old admission and identity
+  ---
+  duration_ms: 3.371875
+  type: 'test'
+  ...
+# Subtest: copy refuses unsupported legacy options instead of defaulting them
+ok 26 - copy refuses unsupported legacy options instead of defaulting them
+  ---
+  duration_ms: 0.737709
+  type: 'test'
+  ...
+# Subtest: configuration edits invalidate admission while new transport evidence does not
+ok 27 - configuration edits invalidate admission while new transport evidence does not
+  ---
+  duration_ms: 0.37275
+  type: 'test'
+  ...
+# Subtest: absent metrics remain unavailable while genuine zero is displayed
+ok 28 - absent metrics remain unavailable while genuine zero is displayed
+  ---
+  duration_ms: 2.292583
+  type: 'test'
+  ...
+# Subtest: global workspace query preserves server-side scope, filters and cancellation
+ok 29 - global workspace query preserves server-side scope, filters and cancellation
+  ---
+  duration_ms: 80.542792
+  type: 'test'
+  ...
+# Subtest: calendar covers leap days and uses stable Sunday grids across year boundaries
+ok 30 - calendar covers leap days and uses stable Sunday grids across year boundaries
+  ---
+  duration_ms: 5.203
+  type: 'test'
+  ...
+# Subtest: instrument search transmits stable identity and server-side keywords
+ok 31 - instrument search transmits stable identity and server-side keywords
+  ---
+  duration_ms: 46.775959
+  type: 'test'
+  ...
+# Subtest: publication sends the alias alongside the inspected draft version
+ok 32 - publication sends the alias alongside the inspected draft version
+  ---
+  duration_ms: 29.379709
+  type: 'test'
+  ...
+# Subtest: Tonghuashun uses its own API Key schema and has no fictitious ingestion tasks
+ok 33 - Tonghuashun uses its own API Key schema and has no fictitious ingestion tasks
+  ---
+  duration_ms: 23.023958
+  type: 'test'
+  ...
+# Subtest: provider schemas preserve zero and false but never initialize a secret
+ok 34 - provider schemas preserve zero and false but never initialize a secret
+  ---
+  duration_ms: 0.372417
+  type: 'test'
+  ...
+# Subtest: invalid drafts fail locally
+ok 35 - invalid drafts fail locally
+  ---
+  duration_ms: 0.661625
+  type: 'test'
+  ...
+# Subtest: connection evidence and task history remain distinct from availability
+ok 36 - connection evidence and task history remain distinct from availability
+  ---
+  duration_ms: 35.315042
+  type: 'test'
+  ...
+# Subtest: timestamps use Shanghai
+ok 37 - timestamps use Shanghai
+  ---
+  duration_ms: 64.87775
+  type: 'test'
+  ...
+# Subtest: requests carry auth, current version and exact draft without caching
+ok 38 - requests carry auth, current version and exact draft without caching
+  ---
+  duration_ms: 0.9175
+  type: 'test'
+  ...
+# Subtest: conflicts remain actionable while raw server errors stay hidden
+ok 39 - conflicts remain actionable while raw server errors stay hidden
+  ---
+  duration_ms: 8.543041
+  type: 'test'
+  ...
+# Subtest: caller cancellation remains recognizable
+ok 40 - caller cancellation remains recognizable
+  ---
+  duration_ms: 2.27425
+  type: 'test'
+  ...
+# Subtest: missing quote facts never render as zero or fabricate a sign
+ok 41 - missing quote facts never render as zero or fabricate a sign
+  ---
+  duration_ms: 13.094375
+  type: 'test'
+  ...
+# Subtest: daily series sorts without mutating API records and retains real volume units
+ok 42 - daily series sorts without mutating API records and retains real volume units
+  ---
+  duration_ms: 3.674875
+  type: 'test'
+  ...
+# Subtest: weekly and monthly aggregation uses first open, extrema, last close and summed original volume
+ok 43 - weekly and monthly aggregation uses first open, extrema, last close and summed original volume
+  ---
+  duration_ms: 3.646875
+  type: 'test'
+  ...
+# Subtest: replay excludes future OHLC, future factor anchors and future partial-period records
+ok 44 - replay excludes future OHLC, future factor anchors and future partial-period records
+  ---
+  duration_ms: 0.27075
+  type: 'test'
+  ...
+# Subtest: forward/backward factors adjust price only, without changing underlying records
+ok 45 - forward/backward factors adjust price only, without changing underlying records
+  ---
+  duration_ms: 0.098333
+  type: 'test'
+  ...
+# Subtest: incomplete factors block adjusted chart but raw chart remains usable
+ok 46 - incomplete factors block adjusted chart but raw chart remains usable
+  ---
+  duration_ms: 0.216041
+  type: 'test'
+  ...
+# Subtest: invalid prices block instead of silently skipping a trading day and bridging MA
+ok 47 - invalid prices block instead of silently skipping a trading day and bridging MA
+  ---
+  duration_ms: 0.156
+  type: 'test'
+  ...
+# Subtest: missing volume propagates across aggregates without pretending to be zero
+ok 48 - missing volume propagates across aggregates without pretending to be zero
+  ---
+  duration_ms: 0.075458
+  type: 'test'
+  ...
+# Subtest: indicator periods reject empty, fractional, invalid and inverted MACD settings
+ok 49 - indicator periods reject empty, fractional, invalid and inverted MACD settings
+  ---
+  duration_ms: 0.308042
+  type: 'test'
+  ...
+# Subtest: pending date and exchange changes retain a coherent detail without flashing placeholders
+ok 50 - pending date and exchange changes retain a coherent detail without flashing placeholders
+  ---
+  duration_ms: 62.128666
+  type: 'test'
+  ...
+# Subtest: settled, missing and failed dates never borrow another date or exchange label
+ok 51 - settled, missing and failed dates never borrow another date or exchange label
+  ---
+  duration_ms: 3.378083
+  type: 'test'
+  ...
+# Subtest: market filters round trip literal search, state and aligned page positions
+ok 52 - market filters round trip literal search, state and aligned page positions
+  ---
+  duration_ms: 4.163416
+  type: 'test'
+  ...
+# Subtest: detail return navigation is restricted to the market route
+ok 53 - detail return navigation is restricted to the market route
+  ---
+  duration_ms: 0.189125
+  type: 'test'
+  ...
+# Subtest: calendar date geometry is Monday-first with six weeks across leap years
+ok 54 - calendar date geometry is Monday-first with six weeks across leap years
+  ---
+  duration_ms: 0.532375
+  type: 'test'
+  ...
+# Subtest: missing days never become closed or open through weekday inference
+ok 55 - missing days never become closed or open through weekday inference
+  ---
+  duration_ms: 0.96675
+  type: 'test'
+  ...
+# Subtest: fee zero, missing values and sync timestamps keep distinct meanings
+ok 56 - fee zero, missing values and sync timestamps keep distinct meanings
+  ---
+  duration_ms: 2.830875
+  type: 'test'
+  ...
+# Subtest: initial loading, empty collection, no matches and unavailable are distinct
+ok 57 - initial loading, empty collection, no matches and unavailable are distinct
+  ---
+  duration_ms: 11.1915
+  type: 'test'
+  ...
+# Subtest: table retains eight facts, status text, complete names and real detail links
+ok 58 - table retains eight facts, status text, complete names and real detail links
+  ---
+  duration_ms: 1.664
+  type: 'test'
+  ...
+# Subtest: market requests encode exact filters, 42-day ranges, auth and cancellation
+ok 59 - market requests encode exact filters, 42-day ranges, auth and cancellation
+  ---
+  duration_ms: 0.698167
+  type: 'test'
+  ...
+# Subtest: 404 date coverage, expired auth and late cancelled bodies stay distinguishable
+ok 60 - 404 date coverage, expired auth and late cancelled bodies stay distinguishable
+  ---
+  duration_ms: 0.488541
+  type: 'test'
+  ...
+# Subtest: unknown data does not claim an empty or healthy workspace
+ok 61 - unknown data does not claim an empty or healthy workspace
+  ---
+  duration_ms: 17.916125
+  type: 'test'
+  ...
+# Subtest: server aggregates, retry reminders and task display names survive rendering
+ok 62 - server aggregates, retry reminders and task display names survive rendering
+  ---
+  duration_ms: 23.84325
+  type: 'test'
+  ...
+# Subtest: all statuses remain distinguishable and successful empty state is explicit
+ok 63 - all statuses remain distinguishable and successful empty state is explicit
+  ---
+  duration_ms: 16.892
+  type: 'test'
+  ...
+# Subtest: asset count uses open records and failures visibly preserve stale numbers
+ok 64 - asset count uses open records and failures visibly preserve stale numbers
+  ---
+  duration_ms: 6.843625
+  type: 'test'
+  ...
+# Subtest: time formatting uses Shanghai across midnight and supports long durations
+ok 65 - time formatting uses Shanghai across midnight and supports long durations
+  ---
+  duration_ms: 0.16075
+  type: 'test'
+  ...
+# Subtest: partial failures retain only failed regions and all reads bypass caches
+ok 66 - partial failures retain only failed regions and all reads bypass caches
+  ---
+  duration_ms: 1.554375
+  type: 'test'
+  ...
+# Subtest: a 401 invalidates the aggregate instead of preserving an apparently valid session
+ok 67 - a 401 invalidates the aggregate instead of preserving an apparently valid session
+  ---
+  duration_ms: 0.442875
+  type: 'test'
+  ...
+# Subtest: superseded requests cannot return a snapshot even if a fetch ignores cancellation
+ok 68 - superseded requests cannot return a snapshot even if a fetch ignores cancellation
+  ---
+  duration_ms: 0.399583
+  type: 'test'
+  ...
+# Subtest: catalog recovers from corrupt and obsolete workspace state
+ok 69 - catalog recovers from corrupt and obsolete workspace state
+  ---
+  duration_ms: 1.5565
+  type: 'test'
+  ...
+# Subtest: search and type filters intersect without changing the selected document
+ok 70 - search and type filters intersect without changing the selected document
+  ---
+  duration_ms: 0.213375
+  type: 'test'
+  ...
+# Subtest: documents describe strict runtime limits rather than prototype-only promises
+ok 71 - documents describe strict runtime limits rather than prototype-only promises
+  ---
+  duration_ms: 0.223917
+  type: 'test'
+  ...
+# Subtest: default document is accessible even when browser storage is unavailable
+ok 72 - default document is accessible even when browser storage is unavailable
+  ---
+  duration_ms: 10.125125
+  type: 'test'
+  ...
+# Subtest: name-only edit preserves expired once schedule, unknown parameters and source data
+ok 73 - name-only edit preserves expired once schedule, unknown parameters and source data
+  ---
+  duration_ms: 4.415958
+  type: 'test'
+  ...
+# Subtest: unchanged cron preserves custom timezone and exact expression; plan changes are explicit
+ok 74 - unchanged cron preserves custom timezone and exact expression; plan changes are explicit
+  ---
+  duration_ms: 0.334458
+  type: 'test'
+  ...
+# Subtest: calendar schedules use APScheduler weekday numbers and round-trip preset meanings
+ok 75 - calendar schedules use APScheduler weekday numbers and round-trip preset meanings
+  ---
+  duration_ms: 0.5205
+  type: 'test'
+  ...
+# Subtest: script parameters retain nullable zero and false and enforce date-window/numeric constraints
+ok 76 - script parameters retain nullable zero and false and enforce date-window/numeric constraints
+  ---
+  duration_ms: 0.46025
+  type: 'test'
+  ...
+# Subtest: completed/paused/source gates override stale next-run values and block execution
+ok 77 - completed/paused/source gates override stale next-run values and block execution
+  ---
+  duration_ms: 26.584458
+  type: 'test'
+  ...
+# Subtest: operator summaries never expose vendor error or raw JSON by default
+ok 78 - operator summaries never expose vendor error or raw JSON by default
+  ---
+  duration_ms: 0.28925
+  type: 'test'
+  ...
+# Subtest: workspace requests encode server filters and pagination and retain mutation versions
+ok 79 - workspace requests encode server filters and pagination and retain mutation versions
+  ---
+  duration_ms: 1.158541
+  type: 'test'
+  ...
+# Subtest: errors distinguish conflict, unknown write outcome, authorization and caller cancellation
+ok 80 - errors distinguish conflict, unknown write outcome, authorization and caller cancellation
+  ---
+  duration_ms: 1.065208
+  type: 'test'
+  ...
+# Subtest: running collection reports actual batch progress rather than a fake percentage
+ok 81 - running collection reports actual batch progress rather than a fake percentage
+  ---
+  duration_ms: 0.724625
+  type: 'test'
+  ...
+# Subtest: source-specific arrays preserve machine values and expose Chinese field copy
+ok 82 - source-specific arrays preserve machine values and expose Chinese field copy
+  ---
+  duration_ms: 2.009458
+  type: 'test'
+  ...
+# Subtest: invalid scope arrays and incomplete pasted codes fail before submission
+ok 83 - invalid scope arrays and incomplete pasted codes fail before submission
+  ---
+  duration_ms: 0.404875
+  type: 'test'
+  ...
+# Subtest: collection event fallback never renders its internal event key
+ok 84 - collection event fallback never renders its internal event key
+  ---
+  duration_ms: 0.205
+  type: 'test'
+  ...
+# Subtest: current local update has Chinese outcomes without leaking raw errors
+ok 85 - current local update has Chinese outcomes without leaking raw errors
+  ---
+  duration_ms: 0.127792
+  type: 'test'
+  ...
+1..85
+# tests 85
+# suites 0
+# pass 85
+# fail 0
+# cancelled 0
+# skipped 0
+# todo 0
+# duration_ms 1347.826

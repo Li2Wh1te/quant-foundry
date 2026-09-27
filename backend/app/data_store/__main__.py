@@ -5,6 +5,7 @@ import argparse
 import json
 import os
 from pathlib import Path
+import re
 import signal
 import sys
 
@@ -21,26 +22,54 @@ def main(argv=None):
     parser.add_argument('--pass-seconds',type=int,default=300)
     parser.add_argument('--allow-incompatible-rebuild',action='store_true')
     parser.add_argument('--rescue',type=Path,action='append',help='Self-contained qf-local-rescue-v1 file; never a legacy formal snapshot')
-    parser.add_argument('--output',type=Path,help='New result file (will not overwrite an existing file)')
+    parser.add_argument('--output',type=Path,help='New result file; for audit-export, a new evidence directory')
+    parser.add_argument('--api-base-url',help='Audit only: actual API base URL; HTTP is allowed on loopback only')
+    parser.add_argument('--api-token-env',default='QF_AUDIT_API_TOKEN',help='Audit only: name of environment variable holding API bearer token')
+    parser.add_argument('--audit-seconds',type=int,default=300)
+    parser.add_argument('--audit-files',type=int,default=10000)
+    parser.add_argument('--audit-bytes',type=int,default=8*1024**3)
+    parser.add_argument('--audit-rows',type=int,default=20_000_000)
+    parser.add_argument('--audit-api-samples',type=int,default=8)
     args=parser.parse_args(argv)
     from .adapters.registry import ENTRIES, BY_ID
     from .adapters.canonical import NativeInputError
     from .errors import DataStoreError
     try:
         selected=([BY_ID[v] for v in args.entry] if args.entry else
-                  [e for e in ENTRIES if e.business] if args.command in ('cleanup','audit-export')
+                  [e for e in ENTRIES if e.business] if args.command=='cleanup'
                   else list(ENTRIES))
     except KeyError:
         parser.error('Unknown entry; use describe to list E01–E71')
     if len(set(e.id for e in selected))!=len(selected): parser.error('Duplicate entry')
-    if args.command in ('cleanup','audit-export') and any(not e.business for e in selected):
-        parser.error('cleanup and audit-export accept business entries only')
+    if args.command=='cleanup' and any(not e.business for e in selected):
+        parser.error('cleanup accepts business entries only')
     if args.command=='describe':
         result={'entries':[e.describe_capability() for e in selected],
                 'source_entry_count':len(ENTRIES),'business_entries':sum(e.business for e in ENTRIES),
                 'production_executed':False}
         print(json.dumps(result,ensure_ascii=False,indent=2));return 0
     if args.root is None or not args.root.is_absolute(): parser.error('--root must be an existing absolute trusted path')
+    if args.command=='audit-export':
+        if args.initialize or args.rescue or args.partition or not args.output:
+            parser.error('audit-export requires --output and forbids initialization, rescue and partition writes')
+        if not re.fullmatch(r'[A-Za-z_][A-Za-z0-9_]*',args.api_token_env):
+            parser.error('--api-token-env must name one environment variable')
+        from app.db.session import get_engine
+        from .audit_export import AuditLimits,export_audit
+        try:
+            limits=AuditLimits(seconds=args.audit_seconds,files=args.audit_files,
+                               bytes=args.audit_bytes,rows=args.audit_rows,
+                               api_samples=args.audit_api_samples)
+            result=export_audit(get_engine(),args.root,args.output,entries=tuple(selected),
+                                limits=limits,api_base_url=args.api_base_url,
+                                api_token=os.environ.get(args.api_token_env))
+        except (ValueError,OSError) as error:
+            result={'complete':False,'reason':'AUDIT_CONFIGURATION_OR_IO_ERROR'}
+        except Exception:
+            # Database exceptions can contain a DSN, SQL or source payload.
+            result={'complete':False,'reason':'AUDIT_UNAVAILABLE'}
+        print(json.dumps(result,ensure_ascii=False))
+        return 0 if result['complete'] else 2
     key=os.environ.get('QF_CURSOR_SIGNING_KEY','').encode()
     if len(key)<32: parser.error('Provide QF_CURSOR_SIGNING_KEY through the environment (at least 32 bytes)')
     # The configured PostgreSQL engine is opened only after an explicit command.
@@ -54,7 +83,7 @@ def main(argv=None):
     for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,cancel)
     output={'command':args.command,'entries':[],'complete':True,'supplier_network_used':False}
     try:
-        options=PipelineOptions(mode=args.command if args.command!='status' else 'update',
+        options=PipelineOptions(mode=args.command if args.command in ('rebuild','update','retry') else 'update',
             partitions=tuple(args.partition),maximum_passes=args.max_passes,pass_seconds=args.pass_seconds,
             allow_incompatible_rebuild=args.allow_incompatible_rebuild)
         engine=get_engine()
@@ -79,17 +108,6 @@ def main(argv=None):
                         output['entries'].append({'entry_id':entry.id,'dataset':entry.spec.name,
                                                   'complete':False,'reason':error.code})
                         output['complete']=False
-                    continue
-                if args.command=='audit-export':
-                    try:
-                        descriptor=store.describe_capability(entry.spec)
-                    except DataStoreError as error:
-                        if error.code!='DATASET_MISSING': raise
-                        descriptor={'dataset':entry.spec.name,'status':'not_checked',
-                                    'row_count':None,'generation':None,'issues':None}
-                    output['entries'].append({'entry_id':entry.id,'complete':True,
-                                              'descriptor':descriptor,
-                                              'processing':read_entry_status(store,entry.id)})
                     continue
                 try:
                     result=run_entry(store,entry,sources,options=options,cancelled=lambda:cancelled[0])

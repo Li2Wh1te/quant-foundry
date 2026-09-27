@@ -1,0 +1,667 @@
+{
+  "command": "cleanup",
+  "entries": [
+    {
+      "entry_id": "E04",
+      "dataset": "fund.news.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E05",
+      "dataset": "market.stock_anomaly.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E06",
+      "dataset": "market.rank_trend.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E07",
+      "dataset": "fund.reported_holdings.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E08",
+      "dataset": "fund.reported_stock_holdings.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E09",
+      "dataset": "fund.reported_bond_holdings.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E10",
+      "dataset": "market.financial_indicator.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E11",
+      "dataset": "fund.financial_indicator.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E12",
+      "dataset": "fund.income.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E13",
+      "dataset": "fund.balance.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E14",
+      "dataset": "market.income.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E15",
+      "dataset": "market.balance.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E16",
+      "dataset": "market.cash_flow.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E17",
+      "dataset": "fund.allocation.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E18",
+      "dataset": "fund.industry.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E19",
+      "dataset": "fund.holder_composition.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E20",
+      "dataset": "fund.top_holder.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E21",
+      "dataset": "fund.dividend.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E22",
+      "dataset": "market.corporate_action.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E23",
+      "dataset": "fund.manager_performance.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E24",
+      "dataset": "fund.manager_style.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E25",
+      "dataset": "fund.return.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E26",
+      "dataset": "fund.drawdown.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E27",
+      "dataset": "fund.performance.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E28",
+      "dataset": "market.dragon_tiger.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E29",
+      "dataset": "market.auction.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E30",
+      "dataset": "market.auction_benchmark.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E31",
+      "dataset": "market.limit_up.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E32",
+      "dataset": "market.limit_down.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E33",
+      "dataset": "market.limit_break.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E34",
+      "dataset": "market.anomaly.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E35",
+      "dataset": "market.limit_ladder.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E36",
+      "dataset": "market.stock_quote.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E37",
+      "dataset": "market.etf_quote.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E38",
+      "dataset": "market.index_quote.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E39",
+      "dataset": "market.stock_valuation.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E40",
+      "dataset": "instrument.reference.provider_reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E41",
+      "dataset": "fund.company.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E42",
+      "dataset": "fund.manager.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E43",
+      "dataset": "fund.profile.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E44",
+      "dataset": "fund.nav.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E45",
+      "dataset": "market.popularity.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E46",
+      "dataset": "market.rising_popularity.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E47",
+      "dataset": "market.popularity_history.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E48",
+      "dataset": "fund.quota_summary.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E49",
+      "dataset": "fund.quota_list.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E50",
+      "dataset": "market.stock_daily.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E51",
+      "dataset": "market.etf_daily.forward_unanchored",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E52",
+      "dataset": "market.index_daily.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E53",
+      "dataset": "fund.offering.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E54",
+      "dataset": "fund.manager_experience.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E55",
+      "dataset": "market.calendar.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E56",
+      "dataset": "index.category.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E57",
+      "dataset": "index.constituent.reported",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E61",
+      "dataset": "market.corporate_action.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E64",
+      "dataset": "market.trading_status.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E67",
+      "dataset": "instrument.reference.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E68",
+      "dataset": "market.calendar.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E69",
+      "dataset": "market.adjustment_factor.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    },
+    {
+      "entry_id": "E70",
+      "dataset": "market.fund_daily.local",
+      "complete": true,
+      "deleted": 0,
+      "pending": 0,
+      "logs": {
+        "retained_segments": 1,
+        "retained_bytes": 871
+      }
+    }
+  ],
+  "complete": true,
+  "supplier_network_used": false
+}
