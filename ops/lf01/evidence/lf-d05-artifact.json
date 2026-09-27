@@ -1,0 +1,14 @@
+{
+  "task": "LF-D05",
+  "code_commit": "1d902395d33be2a41e30849222efbfa07e039f30",
+  "code_tree": "9f443f54327afbe27ae967f182515d1541c45ddb",
+  "local_image_tag": "qf-lfd05:1d90239",
+  "image_id": "sha256:d1d555b962afaaa82034f3c2afab6e51213fe2a086eb1decdb9b457cbcc03f62",
+  "image_size_bytes": 1468061429,
+  "platform": "linux/arm64",
+  "build_command": "docker build --label org.opencontainers.image.revision=1d902395d33be2a41e30849222efbfa07e039f30 -f backend/Dockerfile -t qf-lfd05:1d90239 .",
+  "python_base_image_digest": "sha256:5dc6f84b5e97bfb0c90abfb7c55f3cacc2cb6687c8f920b64a833a2219875997",
+  "uv_base_image_digest": "sha256:240fb85ab0f263ef12f492d8476aa3a2e4e1e333f7d67fbdd923d00a506a516a",
+  "backend_uv_lock_sha256": "ee9e37f7315d9329cb4ca9b5358ca89892e56a577651a68cb965330555853c80",
+  "production_deployed": false
+}

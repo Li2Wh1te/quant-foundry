@@ -34,7 +34,7 @@
 ## P01：部署到维护就绪态
 
 1. 固定并核对提交/镜像身份；将证据与镜像归档保留在私有目录。执行 `docker compose --env-file .env -f compose.yaml stop frontend backend runner`，确认旧正式化 writer 已停且无活动事务。不得清空数据库、共享卷或归档。
-2. 执行上述 `selfhost_env.py` 更新、`docker compose --env-file .env -f compose.yaml build backend`，核对 `docker image inspect quant-foundry-backend:local --format '{{.Id}}'` 与交付镜像身份；`docker compose --env-file .env -f compose.yaml up -d --wait postgres` 后用 `docker compose --env-file .env -f compose.yaml run --rm --no-deps backend alembic upgrade head` 增量安装。这一步只新增当前目录和维护 schema。用表中的 `status --expect-database "$DB"` 核对现状；旧库应保持明确维护态，新空库可直接 ready。
+2. 执行上述 `selfhost_env.py` 更新，在固定提交上逐字执行结果包 `lf-d05-artifact.json` 的 `build_command`，再运行 `docker tag qf-lfd05:1d90239 quant-foundry-backend:local`。同为 Linux arm64 时用 `docker image inspect quant-foundry-backend:local --format '{{.Id}}'` 核对交付镜像 ID；若目标架构不同，先记录目标架构的重建镜像 ID、锁文件和基镜像摘要并审核该差异，不能声称与 arm64 镜像二进制相同。`docker compose --env-file .env -f compose.yaml up -d --wait postgres` 后用 `docker compose --env-file .env -f compose.yaml run --rm --no-deps backend alembic upgrade head` 增量安装。这一步只新增当前目录和维护 schema。用表中的 `status --expect-database "$DB"` 核对现状；旧库应保持明确维护态，新空库可直接 ready。
 3. 用表中的 `enter --expect-database "$DB"` 暂停精确旧任务及现场确定的共享任务 ID，再执行 `docker compose --env-file .env -f compose.yaml up -d --no-build --wait backend runner frontend`。核对 `/readyz`、当前 `/api/admin/data-store/status` 与旧路由的 410。P01 不执行 `apply`、业务 `rebuild`、生产清理或逐领域完成声明。不要用 `make selfhost-deploy-backend` 代替此顺序，因为该目标会在 `enter` 前启动 runner。
 4. 记录部署后的实际镜像 ID、Alembic revision、容器共享挂载身份和可用空间；交给 R01 的维护者。若在任何删除前放弃，按 `restore --include-legacy` 与既有部署回滚步骤处理。
 

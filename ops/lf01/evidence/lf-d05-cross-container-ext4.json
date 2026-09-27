@@ -1,0 +1,45 @@
+{
+  "task": "LF-D01",
+  "case": "C12-cross-container",
+  "synthetic": true,
+  "passed": true,
+  "steps": [
+    {
+      "mode": "init",
+      "passed": true,
+      "synthetic": true
+    },
+    {
+      "mode": "contend",
+      "passed": true,
+      "synthetic": true
+    },
+    {
+      "mode": "after_kill",
+      "passed": true,
+      "synthetic": true
+    },
+    {
+      "mode": "inspect",
+      "passed": true,
+      "synthetic": true
+    },
+    {
+      "mode": "hold_reader",
+      "passed": true
+    },
+    {
+      "mode": "correct",
+      "passed": true
+    },
+    {
+      "mode": "cleanup_contend",
+      "passed": true
+    },
+    {
+      "mode": "verify",
+      "passed": true,
+      "synthetic": true
+    }
+  ]
+}

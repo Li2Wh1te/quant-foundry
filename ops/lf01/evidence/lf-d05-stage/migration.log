@@ -1,0 +1,70 @@
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade  -> 20260815_01, Add persistent scheduler tables.
+INFO  [alembic.runtime.migration] Running upgrade 20260815_01 -> 20260815_02, Add trading calendar days.
+INFO  [alembic.runtime.migration] Running upgrade 20260815_02 -> 20260815_03, Add generic data synchronization checkpoints.
+INFO  [alembic.runtime.migration] Running upgrade 20260815_03 -> 20260816_01, Add ETF entities, trading codes, and mapping audits.
+INFO  [alembic.runtime.migration] Running upgrade 20260816_01 -> 20260816_02, Add current authoritative ETF daily bars.
+INFO  [alembic.runtime.migration] Running upgrade 20260816_02 -> 20260816_03, Add current ETF adjustment factors.
+INFO  [alembic.runtime.migration] Running upgrade 20260816_03 -> 20260819_01, Add private database-backed strategy storage.
+INFO  [alembic.runtime.migration] Running upgrade 20260819_01 -> 20260822_01, Add editable backtest account profiles and bound fee configurations.
+INFO  [alembic.runtime.migration] Running upgrade 20260822_01 -> 20260822_02, Add backtest result tables for steps, decisions, orders, fills,
+positions, equity curve, metrics, data preflight reports, and data chunks.
+INFO  [alembic.runtime.migration] Running upgrade 20260822_02 -> 20260822_03, Add generic instruments and PIT code mappings; absorb ETF identities.
+INFO  [alembic.runtime.migration] Running upgrade 20260822_03 -> 20260822_04, Add instrument rule facts, named exception sets, and run rule snapshots.
+INFO  [alembic.runtime.migration] Running upgrade 20260822_04 -> 20260823_01, Add execution audit columns to backtest_fills.
+INFO  [alembic.runtime.migration] Running upgrade 20260823_01 -> 20260824_01, Add analyzer identity to backtest_metrics and create the run-level
+analysis summary table.
+INFO  [alembic.runtime.migration] Running upgrade 20260824_01 -> 20260825_01, Widen metric formula versions for analyzer contracts.
+INFO  [alembic.runtime.migration] Running upgrade 20260825_01 -> 20260825_02, Add analysis chunk and terminal retry fingerprints.
+INFO  [alembic.runtime.migration] Running upgrade 20260825_02 -> 20260825_03, Add database length checks for the frozen analyzer identity contract.
+INFO  [alembic.runtime.migration] Running upgrade 20260825_03 -> 20260825_04, Persist the formal session timeline used at analysis admission.
+INFO  [alembic.runtime.migration] Running upgrade 20260825_04 -> 20260828_01, Add append-only identity/display facts and PIT mapping revisions.
+INFO  [alembic.runtime.migration] Running upgrade 20260828_01 -> 20260829_01, Add append-only named-calendar registry, facts and reconciliation tables.
+INFO  [alembic.runtime.migration] Running upgrade 20260829_01 -> 20260830_01, Add the explicit exchange attribute to PIT identity facts.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_01 -> 20260830_02, Add ETF corporate action source, normalized and coverage facts.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_02 -> 20260830_03, Add nullable current-state revisions and append-only audit evidence.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_03 -> 20260830_04, Extend data chunk rows with consistency evidence.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_04 -> 20260830_05, Add persisted scheduler run progress and supervision evidence.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_05 -> 20260830_06, Persist normalized suspend_d trading status facts.
+INFO  [alembic.runtime.migration] Running upgrade 20260830_06 -> 20260831_01, Create durable backtest run roots.
+INFO  [alembic.runtime.migration] Running upgrade 20260831_01 -> 20260831_02, Add runner supervision evidence and durable queue-capacity guards.
+INFO  [alembic.runtime.migration] Running upgrade 20260831_02 -> 20260901_01, Persist the owner-scoped parent link for manual backtest reruns.
+INFO  [alembic.runtime.migration] Running upgrade 20260901_01 -> 20260902_01, Freeze the complete run input snapshot and version account configurations.
+INFO  [alembic.runtime.migration] Running upgrade 20260902_01 -> 20260903_01, Persist the ordered domain-event audit stream for backtest runs.
+INFO  [alembic.runtime.migration] Running upgrade 20260903_01 -> 20260904_01, Persist bounded failure, stdout, and force-termination evidence.
+INFO  [alembic.runtime.migration] Running upgrade 20260904_01 -> 20260905_01, Persist the immutable four-level formal admission gate projection.
+INFO  [alembic.runtime.migration] Running upgrade 20260905_01 -> 20260906_01, Close the PIT, revision, validity, and coverage evidence loop.
+INFO  [alembic.runtime.migration] Running upgrade 20260906_01 -> 20260906_02, Allow raw ETF bars to retain source-invalid numeric values.
+INFO  [alembic.runtime.migration] Running upgrade 20260906_02 -> 20260907_01, Complete the persisted backtest event and decision-to-order audit chain.
+INFO  [alembic.runtime.migration] Running upgrade 20260907_01 -> 20260908_01, Persist immutable account versions and backfill the current definition.
+INFO  [alembic.runtime.migration] Running upgrade 20260908_01 -> 20260909_01, Preserve the worker's 28-digit Decimal progress in persisted runs.
+INFO  [alembic.runtime.migration] Running upgrade 20260909_01 -> 20260910_01, Create a shared immutable fee catalog without rewriting legacy snapshots.
+INFO  [alembic.runtime.migration] Running upgrade 20260910_01 -> 20260911_01, Preserve quantity-company-action facts independently of cash accounting.
+INFO  [alembic.runtime.migration] Running upgrade 20260911_01 -> 20260912_01, Add bounded root audit projection.
+INFO  [alembic.runtime.migration] Running upgrade 20260912_01 -> 20260913_01, Add provider-owned configuration and a stable scheduler serialization row.
+INFO  [alembic.runtime.migration] Running upgrade 20260913_01 -> 20260914_01, Persist ETF watchlists and provider-supplied daily change facts.
+INFO  [alembic.runtime.migration] Running upgrade 20260914_01 -> 20260915_01, Allow explicit removal of unused accounts while protecting referenced history.
+INFO  [alembic.runtime.migration] Running upgrade 20260915_01 -> 20260916_01, Store immutable publication aliases; preserve unnamed historical revisions.
+INFO  [alembic.runtime.migration] Running upgrade 20260916_01 -> 20260917_01, Persist owned backtest comparison definitions and ordered run membership.
+INFO  [alembic.runtime.migration] Running upgrade 20260917_01 -> 20260918_01, Seed the independently configured Tonghuashun data source.
+INFO  [alembic.runtime.migration] Running upgrade 20260918_01 -> 20260919_01, Add source-local Tonghuashun collections without modifying Tushare facts.
+INFO  [alembic.runtime.migration] Running upgrade 20260919_01 -> 20260920_01, Add restartable staging for validated Tonghuashun Parquet imports.
+INFO  [alembic.runtime.migration] Running upgrade 20260920_01 -> 20260921_01, Persist collection progress and resumable request units.
+INFO  [alembic.runtime.migration] Running upgrade 20260921_01 -> 20260922_01, Freeze local source evidence and protect its dependency closure.
+INFO  [alembic.runtime.migration] Running upgrade 20260922_01 -> 20260923_01, Add fenced work and typed, atomic foundation publication.
+INFO  [alembic.runtime.migration] Running upgrade 20260923_01 -> 20260924_01, Retain fixed daily-bar applicability independently of provider decoders.
+INFO  [alembic.runtime.migration] Running upgrade 20260924_01 -> 20260925_01, Add typed whole-report objects without changing existing daily releases.
+INFO  [alembic.runtime.migration] Running upgrade 20260925_01 -> 20260926_01, Expand foundation intake and multi-input relationships without rewriting history.
+INFO  [alembic.runtime.migration] Running upgrade 20260926_01 -> 20260927_01, Retain exact local-version membership for restartable full intake.
+INFO  [alembic.runtime.migration] Running upgrade 20260927_01 -> 20260928_01, Extend shared candidates and releases with typed source-local domain records.
+INFO  [alembic.runtime.migration] Running upgrade 20260928_01 -> 20260929_01, Retain validator receipts only for closed immutable typed-record blocks.
+INFO  [alembic.runtime.migration] Running upgrade 20260929_01 -> 20260930_01, Seal full typed-record governance derivations for bounded page execution.
+INFO  [alembic.runtime.migration] Running upgrade 20260930_01 -> 20261001_01, Index reverse sealing guards without weakening immutable membership checks.
+INFO  [alembic.runtime.migration] Running upgrade 20261001_01 -> 20261002_01, Durable fair rotation for local formalization updates.
+INFO  [alembic.runtime.migration] Running upgrade 20261002_01 -> 20261003_01, Capture local table changes atomically without periodic full-table copies.
+INFO  [alembic.runtime.migration] Running upgrade 20261003_01 -> 20261004_01, Retain bounded preparation/proof pages and fixed-source settlement edges.
+INFO  [alembic.runtime.migration] Running upgrade 20261004_01 -> 20261004_02, Bound source/manifest lookups and negative quality checks with online indexes.
+INFO  [alembic.runtime.migration] Running upgrade 20261004_02 -> 20261005_01, Add the LF-D01 current-only catalog; never reset legacy or shared data.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_01 -> 20261006_01, Current LF-D02 entry status, not a formal empty/import/support dataset.
+INFO  [alembic.runtime.migration] Running upgrade 20261006_01 -> 20261007_01, Add non-destructive LF-D03 maintenance receipts.

@@ -1,0 +1,135 @@
+{"actual": "matching identity", "check": "root_binding", "expected": "matching identity", "scope": "store", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E01", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E02", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E03", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E04", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E04", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E05", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E05", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E06", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E06", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E07", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E07", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E08", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E08", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E09", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E09", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E10", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E10", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E11", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E11", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E12", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E12", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E13", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E13", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E14", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E14", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E15", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E15", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E16", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E16", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E17", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E17", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E18", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E18", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E19", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E19", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E20", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E20", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E21", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E21", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E22", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E22", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E23", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E23", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E24", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E24", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E25", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E25", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E26", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E26", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E27", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E27", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E28", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E28", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E29", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E29", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E30", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E30", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E31", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E31", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E32", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E32", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E33", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E33", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E34", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E34", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E35", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E35", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E36", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E36", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E37", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E37", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E38", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E38", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E39", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E39", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E40", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E40", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E41", "status": "pass"}
+{"actual": {"files": 1, "rows": 1}, "check": "full_file_scan", "expected": {"files": 1, "rows": 1}, "scope": "E41", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E42", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E42", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E43", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E43", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E44", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E44", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E45", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E45", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E46", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E46", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E47", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E47", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E48", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E48", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E49", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E49", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E50", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E50", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E51", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E51", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E52", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E52", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E53", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E53", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E54", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E54", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E55", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E55", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E56", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E56", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E57", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E57", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E58", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E59", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E60", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E61", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E61", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E62", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E63", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E64", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E64", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E65", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E66", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E67", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E67", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E68", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E68", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E69", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E69", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E70", "status": "pass"}
+{"actual": {"files": 0, "rows": 0}, "check": "full_file_scan", "expected": {"files": 0, "rows": 0}, "scope": "E70", "status": "pass"}
+{"actual": "entry", "check": "input_disposition", "expected": "complete latest processing scope", "scope": "E71", "status": "pass"}
+{"actual": "unchanged", "check": "generation_stability", "expected": "unchanged", "scope": "store", "status": "pass"}
+{"actual": {"generation": 1, "sample_key_sha256": "9e516738b17ef65821944488a940ff358eab255513dcb17d78cacda62e12c094"}, "check": "api_sample", "expected": {"generation": 1, "sample_key_sha256": "9e516738b17ef65821944488a940ff358eab255513dcb17d78cacda62e12c094"}, "scope": "E41", "status": "pass"}
+{"actual": "unchanged", "check": "final_generation_stability", "expected": "unchanged after API sample", "scope": "store", "status": "pass"}
