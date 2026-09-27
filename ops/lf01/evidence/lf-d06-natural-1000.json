@@ -1,0 +1,102 @@
+{
+  "case": "LF-01-natural-full-source",
+  "complete": true,
+  "production_executed": false,
+  "partitions": 1000,
+  "input_rows": 10000,
+  "current_rows": 10000,
+  "current_files": 1000,
+  "invocations": [
+    {
+      "complete": false,
+      "resumed": null,
+      "source_rows": 10000,
+      "normalized_units": 10000,
+      "scan_source_rows": 10000,
+      "committed_partitions": 256,
+      "last_partition": "1921-04.b05",
+      "metrics": {
+        "input_rows": 2560,
+        "input_bytes": 661504,
+        "current_read_bytes": 0,
+        "written_bytes": 1511612,
+        "files_read": 0,
+        "files_written": 256,
+        "files_retired": 0,
+        "catalog_file_changes": 256,
+        "scratch_peak_bytes": 11818,
+        "rss_peak_bytes": 204173312
+      }
+    },
+    {
+      "complete": false,
+      "resumed": true,
+      "source_rows": 0,
+      "normalized_units": 0,
+      "scan_source_rows": 10000,
+      "committed_partitions": 256,
+      "last_partition": "1942-08.b05",
+      "metrics": {
+        "input_rows": 2560,
+        "input_bytes": 661504,
+        "current_read_bytes": 0,
+        "written_bytes": 1511644,
+        "files_read": 0,
+        "files_written": 256,
+        "files_retired": 0,
+        "catalog_file_changes": 256,
+        "scratch_peak_bytes": 11818,
+        "rss_peak_bytes": 204435456
+      }
+    },
+    {
+      "complete": false,
+      "resumed": true,
+      "source_rows": 0,
+      "normalized_units": 0,
+      "scan_source_rows": 10000,
+      "committed_partitions": 256,
+      "last_partition": "1963-12.b05",
+      "metrics": {
+        "input_rows": 2560,
+        "input_bytes": 661504,
+        "current_read_bytes": 0,
+        "written_bytes": 1511621,
+        "files_read": 0,
+        "files_written": 256,
+        "files_retired": 0,
+        "catalog_file_changes": 256,
+        "scratch_peak_bytes": 11816,
+        "rss_peak_bytes": 205090816
+      }
+    },
+    {
+      "complete": true,
+      "resumed": true,
+      "source_rows": 0,
+      "normalized_units": 0,
+      "scan_source_rows": 10000,
+      "committed_partitions": 232,
+      "last_partition": "1983-04.b05",
+      "metrics": {
+        "input_rows": 2320,
+        "input_bytes": 599488,
+        "current_read_bytes": 0,
+        "written_bytes": 1369922,
+        "files_read": 0,
+        "files_written": 232,
+        "files_retired": 0,
+        "catalog_file_changes": 232,
+        "scratch_peak_bytes": 11816,
+        "rss_peak_bytes": 205221888
+      }
+    }
+  ],
+  "manual_partition_selection": false,
+  "committed_files_unchanged_on_resume": true,
+  "pending_reclaimed": true,
+  "peak_pending_bytes_at_invocation_boundary": 6537216,
+  "rss_peak_bytes": 205484032,
+  "seconds": 46.08636685501551,
+  "supplier_connected": false
+}

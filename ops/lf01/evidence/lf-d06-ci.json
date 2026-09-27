@@ -1,0 +1,29 @@
+{
+  "code_commit": "d52e5455bae8386acb86f54aadf1f3ba744c60ed",
+  "local": {
+    "backend": {
+      "passed": 2698,
+      "skipped": 1,
+      "subtests_passed": 236,
+      "skip_reason": "optional QF_TEST_POSTGRES_DSN not configured"
+    },
+    "root": {
+      "passed": 17,
+      "subtests_passed": 4
+    },
+    "frontend": {
+      "passed": 85
+    },
+    "typescript": "passed",
+    "vite_build": "passed",
+    "alembic_full_chain": "passed",
+    "docker_parquet_runtime": "passed",
+    "release_version": "passed"
+  },
+  "validation_boundaries": [
+    "Backend mechanics tests use the existing overlay filesystem probe; separate real ext4 cross-container acceptance is required.",
+    "Initial read-only virtualenv and root-owner harness failures were corrected by environment configuration, not code or assertion changes."
+  ],
+  "pr_ci": "pending",
+  "main_ci": "not_started"
+}
