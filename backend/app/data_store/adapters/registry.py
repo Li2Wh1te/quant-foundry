@@ -125,7 +125,7 @@ class Entry:
         if self.native=='etf_daily' and self.source=='tonghuashun': name='market.etf_daily.forward_unanchored'
         if self.native=='tickers': name='instrument.reference.provider_reported'
         semantics={'entry_id':self.id,'source':self.source,'native_dataset':self.native,'domain':self.domain,
-                   'row_layout':'typed-object-nodes-v1','issue_scope':'object-key-v1','tombstones':'explicit-current-state','history':'business_dates_only',
+                   'row_layout':'typed-object-nodes-v2','issue_scope':'object-key-v1','tombstones':'explicit-current-state','history':'business_dates_only',
                    'order':'comparable_source_per_object','merge':'whole_object' if self.projection[0] not in ('series','table','reference','intervals','events') else 'sparse_keys',
                    'unknown_units':'restricted_not_inferred','unbounded_decimal':'exact_text_no_sql_arithmetic',
                    'cross_source_fallback':'disabled'}

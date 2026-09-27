@@ -22,7 +22,7 @@ from .adapters.contracts import Unit, digest, native_json, loads
 from .adapters.canonical import NativeInputError
 
 _REBUILT_METADATA = frozenset(('representation','subject','object_key','basis_ns',
-                               'basis_group','basis_token','basis_valid','basis_state','value_hash'))
+                               'basis_group','basis_token','basis_state'))
 
 
 def restore_row(schema, row):
@@ -220,6 +220,8 @@ class MergeSpool:
             self.db.commit(); self.check()
 
     def rows(self, partition):
+        # objects.h is a temporary comparison aid; the formal v2 row carries
+        # only the winner basis and its single explicit validity state.
         for record in self.db.execute('SELECT * FROM objects WHERE p=? ORDER BY k',(partition,)):
             payload=loads(record['body'])
             if not payload:
@@ -227,8 +229,7 @@ class MergeSpool:
             for row in sorted(payload,key=lambda v:v['member_key']):
                 yield restore_row(self.spec.schema, {**row,'representation':record['r'],'subject':record['s'],
                     'object_key':record['o'],'basis_ns':record['n'],'basis_group':record['g'],
-                    'basis_token':record['t'],'basis_valid':record['state']=='valid',
-                    'basis_state':record['state'],'value_hash':record['h']})
+                    'basis_token':record['t'],'basis_state':record['state']})
             self.check()
 
     def batches(self, partition, *, rows, nbytes):

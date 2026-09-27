@@ -122,12 +122,12 @@ class Layout:
     def spec(self, name, rule, semantics, *, report=True):
         fields = [pa.field(k, pa.string(), nullable=False, metadata={b'max_utf8_bytes': b'256'})
                   for k in ('representation','subject','object_key','member_key')]
+        # V2 persists one validity state. Business digests are recomputed only
+        # inside the bounded merge spool, never stored alongside formal values.
         fields += [pa.field('row_kind', pa.int32(), nullable=False),
                    pa.field('basis_ns', pa.int64(), nullable=False, metadata={b'unit':b'epoch_ns'}),
                    pa.field('basis_group', pa.string(), nullable=False, metadata={b'max_utf8_bytes':b'64'}),
                    pa.field('basis_token', pa.string(), nullable=False, metadata={b'max_utf8_bytes':b'64'}),
-                   pa.field('value_hash', pa.string(), nullable=False, metadata={b'max_utf8_bytes':b'64'}),
-                   pa.field('basis_valid', pa.bool_(), nullable=False),
                    pa.field('basis_state', pa.string(), nullable=False, metadata={b'max_utf8_bytes':b'16'})]
         fields += [pa.field('quality_json',pa.string(),nullable=True,metadata={b'max_utf8_bytes':b'32768'})]
         fields += self.fields

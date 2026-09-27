@@ -201,6 +201,8 @@ def test_current_preview_and_generation_change_rejects_continuation(api):
     assert descriptor.status_code == 200
     detail = descriptor.json()
     assert detail["status"] == "available"
+    assert not {"value_hash", "basis_valid"} & {field["column"] for field in detail["fields"]}
+    assert "basis_state" in {field["column"] for field in detail["fields"]}
     assert detail["row_count"] >= 2
     assert detail["preview_key"] is not None
     body = query_body(entry, detail["preview_key"])

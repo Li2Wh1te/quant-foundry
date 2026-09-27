@@ -20,3 +20,13 @@ D01–D05 已合入 main，复核基线为 `4c3e094c17aafadcb4303589d8e123c7f5e6
 `rebuild_complete=false`；`domains_accepted=false`。
 
 本轮没有执行生产部署、停写、迁移、reset、重建、原件删除或生产容器/卷清理。
+
+
+## LF-D06（隔离开发验收通过）
+
+D06 基于 main `08c10fd`，删除正式行可重算字段并升级 row-layout v2。
+专项/本地全量、两组代码 CI、真实 ext4 跨容器、100k envelope、1000 自然分区与最终镜像完整 10M B05 全部通过。
+10M 最终正式数据 416,616,377 bytes，为旧格式同口径的 54.6665%；精度、热修正及未触及文件保持通过。
+D06 `lf01_code_ready=true`；`P01_deploy=not_started`；`production_deployed=false`；`reset_applied=false`；`rebuild_complete=false`；`domains_accepted=false`。
+PR #122 的最终证据提交须通过必需 CI 后才能合并；生产部署/reset/rebuild 仍未执行。
+当前结果见 [LF-D06 结果](lf-d06-storage-slimming.md)。

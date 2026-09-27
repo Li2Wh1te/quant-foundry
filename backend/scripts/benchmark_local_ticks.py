@@ -18,6 +18,8 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
+import threading
+import resource
 import traceback
 from uuid import uuid4
 
@@ -44,7 +46,7 @@ ENTRY=SYNTHETIC[0]
 
 def catalog_files(store):
     with store.catalog.transaction() as c:
-        records=c.execute(text('SELECT path,content_hash,partition_key FROM data_store_files WHERE dataset=:d ORDER BY path LIMIT 10001'),{'d':ENTRY.spec.name}).mappings().all()
+        records=c.execute(text('SELECT path,content_hash,partition_key,byte_count FROM data_store_files WHERE dataset=:d ORDER BY path LIMIT 10001'),{'d':ENTRY.spec.name}).mappings().all()
     if len(records)>10000:raise RuntimeError('Benchmark file-count budget exceeded')
     return records
 
@@ -105,6 +107,7 @@ def execute(store,total,cold_count,result=None):
     assert all(r['f0_price']==str(PRICE) for r in sample)
     assert all(str(r['f0_event_ns'])==str(START_NS) for r in sample)
     if len(sample)==2:assert sample[0]['f0_sequence']!=sample[1]['f0_sequence']
+    before_hot = {r['path']: (r['content_hash'], r['partition_key']) for r in catalog_files(store)}
     hot=(total-1)//100000*100000
     result['phase']='hot_correction'
     hot_part=process(Range(hot,min(total,hot+100),changed=True))
@@ -112,12 +115,31 @@ def execute(store,total,cold_count,result=None):
     # Cold test inputs may hash to the same bucket but are never in the changed
     # sequence partition when hot>0. Compare unaffected actual catalog paths.
     unchanged={r['path']:r['content_hash'] for r in catalog_files(store) if r['partition_key']!=hot_part}
+    assert unchanged == {path: value[0] for path, value in before_hot.items() if value[1] != hot_part}
     if hot>0:assert all(after.get(k)==v for k,v in cold.items())
     with store.catalog.transaction() as c:
         # PostgreSQL SUM(bigint) is numeric; keep the result JSON serializable.
         count=int(c.execute(text('SELECT coalesce(sum(row_count),0) FROM data_store_files WHERE dataset=:d'),
                             {'d':ENTRY.spec.name}).scalar_one())
     assert count==total+cold_count
+    refs = catalog_files(store)
+    final_bytes = sum(ref['byte_count'] for ref in refs)
+    assert final_bytes == sum((store.files.root/ref['path']).stat().st_size for ref in refs)
+    # Every file read by the commit path in this fixture is replaced exactly
+    # once, including the two colliding cold seeds and the hot correction.
+    # This identity also reconstructs final bytes from the committed v1 B05
+    # evidence, which recorded written/read bytes and matching retirement counts.
+    assert result['metrics']['files_read'] == result['metrics']['files_retired']
+    assert final_bytes == result['metrics']['written_bytes'] - result['metrics']['current_read_bytes']
+    assert not list(store.files.root.glob('.scratch/*/spill/*.sqlite'))
+    import pyarrow.parquet as pq
+    for ref in refs:
+        assert pq.read_schema(store.files.root/ref['path']).equals(ENTRY.spec.schema, check_metadata=True)
+    assert not {'value_hash', 'basis_valid'} & set(ENTRY.spec.schema.names)
+    result.update(final_current_bytes=final_bytes, bytes_per_tick=final_bytes/count,
+                  total_written_bytes=result['metrics']['written_bytes'],
+                  temporary_sqlite_reclaimed=True, row_layout=ENTRY.spec.semantics['row_layout'],
+                  all_untouched_files_verified=True)
     result.update(complete=True,full_B05_executed=total==10000000,
                   current_rows=count,current_files=len(after),cold_fixture_files=len(cold),
                   unchanged_partition_files=len(unchanged),exact_event_samples=True,
@@ -154,10 +176,31 @@ def main(argv=None):
         engine=create_engine(url,connect_args={'options':f'-csearch_path={schema}','connect_timeout':3})
         # Real supported mount required. This harness contains no probe injection.
         limits=replace(StoreLimits(),duckdb_threads=1)
+        # Observe the entire scratch tree, including the parent merge spool.
+        # Commit metrics alone omit that spool; sampled peaks are labeled as
+        # samples rather than claimed as exact continuous maximum values.
+        stop = threading.Event()
+        sampled = {'scratch_sampled_peak_bytes': 0, 'sample_interval_seconds': 0.1}
+        def sample_scratch():
+            while not stop.is_set():
+                size = 0
+                for path in (root/'.scratch').glob('**/*'):
+                    try:
+                        if path.is_file(): size += path.stat().st_size
+                    except FileNotFoundError:
+                        pass
+                sampled['scratch_sampled_peak_bytes'] = max(sampled['scratch_sampled_peak_bytes'], size)
+                stop.wait(0.1)
+        monitor = threading.Thread(target=sample_scratch, daemon=True)
+        monitor.start()
+        started = time.monotonic()
         with CurrentStore(engine,root,cursor_key=b'isolated-b05-key-not-production-32chars',initialize=True,limits=limits) as store:
             execute(store,args.rows,args.cold_partitions,result)
             result['filesystem']=locking._filesystem_name(store.files.fd)
             result['filesystem_probe_injected']=False
+        stop.set(); monitor.join()
+        result.update(sampled, total_seconds=time.monotonic()-started,
+                      process_rss_peak_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024)
     except Exception as error:
         result.update(complete=False,reason=getattr(error,'code',type(error).__name__),
                       error_module=type(error).__module__,
@@ -174,6 +217,8 @@ def main(argv=None):
             # line identifies a native capacity failure without any DB DSN.
             result['native_error']=str(error).splitlines()[0][:300]
     finally:
+        if 'stop' in locals():
+            stop.set(); monitor.join()
         if engine:engine.dispose()
         if created:
             with admin.begin() as c:c.execute(text(f'DROP SCHEMA {schema} CASCADE'))
