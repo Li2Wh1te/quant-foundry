@@ -216,7 +216,7 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                             con.execute('CREATE TEMP VIEW current_data AS SELECT * FROM _layout')
                         where, params = [], []
                         if spec.semantics.get('tombstones') == 'explicit-current-state' and query.require_qualified:
-                            where.append("basis_state='valid' AND basis_valid=true")
+                            where.append("basis_state='valid'")
                         for values, operator in ((query.lower, '>='), (query.upper, '<'), (last, '>')):
                             if values is not None:
                                 spec.key_bytes(values)

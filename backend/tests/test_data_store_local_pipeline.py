@@ -501,3 +501,92 @@ def test_run_local_drains_continuations_and_does_not_starve_later_entries(ready)
     else:
         pytest.fail('The next complete batch cannot finish')
     assert source.calls == {entry.id:2 for entry in entries}
+
+
+@pytest.mark.parametrize('entry_id', ['E41', 'B05'])
+def test_D06_persisted_schema_and_capability_exclude_recomputable_fields(ready, entry_id):
+    import pyarrow.parquet as pq
+    from scripts.benchmark_local_ticks import event
+    entry = BY_ID['E41'] if entry_id == 'E41' else SYNTHETIC[0]
+    raw = company() if entry_id == 'E41' else event(1)
+    assert run_entry(ready, entry, Inputs(raw))['complete']
+    unit = next(normalize(entry, raw))
+    partition = entry.spec.partitioner((*unit.key, 'root'))
+    for ref in ready.catalog.files(entry.spec.name, partition):
+        schema = pq.read_schema(ready.files.root / ref['path'])
+        assert not {'value_hash', 'basis_valid'} & set(schema.names)
+        assert 'basis_state' in schema.names
+    capability = ready.describe_capability(entry.spec)
+    assert capability['semantics']['row_layout'] == 'typed-object-nodes-v2'
+    assert not {'value_hash', 'basis_valid'} & {f['name'] for f in capability['fields']}
+    assert not list(ready.files.root.glob('.scratch/*/spill/*.sqlite'))
+
+
+def test_D06_invalid_and_withdrawn_remain_debug_only(ready):
+    entry = BY_ID['E41']
+    raw = company()
+    unit = next(normalize(entry, raw))
+    run_entry(ready, entry, Inputs(raw))
+    assert rows(ready, entry, unit)[0]['basis_state'] == 'valid'
+    run_entry(ready, entry, Inputs(company('bad', 2, failure='CORE_VALUE_INVALID')))
+    with pytest.raises(DataStoreError) as error:
+        rows(ready, entry, unit)
+    assert error.value.code == 'DATA_RESTRICTED'
+    assert rows(ready, entry, unit, qualified=False)[0]['basis_state'] == 'invalid'
+    # The row-state predicate must independently exclude invalid rows, even
+    # when there is no blocking issue left to reject the entire query.
+    with ready.catalog.transaction() as connection:
+        connection.execute(text('DELETE FROM data_store_issues WHERE dataset=:d'), {'d': entry.spec.name})
+    assert rows(ready, entry, unit) == []
+    assert rows(ready, entry, unit, qualified=False)[0]['basis_state'] == 'invalid'
+    withdrawal = replace(company('X', 3), content={'item': []}, withdrawals=('current',))
+    run_entry(ready, entry, Inputs(withdrawal))
+    assert rows(ready, entry, unit) == []
+    assert rows(ready, entry, unit, qualified=False)[0]['basis_state'] == 'withdrawn'
+
+
+def test_D06_v1_file_requires_explicit_rebuild_without_reinterpreting_bytes(ready):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from app.data_store.merge import value_hash
+    from tests.test_data_store_kernel import source
+    entry = BY_ID['E41']
+    raw = company()
+    unit = next(normalize(entry, raw))
+    fields = list(entry.spec.schema)
+    index = entry.spec.schema.get_field_index('basis_state')
+    fields[index:index] = [
+        pa.field('value_hash', pa.string(), nullable=False, metadata={b'max_utf8_bytes': b'64'}),
+        pa.field('basis_valid', pa.bool_(), nullable=False),
+    ]
+    old = replace(entry.spec, schema=pa.schema(fields),
+                  semantics={**entry.spec.semantics, 'row_layout': 'typed-object-nodes-v1'})
+    assert old.schema_id != entry.spec.schema_id and not entry.spec.accepts(old)
+    ready.register(old)
+    partition = old.partitioner((*unit.key, 'root'))
+    payload = [{**row, 'representation': unit.representation, 'subject': unit.subject,
+                'object_key': unit.object_key, 'basis_group': unit.group, 'basis_ns': unit.order,
+                'basis_token': unit.token, 'basis_state': 'valid', 'basis_valid': True,
+                'value_hash': value_hash(unit.rows)} for row in unit.rows]
+    ready.replace_partition(old, partition, [pa.RecordBatch.from_pylist(payload, schema=old.schema)],
+                            source(ready, old.name), complete=True, source_check=lambda _: True)
+    before = ready.catalog.files(old.name, partition)
+    for operation in (lambda: run_entry(ready, entry, Inputs(raw)),
+                      lambda: rows(ready, entry, unit)):
+        with pytest.raises(DataStoreError) as error:
+            operation()
+        assert error.value.code == 'REBUILD_REQUIRED'
+        assert ready.catalog.files(old.name, partition) == before
+    # Preparing a new descriptor still must not let union_by_name reinterpret
+    # the old physical shard. Only a successful explicit source rebuild replaces it.
+    ready.register(entry.spec, prepare_rebuild=True)
+    with pytest.raises(DataStoreError) as error:
+        rows(ready, entry, unit)
+    assert error.value.code == 'REBUILD_REQUIRED'
+    result = run_entry(ready, entry, Inputs(raw),
+                       options=PipelineOptions(mode='rebuild', allow_incompatible_rebuild=True))
+    assert result['complete'] and result['qualified']
+    assert rows(ready, entry, unit)[0]['f0_name'] == 'X'
+    for ref in ready.catalog.files(entry.spec.name, partition):
+        assert ref['schema_id'] == entry.spec.schema_id
+        assert not {'value_hash', 'basis_valid'} & set(pq.read_schema(ready.files.root/ref['path']).names)

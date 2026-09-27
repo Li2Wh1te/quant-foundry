@@ -17,8 +17,11 @@ import pyarrow.parquet as pq
 def measure(path):
     with pq.ParquetFile(path,page_checksum_verification=True) as source:
         names=source.schema_arrow.names
-        if not {'f0_sequence','f0_event_ns','f0_source_code','value_hash','basis_valid'} <= set(names):
+        if not {'f0_sequence','f0_event_ns','f0_source_code','basis_state'} <= set(names):
             raise ValueError('Require a synthetic tick benchmark file')
+        removed = {'value_hash', 'basis_valid'} & set(names)
+        if removed and len(removed) != 2:
+            raise ValueError('Mixed row layout is not a supported measurement')
         if not 1 <= source.metadata.num_rows <= 100000:
             raise ValueError('Require a bounded representative file')
         roles={}
@@ -49,6 +52,11 @@ def measure(path):
         rows=source.metadata.num_rows
     return {'synthetic':True,'production_executed':False,'rows':rows,
             'source_sha256':hashlib.sha256(path.read_bytes()).hexdigest(),
+            'row_layout': 'typed-object-nodes-v1' if removed else 'typed-object-nodes-v2',
+            'removed_columns_absent': not removed,
+            'v1_reference_bytes': 7622792,
+            'v2_budget_bytes': 4573675,
+            'ratio_to_v1_reference': path.stat().st_size/7622792,
             'original_bytes':path.stat().st_size,'variant_bytes':sizes,
             'bytes_per_tick':{k:round(v/rows,6) for k,v in sizes.items()},
             'column_compressed_bytes':columns,'column_roles':roles,
