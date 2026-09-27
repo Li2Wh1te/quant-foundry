@@ -1,0 +1,13 @@
+ Volume quant-foundry-p01_current_store Creating 
+ Volume quant-foundry-p01_current_store Creating 
+ Volume quant-foundry-p01_current_store Created 
+ Volume quant-foundry-p01_current_store Created 
+ Container quant-foundry-p01-backend-run-bef8ee2df907 Creating 
+ Container quant-foundry-p01-backend-run-bef8ee2df907 Created 
+INFO  [alembic.runtime.migration] Context impl PostgresqlImpl.
+INFO  [alembic.runtime.migration] Will assume transactional DDL.
+INFO  [alembic.runtime.migration] Running upgrade 20261003_01 -> 20261004_01, Retain bounded preparation/proof pages and fixed-source settlement edges.
+INFO  [alembic.runtime.migration] Running upgrade 20261004_01 -> 20261004_02, Bound source/manifest lookups and negative quality checks with online indexes.
+INFO  [alembic.runtime.migration] Running upgrade 20261004_02 -> 20261005_01, Add the LF-D01 current-only catalog; never reset legacy or shared data.
+INFO  [alembic.runtime.migration] Running upgrade 20261005_01 -> 20261006_01, Current LF-D02 entry status, not a formal empty/import/support dataset.
+INFO  [alembic.runtime.migration] Running upgrade 20261006_01 -> 20261007_01, Add non-destructive LF-D03 maintenance receipts.

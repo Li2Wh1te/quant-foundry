@@ -1,0 +1,15 @@
+{
+  "started_at": "2026-09-27T15:56:12.213878+00:00",
+  "disabled_restart": [
+    "qf-full-campaign-20260924-reconcile-table-fast",
+    "qf-full-campaign-20260924-reconcile-5",
+    "qf-full-campaign-20260924-reconcile-4",
+    "qf-full-campaign-20260924-reconcile-3",
+    "qf-full-campaign-20260924-reconcile-2",
+    "qf-full-campaign-20260924-reconcile-1",
+    "quant-foundry-backend-1",
+    "quant-foundry-runner-1",
+    "quant-foundry-frontend-1"
+  ],
+  "reason": "P01 application cutover; preserve all containers and writable layers; shared collector configuration retained"
+}

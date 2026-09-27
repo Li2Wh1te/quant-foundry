@@ -1,0 +1,86 @@
+name: quant-foundry-p01
+
+services:
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    image: qf-lfp01-frontend:1da2116
+    environment:
+      QF_BACKEND_PORT: ${QF_SERVER_PORT:-8000}
+    ports:
+      - "${QF_WEB_HOST:-127.0.0.1}:${QF_WEB_PORT:-8080}:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - wget
+        - --quiet
+        - --spider
+        - http://127.0.0.1/
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: qf-lfp01-backend:1da2116
+    env_file:
+      - .env
+    environment:
+      QF_DATABASE_HOST: postgres
+      QF_DATABASE_PORT: 5432
+      QF_DATA_STORE_ROOT: /app/data/current-store
+    expose:
+      - "${QF_SERVER_PORT:-8000}"
+    volumes:
+      - server_logs:/app/data/logs
+      - current_store:/app/data/current-store
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:${QF_SERVER_PORT:-8000}/readyz', timeout=3)
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+  runner:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    image: qf-lfp01-backend:1da2116
+    command: ["python", "-m", "app.runner"]
+    env_file:
+      - .env
+    environment:
+      QF_DATABASE_HOST: postgres
+      QF_DATABASE_PORT: 5432
+      QF_DATA_STORE_ROOT: /app/data/current-store
+    volumes:
+      - server_logs:/app/data/logs
+      - current_store:/app/data/current-store
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+
+volumes:
+  server_logs:
+    external: true
+    name: quant-foundry_server_logs
+  current_store:
+networks:
+  default:
+    external: true
+    name: quant-foundry_default
