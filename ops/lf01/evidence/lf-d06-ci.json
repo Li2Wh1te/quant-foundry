@@ -18,12 +18,41 @@
     "vite_build": "passed",
     "alembic_full_chain": "passed",
     "docker_parquet_runtime": "passed",
-    "release_version": "passed"
+    "release_version": "passed",
+    "isolated_acceptance": {
+      "passed": true,
+      "kernel_tests_passed": 85,
+      "capacity_cases": 11,
+      "filesystem": "ext4",
+      "filesystem_probe_injected": false,
+      "evidence": "lf-d06-isolated.json"
+    },
+    "full_b05": {
+      "passed": true,
+      "evidence": "lf-d06-b05.json"
+    }
   },
   "validation_boundaries": [
     "Backend mechanics tests use the existing overlay filesystem probe; separate real ext4 cross-container acceptance is required.",
     "Initial read-only virtualenv and root-owner harness failures were corrected by environment configuration, not code or assertion changes."
   ],
-  "pr_ci": "pending",
-  "main_ci": "not_started"
+  "pr_ci": {
+    "status": "passed_on_code_evidence_head",
+    "runs": [
+      {
+        "conclusion": "success",
+        "databaseId": 36323922903,
+        "headSha": "deff4f8bdd1edfa1d20650a2c7384a97d35e4433",
+        "url": "https://github.com/Li2Wh1te/quant-foundry/actions/runs/36323922903"
+      },
+      {
+        "conclusion": "success",
+        "databaseId": 36323922901,
+        "headSha": "deff4f8bdd1edfa1d20650a2c7384a97d35e4433",
+        "url": "https://github.com/Li2Wh1te/quant-foundry/actions/runs/36323922901"
+      }
+    ]
+  },
+  "main_ci": "Not started before merge; recorded in final delivery receipt",
+  "final_evidence_head_ci": "Required before merge; recorded in GitHub PR #122 checks and final delivery receipt"
 }

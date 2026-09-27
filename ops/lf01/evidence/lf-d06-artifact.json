@@ -10,7 +10,7 @@
   "production_executed": false,
   "supplier_connected": false,
   "row_layout": "typed-object-nodes-v2",
-  "full_b05": "running",
+  "full_b05": "passed",
   "source_files_sha256": {
     "backend/app/data_store/__init__.py": "01508c4ae5e86efd4779d3df40b3c8bdb410ea0f1fa2014f553a83995b9994f5",
     "backend/app/data_store/__main__.py": "43a43250cfb781dec3137c8fc544d931d8106da74770befb3936aa60157bbb22",
@@ -66,5 +66,12 @@
     "backend/app/data_store/values.py": "f6d2ee4cd8dc031b4d9d1a51868a2e6036a16251c8297ab838aea51bbfca89d6",
     "backend/scripts/benchmark_local_ticks.py": "34b5053f59a78a3e5178fff4fec5a8e32b131f510ae6d702fc666f9282ebbf27",
     "backend/scripts/benchmark_local_snapshot.py": "af13aaeba05b85c945dede3b164e014aa71750bab397a23892fd2d734b3b8777"
-  }
+  },
+  "image_app_source_verification": {
+    "passed": true,
+    "python_files": 362,
+    "method": "SHA-256 equality for every backend/app Python source in running B05 image and fixed checkout"
+  },
+  "full_b05_evidence": "lf-d06-b05.json",
+  "final_runtime_unchanged_since_code_commit": true
 }
