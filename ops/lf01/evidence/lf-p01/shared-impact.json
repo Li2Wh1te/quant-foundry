@@ -1,0 +1,57 @@
+{
+  "events": [
+    {
+      "event": "scheduler_started",
+      "active_tasks": 105,
+      "interrupted_runs": 4,
+      "retired_runs": 0
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "tonghuashun_collection_failed",
+      "error_type": "invalid_data",
+      "task_type": "data.ths.fund_nav"
+    },
+    {
+      "event": "task_run_failed",
+      "error_type": "CollectionError",
+      "task_type": "data.ths.fund_nav"
+    }
+  ],
+  "scope": "Existing collection schedules resumed unchanged; four prior active runs marked interrupted on startup; fund NAV invalid_data / CollectionError observed, not certified as healthy. No new collection task was created.",
+  "time": "2026-09-27T16:00:38.590315+00:00"
+}

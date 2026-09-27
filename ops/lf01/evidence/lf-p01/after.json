@@ -1,0 +1,1753 @@
+{
+  "tasks": [
+    {
+      "id": "02d42c8b-5ee2-4130-a868-33f4cef6627f",
+      "task_type": "data.ths.fund_stock_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "03f60a59-6cea-4b78-a974-738c4afefdd6",
+      "task_type": "data.ths.fund_manager",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "04c26056-4763-454c-b260-a54ab56a29c3",
+      "task_type": "data.ths.limit_break",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "0741fce6-bd28-4196-8c99-fbca70e477f5",
+      "task_type": "data.ths.etf_quote",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "09924d29-69a5-41ac-8a4d-9740e048dc81",
+      "task_type": "data.ths.stock_valuation",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "09e0e8f3-099a-4441-949c-1a57bdf6e24b",
+      "task_type": "data.ths.fund_news",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "0dcf4c22-b34c-4052-9da3-e5f068c82916",
+      "task_type": "data.sync_etf_basics",
+      "state": "active",
+      "version": 4
+    },
+    {
+      "id": "0fdc735e-105f-4e29-9e27-cc7fba61adf0",
+      "task_type": "data.ths.fund_balance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "10037169-2f92-4576-8112-4d18529adabd",
+      "task_type": "data.ths.stock_actions_dump",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "11c030a0-ef47-4d3c-a7d1-a2896d847067",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "12820a06-4170-4136-98c0-420e9512b352",
+      "task_type": "data.ths.fund_dividends",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "12c7be39-2bd4-4857-ac04-4aa5f494609f",
+      "task_type": "data.ths.index_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "1368f939-65fd-4a51-a541-e07bed58574b",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "14ba038b-780c-4ab8-91a9-3a00b6a4c7c1",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 29
+    },
+    {
+      "id": "16a32943-5911-454d-b909-a8088b85b866",
+      "task_type": "data.ths.fund_manager_experience",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "182c731e-365c-4a70-b75b-f7e9778835e1",
+      "task_type": "data.sync_etf_adjustment_incremental",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "19a01b29-13b5-4c1e-adb3-a19ebcf5c289",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "1c4cb133-0aee-43cc-92ab-ef99d9eaa086",
+      "task_type": "data.ths.stock_actions",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "1f78661b-c3e7-49c1-be76-7f980dbf285e",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "21728d4e-a88d-4ba1-bb3e-e11917ff59f4",
+      "task_type": "data.ths.fund_stock_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "21d12ee0-771f-433f-bd08-8888cec84ce8",
+      "task_type": "data.ths.fund_stock_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "220497a0-38d6-404d-97cd-1bfc33f47004",
+      "task_type": "data.ths.fund_profile",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "22701623-44bf-485b-ac66-6efaf01690f5",
+      "task_type": "data.ths.stock_balance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "2280c8c2-c157-4997-aea0-019796732a6f",
+      "task_type": "data.ths.anomaly_list",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "241af131-1cd8-4a8a-ace1-b6d043c3392c",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "24aa2b0a-6a89-4ac9-abe1-89a8e230eda1",
+      "task_type": "data.ths.stock_daily_dump",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "2838142c-9a48-46a1-b19e-db303c92fdf0",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "28b1757b-a32c-49eb-b621-740385c26090",
+      "task_type": "data.sync_etf_daily_full",
+      "state": "completed",
+      "version": 8
+    },
+    {
+      "id": "29c8a564-40e2-4a3c-ac57-f425dcd808e2",
+      "task_type": "data.ths.fund_balance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "2b065d80-5750-45db-9bf0-214875e27100",
+      "task_type": "data.ths.fund_company",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "2bae7e2a-0732-4a49-9ea3-09883e420321",
+      "task_type": "data.ths.fund_industry",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "2c09ff5d-a688-4d45-93e9-927229b168d2",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "2d363dda-64ca-4f72-9525-104448c174d2",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "2de4c3fa-7334-4ad9-ab6c-82a275ba76e3",
+      "task_type": "data.ths.stock_indicators",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "3166336f-2cc6-4088-af70-634c642e3523",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "328e1a06-ac10-4fd1-b6fc-f257a3e9fc80",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "32a59f8c-112a-4fa5-8f9f-a7cac9b27f1f",
+      "task_type": "data.ths.fund_quota_list",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "32e78ac9-505b-4dc5-9900-9e34711a42eb",
+      "task_type": "data.ths.fund_allocation",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "32f71a9d-1266-42c9-a508-c1e7cab558eb",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "34b4b4bc-5952-4956-a985-4fca9a3d6437",
+      "task_type": "data.ths.limit_up",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "34e36c04-31f5-4489-a681-47147339edff",
+      "task_type": "data.ths.index_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "36228697-ae01-41f2-a2cc-ad05bb4ce46b",
+      "task_type": "data.ths.auction_benchmark",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "374f0a16-d615-40e2-8fd3-c32e18b719c3",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "392d6c8c-0166-47c6-bc33-e2c0ad87f95a",
+      "task_type": "data.ths.etf_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "39e5ff63-1d47-499f-a730-12b7ae5969ea",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "3a927282-d5cf-4c4f-b1ab-c2ec605e7da8",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 20
+    },
+    {
+      "id": "3ad2bb41-e52f-4101-9fc9-1f71286f47b2",
+      "task_type": "data.ths.hot_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "3b3c6a41-440d-4277-9c2e-2dd21996139a",
+      "task_type": "data.ths.fund_holdings",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "3c089d89-2551-45a9-b8d9-89f1bd8e8faf",
+      "task_type": "data.ths.stock_quote",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "3cc5353a-955a-46a4-a5c6-f9ed7a7d8bfa",
+      "task_type": "data.ths.fund_income",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "3df7869a-d4e7-4135-9130-19c6186fd01e",
+      "task_type": "data.ths.fund_bond_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "40d750d5-9236-4cb8-bb6d-ebe2fbffddb3",
+      "task_type": "data.ths.fund_holdings",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "42c9115c-9afb-492f-84c0-4659fcdef65d",
+      "task_type": "data.ths.fund_holders",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "436aaa9d-e34f-4c9c-8d0f-ccbb0e142824",
+      "task_type": "data.ths.stock_actions",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "443f826e-8c97-4499-8654-979bec3aed20",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "449ffe62-da6a-443b-896e-1d1cfc4325f6",
+      "task_type": "data.sync_trade_calendar",
+      "state": "active",
+      "version": 4
+    },
+    {
+      "id": "450935cd-ee39-40f0-b772-5ce6a505fa6a",
+      "task_type": "data.ths.stock_indicators",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "45483f5d-fed3-427e-b24d-6d5c64a34990",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "469c77ad-04a2-4460-854a-94092e0aa88a",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 17
+    },
+    {
+      "id": "484b4cc5-c22e-49f9-8aae-4853b161f7eb",
+      "task_type": "data.ths.fund_performance_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "4884d264-1261-4bf0-8f8c-267e04600583",
+      "task_type": "data.ths.stock_income",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "49a7fd41-b399-498e-b406-a9f6a983c0a4",
+      "task_type": "data.ths.fund_quota_summary",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "4cd81eac-d47e-4e43-ad64-46a18d8ec301",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "4f429746-d7b5-46b1-afce-41dd4713a54f",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "4f81d31b-de4b-4905-9482-b7218d41b843",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "54b3857e-672f-4a33-8688-a0c997275bc6",
+      "task_type": "data.ths.skyrocket",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "55900e6b-12bb-4740-97a3-416e7c109c73",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "5664e759-d832-4b9b-90e2-22149cc4acf3",
+      "task_type": "data.ths.dragon_tiger",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "56adb771-fd7c-45d2-bc36-b71f84f4032e",
+      "task_type": "data.ths.fund_income",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "56f84c6f-83f5-4534-8c40-9a0b381ccba4",
+      "task_type": "data.ths.stock_valuation",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "57f82b7c-9d29-409a-81fd-55a4a8dd1743",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 17
+    },
+    {
+      "id": "581782b3-5e56-4549-a09e-986b22e87e0f",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "59fb1238-a206-4abd-9f73-f31d75747abb",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "5bf22058-e3dc-4628-b679-c102f78e6bc5",
+      "task_type": "data.ths.dragon_tiger",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "5dc51288-dba8-4bab-98d6-3cab634f3ff0",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 26
+    },
+    {
+      "id": "5e75e0bc-ccfc-4f99-bef4-f8ce3d7c4b0e",
+      "task_type": "data.ths.fund_returns",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "60bddcff-4c4c-4691-b146-c14303bfc991",
+      "task_type": "data.ths.stock_cash_flow",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "61c1a520-f9fd-4ca9-b054-b07717b6e8a1",
+      "task_type": "data.ths.fund_allocation",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "6208a72f-c0f9-4d79-9a11-0b981deaa3cd",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 29
+    },
+    {
+      "id": "62bb594a-6653-45b9-8469-39e3656d3e5d",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "634295d4-9df1-4b34-b893-fb749b4f0d3c",
+      "task_type": "data.ths.stock_balance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "63550631-4d0e-46ee-9cc2-66cac6cc3455",
+      "task_type": "data.ths.tickers",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "65153c6d-562c-4bde-992e-439322307e48",
+      "task_type": "data.ths.limit_break",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "65a9ba6e-8f80-4d03-9c76-cf9ba13932b7",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "65fd585c-014a-4aea-8f07-9a531ce247d5",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 17
+    },
+    {
+      "id": "66b73de8-af77-42a6-b612-74ff930e14de",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "6886a977-21e6-49a4-afae-8f18620da30b",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "6b85b2b7-619f-4a51-847b-b9daba8fc7e7",
+      "task_type": "data.ths.index_catalog",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "6bb17ee5-0cdd-4929-8c45-21ab9bbb3afe",
+      "task_type": "data.ths.fund_financial_indicators",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "6cc454f2-9996-4d82-b3f7-6d573200e1e8",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "6d454ec1-cfdc-4988-b415-c277baf176f1",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "71375658-9eca-47fb-8a87-2f85240aa302",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 26
+    },
+    {
+      "id": "7934a233-a1dd-4677-9317-3ffe916bcfa3",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 48
+    },
+    {
+      "id": "79a154e4-70f3-489e-9bfa-fd34292d5804",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "7a31bef2-30cd-4cd8-931c-cd2242085abb",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "7bdc79d2-9756-4f5b-948b-ffc30bf91671",
+      "task_type": "data.ths.auction_benchmark",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "7fc4b000-8446-4003-90ef-5a0e4997413a",
+      "task_type": "data.ths.fund_holders",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "81462ff3-c006-415d-baed-56b4a46608df",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "8164d911-757a-4b69-a519-cd4dec54ae63",
+      "task_type": "data.ths.stock_recent_dump",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "83f16bd3-fbf3-4416-81f4-cfd6a79ea84e",
+      "task_type": "data.ths.stock_balance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "83fd0514-4751-4781-a826-1b2853fc54c5",
+      "task_type": "data.ths.stock_income",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "84b98bb7-1866-4754-a8ad-8ddbf6c28c02",
+      "task_type": "data.ths.hot_list",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "852157fc-c326-43dc-a6c9-fd9859e7c4a9",
+      "task_type": "data.sync_etf_daily_incremental",
+      "state": "active",
+      "version": 1
+    },
+    {
+      "id": "87e03aae-8122-45f4-b5e6-af1b14af7d39",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "88bd1bbd-12d4-4bc6-8c53-75e099a24725",
+      "task_type": "data.ths.fund_nav",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "8b7e590b-53ef-4072-9c8c-fa785752ce4e",
+      "task_type": "data.ths.fund_bond_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "8e330b7a-6480-46e3-8c71-1ff6c67b81b5",
+      "task_type": "data.ths.fund_manager",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "8f19b32d-9cae-49cf-a824-ebfc112d418b",
+      "task_type": "data.ths.etf_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "8fcc20ae-0935-4fc6-b5fa-58edcaf8beb8",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 26
+    },
+    {
+      "id": "90b0a873-4fbd-40fe-8db1-3c47b2a68d10",
+      "task_type": "data.ths.fund_bond_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "9130e24b-b286-4485-be5c-b6fbbe112961",
+      "task_type": "data.ths.fund_performance_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "931cf51d-4790-4bc4-9f45-f7ccf625122d",
+      "task_type": "data.ths.fund_offerings",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "949ce1de-210d-4de1-add1-d8d74f55332e",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "95226f8a-9fc4-4170-8e72-49ba0887bb54",
+      "task_type": "data.sync_trade_calendar",
+      "state": "active",
+      "version": 4
+    },
+    {
+      "id": "95344903-2538-4416-a8a9-78b736fe5ad3",
+      "task_type": "data.ths.fund_drawdowns",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "972e3302-c2d7-4e44-89eb-a2a31d331b44",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 48
+    },
+    {
+      "id": "9731894a-79d9-4541-a65d-0298e2754f0f",
+      "task_type": "data.ths.calendar",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "99b222d3-23b5-4e7c-ac22-70fa0d70b5d8",
+      "task_type": "data.sync_etf_adjustment_full",
+      "state": "completed",
+      "version": 2
+    },
+    {
+      "id": "9a753ad0-3851-4864-b203-3aa239ab6a0c",
+      "task_type": "data.ths.fund_manager_style",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "9b7d47cd-f681-47f4-aba1-a4d1f0758bae",
+      "task_type": "data.ths.fund_top_holders",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "9cbea44c-afe8-4ed1-a5d2-ec540036905a",
+      "task_type": "data.ths.fund_nav",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "9e025061-69eb-4617-ba57-e98863a963c6",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "a3800866-8390-41ae-bb17-e501d4ca4ec3",
+      "task_type": "data.ths.stock_indicators",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "a3cc653d-6ccc-4fd3-9e10-85c9572b169a",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "a5771ee2-a208-421e-8682-0a7cd446aae7",
+      "task_type": "data.ths.fund_manager_experience",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "a5a4ce7c-35f5-49c3-8062-8e3aa77301d6",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "a8e5c572-5652-41e6-b74b-c05c8aa3ca4d",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 38
+    },
+    {
+      "id": "aa5805a2-a643-4246-9680-bc6cf8c76d5a",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "ac1d61a9-4f2e-4307-bf59-e77fdfa760b3",
+      "task_type": "data.ths.fund_company",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "ac75e269-1fd8-427f-9667-531a1b67ed2e",
+      "task_type": "data.ths.stock_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "affcab7f-0ec2-4142-b5cc-8268d3ca573d",
+      "task_type": "data.ths.limit_down",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "b1b965e5-fbc7-4169-9522-7fa67e23e3e6",
+      "task_type": "data.ths.stock_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "b1fa8a05-97f6-4a75-80ea-bb7dd7423f98",
+      "task_type": "data.ths.fund_manager_performance",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "b245be4a-3751-47dc-8e03-b109804abfa4",
+      "task_type": "data.ths.limit_down",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "b5158b73-c1ab-4f8f-b3f5-af81f16f8f5d",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 26
+    },
+    {
+      "id": "b703e1bc-3f23-4b8f-8724-d11dde9b750e",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "b79157e5-1167-4815-a6a7-86620a031e58",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "b8a69550-0051-4f04-b51f-1239794c9aa4",
+      "task_type": "data.ths.fund_performance_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "b9149880-1dc0-416c-bb9b-303124783528",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "bfa6e44c-d8ea-45d3-8e2a-6a1cf9f635dd",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "c025d1ea-f4c2-450d-b787-404020dfa418",
+      "task_type": "data.ths.limit_up",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "c2d0d22c-6a57-44a5-8c28-3d62bcf6dc24",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 48
+    },
+    {
+      "id": "c558e577-bf66-4ade-bf5d-a624623e6f53",
+      "task_type": "data.ths.hot_history",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "c678d1ef-74af-432a-9a29-a532e2acc94f",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "c92c4a34-7aeb-4e40-8546-0bd9d094d7a2",
+      "task_type": "data.ths.stock_income",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "cb7938d5-5bc3-48b1-a471-6cc1f62e071d",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 48
+    },
+    {
+      "id": "cc5775f6-1689-4bfe-a377-39bd9d391703",
+      "task_type": "data.ths.index_quote",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "ccc33af5-7e45-478e-a002-b4ae086c53a5",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "cd11dab7-e836-486a-941f-975a3f2d2703",
+      "task_type": "data.ths.index_constituents",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "d057ce42-8ee9-47a3-b09d-3e8466febf2f",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "d1c311c1-013c-4a23-b0fa-60534800d6bb",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 29
+    },
+    {
+      "id": "d57efe3a-af77-4433-b71d-44080930c809",
+      "task_type": "data.ths.fund_dividends",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "d5c88ceb-f1dc-427b-8a28-d89eb2effb6d",
+      "task_type": "data.ths.index_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "df81a31a-d303-4739-9286-cc738c5d2768",
+      "task_type": "data.ths.stock_cash_flow",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "dfbff236-d749-4c28-ad19-b07dfe069c0c",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "e00d5d56-04b9-453e-b429-e06c199528b1",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "e20208a1-ca3d-45f6-8705-f459d175d014",
+      "task_type": "data.ths.index_quote",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "e218e3a0-05ff-4b1c-966d-909aedc65509",
+      "task_type": "data.ths.stock_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "e26f1f1b-5b26-41ee-986f-40af77abfa8f",
+      "task_type": "foundation.formalize_local_table_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "e2cdb4f1-93d9-478a-8487-910dd5f7d13c",
+      "task_type": "data.ths.fund_profile",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "e3ca33d0-7d29-488d-a57f-5f8c2b595457",
+      "task_type": "data.ths.limit_ladder",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "e4a2829b-bd3e-4590-bafc-cf3749d457f8",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "e7caaa26-2c67-4f85-80dc-b84b8785774d",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "e9e97f38-8ca4-4a89-8ba7-1a54ff3b7f0b",
+      "task_type": "data.ths.fund_top_holders",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "eb3cd94a-e1e2-4820-8955-2915ebd05acb",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "eecb9cfa-53db-4669-8343-c3c12f1e1d1c",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    },
+    {
+      "id": "f3035e5d-790b-405c-991b-0a41821159a3",
+      "task_type": "data.ths.etf_daily",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "f33dd0ac-897a-48ca-a332-5e014ed89d33",
+      "task_type": "data.ths.fund_industry",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "f4ff9161-b62c-475e-8240-bcec049eb4e3",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "f6dcf5df-1334-40fc-b7bb-b4b695c64a33",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 14
+    },
+    {
+      "id": "f90fb259-03c5-4c06-8178-0fd8eb9e671b",
+      "task_type": "data.ths.fund_financial_indicators",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "f9b449a7-e502-4436-85fb-3439695403b9",
+      "task_type": "data.ths.stock_auction",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "fa64f209-87c5-4e5c-b574-e20f349159ff",
+      "task_type": "data.ths.stock_cash_flow",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "fcf79111-876e-41e0-a5f6-4d5f7b0f692a",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 23
+    },
+    {
+      "id": "fdd7b65c-9bfc-41fb-a96a-372de633aaa8",
+      "task_type": "data.ths.index_constituents",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "ff70acef-e7ab-4cc9-af7f-8d45b4fa7349",
+      "task_type": "data.ths.fund_nav",
+      "state": "active",
+      "version": 2
+    },
+    {
+      "id": "ff740612-fc45-4651-bfdd-14e2bd0431de",
+      "task_type": "foundation.formalize_local_updates",
+      "state": "paused",
+      "version": 32
+    }
+  ],
+  "sources": [
+    {
+      "key": "tonghuashun",
+      "enabled": true,
+      "version": 2
+    },
+    {
+      "key": "tushare",
+      "enabled": false,
+      "version": 20
+    }
+  ],
+  "revision": [
+    "20261007_01"
+  ],
+  "legacy_releases": {
+    "count": 93398,
+    "last_created_at": "2026-09-24T16:00:46.348907+00:00"
+  },
+  "relations": [
+    {
+      "relname": "alembic_version",
+      "oid": "16385"
+    },
+    {
+      "relname": "backtest_account_profile_versions",
+      "oid": "34312"
+    },
+    {
+      "relname": "backtest_account_profiles",
+      "oid": "16671"
+    },
+    {
+      "relname": "backtest_analysis_summaries",
+      "oid": "32984"
+    },
+    {
+      "relname": "backtest_data_chunks",
+      "oid": "24735"
+    },
+    {
+      "relname": "backtest_data_preflight",
+      "oid": "24727"
+    },
+    {
+      "relname": "backtest_decisions",
+      "oid": "24660"
+    },
+    {
+      "relname": "backtest_equity_curve",
+      "oid": "24709"
+    },
+    {
+      "relname": "backtest_events",
+      "oid": "34264"
+    },
+    {
+      "relname": "backtest_fee_schedule_versions",
+      "oid": "34331"
+    },
+    {
+      "relname": "backtest_fills",
+      "oid": "24689"
+    },
+    {
+      "relname": "backtest_metrics",
+      "oid": "24718"
+    },
+    {
+      "relname": "backtest_order_updates",
+      "oid": "24680"
+    },
+    {
+      "relname": "backtest_orders",
+      "oid": "24669"
+    },
+    {
+      "relname": "backtest_positions",
+      "oid": "24699"
+    },
+    {
+      "relname": "backtest_queue_guards",
+      "oid": "34246"
+    },
+    {
+      "relname": "backtest_run_instrument_rule_snapshots",
+      "oid": "32958"
+    },
+    {
+      "relname": "backtest_run_rule_snapshots",
+      "oid": "32942"
+    },
+    {
+      "relname": "backtest_runs",
+      "oid": "34130"
+    },
+    {
+      "relname": "backtest_saved_comparison_members",
+      "oid": "41056"
+    },
+    {
+      "relname": "backtest_saved_comparisons",
+      "oid": "41043"
+    },
+    {
+      "relname": "backtest_steps",
+      "oid": "24653"
+    },
+    {
+      "relname": "calendar_capability_declarations",
+      "oid": "33988"
+    },
+    {
+      "relname": "calendar_definitions",
+      "oid": "33876"
+    },
+    {
+      "relname": "calendar_exchange_bindings",
+      "oid": "33955"
+    },
+    {
+      "relname": "calendar_reconciliation_ranges",
+      "oid": "34045"
+    },
+    {
+      "relname": "calendar_registry",
+      "oid": "33840"
+    },
+    {
+      "relname": "calendar_resolution_heads",
+      "oid": "34027"
+    },
+    {
+      "relname": "calendar_session_facts",
+      "oid": "33913"
+    },
+    {
+      "relname": "calendar_source_priorities",
+      "oid": "33816"
+    },
+    {
+      "relname": "corporate_action_coverage_facts",
+      "oid": "34092"
+    },
+    {
+      "relname": "corporate_action_facts",
+      "oid": "34081"
+    },
+    {
+      "relname": "corporate_action_source_facts",
+      "oid": "34070"
+    },
+    {
+      "relname": "data_source_configs",
+      "oid": "34346"
+    },
+    {
+      "relname": "data_store_datasets",
+      "oid": "375982"
+    },
+    {
+      "relname": "data_store_entry_status",
+      "oid": "376072"
+    },
+    {
+      "relname": "data_store_files",
+      "oid": "375999"
+    },
+    {
+      "relname": "data_store_garbage",
+      "oid": "376055"
+    },
+    {
+      "relname": "data_store_issues",
+      "oid": "376036"
+    },
+    {
+      "relname": "data_store_legacy_maintenance",
+      "oid": "376082"
+    },
+    {
+      "relname": "data_store_legacy_restrictions",
+      "oid": "376101"
+    },
+    {
+      "relname": "data_store_legacy_task_state",
+      "oid": "376095"
+    },
+    {
+      "relname": "data_store_runtime",
+      "oid": "375973"
+    },
+    {
+      "relname": "data_store_scopes",
+      "oid": "376020"
+    },
+    {
+      "relname": "data_sync_checkpoints",
+      "oid": "16472"
+    },
+    {
+      "relname": "display_resolution_heads",
+      "oid": "33742"
+    },
+    {
+      "relname": "etf_adjustment_factors",
+      "oid": "16568"
+    },
+    {
+      "relname": "etf_code_mapping_audits",
+      "oid": "16519"
+    },
+    {
+      "relname": "etf_codes",
+      "oid": "16496"
+    },
+    {
+      "relname": "etf_daily_bar_revision_audits",
+      "oid": "34100"
+    },
+    {
+      "relname": "etf_daily_bars",
+      "oid": "16549"
+    },
+    {
+      "relname": "etf_entities",
+      "oid": "16490"
+    },
+    {
+      "relname": "etf_watchlist_entries",
+      "oid": "41037"
+    },
+    {
+      "relname": "foundation_artifacts",
+      "oid": "63415"
+    },
+    {
+      "relname": "foundation_assessments",
+      "oid": "64075"
+    },
+    {
+      "relname": "foundation_backfill_completions",
+      "oid": "375890"
+    },
+    {
+      "relname": "foundation_backfill_probes",
+      "oid": "375858"
+    },
+    {
+      "relname": "foundation_backfill_receipts",
+      "oid": "375869"
+    },
+    {
+      "relname": "foundation_backfill_resume_watches",
+      "oid": "375933"
+    },
+    {
+      "relname": "foundation_bar_candidates",
+      "oid": "64094"
+    },
+    {
+      "relname": "foundation_bar_official_revisions",
+      "oid": "64124"
+    },
+    {
+      "relname": "foundation_baseline_blocks",
+      "oid": "63454"
+    },
+    {
+      "relname": "foundation_baselines",
+      "oid": "63425"
+    },
+    {
+      "relname": "foundation_batch_controls",
+      "oid": "153636"
+    },
+    {
+      "relname": "foundation_batch_dispositions",
+      "oid": "153726"
+    },
+    {
+      "relname": "foundation_batch_inputs",
+      "oid": "153606"
+    },
+    {
+      "relname": "foundation_batch_work",
+      "oid": "153621"
+    },
+    {
+      "relname": "foundation_batches",
+      "oid": "153596"
+    },
+    {
+      "relname": "foundation_block_members",
+      "oid": "64145"
+    },
+    {
+      "relname": "foundation_candidate_entries",
+      "oid": "64107"
+    },
+    {
+      "relname": "foundation_candidate_input_entries",
+      "oid": "153654"
+    },
+    {
+      "relname": "foundation_candidate_input_sets",
+      "oid": "153646"
+    },
+    {
+      "relname": "foundation_candidate_manifests",
+      "oid": "64100"
+    },
+    {
+      "relname": "foundation_candidates",
+      "oid": "64085"
+    },
+    {
+      "relname": "foundation_decisions",
+      "oid": "64114"
+    },
+    {
+      "relname": "foundation_definitions",
+      "oid": "63437"
+    },
+    {
+      "relname": "foundation_dependency_entries",
+      "oid": "63541"
+    },
+    {
+      "relname": "foundation_dependency_manifests",
+      "oid": "63447"
+    },
+    {
+      "relname": "foundation_execution_archives",
+      "oid": "64188"
+    },
+    {
+      "relname": "foundation_execution_manifests",
+      "oid": "63467"
+    },
+    {
+      "relname": "foundation_heads",
+      "oid": "64156"
+    },
+    {
+      "relname": "foundation_intake_campaign_scans",
+      "oid": "171372"
+    },
+    {
+      "relname": "foundation_intake_campaigns",
+      "oid": "171358"
+    },
+    {
+      "relname": "foundation_intake_controls",
+      "oid": "153507"
+    },
+    {
+      "relname": "foundation_intake_items",
+      "oid": "153532"
+    },
+    {
+      "relname": "foundation_intake_pointers",
+      "oid": "153574"
+    },
+    {
+      "relname": "foundation_intake_scan_entries",
+      "oid": "153559"
+    },
+    {
+      "relname": "foundation_intake_scan_failures",
+      "oid": "171325"
+    },
+    {
+      "relname": "foundation_intake_scan_seals",
+      "oid": "171341"
+    },
+    {
+      "relname": "foundation_intake_scan_targets",
+      "oid": "171309"
+    },
+    {
+      "relname": "foundation_intake_scans",
+      "oid": "153517"
+    },
+    {
+      "relname": "foundation_intake_scopes",
+      "oid": "153493"
+    },
+    {
+      "relname": "foundation_issue_revisions",
+      "oid": "64167"
+    },
+    {
+      "relname": "foundation_issue_scopes",
+      "oid": "64162"
+    },
+    {
+      "relname": "foundation_maintenance_plans",
+      "oid": "153764"
+    },
+    {
+      "relname": "foundation_maintenance_targets",
+      "oid": "153779"
+    },
+    {
+      "relname": "foundation_observation_dependencies",
+      "oid": "63505"
+    },
+    {
+      "relname": "foundation_official_releases",
+      "oid": "64132"
+    },
+    {
+      "relname": "foundation_reconciliations",
+      "oid": "153686"
+    },
+    {
+      "relname": "foundation_record_block_members",
+      "oid": "171571"
+    },
+    {
+      "relname": "foundation_record_block_page_verifications",
+      "oid": "375845"
+    },
+    {
+      "relname": "foundation_record_block_verifications",
+      "oid": "187169"
+    },
+    {
+      "relname": "foundation_record_candidates",
+      "oid": "171528"
+    },
+    {
+      "relname": "foundation_record_issues",
+      "oid": "171599"
+    },
+    {
+      "relname": "foundation_record_official_revisions",
+      "oid": "171546"
+    },
+    {
+      "relname": "foundation_record_plan_verifications",
+      "oid": "187184"
+    },
+    {
+      "relname": "foundation_record_preparations",
+      "oid": "375808"
+    },
+    {
+      "relname": "foundation_record_prepared_pages",
+      "oid": "375821"
+    },
+    {
+      "relname": "foundation_record_subjects",
+      "oid": "171515"
+    },
+    {
+      "relname": "foundation_record_validation_roots",
+      "oid": "375834"
+    },
+    {
+      "relname": "foundation_release_block_refs",
+      "oid": "64151"
+    },
+    {
+      "relname": "foundation_release_blocks",
+      "oid": "64140"
+    },
+    {
+      "relname": "foundation_release_contributions",
+      "oid": "153670"
+    },
+    {
+      "relname": "foundation_report_block_members",
+      "oid": "147157"
+    },
+    {
+      "relname": "foundation_report_candidate_members",
+      "oid": "147083"
+    },
+    {
+      "relname": "foundation_report_candidates",
+      "oid": "147064"
+    },
+    {
+      "relname": "foundation_report_issue_targets",
+      "oid": "147184"
+    },
+    {
+      "relname": "foundation_report_official_members",
+      "oid": "147133"
+    },
+    {
+      "relname": "foundation_report_official_revisions",
+      "oid": "147107"
+    },
+    {
+      "relname": "foundation_runtime_archives",
+      "oid": "64178"
+    },
+    {
+      "relname": "foundation_source_bindings",
+      "oid": "63520"
+    },
+    {
+      "relname": "foundation_source_refs",
+      "oid": "63482"
+    },
+    {
+      "relname": "foundation_table_change_visits",
+      "oid": "271929"
+    },
+    {
+      "relname": "foundation_table_changes",
+      "oid": "271917"
+    },
+    {
+      "relname": "foundation_table_settlement_receipts",
+      "oid": "375913"
+    },
+    {
+      "relname": "foundation_table_settlement_visits",
+      "oid": "375901"
+    },
+    {
+      "relname": "foundation_update_visits",
+      "oid": "208444"
+    },
+    {
+      "relname": "foundation_work",
+      "oid": "64038"
+    },
+    {
+      "relname": "foundation_work_attempts",
+      "oid": "64051"
+    },
+    {
+      "relname": "foundation_work_coverage",
+      "oid": "65895"
+    },
+    {
+      "relname": "foundation_work_events",
+      "oid": "64066"
+    },
+    {
+      "relname": "foundation_work_source_pointers",
+      "oid": "153748"
+    },
+    {
+      "relname": "foundation_work_units",
+      "oid": "64060"
+    },
+    {
+      "relname": "instrument_code_mappings",
+      "oid": "32852"
+    },
+    {
+      "relname": "instrument_display_facts",
+      "oid": "33708"
+    },
+    {
+      "relname": "instrument_identity_facts",
+      "oid": "33676"
+    },
+    {
+      "relname": "instrument_identity_merge_audits",
+      "oid": "33791"
+    },
+    {
+      "relname": "instrument_rule_exception_entries",
+      "oid": "32921"
+    },
+    {
+      "relname": "instrument_rule_exception_sets",
+      "oid": "32903"
+    },
+    {
+      "relname": "instrument_rule_facts",
+      "oid": "32878"
+    },
+    {
+      "relname": "instruments",
+      "oid": "32845"
+    },
+    {
+      "relname": "mapping_resolution_heads",
+      "oid": "33766"
+    },
+    {
+      "relname": "scheduled_tasks",
+      "oid": "16394"
+    },
+    {
+      "relname": "strategies",
+      "oid": "16592"
+    },
+    {
+      "relname": "strategy_drafts",
+      "oid": "16608"
+    },
+    {
+      "relname": "strategy_revisions",
+      "oid": "16632"
+    },
+    {
+      "relname": "task_runs",
+      "oid": "16428"
+    },
+    {
+      "relname": "tonghuashun_collection_states",
+      "oid": "41095"
+    },
+    {
+      "relname": "tonghuashun_dump_imports",
+      "oid": "41110"
+    },
+    {
+      "relname": "tonghuashun_dump_stages",
+      "oid": "41117"
+    },
+    {
+      "relname": "tonghuashun_observations",
+      "oid": "41082"
+    },
+    {
+      "relname": "tonghuashun_request_budget",
+      "oid": "41105"
+    },
+    {
+      "relname": "tonghuashun_tickers",
+      "oid": "41074"
+    },
+    {
+      "relname": "tonghuashun_work_units",
+      "oid": "50980"
+    },
+    {
+      "relname": "trading_calendar_days",
+      "oid": "16461"
+    },
+    {
+      "relname": "trading_status_coverage_facts",
+      "oid": "34288"
+    },
+    {
+      "relname": "trading_status_fact_revision_audits",
+      "oid": "34299"
+    },
+    {
+      "relname": "trading_status_facts",
+      "oid": "34119"
+    },
+    {
+      "relname": "trading_status_source_facts",
+      "oid": "34278"
+    }
+  ],
+  "current": {
+    "datasets": 0,
+    "files": 0,
+    "entries": 0,
+    "runs": 0,
+    "active_legacy_runs": 0,
+    "active_legacy_leases": 0
+  },
+  "maintenance": [
+    {
+      "phase": "rebuilding",
+      "completed_json": [],
+      "files_started": false
+    }
+  ],
+  "task_receipts": [
+    {
+      "previous_state": "paused",
+      "count": 70
+    }
+  ],
+  "time": "2026-09-27T15:58:48.512028+00:00",
+  "checks": {
+    "task_states_and_versions_preserved": true,
+    "source_states_preserved": true,
+    "legacy_release_watermark_unchanged": true,
+    "all_old_relation_oids_preserved": true,
+    "new_business_store_empty": true,
+    "revision_head": true
+  }
+}

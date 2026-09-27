@@ -1,0 +1,9 @@
+{
+  "status": 503,
+  "body": {
+    "detail": {
+      "code": "DATA_STORE_REBUILDING",
+      "message": "\u6570\u636e\u5e95\u5ea7\u6b63\u5728\u7ef4\u62a4\u6216\u91cd\u5efa\uff0c\u5f53\u524d\u6570\u636e\u6682\u4e0d\u53ef\u8bfb\u53d6\u3002"
+    }
+  }
+}

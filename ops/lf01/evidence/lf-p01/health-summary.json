@@ -1,0 +1,23 @@
+{
+  "frontend": {
+    "status": 200,
+    "html": true
+  },
+  "logs": {
+    "backend": {
+      "lines": 829,
+      "tracebacks": 9,
+      "error_lines": 1
+    },
+    "runner": {
+      "lines": 0,
+      "tracebacks": 0,
+      "error_lines": 0
+    },
+    "frontend": {
+      "lines": 49,
+      "tracebacks": 0,
+      "error_lines": 0
+    }
+  }
+}

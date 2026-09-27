@@ -1,0 +1,363 @@
+[
+  {
+    "name": "/quant-foundry-p01-frontend-1",
+    "image": "sha256:4a3f7d615468bd6039ed79ee9379e6a043946f40520a7dc4612c76ab9ee37caa",
+    "status": "running",
+    "health": "healthy",
+    "restart": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 0,
+    "mounts": []
+  },
+  {
+    "name": "/quant-foundry-p01-backend-1",
+    "image": "sha256:41c8341a9c5e9e7ab2296f9c09ff02c06e571fb09922392bd96bf8bc3e229f95",
+    "status": "running",
+    "health": "healthy",
+    "restart": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 0,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry-p01_current_store",
+        "Source": "/var/lib/docker/volumes/quant-foundry-p01_current_store/_data",
+        "Destination": "/app/data/current-store",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/quant-foundry-p01-runner-1",
+    "image": "sha256:41c8341a9c5e9e7ab2296f9c09ff02c06e571fb09922392bd96bf8bc3e229f95",
+    "status": "running",
+    "health": null,
+    "restart": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 0,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry-p01_current_store",
+        "Source": "/var/lib/docker/volumes/quant-foundry-p01_current_store/_data",
+        "Destination": "/app/data/current-store",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-table-fast",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-5",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-4",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-3",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-2",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/qf-full-campaign-20260924-reconcile-1",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/quant-foundry-backend-1",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      },
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      }
+    ]
+  },
+  {
+    "name": "/quant-foundry-runner-1",
+    "image": "sha256:514acc5b7ce4b42d123cd7f3dfa47ea1a4916c09a13a00ffea133310ae3f6b4a",
+    "status": "exited",
+    "health": null,
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 143,
+    "mounts": [
+      {
+        "Type": "bind",
+        "Source": "/home/lemon/quant-foundry/data/foundation-runtime-archives",
+        "Destination": "/app/data/foundation-runtime-archives",
+        "Mode": "ro",
+        "RW": false,
+        "Propagation": "rprivate"
+      },
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_server_logs",
+        "Source": "/var/lib/docker/volumes/quant-foundry_server_logs/_data",
+        "Destination": "/app/data/logs",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  },
+  {
+    "name": "/quant-foundry-frontend-1",
+    "image": "sha256:3b085c2a573ae221afdb09fad7fcc181d265634bba69ba8d274b1daba5f4eecd",
+    "status": "exited",
+    "health": "unhealthy",
+    "restart": {
+      "Name": "no",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 0,
+    "mounts": []
+  },
+  {
+    "name": "/quant-foundry-postgres-1",
+    "image": "sha256:d4bb0a8c1b7bb2e29f976d099e7bfb9a5d8858cffe9e46b35cd302cd1f1f8168",
+    "status": "running",
+    "health": "healthy",
+    "restart": {
+      "Name": "unless-stopped",
+      "MaximumRetryCount": 0
+    },
+    "exit_code": 0,
+    "mounts": [
+      {
+        "Type": "volume",
+        "Name": "quant-foundry_postgres_data",
+        "Source": "/var/lib/docker/volumes/quant-foundry_postgres_data/_data",
+        "Destination": "/var/lib/postgresql/data",
+        "Driver": "local",
+        "Mode": "rw",
+        "RW": true,
+        "Propagation": ""
+      }
+    ]
+  }
+]

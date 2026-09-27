@@ -1,0 +1,1449 @@
+{
+  "ready": {
+    "status": 200,
+    "body": {
+      "status": "ok"
+    }
+  },
+  "unauthorized": {
+    "status": 401,
+    "body": {
+      "detail": "Invalid or missing API token"
+    }
+  },
+  "status": {
+    "status": 200,
+    "body": {
+      "phase": "rebuilding",
+      "code": "DATA_STORE_REBUILDING",
+      "fresh_install": false,
+      "items": [
+        {
+          "entry_id": "E01",
+          "dataset": null,
+          "name": "运维 · stock_daily_dump",
+          "classification": "ingestion_channel",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E02",
+          "dataset": null,
+          "name": "运维 · stock_recent_dump",
+          "classification": "ingestion_channel",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E03",
+          "dataset": null,
+          "name": "运维 · stock_actions_dump",
+          "classification": "ingestion_channel",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E04",
+          "dataset": "fund.news.reported",
+          "name": "基金 · fund_news",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E05",
+          "dataset": "market.stock_anomaly.reported",
+          "name": "市场 · anomaly_stock",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E06",
+          "dataset": "market.rank_trend.reported",
+          "name": "市场 · rank_trend",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E07",
+          "dataset": "fund.reported_holdings.reported",
+          "name": "基金 · fund_holdings",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E08",
+          "dataset": "fund.reported_stock_holdings.reported",
+          "name": "基金 · fund_stock_history",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E09",
+          "dataset": "fund.reported_bond_holdings.reported",
+          "name": "基金 · fund_bond_history",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E10",
+          "dataset": "market.financial_indicator.reported",
+          "name": "市场 · stock_indicators",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E11",
+          "dataset": "fund.financial_indicator.reported",
+          "name": "基金 · fund_financial_indicators",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E12",
+          "dataset": "fund.income.reported",
+          "name": "基金 · fund_income",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E13",
+          "dataset": "fund.balance.reported",
+          "name": "基金 · fund_balance",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E14",
+          "dataset": "market.income.reported",
+          "name": "市场 · stock_income",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E15",
+          "dataset": "market.balance.reported",
+          "name": "市场 · stock_balance",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E16",
+          "dataset": "market.cash_flow.reported",
+          "name": "市场 · stock_cash_flow",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E17",
+          "dataset": "fund.allocation.reported",
+          "name": "基金 · fund_allocation",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E18",
+          "dataset": "fund.industry.reported",
+          "name": "基金 · fund_industry",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E19",
+          "dataset": "fund.holder_composition.reported",
+          "name": "基金 · fund_holders",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E20",
+          "dataset": "fund.top_holder.reported",
+          "name": "基金 · fund_top_holders",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E21",
+          "dataset": "fund.dividend.reported",
+          "name": "基金 · fund_dividends",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E22",
+          "dataset": "market.corporate_action.reported",
+          "name": "市场 · stock_actions",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E23",
+          "dataset": "fund.manager_performance.reported",
+          "name": "基金 · fund_manager_performance",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E24",
+          "dataset": "fund.manager_style.reported",
+          "name": "基金 · fund_manager_style",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E25",
+          "dataset": "fund.return.reported",
+          "name": "基金 · fund_returns",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E26",
+          "dataset": "fund.drawdown.reported",
+          "name": "基金 · fund_drawdowns",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E27",
+          "dataset": "fund.performance.reported",
+          "name": "基金 · fund_performance_history",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E28",
+          "dataset": "market.dragon_tiger.reported",
+          "name": "市场 · dragon_tiger",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E29",
+          "dataset": "market.auction.reported",
+          "name": "市场 · stock_auction",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E30",
+          "dataset": "market.auction_benchmark.reported",
+          "name": "市场 · auction_benchmark",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E31",
+          "dataset": "market.limit_up.reported",
+          "name": "市场 · limit_up",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E32",
+          "dataset": "market.limit_down.reported",
+          "name": "市场 · limit_down",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E33",
+          "dataset": "market.limit_break.reported",
+          "name": "市场 · limit_break",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E34",
+          "dataset": "market.anomaly.reported",
+          "name": "市场 · anomaly_list",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E35",
+          "dataset": "market.limit_ladder.reported",
+          "name": "市场 · limit_ladder",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E36",
+          "dataset": "market.stock_quote.reported",
+          "name": "市场 · stock_quote",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E37",
+          "dataset": "market.etf_quote.reported",
+          "name": "市场 · etf_quote",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E38",
+          "dataset": "market.index_quote.reported",
+          "name": "市场 · index_quote",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E39",
+          "dataset": "market.stock_valuation.reported",
+          "name": "市场 · stock_valuation",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E40",
+          "dataset": "instrument.reference.provider_reported",
+          "name": "标的 · tickers",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E41",
+          "dataset": "fund.company.reported",
+          "name": "基金 · fund_company",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E42",
+          "dataset": "fund.manager.reported",
+          "name": "基金 · fund_manager",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E43",
+          "dataset": "fund.profile.reported",
+          "name": "基金 · fund_profile",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E44",
+          "dataset": "fund.nav.reported",
+          "name": "基金 · fund_nav",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E45",
+          "dataset": "market.popularity.reported",
+          "name": "市场 · hot_list",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E46",
+          "dataset": "market.rising_popularity.reported",
+          "name": "市场 · skyrocket",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E47",
+          "dataset": "market.popularity_history.reported",
+          "name": "市场 · hot_history",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E48",
+          "dataset": "fund.quota_summary.reported",
+          "name": "基金 · fund_quota_summary",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E49",
+          "dataset": "fund.quota_list.reported",
+          "name": "基金 · fund_quota_list",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E50",
+          "dataset": "market.stock_daily.reported",
+          "name": "市场 · stock_daily",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E51",
+          "dataset": "market.etf_daily.forward_unanchored",
+          "name": "市场 · etf_daily",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E52",
+          "dataset": "market.index_daily.reported",
+          "name": "市场 · index_daily",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E53",
+          "dataset": "fund.offering.reported",
+          "name": "基金 · fund_offerings",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E54",
+          "dataset": "fund.manager_experience.reported",
+          "name": "基金 · fund_manager_experience",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E55",
+          "dataset": "market.calendar.reported",
+          "name": "市场 · calendar",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E56",
+          "dataset": "index.category.reported",
+          "name": "数据 · index_catalog",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E57",
+          "dataset": "index.constituent.reported",
+          "name": "数据 · index_constituents",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E58",
+          "dataset": null,
+          "name": "运维 · etf_code_mapping_audits",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E59",
+          "dataset": null,
+          "name": "运维 · etf_daily_revision_audits",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E60",
+          "dataset": null,
+          "name": "运维 · corporate_action_source_facts",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E61",
+          "dataset": "market.corporate_action.local",
+          "name": "运维 · corporate_action_facts",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E62",
+          "dataset": null,
+          "name": "运维 · corporate_action_coverage_facts",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E63",
+          "dataset": null,
+          "name": "运维 · trading_status_source_facts",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E64",
+          "dataset": "market.trading_status.local",
+          "name": "运维 · trading_status_facts",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E65",
+          "dataset": null,
+          "name": "运维 · trading_status_coverage_facts",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E66",
+          "dataset": null,
+          "name": "运维 · trading_status_revision_audits",
+          "classification": "source_support",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E67",
+          "dataset": "instrument.reference.local",
+          "name": "标的 · etf_directory",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E68",
+          "dataset": "market.calendar.local",
+          "name": "市场 · exchange_calendar",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E69",
+          "dataset": "market.adjustment_factor.local",
+          "name": "市场 · etf_adjustment_factors",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E70",
+          "dataset": "market.fund_daily.local",
+          "name": "市场 · etf_daily",
+          "classification": "business",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        },
+        {
+          "entry_id": "E71",
+          "dataset": null,
+          "name": "运维 · empty_local_scope",
+          "classification": "remove_operational_pseudodataset",
+          "state": "not_checked",
+          "complete": false,
+          "qualified": false,
+          "reason": null,
+          "source_rows": null,
+          "committed_partitions": null,
+          "updated_at": null
+        }
+      ],
+      "total": 71,
+      "next_offset": null
+    }
+  },
+  "legacy": {
+    "status": 410,
+    "body": {
+      "detail": {
+        "code": "LEGACY_FOUNDATION_REMOVED",
+        "message": "旧数据底座的发布与候选接口已退役，请使用当前数据接口。"
+      }
+    }
+  },
+  "datasets": {
+    "status": 200,
+    "body": {
+      "total": 60,
+      "phase": "rebuilding",
+      "next_offset": null
+    },
+    "items": [
+      {
+        "dataset": "fund.news.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "389708861091812700db938fa4ea0704f0a97042530193765fcde86bfe040aab",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.stock_anomaly.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "9d7da0aad09dc56e10a518146ec7347177a314af9bfa7d2dfe9bbb71a2977207",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.rank_trend.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "6b4a41e3501162964b3d58318210dc91aef6256e44cfb19db88ded360151fb12",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.reported_holdings.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "172851a7111494ca0318f6ce22ba9c1c22385d228ee5495646ce74813d96a43c",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.reported_stock_holdings.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "d58f5297a344bbb3d4fe357d1f37a781159e06d5441a22ef5a486596102b66e4",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.reported_bond_holdings.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "4eabea4649d7d91d786c4b130f5f1162f70af104794571dfbcd0979c50c4c83b",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.financial_indicator.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "1ab23b8580d31eab513239084190d191413ddec8a3030b9639492aee05ad4ac4",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.financial_indicator.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "ad5f42714330647855562d1874710fb792968b5dd6ca8f9130b1de039abb1b8d",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.income.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "2a55d0c347eeb885ec54b16d6cb2d8f2978438497edbb9c7d9d7cf0385a80010",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.balance.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "3369cf142db6b87a6e2512d309a981f7d4e3d22626b9baf3612af3e0f6d5e506",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.income.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "12acd94e369bb10c6ccd675820759c784d0a12fc9cd0cd95ae4d44162bafe768",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.balance.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "284b565b1cf65229ad977394a8de7a8b477a79e3c96c043509960ba0fe47145b",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.cash_flow.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "472378880567f728f47356b6f1525a989a52c220088e461e1d655bf27b632b82",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.allocation.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "305b6c15adcb44260f96d768729c79d4bd1763a613e6c5f9dc2d5c91970e87b3",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.industry.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "0b388d2c118f5b78a6a9228830e0b1ee6d67ddd17b0675c61827635eec92bbd7",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.holder_composition.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "8248c4d69fd61abdf34b21f21ebd3d2b4713507930885dd0943c901f7f05656e",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.top_holder.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "a6a5056565b1ec08bcd1941d7d7568bbd3a0dcea17d4489a5eeb98e6e90addef",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.dividend.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c0f6d38891b8ac8e47c3e39c854b9e56bc9160bbebeb4465c8f07cb4f747ffae",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.corporate_action.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "bdfad2a709eb4dd459a995573d864e5da67b129e7035b98b04b2ee717542a087",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.manager_performance.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "e373ffd2f7ddddc5d5dbb69a5fbc3d829882eb573d8ee17793f519a16440583a",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.manager_style.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "a760c5c9373665a6b90bee1ec3e041b40d7d2b50a92ac7eb7af0a8e22841aa51",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.return.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c0a0dc10ab11641d48eef2741f6c7848ebb5c269c4b4519b8e0c8db5eb46fbc8",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.drawdown.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "26add50391af56a657411df3ae48bef3391a4a3f3dc017f683f64212bd14e2aa",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.performance.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "b62e4c5f2866505d42abe4cfeae034d3013b3b924a54a20b6b736ff5cda8e670",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.dragon_tiger.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "89736c59996573ef858d356c1aa6b85d8a1324603f5c2857e6e74bc4de6ea842",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.auction.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "128f49ceb0333e6340691cdd60110466287588c2ef87db456c1ba45eb0cf157a",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.auction_benchmark.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "a550e34633a8c9f46d3afd0a1e36f87c2155b961f63c1d0f4e40371639087a80",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.limit_up.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "cf38bf42f271bac86e09e28a225266940e20cfc01c7102ca1ba857d8f86fb356",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.limit_down.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c305ad04f1084f09685da6e683bc0dcba3a1e4472c63d330cddbd8bce421b174",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.limit_break.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "7af4ca7480abf0ab8e92db6e4e69bab53a01a61959f3b354204191837535bc2c",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.anomaly.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "e3fbd2b6ce7ce7ca7ae1a2fec9ed23cb27eb5514a11e2d86b71bb506d0ccb6f8",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.limit_ladder.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "eead4fc65585bcc7f07fadf663dfa3ba1002938a7b78d4659a463c45e4100913",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.stock_quote.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c623c5e7e777c174ae85c4f8d0020226902f8c01d57147c51901d8cb6d2f03ee",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.etf_quote.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "e08bc37a05f2a59c7f55dcb5845fc14ddcb50bd7d77791ee4a14a800946906ca",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.index_quote.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "d1eb3c15c9fe52e1da98076ca9a6a6560585f62ae13785c8c73087289801d2f3",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.stock_valuation.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "ef114b3a8cdffaa76cc0834e0b753044d42aded0da1c0445dade562738f3f896",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "instrument.reference.provider_reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "990edfd0262425661045d828b3643c639d0e09b2075a441ed3e1cea6736a222d",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.company.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "b0b5a24c47dc60774ca0bb4c09da277393a557e2a3147f164f160e6e9082d4ce",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.manager.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "61f6030c05d4e23e623d350084827ee4f0b4ce5a51df9c5fa565bb4e8e333d36",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.profile.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "76c08d302dff62d5b5f987cc134710251d918465aad0a53285da297343882f3c",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.nav.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "80fe6ca4888bb4881c2406489e78875cbdc2ea5a4c2224fa1c76c49fec4737c5",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.popularity.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "f7cefbd8e7630b18d8c45c71269fbc520c8b226c60c77aa0350f59cff12537f5",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.rising_popularity.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "3d8ccff9b15a3e9a129fb9f288d3bfc13f54f1dd4676399e2c214fc897455696",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.popularity_history.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "f7a482e573cc04d7bac0e7d2fc6215c143204bf625e2a590f09f3b289fab9195",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.quota_summary.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "87b74b6380617749db8b26bbe598b38a6b5a981b393c6f0392614af74e73e5c4",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.quota_list.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "7a5209fc0b49250804b99dfb19af2d9ebc0499d0f1fbc8d3fcdbffe904a0739d",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.stock_daily.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "55bac968c70a96a689f0b0beb907fbe927f1c9605e0595bf56a48baf34e38b97",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.etf_daily.forward_unanchored",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "1c6825f5bdc95404ac2a004aecad621c214bf689b12cea76fdc29c0b8bea8fdd",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.index_daily.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "93a210e1b408864868f20cc234dab71285588c4660647cb64458424c46f339d6",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.offering.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "da4d220614e0140f6e05b4332d1ef8f88f75555e82215516f1a416715bd5d92f",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "fund.manager_experience.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "72799caa3c3ebf8717dae265506b58971d57a74569c558a698deec5f355587d6",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.calendar.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "eac004d3de3a3f382ad3c02df9ed3f47ca64a51e96c3fce1dee61a93c36049d0",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "index.category.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "e3dce16d0a8280646bb1725365ad55d3255679a4aaca93cb3b82a13a5fcf1d3b",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "index.constituent.reported",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "5d462b7ec09383746df610d50ece791995c702d7ade93aabdae073532935e8e2",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.corporate_action.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c01a1d2b622185e402a297fedc52e866209fe5041e7bd7d36c969ae82db6110d",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.trading_status.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "18000e2f05e61bc07f454b85bd53aaf81b12cd4260d084b1c2e77911588ec7b6",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "instrument.reference.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "e9948fcc192c25d218328a42cdc38b66bbfa03f6b6544c6d351ec653ebc0aedd",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.calendar.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "995f1a04e363be8e5e12f1897d57cee39cdff7835a8ea587688b2b99450caf9b",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.adjustment_factor.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "04a6608bc0e5989a5f1c71a40e1a61bf8da4b078c24f0b4dc1dd11e47fc4e06e",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      },
+      {
+        "dataset": "market.fund_daily.local",
+        "representation": "typed-object-nodes-v2",
+        "schema_id": "c13a89f76b15472aaaaba4bd62346bf237ae81a164241ffec07e6c76bd10619c",
+        "status": "rebuilding",
+        "row_count": null,
+        "generation": null
+      }
+    ]
+  },
+  "full_response_sha256": "427579789100375a1bb85d7ae9c7b54a2e9c4bc963e43395d4ae599e90ddf4a5"
+}

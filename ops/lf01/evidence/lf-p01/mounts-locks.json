@@ -1,0 +1,23 @@
+{
+  "quant-foundry-p01-backend-1": {
+    "uid": 999,
+    "gid": 999,
+    "device": 2080,
+    "inode": 33556715,
+    "writable": true,
+    "available_bytes": 878887657472,
+    "entries": [],
+    "filesystem": "ext2/ext3"
+  },
+  "quant-foundry-p01-runner-1": {
+    "uid": 999,
+    "gid": 999,
+    "device": 2080,
+    "inode": 33556715,
+    "writable": true,
+    "available_bytes": 878887653376,
+    "entries": [],
+    "filesystem": "ext2/ext3"
+  },
+  "shared_lock": "shared_lock_blocked"
+}
