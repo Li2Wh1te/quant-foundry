@@ -63,20 +63,31 @@ Tushare 可变表以当前只读快照确认，固定版本公司行动使用 `f
 
 `pipeline.run_entry(store, entry, sources, options=PipelineOptions(...))` 与
 `run_local(...)` 使用同一套路径，mode 为 rebuild/update/retry。
-每个来源 factory 必须在每个 pass 返回完整且一致的已声明输入范围，不可把
-未读完页声称为 complete。只读合成 B05 source 可明确声明序号范围。
+每个来源 factory 必须返回完整且一致的已声明输入范围，不能把未读完页声称为 complete。
+只读合成 B05 source 可明确声明序号范围。
 
-先在 D01 计入 staging/spill 预算的临时 SQLite 中按目标分区归并原材料，再加载
-相关当前文件并合并，最后调用 D01 原子 replace。临时库退出后回收，不是第二份
-长期 DuckDB 全库、历史正式副本或逐次运行台账。分区过多会多次补扫；这是有界
-空间换取额外读取，不是全量性能承诺。source_rows/normalized_units 统计实际扫描/
-转换次数，重复 pass 会累计，不是全库唯一行数或覆盖率分母。
+一次完整扫描在共享 staging/spill 预算内归并到 SQLite 当前工作文件，完整扫描成功后
+才允许提交分区。默认每次调用提交最多 256 个 pass；每 pass 最多处理配置的分区数。
+未完成部分保留在原暂存槽，下一次相同入口/规则/来源类型/选区/mode 调用直接续作，
+不重新读取或规范化来源。已提交分区的工作行立即删除，全部完成后回收槽；没有历史
+正式副本、逐行成功账本或第二份长期数据库。普通恢复清理不会删除仍有续作的槽，
+空闲续作也计入共享预算。完整扫描本身仍须满足时间、RSS 和 SQLite/spill 上限；
+扫描阶段失败会回收未完成工作，重新执行需重新取得完整快照，不能以残缺扫描推断删除。
 
-每个当前对象内包含紧凑 basis、有效/撤回/无效状态。可选字段限制只在对象根记录
-保留有界 `quality_json`；不是逐成员成功日志。当前文件、问题、来源范围状态及
-checkpoint 同事务切换。快照合并后使用 dataset generation fencing 防止并发丢失更新。
-同输入/规则/上下文通过 token 无操作；不同依据但相同当前文件内容可只提交控制状态。
-崩溃后重新扫描、归并和检查已提交 token，不盲目重放。
+`source_rows` / `normalized_units` 是本次调用的实际读取/转换次数，续作时可为 0；
+`scan_source_rows` / `scan_normalized_units` 是所续作完整扫描的总量。
+完成一轮后下一次调用重新扫描，以捕获迟到提交和来源更正。选区、来源类型、规则或
+mode 改变会放弃旧工作快照并重新取得来源；不会删除已经提交的正式值。
+
+当前文件、问题、范围状态及 checkpoint 仍同事务切换。目录中的扫描标识处理
+“正式目录已提交、工作游标未推进”的崩溃窗口；续作先核对当前文件依据，再跳过
+已经提交的分区。实际替换仍使用 generation fencing。相同输入复用原 checkpoint，
+避免只更新扫描标识就推动 generation。
+
+只有 NativeSources 成功完整读取且全部输入通过规范化的显式可变入口
+E64、E67、E68、E69、E70 才有整表缺失键删除语义；删除仅作用于对应来源表示。
+当前业务值相等时保留原逐行依据，不把扫描时间写成新的业务变化。
+版本化公司行动、历史观察、支持审计以及 rescue/combined 来源不据缺失键推断删除。
 
 新错误默认限制对应能力，旧展示值即使保留也带 invalid，不进入合格读取。
 旧坏输入不覆盖新好值；未解决旧错误可以保留为已解释、不阻断当前读取的问题。
@@ -140,7 +151,7 @@ python -m app.data_store rebuild --root /trusted/current --entry E50 --rescue /t
 ```
 
 分区名以实际元数据为准，示例不是生产范围授权。不指定 entry 会按71入口处理。
-每次 pass 默认只选择一个目标分区、最多256pass/每pass300秒；超预算不是成功完成。
+完整扫描后每 pass 默认提交一个分区，每次调用最多 256 pass、每 pass 300 秒；超过 pass 数后保持 incomplete 并留待下次续作。
 Schema/规则不兼容须显式局部重建，不能把旧文件按新模式解释。
 
 B05 执行器 `backend/scripts/benchmark_local_ticks.py` 默认1000万条，真实经过合成

@@ -1,9 +1,8 @@
 """LF-D02 local rebuild/update/retry through one bounded current-value pipeline.
 
-Every pass first reduces source history into target partitions. It never creates
-an official copy for each observation. Finite partition passes may rescan native
-inputs; this trades bounded storage for extra reads, not for an unsafe permanent
-ID/time watermark. A next invocation always sweeps early/late commits again.
+One bounded full scan reduces local inputs into a charged continuation spool.
+Only a complete scan can be published. Pending partitions survive invocation and
+process boundaries; the current spool is removed when the sweep completes.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from uuid import uuid4
 
 import pyarrow.parquet as pq
 from sqlalchemy import text
@@ -22,7 +22,7 @@ from .adapters.contracts import Unit, digest
 from .adapters.normalize import normalize
 from .adapters.registry import BY_ID, ENTRIES, Entry
 from .adapters.canonical import NativeInputError
-from .catalog import SourceUpdate, Issue
+from .catalog import SourceUpdate, Issue, basis_hash
 from .errors import DataStoreError
 from .locking import _deadline
 from .merge import MergeSpool, restore_row
@@ -159,6 +159,15 @@ def _partition_issues(store,entry,partition,spool):
 
 
 def _commit_partition(store,entry,partition,spool,options,cancelled):
+    with store.locks.read(entry.spec.name,timeout_ms=store.limits.lock_timeout_ms):
+        previous=store.source_state(entry.spec.name,_scope(partition))
+        if previous and previous.get('checkpoint',{}).get('cycle') == spool.cycle:
+            # The catalog commit may survive a crash before the SQLite cursor.
+            # Only its unchanged file basis proves that this partition is still
+            # committed; a different integration must not be silently ignored.
+            if previous['basis_hash'] != basis_hash(store.catalog.files(entry.spec.name,partition)):
+                raise DataStoreError('SOURCE_CONFLICT')
+            return None
     generation,incompatible=_load_current(store,entry,partition,spool,rebuild=options.allow_incompatible_rebuild)
     # Incompatible partitions require real replacement evidence. Absence from a
     # partial rescue/local range cannot authorize deleting their current values.
@@ -168,10 +177,15 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
     scope_key=_scope(partition)
     previous=store.source_state(entry.spec.name,scope_key)
     token=spool.partition_token(partition)
+    checkpoint={'policy':'complete_scan_continuation','partition':partition,'input':token,'cycle':spool.cycle}
+    if previous and previous['input_token']==token and not issues and not resolved:
+        # Reuse equal confirmation metadata; the kernel still fences generation
+        # and verifies the current file basis before taking its no-op path.
+        checkpoint=previous['checkpoint']
     source=SourceUpdate(scope_key,token,digest([entry.spec.schema_id,entry.spec.rule,partition]),
                         previous['revision'] if previous else 0,
                         confirmation={'basis':'inline_sparse_object_order','range':partition},
-                        checkpoint={'policy':'rescan_native_inputs','partition':partition,'input':token},
+                        checkpoint=checkpoint,
                         qualified=not issues,expected_generation=generation)
     revision=source.expected_revision
     result=store.replace_partition(entry.spec,partition,
@@ -213,16 +227,23 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                     summary['target_entry']=entry.target
                 return summary
             store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
-            after=''
-            for number in range(options.maximum_passes):
-                summary['passes']=number+1
-                with store.budget.reserve('read',cancelled=cancelled) as space:
-                    # This is an explicitly finite transformation budget, not a
-                    # query. It still shares measured native/RSS/disk accounting.
-                    space.deadline=time.monotonic()+options.pass_seconds
-                    spool=MergeSpool(space,entry.spec,after=after,partitions=options.partitions or None,
-                                     partition_count=options.partitions_per_pass)
-                    try:
+            with store.budget.reserve('read',cancelled=cancelled,
+                                      pending='pipeline.'+entry.id) as space:
+                space.deadline=time.monotonic()+options.pass_seconds
+                spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
+                                 partition_count=None)
+                try:
+                    identity=digest([entry.spec.descriptor(),type(sources).__module__,
+                                     type(sources).__qualname__,options.mode,options.partitions,
+                                     options.allow_incompatible_rebuild])
+                    record=spool.db.execute('SELECT body FROM progress WHERE id=1').fetchone()
+                    progress=json.loads(record[0]) if record else {}
+                    if progress.get('identity') != identity or not progress.get('scan_complete'):
+                        # A failed/incomplete scan provides no deletion evidence.
+                        # It is safe to restart acquisition because none of it was
+                        # published. A sealed scan instead resumes without IO.
+                        for table in ('objects','problems','scopes','partitions','progress'):
+                            spool.db.execute('DELETE FROM '+table)
                         for raw in sources.iter_entry(entry):
                             summary['source_rows']+=1
                             count=0; failed=False
@@ -230,16 +251,44 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                                 count+=1;failed|=bool(unit.failure)
                                 summary['normalized_units']+=1;summary['input_failures']+=bool(unit.failure)
                                 spool.offer(unit)
-                            # Only whole current-object inputs can prove the end
-                            # of a previously unlocated scope restriction. A
-                            # sparse price/report request never clears it globally.
                             if count and not failed and entry.projection[0] in ('snapshot','reference'):
                                 spool.validate_scope(raw)
                             spool.check()
                         if not sources.summary.get('complete',False):
                             raise NativeInputError('LOCAL_SCAN_INCOMPLETE','本地来源尚未完整扫描。')
+                        representation=(sources.summary.get('snapshot_representation')
+                                        if entry.complete_table_snapshot and not summary['input_failures'] else None)
+                        if representation:
+                            # Include partitions that became entirely empty. The
+                            # catalog is current metadata, never a source ledger.
+                            with store.catalog.transaction() as c:
+                                for (partition,) in c.execute(text(
+                                    'SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),
+                                    {'d':entry.spec.name}):
+                                    spool._select(partition)
+                        progress={'identity':identity,'scan_complete':True,'after':'',
+                                  'cycle':uuid4().hex,'representation':representation,
+                                  'source_rows':summary['source_rows'],
+                                  'normalized_units':summary['normalized_units'],
+                                  'input_failures':summary['input_failures']}
+                        spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
+                                         (json.dumps(progress),))
                         spool.db.commit();spool.check()
-                        selected=sorted(spool.parts)
+                    else:
+                        summary['resumed']=True
+                    summary['scan_source_rows']=progress['source_rows']
+                    summary['scan_normalized_units']=progress['normalized_units']
+                    spool.cycle=progress['cycle']
+                    spool.snapshot_representation=progress['representation']
+                    for number in range(options.maximum_passes):
+                        summary['passes']=number+1
+                        space.deadline=time.monotonic()+options.pass_seconds
+                        selected=[r[0] for r in spool.db.execute(
+                            'SELECT p FROM partitions WHERE p>? ORDER BY p LIMIT ?',
+                            (progress['after'],options.partitions_per_pass))]
+                        if not selected:
+                            summary['complete']=True
+                            break
                         for partition in selected:
                             try:
                                 result=_commit_partition(store,entry,partition,spool,options,cancelled)
@@ -256,22 +305,35 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                                 from .problem_samples import resolved_overflow
                                 if resolved_overflow(store,entry,partition,spool,summary['overflow_restriction']):
                                     summary.pop('overflow_restriction')
-                            summary['committed_partitions']+=1
-                            summary['new_issues']+=result['new_issues'];summary['resolved']+=result['resolved']
+                            if result is not None:
+                                summary['committed_partitions']+=1
+                                summary['new_issues']+=result['new_issues'];summary['resolved']+=result['resolved']
+                                summary['last_generation']=result['generation']
+                                summary['cleanup_pending']=summary.get('cleanup_pending',False) or result['cleanup_pending']
+                                for k,v in result['metrics'].items():
+                                    summary['metrics'][k]=(max(summary['metrics'].get(k,0),v) if k.endswith('peak_bytes')
+                                                           else summary['metrics'].get(k,0)+v)
                             summary['last_partition']=partition
-                            summary['last_generation']=result['generation']
-                            summary['cleanup_pending']=summary.get('cleanup_pending',False) or result['cleanup_pending']
-                            for k,v in result['metrics'].items():
-                                summary['metrics'][k]=(max(summary['metrics'].get(k,0),v) if k.endswith('peak_bytes')
-                                                       else summary['metrics'].get(k,0)+v)
+                            progress['after']=partition
+                            spool.db.execute('UPDATE progress SET body=? WHERE id=1',(json.dumps(progress),))
+                            # Only pending working values are retained; completed
+                            # partitions leave no duplicate per-row success log.
+                            spool.db.execute('DELETE FROM objects WHERE p=?',(partition,))
+                            spool.db.execute('DELETE FROM problems WHERE p=?',(partition,))
+                            spool.db.commit()
                             _status(store,entry,summary)
-                        more=spool.discarded
-                    finally:
-                        spool.close()
-                if options.partitions or not more or not selected:
-                    summary['complete']=True
-                    break
-                after=selected[-1]
+                    summary['complete']=not spool.db.execute(
+                        'SELECT 1 FROM partitions WHERE p>? LIMIT 1',(progress['after'],)).fetchone()
+                    if summary['complete']:
+                        space.discard=True
+                except BaseException:
+                    # Unsealed acquisition cannot resume a repeatable-read DB
+                    # transaction. Reclaim it immediately; sealed work survives.
+                    if not spool.db.execute('SELECT 1 FROM progress WHERE id=1').fetchone():
+                        space.discard=True
+                    raise
+                finally:
+                    spool.close()
             if not summary['complete']:
                 summary['state']='incomplete';summary['reason']='PASS_BUDGET_EXCEEDED'
             else:
@@ -279,7 +341,7 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                     issue_count=c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
                                           {'d':entry.spec.name}).scalar_one()
                 summary['unresolved_issues']=issue_count
-                summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['normalized_units'] else 'processed'
+                summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['scan_normalized_units'] else 'processed'
                 summary['qualified']=not issue_count and not summary.get('overflow_restriction',{}).get('blocking_objects')
             _status(store,entry,summary)
             return summary

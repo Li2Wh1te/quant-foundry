@@ -72,6 +72,14 @@ class Entry:
     def business(self):
         return self.disposition == 'business'
 
+    @property
+    def complete_table_snapshot(self):
+        # Explicit mutable-table contract. Source facts, audit histories and
+        # versioned corporate-action facts are intentionally excluded.
+        return self.source == 'tushare' and self.native in (
+            'etf_directory', 'exchange_calendar', 'etf_adjustment_factors', 'etf_daily',
+            'trading_status_facts')
+
     @cached_property
     def projection(self):
         if not self.business:

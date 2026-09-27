@@ -165,7 +165,7 @@ def test_C14_native_disabled_source_rescan_sees_late_commits_without_supplier(re
     remaining=list(scan)
     assert len(remaining)==1  # fixed repeatable-read snapshot, not a moving cursor
     result=run_entry(ready,e,native)
-    assert result['complete'] and result['normalized_units']==3*result['passes']
+    assert result['complete'] and result['normalized_units']==3
     with engine.connect() as c:
         assert c.execute(text("SELECT enabled FROM data_sources WHERE key='tushare'")).scalar_one() is False
     for raw in native.iter_entry(e):
@@ -250,3 +250,196 @@ def test_additive_D02_migration_executes_without_touching_existing_kernel(store,
         c.execute(text("INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES ('E01','{}')"))
         monkeypatch.setattr(mod.op,'get_bind',lambda:c)
         with pytest.raises(RuntimeError):mod.downgrade()
+
+
+def calendar_rows(ready, entry):
+    with ready.catalog.transaction() as c:
+        partitions=tuple(c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),
+                                   {'d':entry.spec.name}).scalars())
+    return ready.read(entry.spec,Query(partitions=partitions or ('default',),page_size=100)).rows
+
+
+def calendar_table(ready, dates):
+    with ready.catalog.engine.begin() as c:
+        c.execute(text('CREATE TABLE trading_calendar_days (exchange text,calendar_date date,is_open boolean,PRIMARY KEY(exchange,calendar_date))'))
+        c.execute(text("INSERT INTO trading_calendar_days VALUES ('SSE',:day,true)"),
+                  [{'day': day} for day in dates])
+
+
+def test_native_full_scan_over_256_partitions_resumes_after_store_restart(ready):
+    from app.data_store.local_sources import NativeSources
+    from app.data_store.storage import CurrentStore
+    from tests.test_data_store_kernel import KEY
+    entry = BY_ID['E68']
+    calendar_table(ready, [f'{2000+i//12}-{1+i%12:02}-01' for i in range(300)])
+    first = run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    assert not first['complete'] and first['committed_partitions'] == 256
+    assert first['source_rows'] == first['normalized_units'] == 300
+    with ready.catalog.transaction() as c:
+        before = dict(c.execute(text('SELECT path,content_hash FROM data_store_files')).all())
+    # Recovery must preserve the charged sealed scan after all process locks
+    # have gone away. A newly constructed store models a different invocation.
+    ready.budget.sweep()
+    with CurrentStore(ready.catalog.engine, ready.files.root, cursor_key=KEY, limits=ready.limits) as reopened:
+        second = run_entry(reopened, entry, NativeSources(ready.catalog.engine))
+        assert second['complete'] and second['resumed']
+        assert second['committed_partitions'] == 44
+        assert second['source_rows'] == second['normalized_units'] == 0
+        assert second['last_partition'] > first['last_partition']
+        with reopened.catalog.transaction() as c:
+            after = dict(c.execute(text('SELECT path,content_hash FROM data_store_files')).all())
+        assert len(after) == 300 and before.items() <= after.items()
+    assert not list(ready.files.root.glob('.scratch/*/spill/*.sqlite'))
+
+
+def test_native_unchanged_scan_noop_and_one_changed_partition(ready):
+    from app.data_store.local_sources import NativeSources
+    entry = BY_ID['E68']
+    calendar_table(ready, ['2025-01-01','2025-02-01'])
+    run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    generation = ready.catalog.dataset(entry.spec.name)['generation']
+    repeat = run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    assert repeat['metrics']['files_written'] == 0
+    assert ready.catalog.dataset(entry.spec.name)['generation'] == generation
+    with ready.catalog.engine.begin() as c:
+        c.execute(text("UPDATE trading_calendar_days SET is_open=false WHERE calendar_date='2025-02-01'"))
+    changed = run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    assert changed['metrics']['files_written'] == 1
+    assert ready.catalog.dataset(entry.spec.name)['generation'] == generation+1
+
+
+def test_native_complete_snapshot_deletes_missing_keys_including_empty_partition(ready):
+    from app.data_store.local_sources import NativeSources
+    entry = BY_ID['E68']
+    calendar_table(ready, ['2025-01-01','2025-01-02','2025-02-01'])
+    run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    with ready.catalog.engine.begin() as c:
+        c.execute(text("DELETE FROM trading_calendar_days WHERE calendar_date <> '2025-01-01'"))
+    result = run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    assert result['complete']
+    assert len(calendar_rows(ready, entry)) == 1
+    with ready.catalog.engine.begin() as c:
+        c.execute(text('DELETE FROM trading_calendar_days'))
+    result = run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    assert result['complete'] and calendar_rows(ready, entry) == []
+
+
+@pytest.mark.parametrize('failure', ['incomplete','exception'])
+def test_native_unfinished_scan_never_deletes_current(ready, failure):
+    from app.data_store.local_sources import NativeSources
+    from app.data_store.adapters.canonical import NativeInputError
+    entry = BY_ID['E68']
+    calendar_table(ready, ['2025-01-01','2025-01-02'])
+    run_entry(ready, entry, NativeSources(ready.catalog.engine))
+    generation = ready.catalog.dataset(entry.spec.name)['generation']
+    class Truncated(NativeSources):
+        def iter_entry(self, entry):
+            source = super().iter_entry(entry)
+            try:
+                yield next(source)
+                if failure == 'exception':
+                    raise NativeInputError('SOURCE_BUDGET_EXCEEDED', '测试超时。')
+            finally:
+                source.close()
+    with pytest.raises(NativeInputError):
+        run_entry(ready, entry, Truncated(ready.catalog.engine))
+    assert ready.catalog.dataset(entry.spec.name)['generation'] == generation
+    assert len(calendar_rows(ready, entry)) == 2
+    assert run_entry(ready, entry, NativeSources(ready.catalog.engine))['complete']
+
+
+def test_resume_catalog_commit_before_spool_cursor_never_merges_twice(ready, monkeypatch):
+    from app.data_store import pipeline
+    from app.data_store.local_sources import NativeSources
+    entry = BY_ID['E68']
+    calendar_table(ready, ['2025-01-01','2025-02-01'])
+    original = pipeline._commit_partition
+    def interrupted(*args, **kwargs):
+        original(*args, **kwargs)
+        raise RuntimeError('process stopped after catalog commit')
+    with monkeypatch.context() as patch:
+        patch.setattr(pipeline, '_commit_partition', interrupted)
+        with pytest.raises(RuntimeError):
+            run_entry(ready,entry,NativeSources(ready.catalog.engine))
+    result = run_entry(ready,entry,NativeSources(ready.catalog.engine))
+    assert result['complete'] and result['resumed']
+    assert result['source_rows'] == 0 and result['committed_partitions'] == 1
+    assert len(calendar_rows(ready, entry)) == 2
+
+
+def _crash_pipeline_after_catalog_commit(schema, root, policy):
+    import os
+    from app.data_store import pipeline
+    from app.data_store.local_sources import NativeSources
+    from app.data_store.storage import CurrentStore
+    from tests.test_data_store_kernel import KEY, make_engine, probe
+    # A fresh interpreter gets its own connection pool and no inherited locks.
+    # Only the isolated schema and real shared files survive the process exit.
+    engine=make_engine(schema)
+    original = pipeline._commit_partition
+    def crash(*args, **kwargs):
+        original(*args, **kwargs)
+        os._exit(73)
+    pipeline._commit_partition = crash
+    with probe(), CurrentStore(engine,root,cursor_key=KEY,limits=policy) as child:
+        pipeline.run_entry(child,BY_ID['E68'],NativeSources(engine))
+
+
+def test_real_process_death_after_commit_resumes_without_source_scan(ready, database):
+    import multiprocessing
+    from app.data_store.local_sources import NativeSources
+    calendar_table(ready,['2025-01-01','2025-02-01'])
+    child=multiprocessing.get_context('spawn').Process(
+        target=_crash_pipeline_after_catalog_commit,
+        args=(database[1],ready.files.root,ready.limits))
+    child.start()
+    try:
+        child.join(20)
+        assert child.exitcode == 73
+    finally:
+        if child.is_alive():
+            child.kill();child.join()
+    result=run_entry(ready,BY_ID['E68'],NativeSources(ready.catalog.engine))
+    assert result['complete'] and result['resumed']
+    assert result['source_rows']==0 and result['committed_partitions']==1
+    assert len(calendar_rows(ready,BY_ID['E68']))==2
+
+
+def test_idle_continuations_remain_charged_and_are_reclaimed_only_when_done(ready):
+    from app.data_store.budget import Budget
+    from app.data_store.limits import MiB
+    budget=Budget(ready.files,ready.locks,replace(ready.limits,scratch_bytes=128*MiB))
+    for key in ('pipeline.E68','pipeline.E70'):
+        with budget.reserve('read',pending=key) as reservation:
+            (reservation.spill/'pending.sqlite').write_bytes(b'pending current work')
+    budget.sweep()
+    with pytest.raises(DataStoreError) as error:
+        with budget.reserve('read'):
+            pass
+    assert error.value.code == 'SCRATCH_BUDGET_EXCEEDED'
+    with budget.reserve('read',pending='pipeline.E68') as reservation:
+        assert (reservation.spill/'pending.sqlite').read_bytes()==b'pending current work'
+        reservation.discard=True
+    with budget.reserve('read'):
+        pass
+    with budget.reserve('read',pending='pipeline.E70') as reservation:
+        assert (reservation.spill/'pending.sqlite').exists()
+        reservation.discard=True
+
+
+def test_mutable_trading_status_snapshot_noop_and_deletion(ready):
+    from app.data_store.local_sources import NativeSources
+    entry=BY_ID['E64']
+    with ready.catalog.engine.begin() as c:
+        c.execute(text('CREATE TABLE trading_status_facts (ts_code text,trade_date date,dimension text,status text,quality_status text,source text)'))
+        c.execute(text("INSERT INTO trading_status_facts VALUES ('A.SH','2025-01-01','suspend','normal','complete','tushare'),('B.SH','2025-01-01','suspend','normal','complete','tushare')"))
+    initial=run_entry(ready,entry,NativeSources(ready.catalog.engine))
+    assert initial['qualified']
+    generation=ready.catalog.dataset(entry.spec.name)['generation']
+    repeated=run_entry(ready,entry,NativeSources(ready.catalog.engine))
+    assert repeated['metrics']['files_written']==0
+    assert ready.catalog.dataset(entry.spec.name)['generation']==generation
+    with ready.catalog.engine.begin() as c:
+        c.execute(text("DELETE FROM trading_status_facts WHERE ts_code='B.SH'"))
+    assert run_entry(ready,entry,NativeSources(ready.catalog.engine))['complete']
+    assert len(calendar_rows(ready,entry))==1
