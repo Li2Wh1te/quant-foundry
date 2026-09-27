@@ -1,9 +1,8 @@
 """LF-D02 local rebuild/update/retry through one bounded current-value pipeline.
 
-Every pass first reduces source history into target partitions. It never creates
-an official copy for each observation. Finite partition passes may rescan native
-inputs; this trades bounded storage for extra reads, not for an unsafe permanent
-ID/time watermark. A next invocation always sweeps early/late commits again.
+One bounded full scan reduces local inputs into a charged continuation spool.
+Only a complete scan can be published. Pending partitions survive invocation and
+process boundaries; the current spool is removed when the sweep completes.
 """
 from __future__ import annotations
 
@@ -14,6 +13,7 @@ import hashlib
 import json
 import sqlite3
 import time
+from uuid import uuid4
 
 import pyarrow.parquet as pq
 from sqlalchemy import text
@@ -22,7 +22,7 @@ from .adapters.contracts import Unit, digest
 from .adapters.normalize import normalize
 from .adapters.registry import BY_ID, ENTRIES, Entry
 from .adapters.canonical import NativeInputError
-from .catalog import SourceUpdate, Issue
+from .catalog import SourceUpdate, Issue, basis_hash
 from .errors import DataStoreError
 from .locking import _deadline
 from .merge import MergeSpool, restore_row
@@ -58,6 +58,8 @@ def _scope(partition):
 
 def _status(store, entry, summary):
     """One current operational state per static entry, never a pseudo dataset."""
+    if summary.get('batch_token'):
+        summary['batch_pending']=not summary.get('complete',False)
     with store.catalog.transaction() as c:
         c.execute(text('INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES (:i,:j) '
                        'ON CONFLICT (entry_id) DO UPDATE SET summary_json=EXCLUDED.summary_json, '
@@ -159,6 +161,15 @@ def _partition_issues(store,entry,partition,spool):
 
 
 def _commit_partition(store,entry,partition,spool,options,cancelled):
+    with store.locks.read(entry.spec.name,timeout_ms=store.limits.lock_timeout_ms):
+        previous=store.source_state(entry.spec.name,_scope(partition))
+        if previous and previous.get('checkpoint',{}).get('cycle') == spool.cycle:
+            # The catalog commit may survive a crash before the SQLite cursor.
+            # Only its unchanged file basis proves that this partition is still
+            # committed; a different integration must not be silently ignored.
+            if previous['basis_hash'] != basis_hash(store.catalog.files(entry.spec.name,partition)):
+                raise DataStoreError('SOURCE_CONFLICT')
+            return None
     generation,incompatible=_load_current(store,entry,partition,spool,rebuild=options.allow_incompatible_rebuild)
     # Incompatible partitions require real replacement evidence. Absence from a
     # partial rescue/local range cannot authorize deleting their current values.
@@ -168,10 +179,15 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
     scope_key=_scope(partition)
     previous=store.source_state(entry.spec.name,scope_key)
     token=spool.partition_token(partition)
+    checkpoint={'policy':'complete_scan_continuation','partition':partition,'input':token,'cycle':spool.cycle}
+    if previous and previous['input_token']==token and not issues and not resolved:
+        # Reuse equal confirmation metadata; the kernel still fences generation
+        # and verifies the current file basis before taking its no-op path.
+        checkpoint=previous['checkpoint']
     source=SourceUpdate(scope_key,token,digest([entry.spec.schema_id,entry.spec.rule,partition]),
                         previous['revision'] if previous else 0,
                         confirmation={'basis':'inline_sparse_object_order','range':partition},
-                        checkpoint={'policy':'rescan_native_inputs','partition':partition,'input':token},
+                        checkpoint=checkpoint,
                         qualified=not issues,expected_generation=generation)
     revision=source.expected_revision
     result=store.replace_partition(entry.spec,partition,
@@ -184,7 +200,7 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
             'cleanup_pending':result.cleanup_pending,'metrics':asdict(result.metrics)}
 
 
-def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancelled=None):
+def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancelled=None, _batch=None):
     """Process one registered entry; a failure never becomes complete/empty.
 
     `sources.iter_entry(entry)` must return a *new full read* on each call.
@@ -199,6 +215,19 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
     dataset=entry.spec.name if entry.business else 'local.entry.'+entry.id.lower()
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old_status=read_entry_status(store,entry.id) if entry.id in BY_ID else {}
+        if _batch:
+            signature,token=_batch
+            if (old_status.get('batch_signature')==signature and old_status.get('batch_token')==token
+                    and old_status.get('complete') and not old_status.get('batch_pending')):
+                # Completed siblings belong to this still-active sweep. Returning
+                # their current disposition must not restart acquisition or count
+                # previously completed work as work performed by this invocation.
+                cached=dict(old_status)
+                cached.update({key:0 for key in ('passes','committed_partitions','source_rows',
+                              'normalized_units','new_issues','resolved','input_failures')})
+                cached.update(metrics={},reused_batch_result=True)
+                return cached
+            summary.update(batch_signature=signature,batch_token=token,batch_pending=True)
         if old_status.get('overflow_restriction'):summary['overflow_restriction']=old_status['overflow_restriction']
         _status(store,entry,summary)
         try:
@@ -213,16 +242,23 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                     summary['target_entry']=entry.target
                 return summary
             store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
-            after=''
-            for number in range(options.maximum_passes):
-                summary['passes']=number+1
-                with store.budget.reserve('read',cancelled=cancelled) as space:
-                    # This is an explicitly finite transformation budget, not a
-                    # query. It still shares measured native/RSS/disk accounting.
-                    space.deadline=time.monotonic()+options.pass_seconds
-                    spool=MergeSpool(space,entry.spec,after=after,partitions=options.partitions or None,
-                                     partition_count=options.partitions_per_pass)
-                    try:
+            with store.budget.reserve('read',cancelled=cancelled,
+                                      pending='pipeline.'+entry.id) as space:
+                space.deadline=time.monotonic()+options.pass_seconds
+                spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
+                                 partition_count=None)
+                try:
+                    identity=digest([entry.spec.descriptor(),type(sources).__module__,
+                                     type(sources).__qualname__,options.mode,options.partitions,
+                                     options.allow_incompatible_rebuild])
+                    record=spool.db.execute('SELECT body FROM progress WHERE id=1').fetchone()
+                    progress=json.loads(record[0]) if record else {}
+                    if progress.get('identity') != identity or not progress.get('scan_complete'):
+                        # A failed/incomplete scan provides no deletion evidence.
+                        # It is safe to restart acquisition because none of it was
+                        # published. A sealed scan instead resumes without IO.
+                        for table in ('objects','problems','scopes','partitions','progress'):
+                            spool.db.execute('DELETE FROM '+table)
                         for raw in sources.iter_entry(entry):
                             summary['source_rows']+=1
                             count=0; failed=False
@@ -230,16 +266,44 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                                 count+=1;failed|=bool(unit.failure)
                                 summary['normalized_units']+=1;summary['input_failures']+=bool(unit.failure)
                                 spool.offer(unit)
-                            # Only whole current-object inputs can prove the end
-                            # of a previously unlocated scope restriction. A
-                            # sparse price/report request never clears it globally.
                             if count and not failed and entry.projection[0] in ('snapshot','reference'):
                                 spool.validate_scope(raw)
                             spool.check()
                         if not sources.summary.get('complete',False):
                             raise NativeInputError('LOCAL_SCAN_INCOMPLETE','本地来源尚未完整扫描。')
+                        representation=(sources.summary.get('snapshot_representation')
+                                        if entry.complete_table_snapshot and not summary['input_failures'] else None)
+                        if representation:
+                            # Include partitions that became entirely empty. The
+                            # catalog is current metadata, never a source ledger.
+                            with store.catalog.transaction() as c:
+                                for (partition,) in c.execute(text(
+                                    'SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),
+                                    {'d':entry.spec.name}):
+                                    spool._select(partition)
+                        progress={'identity':identity,'scan_complete':True,'after':'',
+                                  'cycle':uuid4().hex,'representation':representation,
+                                  'source_rows':summary['source_rows'],
+                                  'normalized_units':summary['normalized_units'],
+                                  'input_failures':summary['input_failures']}
+                        spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
+                                         (json.dumps(progress),))
                         spool.db.commit();spool.check()
-                        selected=sorted(spool.parts)
+                    else:
+                        summary['resumed']=True
+                    summary['scan_source_rows']=progress['source_rows']
+                    summary['scan_normalized_units']=progress['normalized_units']
+                    spool.cycle=progress['cycle']
+                    spool.snapshot_representation=progress['representation']
+                    for number in range(options.maximum_passes):
+                        summary['passes']=number+1
+                        space.deadline=time.monotonic()+options.pass_seconds
+                        selected=[r[0] for r in spool.db.execute(
+                            'SELECT p FROM partitions WHERE p>? ORDER BY p LIMIT ?',
+                            (progress['after'],options.partitions_per_pass))]
+                        if not selected:
+                            summary['complete']=True
+                            break
                         for partition in selected:
                             try:
                                 result=_commit_partition(store,entry,partition,spool,options,cancelled)
@@ -256,22 +320,35 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                                 from .problem_samples import resolved_overflow
                                 if resolved_overflow(store,entry,partition,spool,summary['overflow_restriction']):
                                     summary.pop('overflow_restriction')
-                            summary['committed_partitions']+=1
-                            summary['new_issues']+=result['new_issues'];summary['resolved']+=result['resolved']
+                            if result is not None:
+                                summary['committed_partitions']+=1
+                                summary['new_issues']+=result['new_issues'];summary['resolved']+=result['resolved']
+                                summary['last_generation']=result['generation']
+                                summary['cleanup_pending']=summary.get('cleanup_pending',False) or result['cleanup_pending']
+                                for k,v in result['metrics'].items():
+                                    summary['metrics'][k]=(max(summary['metrics'].get(k,0),v) if k.endswith('peak_bytes')
+                                                           else summary['metrics'].get(k,0)+v)
                             summary['last_partition']=partition
-                            summary['last_generation']=result['generation']
-                            summary['cleanup_pending']=summary.get('cleanup_pending',False) or result['cleanup_pending']
-                            for k,v in result['metrics'].items():
-                                summary['metrics'][k]=(max(summary['metrics'].get(k,0),v) if k.endswith('peak_bytes')
-                                                       else summary['metrics'].get(k,0)+v)
+                            progress['after']=partition
+                            spool.db.execute('UPDATE progress SET body=? WHERE id=1',(json.dumps(progress),))
+                            # Only pending working values are retained; completed
+                            # partitions leave no duplicate per-row success log.
+                            spool.db.execute('DELETE FROM objects WHERE p=?',(partition,))
+                            spool.db.execute('DELETE FROM problems WHERE p=?',(partition,))
+                            spool.db.commit()
                             _status(store,entry,summary)
-                        more=spool.discarded
-                    finally:
-                        spool.close()
-                if options.partitions or not more or not selected:
-                    summary['complete']=True
-                    break
-                after=selected[-1]
+                    summary['complete']=not spool.db.execute(
+                        'SELECT 1 FROM partitions WHERE p>? LIMIT 1',(progress['after'],)).fetchone()
+                    if summary['complete']:
+                        space.discard=True
+                except BaseException:
+                    # Unsealed acquisition cannot resume a repeatable-read DB
+                    # transaction. Reclaim it immediately; sealed work survives.
+                    if not spool.db.execute('SELECT 1 FROM progress WHERE id=1').fetchone():
+                        space.discard=True
+                    raise
+                finally:
+                    spool.close()
             if not summary['complete']:
                 summary['state']='incomplete';summary['reason']='PASS_BUDGET_EXCEEDED'
             else:
@@ -279,7 +356,7 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                     issue_count=c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
                                           {'d':entry.spec.name}).scalar_one()
                 summary['unresolved_issues']=issue_count
-                summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['normalized_units'] else 'processed'
+                summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['scan_normalized_units'] else 'processed'
                 summary['qualified']=not issue_count and not summary.get('overflow_restriction',{}).get('blocking_objects')
             _status(store,entry,summary)
             return summary
@@ -292,16 +369,57 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
             raise
 
 
+def _local_batch(store,selected,sources,options,cancelled):
+    """Keep only the current sweep marker in existing per-entry status rows.
+
+    The short coordinator lock serializes marker initialization, while each
+    entry's ordinary pipeline lock protects its actual work. No history ledger
+    or source records are introduced. A new sweep starts only after all entries
+    in this exact selection completed, including automatically routed imports.
+    """
+    signature=digest([[(e.id,e.spec.descriptor() if e.business else e.disposition)
+                       for e in sorted(selected,key=lambda e:e.id)],
+                      type(sources).__module__,type(sources).__qualname__,options.mode,
+                      options.partitions,options.allow_incompatible_rebuild])
+    with store.locks._hold('local.batch','pipeline',fcntl.LOCK_EX,
+                           _deadline(store.limits.lock_timeout_ms),cancelled):
+        with store.catalog.transaction() as c:
+            statuses={row[0]:json.loads(row[1]) for row in c.execute(text(
+                'SELECT entry_id,summary_json FROM data_store_entry_status'))}
+            active={statuses[e.id]['batch_token'] for e in selected
+                    if statuses.get(e.id,{}).get('batch_signature')==signature
+                    and statuses[e.id].get('batch_pending')}
+            if len(active)==1:
+                return signature,active.pop()
+            token=uuid4().hex
+            for entry in sorted(selected,key=lambda e:e.id):
+                summary=dict(statuses.get(entry.id,{}))
+                summary.update(entry_id=entry.id,batch_signature=signature,batch_token=token,
+                               batch_pending=True,complete=False,qualified=False,state='running')
+                summary.pop('reason',None)
+                c.execute(text('INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES (:i,:j) '
+                               'ON CONFLICT (entry_id) DO UPDATE SET summary_json=EXCLUDED.summary_json'),
+                          {'i':entry.id,'j':control_json(summary)})
+            return signature,token
+
+
 def run_local(store,sources,*,entries=None,options=PipelineOptions(),cancelled=None):
     """All baseline entries have a real disposition; imports share target writes."""
     selected=list(entries or ENTRIES)
     if len(selected)>len(ENTRIES): raise ValueError('Too many source entries')
-    seen=set();results=[]
-    for entry in selected:
-        if entry.id in seen: continue
-        seen.add(entry.id)
-        results.append(run_entry(store,entry,sources,options=options,cancelled=cancelled))
-        if entry.target and entry.disposition=='ingestion_channel' and entry.target not in seen:
-            target=BY_ID[entry.target];seen.add(target.id)
-            results.append(run_entry(store,target,sources,options=options,cancelled=cancelled))
-    return results
+    # Expand import targets before assigning one durable current-sweep marker.
+    selected=list({e.id:e for e in selected}.values())
+    for entry in list(selected):
+        if (entry.target and entry.disposition=='ingestion_channel'
+                and not any(e.id==entry.target for e in selected)):
+            selected.append(BY_ID[entry.target])
+    batch=_local_batch(store,selected,sources,options,cancelled)
+    # Drain retained work before admitting additional acquisitions. Completed
+    # siblings return their stored disposition until this entire sweep finishes.
+    pending=store.budget.pending_keys()
+    with store.catalog.transaction() as c:
+        age={row[0]:rank for rank,row in enumerate(c.execute(text(
+            'SELECT entry_id FROM data_store_entry_status ORDER BY updated_at,entry_id')))}
+    selected.sort(key=lambda e:('pipeline.'+e.id not in pending,age.get(e.id,-1)))
+    return [run_entry(store,entry,sources,options=options,cancelled=cancelled,_batch=batch)
+            for entry in selected]

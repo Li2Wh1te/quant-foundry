@@ -1,0 +1,61 @@
+Bytecode compiled 3764 files in 385ms
+.................................................................... [  2%]
+................................................................. [  4%]
+................................................................. [  7%]
+.......................................................... [  9%]
+........................................................................ [ 12%]
+................................................................. [ 14%]
+.................................................................. [ 17%]
+............................................................... [ 19%]
+..................................................................... [ 21%]
+....................................................................................................................................................................................... [ 28%]
+........................................................................ [ 31%]
+........................................................................ [ 34%]
+................s....................................................... [ 36%]
+..................................................................... [ 39%]
+................................................................ [ 41%]
+................................................................... [ 44%]
+.................................................................................................................. [ 48%]
+........................................................................ [ 51%]
+........................................................................ [ 53%]
+........................................................................ [ 56%]
+........................................................................ [ 59%]
+........................................................................ [ 61%]
+........................................................................ [ 64%]
+.................................................................. [ 66%]
+........................................................................ [ 69%]
+.............................................................. [ 71%]
+........................................................................ [ 74%]
+........................................................................ [ 77%]
+.............................................................................................................. [ 81%]
+.................................................................... [ 83%]
+.......................................................................................................................... [ 88%]
+..................................................................... [ 90%]
+.................................................................... [ 93%]
+.................................................................... [ 95%]
+........................................................... [ 98%]
+...................................................                      [100%]
+=============================== warnings summary ===============================
+tests/test_scheduling.py:38
+  /repo/backend/tests/test_scheduling.py:38: PytestCollectionWarning: cannot collect test class 'TestTaskParameters' because it has a __init__ constructor (from: tests/test_scheduling.py)
+    class TestTaskParameters(BaseModel):
+
+tests/test_collection_control.py::test_budget_exit_accepts_snapshot_task_schema_without_date_fields
+  /repo/backend/tests/test_collection_control.py:63: PydanticDeprecatedSince211: Accessing the 'model_fields' attribute on the instance is deprecated. Instead, you should access this attribute from the model class. Deprecated in Pydantic V2.11 to be removed in V3.0.
+    assert 'start_date' not in params.model_fields
+
+tests/test_data_fact_provenance_migration.py::test_provenance_migration_backfills_validity_and_creates_evidence_tables
+tests/test_etf_daily_revision_migration.py::EtfRevisionMigrationTest::test_existing_rows_keep_null_revision_and_round_trip
+tests/test_etf_daily_revision_migration.py::EtfRevisionMigrationTest::test_invalid_source_ohlc_values_round_trip_in_raw_bar_table
+  /tmp/lf-fixes-venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
+    cursor.execute(statement, parameters)
+
+tests/test_market_workspace.py::MarketWorkspaceTest::test_calendar_list_keeps_missing_dates_absent_and_validates_ranges
+  /repo/backend/app/data_ingestion/router.py:152: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
+    _validate_date_range(start_date, end_date)
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+2694 passed, 1 skipped, 6 warnings, 236 subtests passed in 125.91s (0:02:05)
+.................                                                    [100%]
+17 passed, 4 subtests passed in 0.19s
+Release version 0.3.0 is consistent

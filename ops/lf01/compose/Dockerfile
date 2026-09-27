@@ -7,6 +7,7 @@ RUN uv sync --locked --no-install-project
 COPY VERSION /app/VERSION
 COPY backend/app ./app
 COPY backend/tests ./tests
+COPY backend/scripts ./scripts
 COPY backend/alembic.ini ./
 COPY ops/lf01/container_probe.py /app/container_probe.py
 COPY scripts/benchmark_current_store.py /app/benchmark_current_store.py

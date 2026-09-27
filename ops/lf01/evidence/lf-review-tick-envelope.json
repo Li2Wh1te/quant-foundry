@@ -1,0 +1,70 @@
+{
+  "synthetic": true,
+  "production_executed": false,
+  "rows": 100000,
+  "source_sha256": "68e660cef3fca23a7e85d150d7cf1bd6ffc50e866c39e33674a04eee4d8b7fcf",
+  "original_bytes": 7622792,
+  "variant_bytes": {
+    "full_envelope": 7622792,
+    "without_recomputable": 4166039,
+    "business_only": 413270
+  },
+  "bytes_per_tick": {
+    "full_envelope": 76.22792,
+    "without_recomputable": 41.66039,
+    "business_only": 4.1327
+  },
+  "column_compressed_bytes": {
+    "representation": 18304,
+    "subject": 8586,
+    "object_key": 105731,
+    "member_key": 7796,
+    "row_kind": 8362,
+    "basis_ns": 10959,
+    "basis_group": 26894,
+    "basis_token": 3418570,
+    "value_hash": 3419409,
+    "basis_valid": 6779,
+    "basis_state": 8135,
+    "quality_json": 5085,
+    "f0_source_code": 9378,
+    "f0_trading_date": 9379,
+    "f0_session": 10734,
+    "f0_channel": 7570,
+    "f0_sequence": 115850,
+    "f0_event_ns": 65047,
+    "f0_price": 16272,
+    "f0_quantity": 51491,
+    "f0_currency": 8248,
+    "f0_price_basis": 8136
+  },
+  "column_roles": {
+    "representation": "current_identity_order_or_quality",
+    "subject": "current_identity_order_or_quality",
+    "object_key": "current_identity_order_or_quality",
+    "member_key": "current_identity_order_or_quality",
+    "row_kind": "current_identity_order_or_quality",
+    "basis_ns": "current_identity_order_or_quality",
+    "basis_group": "current_identity_order_or_quality",
+    "basis_token": "current_identity_order_or_quality",
+    "value_hash": "recomputable",
+    "basis_valid": "recomputable",
+    "basis_state": "current_identity_order_or_quality",
+    "quality_json": "current_identity_order_or_quality",
+    "f0_source_code": "business_value",
+    "f0_trading_date": "business_value",
+    "f0_session": "business_value",
+    "f0_channel": "business_value",
+    "f0_sequence": "business_value",
+    "f0_event_ns": "business_value",
+    "f0_price": "business_value",
+    "f0_quantity": "business_value",
+    "f0_currency": "business_value",
+    "f0_price_basis": "business_value"
+  },
+  "limitations": [
+    "Single synthetic partition; not representative of all market tick feeds.",
+    "Business-only is a size baseline and cannot support current merge correctness.",
+    "Removing persisted fields requires an explicit schema/rebuild compatibility change."
+  ]
+}

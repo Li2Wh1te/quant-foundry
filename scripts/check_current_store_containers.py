@@ -124,6 +124,7 @@ def main():
         if args.with_suite:
             output=cmd(base+['run','--rm','--no-deps','kernel','python','-m','pytest',
                             'tests/test_data_store_kernel.py','tests/test_data_store_schema.py',
+                            'tests/test_data_store_local_pipeline.py',
                             '--basetemp=/work/pytest','-q','--tb=short'],timeout=240)
             result['kernel_tests']={'passed':True,'summary':output.splitlines()[-1]}
             if args.docker_volume:

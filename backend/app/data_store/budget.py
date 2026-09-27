@@ -59,16 +59,23 @@ class Budget:
     def _hold(self, role, timeout=0):
         return self.locks._hold('store.internal', role, fcntl.LOCK_EX, _deadline(timeout), None)
 
-    def _quota(self, slot: int) -> tuple[str, int]:
+    def _quota(self, slot: int) -> tuple[str, int, str | None]:
         with self.files.directory(f'.scratch/{slot:03}') as fd:
-            handle = os.open('quota', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            try:
+                handle = os.open('quota', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+            except FileNotFoundError:
+                return 'read', 0, None
             try:
                 self.files._regular(handle)
                 value = json.loads(os.read(handle, 257))
                 if (value['kind'] not in ('write', 'read') or type(value['bytes']) is not int
                         or not 0 < value['bytes'] <= self.limits.scratch_bytes):
                     raise ValueError()
-                return value['kind'], value['bytes']
+                pending = value.get('pending')
+                if pending is not None and (value['kind'] != 'read' or not isinstance(pending,str)
+                        or not re.fullmatch(r'[a-zA-Z0-9.-]{1,128}',pending)):
+                    raise ValueError()
+                return value['kind'], value['bytes'], pending
             except (ValueError, KeyError, TypeError):
                 raise DataStoreError('SCRATCH_BUDGET_EXCEEDED') from None
             finally:
@@ -86,11 +93,17 @@ class Budget:
                             continue
                         s = e.stat(follow_symlinks=False)
                         if (not stat.S_ISREG(s.st_mode) or s.st_mode & stat.S_IWOTH
-                                or (not suffix and not _TEMP.fullmatch(e.name))):
+                                or (not suffix and e.name != 'quota.pending' and not _TEMP.fullmatch(e.name))):
                             raise DataStoreError('UNSAFE_STORAGE_PATH')
                         # Only this acquired slot's scratch files. Never objects/raw.
                         os.unlink(e.name, dir_fd=fd)
                 os.fsync(fd)
+
+    def pending_keys(self) -> set[str]:
+        """Return only current continuation owners, never an execution history."""
+        with self._hold('admission', self.limits.lock_timeout_ms):
+            return {owner for i in range(self.limits.operation_slots)
+                    if (owner := self._quota(i)[2]) is not None}
 
     def sweep(self) -> int:
         """Recover only inactive scratch slots, including below the free-space floor."""
@@ -105,14 +118,18 @@ class Budget:
                         raise
                 else:
                     try:
-                        self._clean_slot(i)
-                        cleaned += 1
+                        pending = self._quota(i)[2]
+                        if pending is None:
+                            self._clean_slot(i)
+                            cleaned += 1
                     finally:
                         hold.__exit__(None, None, None)
         return cleaned
 
     @contextmanager
-    def reserve(self, kind: str, *, cancelled=None, metrics: Metrics | None = None):
+    def reserve(self, kind: str, *, cancelled=None, metrics: Metrics | None = None, pending=None):
+        if pending is not None and (kind != 'read' or not isinstance(pending,str) or not re.fullmatch(r'[a-zA-Z0-9.-]{1,128}', pending)):
+            raise DataStoreError('INVALID_CONFIGURATION')
         if kind not in ('write', 'read'):
             raise DataStoreError('INVALID_CONFIGURATION')
         quota = min(self.limits.scratch_bytes,
@@ -123,6 +140,8 @@ class Budget:
         try:
             with self._hold('admission', self.limits.lock_timeout_ms):
                 used, writers = 0, 0
+                available_slots = []
+                free_holds = []
                 for i in range(self.limits.operation_slots):
                     candidate = self._hold(f'scratch-{i}')
                     try:
@@ -130,20 +149,35 @@ class Budget:
                     except DataStoreError as error:
                         if error.code != 'LOCK_TIMEOUT':
                             raise
-                        mode, size = self._quota(i)
+                        mode, size, owner = self._quota(i)
                         used += size
                         writers += mode == 'write'
                     else:
-                        try:
-                            self._clean_slot(i)
-                        except BaseException:
-                            candidate.__exit__(None, None, None)
-                            raise
-                        if slot is None:
-                            slot = i
-                            held.callback(candidate.__exit__, None, None, None)
+                        # Completed full scans remain charged while their entry
+                        # is idle. Neither recovery nor another reader may erase
+                        # a continuation. Slot locks also protect crash recovery.
+                        free_holds.append((i, candidate))
+                        held.callback(candidate.__exit__, None, None, None)
+                        mode, size, owner = self._quota(i)
+                        if owner is not None:
+                            if owner == pending:
+                                slot = i
+                                quota = size
+                            else:
+                                used += size
                         else:
-                            candidate.__exit__(None, None, None)
+                            self._clean_slot(i)
+                            available_slots.append(i)
+                if pending is not None and slot is None:
+                    # A sealed continuation needs a separate kernel writer to
+                    # drain it. Idle pending scans must never occupy every slot
+                    # or every byte and permanently prevent their own commits.
+                    writer_quota=min(self.limits.scratch_bytes,
+                                     self.limits.commit_bytes*3+self.limits.duckdb_memory_bytes)
+                    if len(available_slots)<2 or used+quota+writer_quota>self.limits.scratch_bytes:
+                        raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
+                if slot is None and available_slots:
+                    slot = available_slots[0]
                 if slot is None or used + quota > self.limits.scratch_bytes:
                     raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
                 if kind == 'write' and writers >= self.limits.parallel_writers:
@@ -152,22 +186,39 @@ class Budget:
                 if available.f_bavail * available.f_frsize - used - quota < self.limits.minimum_free_bytes:
                     raise DataStoreError('DISK_PRESSURE')
                 with self.files.directory(f'.scratch/{slot:03}') as fd:
-                    handle = os.open('quota', os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                    handle = os.open('quota.pending', os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
                                      0o660, dir_fd=fd)
                     try:
                         self.files._regular(handle)
-                        os.write(handle, json.dumps({'kind': kind, 'bytes': quota}).encode())
+                        os.write(handle, json.dumps({'kind': kind, 'bytes': quota, 'pending': pending}).encode())
                         os.fsync(handle)
                     finally:
                         os.close(handle)
+                    os.replace('quota.pending','quota',src_dir_fd=fd,dst_dir_fd=fd)
+                    os.fsync(fd)
+            # Detach callbacks, then retain only the chosen slot. Each unlocked
+            # candidate was inspected under the shared admission lock above.
+            held.pop_all()
+            for i, candidate in free_holds:
+                if i == slot:
+                    held.callback(candidate.__exit__, None, None, None)
+                else:
+                    candidate.__exit__(None, None, None)
             space = Reservation(self, slot, quota, kind, cancelled, metrics or Metrics())
+            space.persistent = pending is not None
+            space.discard = False
             space.check()
             try:
                 yield space
             finally:
                 # The slot is still locked. Clean even after cancellation.
                 try:
-                    self._clean_slot(slot)
+                    if not space.persistent or space.discard:
+                        self._clean_slot(slot)
+                        if space.persistent:
+                            with self.files.directory(f'.scratch/{slot:03}') as fd:
+                                os.unlink('quota', dir_fd=fd)
+                                os.fsync(fd)
                 except (OSError, DataStoreError):
                     # A failed cleanup must not turn an acknowledged directory
                     # commit into an apparent failed write. Next admission must

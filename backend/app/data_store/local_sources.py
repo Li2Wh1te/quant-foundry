@@ -351,6 +351,10 @@ class NativeSources:
                 else:
                     yield from self._ths(c, entry, when)
             self.summary['complete'] = True
+            if entry.complete_table_snapshot:
+                # This declaration is published only after the read transaction
+                # closes successfully, including an empty authoritative table.
+                self.summary['snapshot_representation'] = 'tushare:' + digest([entry.native, 'default'])[:24]
             if self.summary['state'] == 'reading':
                 self.summary['state'] = ('support' if not entry.business else
                                          'present' if self.summary['source_rows'] else 'empty')
@@ -531,6 +535,7 @@ class CombinedSources:
         for value in self.native.iter_entry(entry):
             yield value
         native = dict(self.native.summary)
+        native.pop('snapshot_representation', None)  # Supplemented rescue is not an authoritative full table.
         self.summary = dict(native, source_rows=native.get('source_rows',0)+rescued.get('source_rows',0),
                             rescue_rows=rescued.get('source_rows',0),
                             rescue_historical_changes=rescued.get('historical_changes',0),

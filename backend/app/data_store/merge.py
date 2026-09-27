@@ -1,9 +1,9 @@
 """Temporary bounded current-winner reduction, not a second formal database.
 
 SQLite here is an external-memory working file inside a charged D01 spill slot.
-It contains at most the selected current partitions, not source success/history
-rows. It is deleted on context exit and recovered by the kernel after a crash.
-The only durable successful facts are typed Parquet rows and current checkpoints.
+It contains reduced pending current objects, never source success/history rows.
+The pipeline seals one complete scan and retires partitions as they commit.
+A charged scratch slot retains this working file only until the sweep completes.
 """
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
 import hashlib
+import os
+import stat
 import sqlite3
 
 import pyarrow as pa
@@ -49,9 +51,25 @@ class MergeSpool:
     def __init__(self, space, spec, *, after='', partitions=None, partition_count=1):
         self.space,self.spec=space,spec
         self.after,self.only,self.count=after,set(partitions) if partitions else None,partition_count
+        self.snapshot_representation = None
+        self.cycle = None
         self.parts=set(); self.discarded=False; self.offered=0; self.old_invalid=0
         path=space.spill/'lfd02-merge.sqlite'
+        # Continuations are reused after a restart. Reject links or writable
+        # foreign files before SQLite opens them, including its recovery journal.
+        for candidate in (path, path.with_name(path.name+'-journal')):
+            try:
+                info=candidate.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISREG(info.st_mode) or info.st_mode & stat.S_IWOTH:
+                raise DataStoreError('UNSAFE_STORAGE_PATH')
         self.db=sqlite3.connect(path)
+        directory=os.open(space.spill,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
         self.db.row_factory=sqlite3.Row
         self.db.execute('PRAGMA journal_mode=DELETE')
         self.db.execute('PRAGMA temp_store=MEMORY')
@@ -62,14 +80,16 @@ class MergeSpool:
         # Reserve half the spill bound for the rollback journal. Inserts are
         # committed in small batches; no unbounded transaction/journal growth.
         self.db.executescript('''
-          CREATE TABLE objects(k BLOB PRIMARY KEY,p TEXT NOT NULL,r TEXT NOT NULL,s TEXT NOT NULL,o TEXT NOT NULL,
+          CREATE TABLE IF NOT EXISTS progress (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);
+          CREATE TABLE IF NOT EXISTS partitions (p TEXT PRIMARY KEY) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS objects(k BLOB PRIMARY KEY,p TEXT NOT NULL,r TEXT NOT NULL,s TEXT NOT NULL,o TEXT NOT NULL,
             g TEXT NOT NULL,n INTEGER NOT NULL,t TEXT NOT NULL,state TEXT NOT NULL,h TEXT NOT NULL,body TEXT NOT NULL,
             validated INTEGER NOT NULL DEFAULT 0) WITHOUT ROWID;
-          CREATE INDEX objects_partition ON objects(p,k);
-          CREATE TABLE problems(k BLOB PRIMARY KEY,p TEXT NOT NULL,r TEXT NOT NULL,s TEXT NOT NULL,o TEXT NOT NULL,
+          CREATE INDEX IF NOT EXISTS objects_partition ON objects(p,k);
+          CREATE TABLE IF NOT EXISTS problems(k BLOB PRIMARY KEY,p TEXT NOT NULL,r TEXT NOT NULL,s TEXT NOT NULL,o TEXT NOT NULL,
             g TEXT NOT NULL,n INTEGER NOT NULL,t TEXT NOT NULL,reason TEXT NOT NULL) WITHOUT ROWID;
-          CREATE INDEX problems_partition ON problems(p,k);
-          CREATE TABLE scopes(r TEXT NOT NULL,s TEXT NOT NULL,g TEXT NOT NULL,n INTEGER NOT NULL,t TEXT NOT NULL,
+          CREATE INDEX IF NOT EXISTS problems_partition ON problems(p,k);
+          CREATE TABLE IF NOT EXISTS scopes(r TEXT NOT NULL,s TEXT NOT NULL,g TEXT NOT NULL,n INTEGER NOT NULL,t TEXT NOT NULL,
             PRIMARY KEY(r,s)) WITHOUT ROWID;
         ''')
         self.db.set_progress_handler(self._progress,10000)
@@ -92,6 +112,9 @@ class MergeSpool:
         if partition<=self.after or self.only is not None and partition not in self.only:
             return False
         if partition in self.parts: return True
+        if self.count is None:
+            self.db.execute('INSERT OR IGNORE INTO partitions VALUES (?)', (partition,))
+            return True
         if self.only is not None or len(self.parts)<self.count:
             self.parts.add(partition); return True
         largest=max(self.parts)
@@ -129,6 +152,18 @@ class MergeSpool:
             if not current: self.note_problem(unit,partition)
             if unit.object_key=='unlocated':
                 # A scope problem has no fabricated business row.
+                return
+        if current and unit.representation == self.snapshot_representation:
+            # Absence is meaningful only after a declared full current-table
+            # snapshot finished. Historical/rescue inputs never set this scope.
+            if old is None:
+                return
+            state = 'invalid' if unit.failure else 'withdrawn' if unit.withdrawn else 'valid'
+            hashed = value_hash(unit.rows) if state == 'valid' else digest(state)
+            if old['g'] == unit.group and old['state'] == state and old['h'] == hashed:
+                # Reconfirmation is a scope fact. Keep the original row basis
+                # when its business content is equal, without losing validation.
+                self.db.execute('UPDATE objects SET n=?,t=? WHERE k=?', (unit.order,unit.token,k))
                 return
         if old and old['g']!=unit.group:
             self.note_problem(replace(unit,failure='SOURCE_ORDER_UNCOMPARABLE'),partition)
