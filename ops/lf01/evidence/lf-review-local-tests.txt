@@ -1,4 +1,4 @@
-Bytecode compiled 3764 files in 429ms
+Bytecode compiled 3764 files in 385ms
 .................................................................... [  2%]
 ................................................................. [  4%]
 ................................................................. [  7%]
@@ -29,13 +29,12 @@ Bytecode compiled 3764 files in 429ms
 ........................................................................ [ 77%]
 .............................................................................................................. [ 81%]
 .................................................................... [ 83%]
-.......................................................... [ 85%]
-................................................................ [ 88%]
+.......................................................................................................................... [ 88%]
 ..................................................................... [ 90%]
 .................................................................... [ 93%]
 .................................................................... [ 95%]
 ........................................................... [ 98%]
-..................................................                       [100%]
+...................................................                      [100%]
 =============================== warnings summary ===============================
 tests/test_scheduling.py:38
   /repo/backend/tests/test_scheduling.py:38: PytestCollectionWarning: cannot collect test class 'TestTaskParameters' because it has a __init__ constructor (from: tests/test_scheduling.py)
@@ -51,16 +50,12 @@ tests/test_etf_daily_revision_migration.py::EtfRevisionMigrationTest::test_inval
   /tmp/lf-fixes-venv/lib/python3.12/site-packages/sqlalchemy/engine/default.py:952: DeprecationWarning: The default date adapter is deprecated as of Python 3.12; see the sqlite3 documentation for suggested replacement recipes
     cursor.execute(statement, parameters)
 
-tests/test_data_store_local_pipeline.py::test_real_process_death_after_commit_resumes_without_source_scan
-  /usr/local/lib/python3.12/multiprocessing/popen_fork.py:66: DeprecationWarning: This process (pid=37) is multi-threaded, use of fork() may lead to deadlocks in the child.
-    self.pid = os.fork()
-
 tests/test_market_workspace.py::MarketWorkspaceTest::test_calendar_list_keeps_missing_dates_absent_and_validates_ranges
   /repo/backend/app/data_ingestion/router.py:152: StarletteDeprecationWarning: 'HTTP_422_UNPROCESSABLE_ENTITY' is deprecated. Use 'HTTP_422_UNPROCESSABLE_CONTENT' instead.
     _validate_date_range(start_date, end_date)
 
 -- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
-2693 passed, 1 skipped, 7 warnings, 236 subtests passed in 123.02s (0:02:03)
+2694 passed, 1 skipped, 6 warnings, 236 subtests passed in 125.91s (0:02:05)
 .................                                                    [100%]
-17 passed, 4 subtests passed in 0.08s
+17 passed, 4 subtests passed in 0.19s
 Release version 0.3.0 is consistent
