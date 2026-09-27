@@ -463,17 +463,41 @@ def test_run_local_drains_continuations_and_does_not_starve_later_entries(ready)
         entry=replace(BY_ID['E41'],id=f'E{number}')
         object.__setattr__(entry,'spec',replace(entry.spec,name=f'resume.e{number}'))
         entries.append(entry)
-    source=Inputs(company(subject='C1'),company(subject='C2'))
+    class Counted(Inputs):
+        def __init__(self, *rows):
+            super().__init__(*rows)
+            self.calls={}
+        def iter_entry(self, entry):
+            self.calls[entry.id]=self.calls.get(entry.id,0)+1
+            yield from super().iter_entry(entry)
+    source=Counted(company(subject='C1'),company(subject='C2'))
     assert len({entries[0].spec.partitioner((*next(normalize(entries[0],r)).key,'root'))
                 for r in source.rows}) == 2
     for _ in range(8):
         try:
-            run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
+            results=run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
         except DataStoreError as error:
             assert error.code=='SCRATCH_BUDGET_EXCEEDED'
-        with ready.catalog.transaction() as c:
-            counts=dict(c.execute(text('SELECT dataset,sum(row_count) FROM data_store_files GROUP BY dataset')).all())
-        if len(counts)==6 and all(value==2 for value in counts.values()):
+            continue
+        if all(result['complete'] for result in results):
             break
     else:
-        pytest.fail('Later entries never received both partitions under bounded continuation capacity')
+        pytest.fail('A batch never completes because finished entries restart while siblings are pending')
+    assert source.calls=={entry.id:1 for entry in entries}
+    with ready.catalog.transaction() as c:
+        counts=dict(c.execute(text('SELECT dataset,sum(row_count) FROM data_store_files GROUP BY dataset')).all())
+    assert len(counts)==6 and all(value==2 for value in counts.values())
+
+    # Finishing a sweep must not freeze subsequent updates. The next invocation
+    # starts exactly one fresh acquisition per entry and can finish naturally.
+    for _ in range(8):
+        try:
+            results=run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
+        except DataStoreError as error:
+            assert error.code=='SCRATCH_BUDGET_EXCEEDED'
+            continue
+        if all(result['complete'] for result in results):
+            break
+    else:
+        pytest.fail('The next complete batch cannot finish')
+    assert source.calls == {entry.id:2 for entry in entries}

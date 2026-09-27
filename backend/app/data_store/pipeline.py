@@ -58,6 +58,8 @@ def _scope(partition):
 
 def _status(store, entry, summary):
     """One current operational state per static entry, never a pseudo dataset."""
+    if summary.get('batch_token'):
+        summary['batch_pending']=not summary.get('complete',False)
     with store.catalog.transaction() as c:
         c.execute(text('INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES (:i,:j) '
                        'ON CONFLICT (entry_id) DO UPDATE SET summary_json=EXCLUDED.summary_json, '
@@ -198,7 +200,7 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
             'cleanup_pending':result.cleanup_pending,'metrics':asdict(result.metrics)}
 
 
-def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancelled=None):
+def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancelled=None, _batch=None):
     """Process one registered entry; a failure never becomes complete/empty.
 
     `sources.iter_entry(entry)` must return a *new full read* on each call.
@@ -213,6 +215,19 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
     dataset=entry.spec.name if entry.business else 'local.entry.'+entry.id.lower()
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old_status=read_entry_status(store,entry.id) if entry.id in BY_ID else {}
+        if _batch:
+            signature,token=_batch
+            if (old_status.get('batch_signature')==signature and old_status.get('batch_token')==token
+                    and old_status.get('complete') and not old_status.get('batch_pending')):
+                # Completed siblings belong to this still-active sweep. Returning
+                # their current disposition must not restart acquisition or count
+                # previously completed work as work performed by this invocation.
+                cached=dict(old_status)
+                cached.update({key:0 for key in ('passes','committed_partitions','source_rows',
+                              'normalized_units','new_issues','resolved','input_failures')})
+                cached.update(metrics={},reused_batch_result=True)
+                return cached
+            summary.update(batch_signature=signature,batch_token=token,batch_pending=True)
         if old_status.get('overflow_restriction'):summary['overflow_restriction']=old_status['overflow_restriction']
         _status(store,entry,summary)
         try:
@@ -354,25 +369,57 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
             raise
 
 
+def _local_batch(store,selected,sources,options,cancelled):
+    """Keep only the current sweep marker in existing per-entry status rows.
+
+    The short coordinator lock serializes marker initialization, while each
+    entry's ordinary pipeline lock protects its actual work. No history ledger
+    or source records are introduced. A new sweep starts only after all entries
+    in this exact selection completed, including automatically routed imports.
+    """
+    signature=digest([[(e.id,e.spec.descriptor() if e.business else e.disposition)
+                       for e in sorted(selected,key=lambda e:e.id)],
+                      type(sources).__module__,type(sources).__qualname__,options.mode,
+                      options.partitions,options.allow_incompatible_rebuild])
+    with store.locks._hold('local.batch','pipeline',fcntl.LOCK_EX,
+                           _deadline(store.limits.lock_timeout_ms),cancelled):
+        with store.catalog.transaction() as c:
+            statuses={row[0]:json.loads(row[1]) for row in c.execute(text(
+                'SELECT entry_id,summary_json FROM data_store_entry_status'))}
+            active={statuses[e.id]['batch_token'] for e in selected
+                    if statuses.get(e.id,{}).get('batch_signature')==signature
+                    and statuses[e.id].get('batch_pending')}
+            if len(active)==1:
+                return signature,active.pop()
+            token=uuid4().hex
+            for entry in sorted(selected,key=lambda e:e.id):
+                summary=dict(statuses.get(entry.id,{}))
+                summary.update(entry_id=entry.id,batch_signature=signature,batch_token=token,
+                               batch_pending=True,complete=False,qualified=False,state='running')
+                summary.pop('reason',None)
+                c.execute(text('INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES (:i,:j) '
+                               'ON CONFLICT (entry_id) DO UPDATE SET summary_json=EXCLUDED.summary_json'),
+                          {'i':entry.id,'j':control_json(summary)})
+            return signature,token
+
+
 def run_local(store,sources,*,entries=None,options=PipelineOptions(),cancelled=None):
     """All baseline entries have a real disposition; imports share target writes."""
     selected=list(entries or ENTRIES)
     if len(selected)>len(ENTRIES): raise ValueError('Too many source entries')
-    # Drain retained work first. Among other entries, serve the least recently
-    # attempted entry before starting a fresh sweep of an already completed one.
-    # This uses the existing one-row current status, not a campaign/history table.
-    # Otherwise early entries could refill finite slots and starve later domains.
+    # Expand import targets before assigning one durable current-sweep marker.
+    selected=list({e.id:e for e in selected}.values())
+    for entry in list(selected):
+        if (entry.target and entry.disposition=='ingestion_channel'
+                and not any(e.id==entry.target for e in selected)):
+            selected.append(BY_ID[entry.target])
+    batch=_local_batch(store,selected,sources,options,cancelled)
+    # Drain retained work before admitting additional acquisitions. Completed
+    # siblings return their stored disposition until this entire sweep finishes.
     pending=store.budget.pending_keys()
     with store.catalog.transaction() as c:
         age={row[0]:rank for rank,row in enumerate(c.execute(text(
             'SELECT entry_id FROM data_store_entry_status ORDER BY updated_at,entry_id')))}
     selected.sort(key=lambda e:('pipeline.'+e.id not in pending,age.get(e.id,-1)))
-    seen=set();results=[]
-    for entry in selected:
-        if entry.id in seen: continue
-        seen.add(entry.id)
-        results.append(run_entry(store,entry,sources,options=options,cancelled=cancelled))
-        if entry.target and entry.disposition=='ingestion_channel' and entry.target not in seen:
-            target=BY_ID[entry.target];seen.add(target.id)
-            results.append(run_entry(store,target,sources,options=options,cancelled=cancelled))
-    return results
+    return [run_entry(store,entry,sources,options=options,cancelled=cancelled,_batch=batch)
+            for entry in selected]
