@@ -81,6 +81,37 @@ class Budget:
             finally:
                 os.close(handle)
 
+    def _write_quota(self, slot, kind, quota, pending):
+        """Publish coordination metadata atomically while holding admission/slot locks."""
+        with self.files.directory(f'.scratch/{slot:03}') as fd:
+            handle = os.open('quota.pending', os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
+                             0o660, dir_fd=fd)
+            try:
+                self.files._regular(handle)
+                os.write(handle, json.dumps({'kind': kind, 'bytes': quota, 'pending': pending}).encode())
+                os.fsync(handle)
+            finally:
+                os.close(handle)
+            os.replace('quota.pending', 'quota', src_dir_fd=fd, dst_dir_fd=fd)
+            os.fsync(fd)
+
+    def _idle_charge(self, slot, size, owner):
+        """Charge retained bytes, not an idle scan's former growth allowance.
+
+        Both admission and this slot must be exclusively held. An inactive
+        continuation cannot grow until its owner obtains a new full reservation.
+        Measuring with the ordinary path/type guards preserves every scratch
+        file, including crash leftovers; this is accounting, never cleanup.
+        """
+        space = Reservation(self, slot, size, 'read', None, Metrics())
+        staging, spill = space.usage()
+        if staging or spill > size:
+            raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
+        charge = max(1, spill)
+        if charge != size:
+            self._write_quota(slot, 'read', charge, owner)
+        return charge
+
     def _clean_slot(self, slot: int):
         for suffix in ('/spill', ''):
             relative = f'.scratch/{slot:03}' + suffix
@@ -161,18 +192,19 @@ class Budget:
                         used += size
                         writers += mode == 'write'
                     else:
-                        # Completed full scans remain charged while their entry
-                        # is idle. Neither recovery nor another reader may erase
-                        # a continuation. Slot locks also protect crash recovery.
+                        # Idle scans retain their files and charge their actual
+                        # footprint. Only active owners reserve future growth;
+                        # charging that allowance forever starves unrelated work.
                         free_holds.append((i, candidate))
                         held.callback(candidate.__exit__, None, None, None)
                         mode, size, owner = self._quota(i)
                         if owner is not None:
+                            size = self._idle_charge(i, size, owner)
                             if owner == pending:
                                 slot = i
-                                # A reviewed larger disk budget may drain an
-                                # existing continuation. Never shrink its charge
-                                # or erase its contents to make admission pass.
+                                # Reacquire the full growth allowance before
+                                # resuming. Retained bytes still form a hard floor;
+                                # another owner cannot spend this active quota.
                                 quota = max(size, quota) if quota_bytes is not None or self.limits.pipeline_spill_bytes else size
                             else:
                                 used += size
@@ -197,17 +229,7 @@ class Budget:
                 available = os.fstatvfs(self.files.fd)
                 if available.f_bavail * available.f_frsize - used - quota < self.limits.minimum_free_bytes:
                     raise DataStoreError('DISK_PRESSURE')
-                with self.files.directory(f'.scratch/{slot:03}') as fd:
-                    handle = os.open('quota.pending', os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW,
-                                     0o660, dir_fd=fd)
-                    try:
-                        self.files._regular(handle)
-                        os.write(handle, json.dumps({'kind': kind, 'bytes': quota, 'pending': pending}).encode())
-                        os.fsync(handle)
-                    finally:
-                        os.close(handle)
-                    os.replace('quota.pending','quota',src_dir_fd=fd,dst_dir_fd=fd)
-                    os.fsync(fd)
+                self._write_quota(slot, kind, quota, pending)
             # Detach callbacks, then retain only the chosen slot. Each unlocked
             # candidate was inspected under the shared admission lock above.
             held.pop_all()
