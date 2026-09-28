@@ -84,12 +84,16 @@ def test_growing_continuation_preserves_other_owner_and_writer_headroom(ready):
     for key in ('pipeline.E68','pipeline.E70'):
         with budget.reserve('read',pending=key) as reservation:
             (reservation.spill/'pending.sqlite').write_bytes(key.encode())
-    with pytest.raises(DataStoreError) as error:
-        with budget.reserve('read',pending='pipeline.E68',quota_bytes=32*MiB):pass
-    assert error.value.code=='SCRATCH_BUDGET_EXCEEDED'
-    with budget.reserve('read',pending='pipeline.E68',quota_bytes=24*MiB) as reservation:
-        assert reservation.quota==24*MiB
+    # A waiting scan occupies only its retained bytes. Its previous growth
+    # allowance must not block another entry, even after a failed issue commit.
+    with budget.reserve('read',pending='pipeline.E68',quota_bytes=32*MiB) as reservation:
+        assert reservation.quota==32*MiB
         assert (reservation.spill/'pending.sqlite').read_bytes()==b'pipeline.E68'
+        # Active reservations still charge their full quota and preserve writer
+        # headroom; reducing idle accounting must not weaken admission safety.
+        with pytest.raises(DataStoreError) as error:
+            with budget.reserve('read',pending='pipeline.E70',quota_bytes=32*MiB):pass
+        assert error.value.code=='SCRATCH_BUDGET_EXCEEDED'
         with budget.reserve('write'):pass
         reservation.discard=True
     with budget.reserve('read',pending='pipeline.E70') as reservation:
@@ -180,3 +184,53 @@ def test_legacy_policy_defaults_and_explicit_cli_upgrade(ready,monkeypatch,tmp_p
                                   {'issue_count':True},{'scratch_bytes':0}])
 def test_resource_overrides_remain_finite(kwargs):
     with pytest.raises(DataStoreError):local_operation_limits(**kwargs)
+
+
+def test_idle_continuation_reclaims_allowance_without_deleting_crash_files(ready):
+    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
+                   pipeline_spill_bytes=32*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,
+                   commit_bytes=MiB,operation_slots=3)
+    budget=Budget(ready.files,ready.locks,policy)
+    with budget.reserve('read',pending='pipeline.E41') as first:
+        payload=first.spill/'pending.sqlite'
+        payload.write_bytes(b'sealed continuation')
+    # Emulate a process that died after releasing its OS locks: the old full
+    # quota remains on disk. The next admission measures it under exclusive
+    # locks and atomically lowers only accounting, never its sealed evidence.
+    assert budget._quota(first.slot)[1]==32*MiB
+    with budget.reserve('read',pending='pipeline.E42') as second:
+        assert payload.read_bytes()==b'sealed continuation'
+        assert budget._quota(first.slot)[1]==len(b'sealed continuation')
+        with budget.reserve('write'):pass
+        second.discard=True
+    with budget.reserve('read',pending='pipeline.E41') as resumed:
+        assert resumed.quota==32*MiB
+        assert payload.read_bytes()==b'sealed continuation'
+        resumed.discard=True
+    assert budget.pending_keys()==set()
+
+
+def test_issue_limited_entry_does_not_starve_unrelated_entry(database,tmp_path):
+    root=tmp_path/'current';root.mkdir()
+    with database[0].begin() as c:entry_status.create(c)
+    policy=replace(StoreLimits(),scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
+                   pipeline_spill_bytes=32*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,
+                   commit_bytes=MiB,operation_slots=3,issue_count=1)
+    with CurrentStore(database[0],root,cursor_key=KEY,initialize=True,limits=policy) as current:
+        source=Inputs(*(company(subject='C'+str(i),failure='SOURCE_REFRESH_FAILED') for i in range(20)))
+        with pytest.raises(DataStoreError) as error:
+            run_entry(current,BY_ID['E41'],source)
+        assert error.value.code=='ISSUE_BUDGET_EXCEEDED'
+        before=read_entry_status(current,'E41')
+        assert before['overflow_restriction']['blocking_objects']>0
+        # An independent empty domain can still complete while the failed
+        # domain's sealed scan and exact overflow restriction remain intact.
+        other=run_entry(current,BY_ID['E42'],Inputs())
+        assert other['complete'] and other['qualified']
+        assert read_entry_status(current,'E41')==before
+        assert current.budget.pending_keys()=={'pipeline.E41'}
+        current.configure_resources(issue_count=100)
+        source.iter_entry=lambda entry: (_ for _ in ()).throw(AssertionError('must resume'))
+        recovered=run_entry(current,BY_ID['E41'],source)
+        assert recovered['complete'] and recovered['resumed'] and not recovered['qualified']
+        assert current.budget.pending_keys()==set()
