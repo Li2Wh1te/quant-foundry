@@ -273,6 +273,20 @@ class EffectiveBasis:
 
 class NativeSources:
     """One iterator invocation is one bounded consistent read; no network fallback."""
+
+    def selection_key(self):
+        """Identify the promised local database namespace, never its secrets.
+
+        Row revisions are deliberately excluded: a sealed continuation drains
+        its already acquired boundary before a later scan observes new rows.
+        """
+        try:
+            with self._snapshot() as (connection, _):
+                namespace=connection.execute(text('SELECT current_database(),current_schema()')).one()
+        except SQLAlchemyError:
+            raise NativeInputError('LOCAL_SOURCE_UNAVAILABLE','本地输入范围无法确认。') from None
+        return digest(['native',self.engine.url.host,self.engine.url.port,*namespace])
+
     def __init__(self, engine, *, limits=SourceLimits(), cancelled=None):
         if engine.dialect.name != 'postgresql':
             raise ValueError('Native sources require PostgreSQL')
@@ -416,6 +430,10 @@ class RescueSources:
         if not self.paths or len(self.paths)>128: raise ValueError('Invalid rescue file list')
         self.limits, self.cancelled, self.summary = limits, cancelled, {}
 
+    def selection_key(self):
+        # This is an input selection, not a retained manifest of source rows.
+        return digest(['rescue', [str(path.absolute()) for path in self.paths]])
+
     def iter_entry(self, entry):
         self.summary={'entry_id':entry.id,'source_rows':0,'state':'reading','complete':False,
                       'scan_policy':'self_contained_rescue_rescan'}
@@ -527,6 +545,9 @@ class CombinedSources:
     def __init__(self, native: NativeSources, rescue: RescueSources):
         self.native,self.rescue = native,rescue
         self.summary = {}
+
+    def selection_key(self):
+        return digest([self.native.selection_key(),self.rescue.selection_key()])
 
     def iter_entry(self, entry):
         for value in self.rescue.iter_entry(entry):
