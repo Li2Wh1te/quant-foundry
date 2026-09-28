@@ -40,6 +40,29 @@
 
 ## R01：目标环境原件保全、精确清退与重建
 
+### 明确放弃旧底座历史副本的可选模式
+
+维护者明确放弃仅存在于旧底座中的历史采集副本时，在 **plan 和 apply 两步**均传入
+`--discard-legacy-originals`。计划将 `original_policy=discard_legacy_only` 纳入摘要，
+apply 必须匹配同一摘要及选项；默认和旧计划仍要求 rescue/manifest。该模式的 apply
+不传 `--rescue` 或 `--manifest`，也不执行 export/verify；丢弃计划不能用于保全导出。
+
+此选择仅作用于清单内的 `foundation_baselines`、`foundation_baseline_blocks`、
+`foundation_table_changes` 历史副本，不扩大旧派生对象/归档的既有删除清单。
+原生采集表、采集配置/状态、身份资料和共享业务继续保护；数据库身份、摘要、目录、
+外部依赖、活动写者、路径与锁后复核仍然执行。旧 confirmed/suspected 问题继续保留。
+仅来自已明确放弃的 unresolved request 原文的限制不转为新原生数据的全局限制。
+后续 rebuild 仅从现存原生采集层读取，不传 rescue；不得把已放弃的历史副本算作恢复成功。
+
+计划、执行与恢复使用同一选项，示例语法如下；真实数据库及归档路径必须按现场设置：
+
+```sh
+python -m app.legacy_reset plan --expect-database "$DB" --archive-root "$ARCHIVES" --discard-legacy-originals --out "$OUT/plan.json"
+python -m app.legacy_reset apply --expect-database "$DB" --archive-root "$ARCHIVES" --discard-legacy-originals --plan "$OUT/plan.json" --sha256 "$PLAN_SHA256"
+```
+
+以下为默认保全流程；仅在明确采用上述放弃模式时，以绑定计划的放弃记录替代救回要求。
+
 1. 在维护态重新核对目标 DB 指纹、旧限制、全部原件容器与活跃写者。运行 `plan`，要求 blocker 为空；对唯一原件运行 `export`、`verify`，保留计划 SHA-256 与私有救回文件。
 2. 使用该次计划的 SHA-256 执行 `apply`。中断时复查 `status`、计划及救回文件后重试同一组；不使用全局 `CASCADE` 或卷清理。把实际删除对象、保护对象和空间结果写入 `reset_result.json`。
 3. 从本地原件和必要救回文件执行 `rebuild`，随后 `update`、按入口 `retry`、有限 `cleanup`。逐领域核对输入处置、当前键、历史业务区间、字段限制和接入的本地增量。问题仍在时保持维护态。

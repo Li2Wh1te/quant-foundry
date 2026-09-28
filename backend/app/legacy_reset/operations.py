@@ -120,7 +120,8 @@ def restore_tasks(engine, *, expect_database: str, include_legacy: bool = False)
         return {'restored':restored,'phase':None if include_legacy else state['phase']}
 
 
-def create_plan(engine, *, expect_database: str, archive_root: Path | None = None) -> dict:
+def create_plan(engine, *, expect_database: str, archive_root: Path | None = None,
+                discard_legacy_originals: bool = False) -> dict:
     with transaction(engine,read_only=True) as c:
         live = snapshot(c,expect_database=expect_database,archive_root=archive_root)
         schema = live['database']['schema']
@@ -133,8 +134,25 @@ def create_plan(engine, *, expect_database: str, archive_root: Path | None = Non
             live['blockers'].append({'code':'LEGACY_TASK_NOT_PAUSED'})
         # A plan records names, OIDs, definitions and IDs. It never stores
         # source payloads, credentials, or complete connection strings.
+        # Bind the operator's data-loss choice into the reviewed plan digest.
+        # This changes only the three exact legacy original containers. Native
+        # collection tables and shared business objects remain protected.
+        live['original_policy'] = 'discard_legacy_only' if discard_legacy_originals else 'rescue'
         live['digest'] = sha(live)
         return live
+
+
+def validate_original_policy(plan: dict, *, discard_legacy_originals: bool = False) -> None:
+    """Require the same explicit loss acknowledgement at plan and apply time.
+
+    Old plans retain their rescue requirement. Neither a CLI flag alone nor a
+    discard plan alone can silently change the retention boundary on resume.
+    """
+    policy = plan.get('original_policy', 'rescue')
+    if policy not in ('rescue', 'discard_legacy_only'):
+        raise ResetRefused('ORIGINAL_POLICY_INVALID', '计划中的旧原件处置方式无效。')
+    if discard_legacy_originals != (policy == 'discard_legacy_only'):
+        raise ResetRefused('ORIGINAL_POLICY_MISMATCH', '不救回选项必须与计划中明确记录的放弃范围一致。')
 
 
 def write_new_json(path: Path, payload: dict) -> None:
@@ -228,6 +246,8 @@ def _mark(c, schema: str, completed: list[str], phase: str = 'resetting') -> Non
 
 
 def _require_rescue(plan: dict, rescue_manifest: dict | None) -> None:
+    if plan.get('original_policy') == 'discard_legacy_only':
+        return
     if not any(plan['originals'].values()):
         return
     if rescue_manifest is None or rescue_manifest.get('format')!='qf-local-rescue-manifest-v1' \
@@ -247,7 +267,8 @@ def _recheck_originals(c, schema: str, plan: dict, rescue_manifest: dict | None)
 
     legacy = [name for name in ('foundation_baselines','foundation_baseline_blocks',
                                 'foundation_table_changes') if name in {v['name'] for v in plan['tables']}]
-    if any(plan['originals'].values()):
+    discard = plan.get('original_policy') == 'discard_legacy_only'
+    if any(plan['originals'].values()) and not discard:
         candidate = sorted({spec[0] for spec in TABLES.values()})
         native = [row['relname'] for row in c.execute(text("""SELECT r.relname
             FROM pg_class r JOIN pg_namespace n ON n.oid=r.relnamespace
@@ -263,7 +284,7 @@ def _recheck_originals(c, schema: str, plan: dict, rescue_manifest: dict | None)
               for name in plan['originals'] if name in legacy}
     if actual != {name:value for name,value in plan['originals'].items() if name in legacy}:
         raise ResetRefused('ORIGINALS_CHANGED','锁定后发现计划外原件。')
-    if not any(plan['originals'].values()):
+    if discard or not any(plan['originals'].values()):
         return
     current = _record_summary(c,plan)
     if any(current[key]!=rescue_manifest[key] for key in
@@ -271,7 +292,8 @@ def _recheck_originals(c, schema: str, plan: dict, rescue_manifest: dict | None)
         raise ResetRefused('ORIGINALS_CHANGED','删除前原件或原生副本与救回校验结果不同。')
 
 
-def _preserve_current_restrictions(c, schema: str, table_names: set[str]) -> int:
+def _preserve_current_restrictions(c, schema: str, table_names: set[str], *,
+                                   discard_legacy_originals: bool = False) -> int:
     """Keep only the latest unresolved restriction per old issue identity.
 
     An unlocated restriction is an explicit global read guard for D04. It may
@@ -317,7 +339,10 @@ def _preserve_current_restrictions(c, schema: str, table_names: set[str]) -> int
                  'fields':row['fields_json'],'reason':row['reason'],'payload':canonical(body)})
             total += 1
         result.close()
-    if 'foundation_baselines' in table_names:
+    # An abandoned unresolved request is not an input to the native-only
+    # rebuild. Do not create a global restriction from that discarded payload;
+    # confirmed/suspected issues above still survive for retained native data.
+    if 'foundation_baselines' in table_names and not discard_legacy_originals:
         pending = c.execute(text(f"""SELECT EXISTS(SELECT 1 FROM {ident(schema)}.foundation_baselines
             WHERE source='tonghuashun' AND dataset='unresolved_request_units')""")).scalar_one()
         if pending:
@@ -331,7 +356,9 @@ def _preserve_current_restrictions(c, schema: str, table_names: set[str]) -> int
 
 
 def apply_database_group(engine, *, plan: dict, group: str,
-                         rescue_manifest: dict | None = None, archive_root: Path | None = None) -> dict:
+                         rescue_manifest: dict | None = None, archive_root: Path | None = None,
+                         discard_legacy_originals: bool = False) -> dict:
+    validate_original_policy(plan, discard_legacy_originals=discard_legacy_originals)
     if group not in GROUPS[:-1]:
         raise ValueError('Only transactional database groups belong here')
     if plan['blockers']:
@@ -372,11 +399,13 @@ def apply_database_group(engine, *, plan: dict, group: str,
                 if restrictions:
                     c.execute(text('LOCK TABLE '+','.join(f'{ident(schema)}.{ident(name)}'
                                   for name in restrictions)+' IN ACCESS EXCLUSIVE MODE'))
-                _preserve_current_restrictions(c,schema,existing)
+                _preserve_current_restrictions(c,schema,existing,
+                    discard_legacy_originals=discard_legacy_originals)
             else:
                 # The baseline lock acquired by _recheck_originals also closes
                 # the gap for unresolved request units created after derived.
-                _preserve_current_restrictions(c,schema,{row['name'] for row in live['tables']})
+                _preserve_current_restrictions(c,schema,{row['name'] for row in live['tables']},
+                    discard_legacy_originals=discard_legacy_originals)
             names = [row['name'] for row in plan['tables'] if
                      (row['name'] in ORIGINAL_CONTAINERS)==(group=='originals')]
             if names:
@@ -431,7 +460,9 @@ def _check_archive(root: Path, item: dict, *, missing_ok: bool, delete: bool) ->
         os.close(directory)
 
 
-def apply_files(engine, *, plan: dict, archive_root: Path | None) -> dict:
+def apply_files(engine, *, plan: dict, archive_root: Path | None,
+                discard_legacy_originals: bool = False) -> dict:
+    validate_original_policy(plan, discard_legacy_originals=discard_legacy_originals)
     if archive_root is None and plan['paths']:
         raise ResetRefused('ARCHIVE_ROOT_REQUIRED','计划包含专属归档文件。')
     with transaction(engine) as c:
