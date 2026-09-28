@@ -1,0 +1,19 @@
+........................................................................ [ 13%]
+........................................................................ [ 27%]
+........................................................................ [ 40%]
+........................................................................ [ 54%]
+........................................................................ [ 68%]
+........................................................................ [ 81%]
+........................................................................ [ 95%]
+.........................                                              [100%]
+=============================== warnings summary ===============================
+tests/test_scheduling.py:38
+  /ar01/backend/tests/test_scheduling.py:38: PytestCollectionWarning: cannot collect test class 'TestTaskParameters' because it has a __init__ constructor (from: tests/test_scheduling.py)
+    class TestTaskParameters(BaseModel):
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+529 passed, 1 warning, 2 subtests passed in 99.08s (0:01:39)
+
+Final strengthened scheduler recovery cases:
+...                                                                      [100%]
+3 passed, 16 deselected in 8.78s

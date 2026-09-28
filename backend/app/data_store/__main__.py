@@ -89,7 +89,7 @@ def main(argv=None):
     from app.db.session import get_engine
     from .storage import CurrentStore
     from .local_sources import NativeSources,RescueSources,CombinedSources,SourceLimits
-    from .pipeline import PipelineOptions,run_entry,read_entry_status
+    from .pipeline import PipelineOptions,run_local,read_entry_status
     cancelled=[False]
     def cancel(*_): cancelled[0]=True
     for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,cancel)
@@ -107,18 +107,15 @@ def main(argv=None):
             native=NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0])
             sources=(CombinedSources(native,RescueSources(args.rescue,limits=source_limits,
                      cancelled=lambda:cancelled[0])) if args.rescue else native)
-            seen=set()
-            queue=[] if args.command=='configure-resources' else list(selected)
-            # Drain durable scans before charging another complete acquisition.
-            # Import targets still run exactly once through the same queue.
-            pending=store.budget.pending_keys() if args.command in ('rebuild','update','retry') else set()
-            queue.sort(key=lambda entry:'pipeline.'+entry.id not in pending)
-            for entry in queue:
-                if entry.id in seen: continue
-                seen.add(entry.id)
-                if args.command=='status':
-                    output['entries'].append(read_entry_status(store,entry.id));continue
-                if args.command=='cleanup':
+            if args.command in ('rebuild','update','retry'):
+                output['entries']=run_local(store,sources,entries=selected,options=options,
+                                            cancelled=lambda:cancelled[0])
+                output['complete']=all(row.get('complete') and row.get('qualified',True)
+                                       for row in output['entries'])
+            elif args.command=='status':
+                output['entries']=[read_entry_status(store,e.id) for e in selected]
+            elif args.command=='cleanup':
+                for entry in selected:
                     try:
                         result=store.cleanup(entry.spec.name)
                         output['entries'].append({'entry_id':entry.id,'dataset':entry.spec.name,
@@ -127,28 +124,18 @@ def main(argv=None):
                         output['entries'].append({'entry_id':entry.id,'dataset':entry.spec.name,
                                                   'complete':False,'reason':error.code})
                         output['complete']=False
-                    continue
-                try:
-                    result=run_entry(store,entry,sources,options=options,cancelled=lambda:cancelled[0])
-                except (NativeInputError,DataStoreError) as error:
-                    # Retain actual attempted-source and committed-partition
-                    # counts instead of replacing useful failure evidence.
-                    result={**read_entry_status(store,entry.id),'entry_id':entry.id,
-                            'state':'incomplete','complete':False,'qualified':False,'reason':error.code}
-                output['entries'].append(result)
-                output['complete'] &= result.get('complete',False)
-                if entry.disposition=='ingestion_channel' and entry.target not in seen:
-                    queue.append(BY_ID[entry.target])
-                if cancelled[0]: output['complete']=False;break
     except (NativeInputError,DataStoreError,ValueError,OSError) as error:
         output.update(complete=False,reason=getattr(error,'code','LOCAL_CONFIGURATION_OR_IO_ERROR'))
-    except Exception:
+        if hasattr(error,'results'):output['entries']=error.results
+    except Exception as error:
         # Do not expose DSNs, SQL, provider payloads or authentication material.
-        output.update(complete=False,reason='LOCAL_OPERATION_FAILED')
+        output.update(complete=False,reason='LOCAL_OPERATION_FAILED',error_type=type(error).__name__)
+        if hasattr(error,'results'):output['entries']=error.results
     encoded=json.dumps(output,ensure_ascii=False,indent=2)
     if args.output:
         with args.output.open('x',encoding='utf-8') as handle: handle.write(encoded+'\n')
     print(encoded)
+    if cancelled[0]:return 130
     return 0 if output['complete'] and all(e.get('qualified',True) for e in output['entries']) else 2
 
 

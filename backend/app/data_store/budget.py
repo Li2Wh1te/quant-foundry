@@ -157,6 +157,23 @@ class Budget:
                         hold.__exit__(None, None, None)
         return cleaned
 
+    def abandon(self, owner: str) -> bool:
+        """Release one explicitly aborted continuation, never current data.
+
+        The caller must hold that entry's pipeline lock and durably mark its
+        work incomplete first. Admission plus a nonblocking slot lock prevents
+        reclaiming an active reader/writer, including another process.
+        """
+        with self._hold('admission',self.limits.lock_timeout_ms):
+            for slot in range(self.limits.operation_slots):
+                if self._quota(slot)[2]!=owner:continue
+                with self._hold(f'scratch-{slot}'):
+                    self._clean_slot(slot)
+                    with self.files.directory(f'.scratch/{slot:03}') as fd:
+                        os.unlink('quota',dir_fd=fd);os.fsync(fd)
+                return True
+        return False
+
     @contextmanager
     def reserve(self, kind: str, *, cancelled=None, metrics: Metrics | None = None, pending=None,
                 quota_bytes=None):

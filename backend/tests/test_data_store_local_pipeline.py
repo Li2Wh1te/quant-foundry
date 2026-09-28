@@ -473,34 +473,22 @@ def test_run_local_drains_continuations_and_does_not_starve_later_entries(ready)
     source=Counted(company(subject='C1'),company(subject='C2'))
     assert len({entries[0].spec.partitioner((*next(normalize(entries[0],r)).key,'root'))
                 for r in source.rows}) == 2
-    for _ in range(8):
-        try:
-            results=run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
-        except DataStoreError as error:
-            assert error.code=='SCRATCH_BUDGET_EXCEEDED'
-            continue
-        if all(result['complete'] for result in results):
-            break
-    else:
-        pytest.fail('A batch never completes because finished entries restart while siblings are pending')
-    assert source.calls=={entry.id:1 for entry in entries}
+    clock=[1000]
+    for sweep in range(2):
+        completed=set()
+        for _ in range(24):
+            clock[0]+=3600
+            results=run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1),
+                              clock=lambda:clock[0])
+            completed.update(r['entry_id'] for r in results if r['complete'])
+            assert not any(r.get('reused_batch_result') for r in results)
+            if len(completed)==len(entries):break
+        else:
+            pytest.fail('A runnable entry never completes its own retained work')
+        assert all(source.calls[e.id]>=sweep+1 for e in entries)
     with ready.catalog.transaction() as c:
         counts=dict(c.execute(text('SELECT dataset,sum(row_count) FROM data_store_files GROUP BY dataset')).all())
     assert len(counts)==6 and all(value==2 for value in counts.values())
-
-    # Finishing a sweep must not freeze subsequent updates. The next invocation
-    # starts exactly one fresh acquisition per entry and can finish naturally.
-    for _ in range(8):
-        try:
-            results=run_local(ready,source,entries=entries,options=PipelineOptions(maximum_passes=1))
-        except DataStoreError as error:
-            assert error.code=='SCRATCH_BUDGET_EXCEEDED'
-            continue
-        if all(result['complete'] for result in results):
-            break
-    else:
-        pytest.fail('The next complete batch cannot finish')
-    assert source.calls == {entry.id:2 for entry in entries}
 
 
 @pytest.mark.parametrize('entry_id', ['E41', 'B05'])

@@ -25,6 +25,8 @@ TASK_KEY = "data_store.update_local"
 STATE_NAMES = {
     "processed": "处理完成", "processed_with_issues": "处理完成但有问题",
     "empty": "确认当前为空", "incomplete": "处理未完成",
+    "updated": "本次已更新", "unchanged": "本次无变化", "continued": "待续作",
+    "backoff": "退避中，本次未尝试", "deferred": "预算延后，本次未尝试", "failed": "本次失败",
 }
 
 
@@ -69,29 +71,34 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
                     pipeline_spill_bytes=parameters.pipeline_spill_bytes,
                 ),
             )
-        except (DataStoreError, NativeInputError) as error:
+        except Exception as error:
+            partial=getattr(error,'results',[])
+            code=getattr(error,'code',type(error).__name__)
             logger.error(
                 "data_store_local_update_failed",
                 message=(
                     f"本地数据更新：数据类型为所选 {len(entries)} 类，适用起始日期和结束日期均未限定，"
-                    f"本次失败 1 项（{error.code}），已提交分区仍按当前断点保存，任务未完成。"
+                    f"已处理 {len(partial)} 项、读取 {sum(r.get('source_rows',0) for r in partial)} 条，"
+                    f"全局停止原因 {code}，已提交分区仍按当前断点保存，任务未完成。"
                 ),
                 task_id=str(context.task_id), run_id=str(context.run_id),
                 task_type=TASK_KEY, selected_entries=[entry.id for entry in entries],
-                error_type=error.code, failed=1,
+                error_type=code, failed=1, entries=partial,
             )
-            raise
+            if isinstance(error,(DataStoreError,NativeInputError)):raise
+            raise RuntimeError('DATA_STORE_UPDATE_ABORTED:'+type(error).__name__) from None
     for result in results:
         logger.info(
             "data_store_local_update",
             message=(
                 f"本地数据更新：数据类型 {BUSINESS_BY_ID[result['entry_id']]}，"
-                "适用起始日期和结束日期均未限定（扫描该类本地来源），"
+                "适用起始日期和结束日期均未限定（按该类本地来源范围处理），"
                 f"读取 {result.get('source_rows', 0)} 条、规范化 "
                 f"{result.get('normalized_units', 0)} 项、提交 "
                 f"{result.get('committed_partitions', 0)} 个分区，"
                 f"新增问题 {result.get('new_issues', 0)} 项，"
-                f"结果为{STATE_NAMES.get(result.get('state'), '待核对')}，当前断点已保存。"
+                f"结果为{STATE_NAMES.get(result.get('outcome'), '待核对')}，"
+                + ("本次处理游标已推进。" if result.get('committed_partitions') else "本次处理游标未推进。")
             ),
             task_id=str(context.task_id), run_id=str(context.run_id),
             task_type=TASK_KEY, entry_id=result["entry_id"],
@@ -99,6 +106,8 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
             committed_partitions=result.get("committed_partitions", 0),
             complete=result.get("complete", False),
             qualified=result.get("qualified", False),
+            outcome=result.get('outcome'), attempted=result.get('attempted'), refresh=result.get('refresh'),
+            source_scanned=result.get('source_scanned',False),
         )
     complete = all(row.get("complete") and row.get("qualified") for row in results)
     if not complete:
