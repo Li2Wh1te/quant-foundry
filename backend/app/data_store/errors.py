@@ -1,6 +1,7 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'LOCAL_UPDATE_BUDGET_EXCEEDED': '本次本地更新达到工作预算，未完成入口将在后续继续处理。',
     'DATA_STORE_REBUILDING': '数据底座正在维护或重建，当前数据暂不可读取。',
     'DATA_STORE_NOT_INITIALIZED': '当前数据目录尚未初始化，请先完成本地初始化。',
     'PARTIAL_SCOPE_REQUIRED': '所选分区未覆盖请求范围；如需读取子集，请明确允许部分结果。',
