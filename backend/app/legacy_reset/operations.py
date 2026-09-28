@@ -518,6 +518,8 @@ def finish_rebuild(engine, *, expect_database: str) -> dict:
         # Fence both pipeline status writes and direct kernel commits before
         # taking any evidence snapshot. The locks remain held through ready's
         # commit, so a concurrent reset/contract change cannot win the gap.
+        if c.execute(text("SELECT to_regclass('data_store_source_ranges') IS NOT NULL")).scalar_one():
+            c.execute(text('LOCK TABLE data_store_source_ranges IN SHARE MODE'))
         c.execute(text('LOCK TABLE data_store_entry_status, data_store_datasets, '
                        'data_store_files, data_store_scopes, data_store_issues, '
                        'data_store_legacy_restrictions IN SHARE MODE'))

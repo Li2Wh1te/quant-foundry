@@ -232,6 +232,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
     Retry uses the same normalizer/order rules, optionally a bounded partition
     selector. No campaign/execution/runtime ID or supplier access is needed.
     """
+    full_scan=not options.partitions and not getattr(sources,'incremental_slice',False)
     summary={'entry_id':entry.id,'mode':options.mode,'state':'running','complete':False,
              'partitions':list(options.partitions),
              'passes':0,'committed_partitions':0,'source_rows':0,'normalized_units':0,
@@ -240,9 +241,9 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
     # Preserve coverage independently of the most recent operation. A
     # bounded set of unresolved selectors prevents a later unrelated retry
     # from hiding a failed update. Overflow requires a complete scan.
-    operation_scope=_operation_scope(options)
+    operation_scope='native_ranges' if getattr(sources,'incremental_slice',False) else _operation_scope(options)
     summary['coverage_pending']=_pending_operations(old_status,operation_scope)
-    for key in ('full_coverage','last_complete_coverage'):
+    for key in ('full_coverage','last_complete_coverage','incremental'):
         if key in old_status: summary[key]=old_status[key]
     maintain_coverage=False
     if entry.business and options.partitions:
@@ -312,6 +313,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     for table in ('objects','problems','scopes','partitions','progress'):
                         spool.db.execute('DELETE FROM '+table)
                     input_hash=hashlib.sha256()
+                    invalid_snapshot_scopes=set()
                     for raw in _source_rows(sources,entry):
                         input_hash.update(digest([raw.source,raw.dataset,raw.subject,
                                                   raw.variant,raw.token,raw.order_ns]).encode())
@@ -320,6 +322,8 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                         for unit in normalize(entry,raw):
                             count+=1;failed|=bool(unit.failure)
                             summary['normalized_units']+=1;summary['input_failures']+=bool(unit.failure)
+                            if unit.failure and getattr(sources,'snapshot_scope',None):
+                                invalid_snapshot_scopes.add((raw.subject,str(raw.content.get('trade_date',''))[:7]))
                             spool.offer(unit)
                         if count and not failed and entry.projection[0] in ('snapshot','reference'):
                             spool.validate_scope(raw)
@@ -327,18 +331,31 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     if not sources.summary.get('complete',False):
                         raise NativeInputError('LOCAL_SCAN_INCOMPLETE','本地来源尚未完整扫描。')
                     summary['source_scanned']=True
+                    snapshot_scopes=getattr(sources,'snapshot_scope',None)
+                    if snapshot_scopes is not None:
+                        # Each month is authoritative only if all its rows were
+                        # valid. A bad sibling month must not prevent deletion
+                        # in an independently complete good month in this batch.
+                        snapshot_scopes=[scope for scope in snapshot_scopes
+                            if (scope['subject'],scope['month']) not in invalid_snapshot_scopes]
                     representation=(sources.summary.get('snapshot_representation')
-                                    if entry.complete_table_snapshot and not summary['input_failures'] else None)
+                                    if entry.complete_table_snapshot and
+                                    (not summary['input_failures'] or snapshot_scopes is not None) else None)
                     if representation:
                         # Include partitions that became entirely empty. The
                         # catalog is current metadata, never a source ledger.
-                        with store.catalog.transaction() as c:
-                            for (partition,) in c.execute(text(
-                                'SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),
-                                {'d':entry.spec.name}):
-                                spool._select(partition)
+                        if snapshot_scopes is not None:
+                            for scope in snapshot_scopes:
+                                spool._select(entry.spec.partitioner((representation,scope['subject'],scope['month']+'-01','root')))
+                        else:
+                            with store.catalog.transaction() as c:
+                                for (partition,) in c.execute(text(
+                                    'SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),
+                                    {'d':entry.spec.name}):
+                                    spool._select(partition)
                     progress={'identity':identity,'scan_complete':True,'after':'',
                               'cycle':uuid4().hex,'representation':representation,
+                              'snapshot_scope':snapshot_scopes,
                               'source_rows':summary['source_rows'],
                               'normalized_units':summary['normalized_units'],
                               'input_failures':summary['input_failures'],
@@ -348,7 +365,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     spool.db.commit();spool.check()
                 else:
                     summary['resumed']=True
-                if not options.partitions:
+                if full_scan:
                     # Upgrade a legacy sealed continuation from its actual
                     # ordered range and cursor, never from old booleans.
                     # Completed-prefix checkpoints are verified below.
@@ -383,6 +400,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                 summary['scan_normalized_units']=progress['normalized_units']
                 spool.cycle=progress['cycle']
                 spool.snapshot_representation=progress['representation']
+                spool.snapshot_scope=progress.get('snapshot_scope')
                 overflow=summary.get('overflow_restriction',{})
                 if (summary.get('resumed') and overflow and not overflow.get('file')
                         and overflow.get('partition','')>progress['after']):
@@ -435,7 +453,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                         spool.db.execute('DELETE FROM objects WHERE p=?',(partition,))
                         spool.db.execute('DELETE FROM problems WHERE p=?',(partition,))
                         spool.db.commit()
-                        if not options.partitions:
+                        if full_scan:
                             summary['full_coverage'].update(after=partition,remaining=spool.db.execute(
                                 'SELECT count(*) FROM partitions WHERE p>?',(partition,)).fetchone()[0])
                         _status(store,entry,summary)
@@ -447,7 +465,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     # afterwards leaves a valid compact proof, not a gap.
                     with store.locks.read(entry.spec.name,timeout_ms=store.limits.lock_timeout_ms):
                         generation=store.catalog.dataset(entry.spec.name)['generation']
-                        if not options.partitions:
+                        if full_scan:
                             summary['full_coverage'].update(complete=True,remaining=0,generation=generation)
                             summary['last_complete_coverage']=dict(summary['full_coverage'])
                             summary['coverage_pending']=[]
@@ -464,6 +482,10 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     space.discard=True
                 raise
             finally:
+                # Include acquisition/merge scratch, not only the writer's
+                # staging metric. These are sampled per-reservation peaks.
+                for key in ('scratch_peak_bytes','rss_peak_bytes'):
+                    summary['metrics'][key]=max(summary['metrics'].get(key,0),getattr(space.metrics,key))
                 spool.close()
         if not summary['complete']:
             summary['state']='incomplete';summary['reason']='PASS_BUDGET_EXCEEDED'

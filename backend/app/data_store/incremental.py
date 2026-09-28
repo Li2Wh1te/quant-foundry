@@ -1,0 +1,356 @@
+"""Native range consumer shared by the CLI and ordinary scheduled updates.
+
+Only one source object/month is decoded into a charged spool at a time. The
+source claim survives process exits; its cursor advances only after the current
+commit. Concurrent writes merge into a separate pending range, so an acknowledgement
+cannot erase a late commit or r+1. No completed observation ledger is retained.
+"""
+from dataclasses import replace
+from datetime import date, datetime, timezone
+import hashlib
+import json
+from uuid import UUID, uuid4
+
+from sqlalchemy import text
+
+from .adapters.canonical import NativeInputError
+from .adapters.contracts import LocalInput, digest, native_json, instant_ns
+from .local_sources import (NativeSources, TABLES, _json, _requests, _scope,
+                            materialize_observation, EffectiveBasis, _confirmed)
+from .errors import DataStoreError
+
+IDS = frozenset(('E50','E51','E52','E69','E70'))
+WHERE = 'source=:source AND dataset=:dataset AND subject=:subject AND variant=:variant AND range_key=:range_key'
+ZERO = '00000000-0000-0000-0000-000000000000'
+
+
+def enabled(sources, entry, options):
+    # Rescue/combined sources retain their explicit complete-scan semantics.
+    return type(sources) is NativeSources and entry.id in IDS and not options.partitions
+
+
+def _params(entry):return {'source':entry.source,'dataset':entry.native}
+
+
+def available(engine):
+    with engine.connect() as c:
+        if not c.execute(text("SELECT to_regclass('data_store_capture_version') IS NOT NULL")).scalar_one():return False
+        # Disabled/bypassed capture is not a proven caught-up boundary. Ordinary
+        # INSERT/UPDATE/DELETE/COPY execute these triggers; TRUNCATE is refused.
+        return c.execute(text("SELECT count(*) FROM pg_trigger WHERE tgname='data_store_capture_range' AND tgenabled IN ('O','A') AND tgrelid IN (to_regclass('tonghuashun_observations'),to_regclass('tonghuashun_collection_states'),to_regclass('etf_daily_bars'),to_regclass('etf_adjustment_factors'))")).scalar_one()==4
+
+
+def claim(sources,entry):
+    """Capture an active source boundary without holding locks during file IO."""
+    with sources.engine.begin() as c:
+        row=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text FROM data_store_source_ranges '
+            'WHERE source=:source AND dataset=:dataset '
+            'ORDER BY (active IS NOT NULL) DESC,enqueued_at,subject,variant,range_key LIMIT 1 FOR UPDATE'),_params(entry)).mappings().first()
+        if row is None:return None
+        row=dict(row)
+        if row['active'] is None:
+            # +infinity is a state-only event. UUID order is used solely inside
+            # this captured boundary; later commits are independently dirtied.
+            stop=None
+            if entry.source=='tonghuashun':
+                stop=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
+                    'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+                    'AND observed_at>=CAST(:lower_text AS timestamptz) ORDER BY observed_at DESC,id DESC LIMIT 1'),row).mappings().first()
+            active={'id':uuid4().hex,'bootstrap':row['bootstrap_pending'],'when':datetime.now(timezone.utc).isoformat(),
+                    'lower':row['lower_text'],'after':None,'stop':dict(stop) if stop else None}
+            row['active']=active
+            c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb),pending=false,bootstrap_pending=false '
+                           'WHERE '+WHERE),{**row,'a':json.dumps(active)})
+        return row
+
+
+def claim_tables(sources,entry,limit):
+    """Batch adjacent monthly ranges into one bounded merge, not one file per symbol.
+
+    Active rows sort first so a sealed merge resumes the identical claim set.
+    A fixed maximum of 64 months bounds acquisition independently of history.
+    """
+    with sources.engine.begin() as c:
+        has_active=c.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset AND active IS NOT NULL)'),_params(entry)).scalar_one()
+        rows=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active '
+            'FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset '
+            'AND (:active=false OR active IS NOT NULL) '
+            "ORDER BY CASE WHEN :active THEN '-infinity'::timestamptz ELSE enqueued_at END,range_key,subject,variant LIMIT :n FOR UPDATE"),
+            {**_params(entry),'n':64 if has_active else limit,'active':has_active}).mappings().all()
+        jobs=[]
+        for record in rows:
+            job=dict(record)
+            if job['active'] is None:
+                job['active']={'id':uuid4().hex,'bootstrap':job['bootstrap_pending'],'when':datetime.now(timezone.utc).isoformat()}
+                c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb),pending=false,bootstrap_pending=false WHERE '+WHERE),
+                          {**job,'a':json.dumps(job['active'])})
+            jobs.append(job)
+        return sorted(jobs,key=lambda j:(j['range_key'],j['subject'],j['variant']))
+
+
+def acknowledge(sources,job,*,after=None):
+    """Never clear a producer's pending bit, even when no newer head exists."""
+    with sources.engine.begin() as c:
+        current=c.execute(text('SELECT active,pending FROM data_store_source_ranges WHERE '+WHERE+' FOR UPDATE'),job).mappings().one()
+        if current['active']['id']!=job['active']['id']:raise DataStoreError('SOURCE_CONFLICT')
+        if after is not None:
+            active=dict(current['active'],after=after)
+            c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb) WHERE '+WHERE),
+                      {**job,'a':json.dumps(active)})
+        elif current['pending']:
+            c.execute(text('UPDATE data_store_source_ranges SET active=NULL WHERE '+WHERE),job)
+        else:
+            c.execute(text('DELETE FROM data_store_source_ranges WHERE '+WHERE),job)
+
+
+class RangeSources:
+    """A stable, bounded input for the existing current merger, never full proof."""
+    incremental_slice=True
+
+    def __init__(self,native,entry,job,observation=None,jobs=None):
+        self.native,self.entry,self.job,self.observation=native,entry,job,observation
+        self.jobs=jobs or [job]
+        self.summary={};self.snapshot_scope=None
+        self.metrics={'metadata_rows':1,'payload_rows':0,'payload_bytes':0,
+                      'dependency_rows':0,'dependency_bytes':0,'decoded_rows':0,'decode_calls':0}
+        self.boundary=digest([[j['active']['id'] for j in self.jobs],observation])
+        if entry.source=='tushare':
+            self.snapshot_scope=[{'subject':j['subject'],'month':j['range_key']} for j in self.jobs]
+
+    def selection_key(self):return digest([self.native.selection_key(),self.boundary])
+
+    def iter_entry(self,entry):
+        self.summary={'complete':False,'source_rows':0,'scan_policy':'transactional_native_range'}
+        with self.native._snapshot() as (c,_):
+            if entry.source=='tushare':
+                table=TABLES[entry.native][0]
+                for job in self.jobs:
+                    start=date.fromisoformat(job['range_key']+'-01')
+                    end=date(start.year+int(start.month==12),1 if start.month==12 else start.month+1,1)
+                    # The existing PK (source,ts_code,trade_date) bounds this read.
+                    for row in self.native._rows(c,table,
+                        'WHERE source=:source AND ts_code=:subject AND trade_date>=:start AND trade_date<:end',
+                        {**job,'start':start.isoformat(),'end':end.isoformat()},'ORDER BY trade_date'):
+                        self.metrics['payload_rows']+=1;self.metrics['decoded_rows']+=1;self.metrics['decode_calls']+=1
+                        self.metrics['payload_bytes']+=len(native_json(row).encode())
+                        self.summary['source_rows']+=1
+                        yield LocalInput('tushare',entry.native,job['subject'],'default',job['active']['when'],
+                                         row,digest(row),order_kind='current_table_snapshot',representation='native_table')
+                self.summary['snapshot_representation']='tushare:'+digest([entry.native,'default'])[:24]
+            else:
+                cache={}
+                def lookup(identity,dependency=True):
+                    if identity in cache:return cache[identity]
+                    encoded=c.execute(text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:n '
+                         'THEN row_to_json(t)::text ELSE NULL END FROM tonghuashun_observations t WHERE id=:id'),
+                         {'id':UUID(identity),'n':self.native.limits.payload_bytes}).scalar_one_or_none()
+                    if encoded is None:raise NativeInputError('SOURCE_DEPENDENCY_MISSING','原生观察或必要依赖缺失。')
+                    value=_json(encoded,self.native.limits.payload_bytes);cache[identity]=value
+                    prefix='dependency' if dependency else 'payload'
+                    self.metrics[prefix+'_rows']+=1;self.metrics[prefix+'_bytes']+=len(encoded.encode())
+                    return value
+                row=lookup(self.observation['id'],False)
+                body,basis,field=materialize_observation(row,lookup,self.native.limits,metrics=self.metrics)
+                tracker=EffectiveBasis()
+                # One immediate predecessor establishes sparse equal-value
+                # confirmation across full re-anchors. Necessary delta ancestors
+                # are fetched by primary key and hash checked, never a scope replay.
+                requests=_requests(row,self.native.limits)
+                previous=None
+                # Complete returned-key evidence grants its own confirmation;
+                # an unrelated preceding full anchor is not a dependency.
+                if not all(_confirmed(field,r.get(field),requests) for r in body.get('item',[])):
+                    previous=c.execute(text('SELECT id::text FROM tonghuashun_observations '
+                        'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+                        'AND (observed_at,id)<(CAST(:at AS timestamptz),CAST(:id AS uuid)) '
+                        'ORDER BY observed_at DESC,id DESC LIMIT 1'),{**self.job,**self.observation}).scalar_one_or_none()
+                    self.metrics['metadata_rows']+=1
+                old_items={}
+                if previous:
+                    old=lookup(previous);oldbody,oldbasis,oldfield=materialize_observation(old,lookup,self.native.limits,metrics=self.metrics)
+                    tracker.apply(old,oldbody,oldbasis,oldfield,_requests(old,self.native.limits))
+                    old_items={str(r.get(field)):r for r in oldbody.get('item',[])}
+                requests=_requests(row,self.native.limits)
+                basis,uncertain=tracker.apply(row,body,basis,field,requests)
+                # Inherited equal values that were not returned need no new
+                # normalization. Ambiguous legacy confirmation stays restricted.
+                items=[r for r in body.get('item',[]) if str(r.get(field)) in uncertain or
+                       old_items.get(str(r.get(field)))!=r or _confirmed(field,r.get(field),requests)]
+                body=dict(body,item=items)
+                self.summary['source_rows']=1
+                yield LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],row['observed_at'],body,
+                    digest([_scope(row),row['content_hash'],row['observed_at'],requests]),
+                    row_basis=basis,basis_field=field,unconfirmed_keys=uncertain)
+        self.summary['complete']=True
+
+
+def next_observation(sources,entry,job):
+    a=job['active']
+    if not a['stop']:return None
+    with sources.engine.connect() as c:
+        row=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
+            'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+            'AND observed_at>=CAST(:lower AS timestamptz) '
+            'AND (observed_at,id)>(CAST(:after_at AS timestamptz),CAST(:after_id AS uuid)) '
+            'AND (observed_at,id)<=(CAST(:stop_at AS timestamptz),CAST(:stop_id AS uuid)) '
+            'ORDER BY observed_at,id LIMIT 1'),{**job,'lower':a['lower'],
+                'after_at':a['after']['at'] if a['after'] else '-infinity',
+                'after_id':a['after']['id'] if a['after'] else ZERO,
+                'stop_at':a['stop']['at'],'stop_id':a['stop']['id']}).mappings().first()
+        return dict(row) if row else None
+
+
+def check_state(sources,entry,job):
+    with sources.engine.connect() as c:
+        status=c.execute(text('SELECT status FROM tonghuashun_collection_states '
+            'WHERE dataset=:dataset AND subject=:subject AND variant=:variant'),job).scalar_one_or_none()
+    if status in ('failed','partial'):
+        raise NativeInputError('SOURCE_REFRESH_FAILED','该本地行情范围的最近采集未成功，保留最后正确数据。')
+
+
+def seed_current(store,entry,sources):
+    """Only explicit/bootstrap reconciliation reads current range identities.
+
+    Include empty native months retained in current after unsupported manual
+    writes. Ordinary update never walks these files. Pagination uses the normal
+    pinned, checked current reader; a concurrent direct commit invalidates its
+    cursor instead of turning an inconsistent enumeration into deletion proof.
+    """
+    if entry.source!='tushare':return
+    from .readers import Query
+    with store.catalog.transaction() as c:
+        parts=[r[0] for r in c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d'),{'d':entry.spec.name})]
+    for part in parts:
+        cursor=None
+        while True:
+            page=store.read(entry.spec,Query(partitions=(part,),columns=('representation','subject','object_key'),
+                                           page_size=1000,cursor=cursor,require_qualified=False))
+            scopes={(r['subject'],r['object_key'][:7]) for r in page.rows
+                    if r['representation']=='tushare:'+digest([entry.native,'default'])[:24]}
+            with sources.engine.begin() as c:
+                for subject,month in scopes:
+                    c.execute(text("INSERT INTO data_store_source_ranges(source,dataset,subject,variant,range_key,bootstrap_pending) "
+                        "VALUES (:source,:dataset,:subject,'default',:month,true) "
+                        "ON CONFLICT(source,dataset,subject,variant,range_key) DO UPDATE SET pending=true,bootstrap_pending=true,lower_at='-infinity'"),
+                        {**_params(entry),'subject':subject,'month':month})
+            if not page.next_cursor:break
+            cursor=page.next_cursor
+
+
+def _accumulate(totals,result,segment):
+    """Include work before budget/cancel exits, not only the final small slice."""
+    for key in ('source_rows','normalized_units','input_failures','passes','committed_partitions','new_issues','resolved'):
+        totals[key]+=result.get(key,0)
+    for key,value in result['metrics'].items():
+        totals['metrics'][key]=(max(totals['metrics'].get(key,0),value) if key.endswith('peak_bytes')
+                                 else totals['metrics'].get(key,0)+value)
+    for key,value in segment.metrics.items():totals['source_metrics'][key]+=value
+    totals['source_scanned']|=result.get('source_scanned',False)
+    totals['work_admitted']=result.get('work_admitted',False)
+
+
+def run(store,entry,sources,*,options,cancelled=None):
+    from .pipeline import _run_entry_locked,read_entry_status,_status
+    from .change_capture import seed
+    if not available(sources.engine):
+        raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
+    old=read_entry_status(store,entry.id)
+    contract=digest(entry.spec.descriptor())
+    store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
+    if old.get('incremental',{}).get('contract')!=contract:
+        # A new store/rule must enumerate source metadata even if a previous
+        # consumer exhausted the shared queue. No business payload is copied.
+        with sources.engine.begin() as c:seed(c,entry.source,entry.native)
+        seed_current(store,entry,sources)
+        old['incremental']={'version':1,'contract':contract,'bootstrap_boundary':uuid4().hex}
+        _status(store,entry,old)
+    # Rebuild is an explicit metadata reconciliation. Continuations retain the
+    # marker until all ranges are exhausted, including across process restarts.
+    explicit_reconcile=(options.mode=='rebuild' or
+                        options.mode=='retry' and bool(store.catalog.issues(entry.spec.name,limit=1)))
+    if explicit_reconcile and not old.get('incremental',{}).get('reconciling'):
+        with sources.engine.begin() as c:seed(c,entry.source,entry.native)
+        seed_current(store,entry,sources)
+        old['incremental']={'reconciling':True,'contract':contract,'bootstrap_boundary':uuid4().hex};_status(store,entry,old)
+    store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
+    totals={'entry_id':entry.id,'mode':options.mode,'scope':'native_incremental','state':'running',
+        'complete':False,'qualified':False,'source_rows':0,'normalized_units':0,'input_failures':0,
+        'passes':0,'committed_partitions':0,'new_issues':0,'resolved':0,'metrics':{'files_written':0},
+        'source_metrics':{'metadata_rows':0,'payload_rows':0,'payload_bytes':0,'dependency_rows':0,
+                          'dependency_bytes':0,'decoded_rows':0,'decode_calls':0},'source_scanned':False}
+    try:
+        for _ in range(options.maximum_passes):
+            if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
+            jobs=(claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
+            totals['source_metrics']['metadata_rows']+=len(jobs)
+            if not jobs or jobs[0] is None:break
+            job=jobs[0]
+            observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
+            if entry.source=='tonghuashun' and observation is None:
+                check_state(sources,entry,job);acknowledge(sources,job);continue
+            segment=RangeSources(sources,entry,job,observation,jobs=jobs)
+            marker=read_entry_status(store,entry.id)
+            marker['incremental']=dict(old.get('incremental',{}),version=1,contract=contract,
+                active_range={k:job[k] for k in ('source','dataset','subject','variant','range_key')},
+                active_observation=observation)
+            _status(store,entry,marker)
+            try:
+                result=_run_entry_locked(store,entry,segment,options=options,cancelled=cancelled)
+            except BaseException:
+                _accumulate(totals,read_entry_status(store,entry.id),segment)
+                raise
+            _accumulate(totals,result,segment)
+            if not result.get('complete'):break
+            # This is intentionally after the file/catalog commit. A process exit
+            # before this acknowledgement repeats only this unit, idempotently.
+            for done in jobs:acknowledge(sources,done,after=observation)
+    except BaseException as error:
+        # A finite pass may have committed many independent ranges. Preserve
+        # their measured work even when the final range is interrupted.
+        try:
+            latest=read_entry_status(store,entry.id)
+            for key in ('full_coverage','last_complete_coverage','coverage_pending','incremental','overflow_restriction'):
+                if key in latest:totals[key]=latest[key]
+            totals.update(state='incomplete',complete=False,qualified=False,reason=getattr(error,'code','INTERRUPTED'))
+            _status(store,entry,totals)
+        except Exception:
+            pass  # A catalog outage must not replace a process exit signal.
+        raise
+    with sources.engine.connect() as c:
+        remaining,bootstrap_remaining=c.execute(text("SELECT count(*),count(*) FILTER(WHERE bootstrap_pending OR coalesce((active->>'bootstrap')::boolean,false)) FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset"),_params(entry)).one()
+    latest=read_entry_status(store,entry.id)
+    totals['incremental']={'version':1,'contract':contract,'remaining_ranges':remaining,
+                           'reconciling':bool(old.get('incremental',{}).get('reconciling') and remaining),
+                           'bootstrap_complete':bootstrap_remaining==0,
+                           'bootstrap_boundary':old.get('incremental',{}).get('bootstrap_boundary'),
+                           'bootstrap_remaining_ranges':bootstrap_remaining}
+    for key in ('full_coverage','last_complete_coverage','coverage_pending','overflow_restriction'):
+        if key in latest:totals[key]=latest[key]
+    totals['complete']=remaining==0
+    totals['qualified']=not store.catalog.issues(entry.spec.name,limit=1)
+    totals['state']='processed' if totals['complete'] else 'incomplete'
+    if not totals['complete']:totals['reason']='NATIVE_RANGES_PENDING'
+    if not remaining or (not old.get('incremental',{}).get('bootstrap_complete') and not bootstrap_remaining):
+        # Every seeded native range and transactionally captured change up to
+        # this boundary was actually exhausted. Output metadata describes the
+        # completed range, but is never the source of completion evidence.
+        with store.catalog.transaction() as c:
+            parts=[r[0] for r in c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d ORDER BY partition_key'),{'d':entry.spec.name})]
+        h=hashlib.sha256()
+        for part in parts:h.update(digest(part).encode())
+        previous=totals.get('full_coverage',{})
+        proof={'version':1,'entry_id':entry.id,'contract':digest(entry.spec.descriptor()),
+            'source_selection':sources.selection_key(),'source_kind':digest([type(sources).__module__,type(sources).__qualname__]),
+            'boundary':digest(['native-ranges-v1',totals['incremental']['bootstrap_boundary'],previous.get('boundary'),totals['source_rows']]),
+            'boundary_kind':'exhausted_transactional_ranges','range_digest':h.hexdigest(),
+            'expected':len(parts),'end':parts[-1] if parts else '', 'after':parts[-1] if parts else '',
+            'scan_complete':True,'complete':True,'remaining':0,
+            'generation':store.catalog.dataset(entry.spec.name)['generation']}
+        pending=[] if (not old.get('incremental',{}).get('bootstrap_complete') or
+                       old.get('incremental',{}).get('reconciling')) else [
+                       p for p in totals.get('coverage_pending',[]) if p!='native_ranges']
+        if remaining:pending=sorted(set(pending)|{'native_ranges'})
+        totals.update(full_coverage=proof,last_complete_coverage=proof,coverage_pending=pending)
+    sources.summary=dict(totals)
+    _status(store,entry,totals)
+    return totals

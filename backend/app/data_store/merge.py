@@ -52,6 +52,7 @@ class MergeSpool:
         self.space,self.spec=space,spec
         self.after,self.only,self.count=after,set(partitions) if partitions else None,partition_count
         self.snapshot_representation = None
+        self.snapshot_scope = None
         self.cycle = None
         self.parts=set(); self.discarded=False; self.offered=0; self.old_invalid=0
         path=space.spill/'lfd02-merge.sqlite'
@@ -153,7 +154,10 @@ class MergeSpool:
             if unit.object_key=='unlocated':
                 # A scope problem has no fabricated business row.
                 return
-        if current and unit.representation == self.snapshot_representation:
+        if (current and unit.representation == self.snapshot_representation and
+                (self.snapshot_scope is None or
+                 any(unit.subject==scope['subject'] and
+                     unit.object_key.startswith(scope['month']+'-') for scope in self.snapshot_scope))):
             # Absence is meaningful only after a declared full current-table
             # snapshot finished. Historical/rescue inputs never set this scope.
             if old is None:

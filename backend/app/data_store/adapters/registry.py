@@ -135,6 +135,8 @@ class Entry:
 
     def describe_capability(self):
         return {'entry_id':self.id,'source':self.source,'native_dataset':self.native,'domain':self.domain,
+                'update_discovery':('transactional_native_ranges' if self.id in ('E50','E51','E52','E69','E70') else 'complete_local_scan'),
+                'reconcile_command':'rebuild',
                 'classification':self.disposition,'dataset':self.spec.name if self.business else None,
                 'reader':'local_sources.NativeSources.iter_entry / RescueSources.iter_entry','adapter':'adapters.normalize.normalize',
                 'target_entry':self.target,'update_unit':self.projection[0] if self.business else self.disposition,
