@@ -203,7 +203,7 @@ def _directory_bytes(files: LocalFiles, directory: str, *, cap: int,
 
 def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, ...] = ENTRIES,
                  limits: AuditLimits = AuditLimits(), api_base_url: str | None = None,
-                 api_token: str | None = None, api_request=None) -> dict:
+                 api_token: str | None = None, api_request=None, local_only: bool = False) -> dict:
     """Export finite evidence; any truncation or unchecked source is incomplete.
 
     The caller supplies an existing PostgreSQL engine. A snapshot anchors all
@@ -226,11 +226,15 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
         "dataset": entry.spec.name if entry.business else None,
         "target_entry": entry.target, "selected": entry.id in selected,
         "latest_input_scope": None, "latest_input_complete": None,
+        "latest_mode": None, "latest_state": None, "latest_reason": None,
+        "latest_partitions": None,
         "source_rows_processed": None, "normalized_units_processed": None,
         "input_failures_processed": None, "passes": None,
         "current_key_count": None,
     } for entry in ENTRIES]
     disposition_by_id = {row["entry_id"]: row for row in dispositions}
+    coverage_results = []
+    status_fingerprints = {}
     current_generations: dict[str, int] = {}
     samples: list[tuple[Entry, tuple[str, str, str], int, int]] = []
     used_files = used_bytes = used_rows = 0
@@ -238,6 +242,8 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     runtime: dict = {"format": "qf-current-audit-v1", "generated_at": datetime.now(timezone.utc).isoformat(),
                      "scope": "all_entries" if selected == {entry.id for entry in ENTRIES} else "selected_entries",
                      "selected_entries": sorted(selected),
+                     "coverage_mode": "local_only" if local_only else "full_range",
+                     "global_acceptance": False,
                      "production_state": "unasserted_by_audit",
                      "catalog_transaction": "repeatable_read_read_only",
                      "versions": {name: importlib.metadata.version(name)
@@ -295,6 +301,10 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                                code="STATUS_INVALID")
                     disposition = disposition_by_id[entry.id]
                     disposition.update(
+                        latest_mode=status.get('mode') if status else None,
+                        latest_state=status.get('state') if status else None,
+                        latest_reason=status.get('reason') if status else None,
+                        latest_partitions=json.dumps(status.get('partitions', [])) if status else None,
                         latest_input_scope=status.get("scope") if status else None,
                         latest_input_complete=status.get("complete") if status else None,
                         source_rows_processed=status.get("source_rows") if status else None,
@@ -314,6 +324,15 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                                    actual=status.get("scope", "entry"))
                     if entry.id not in selected or not entry.business:
                         continue
+                    from .coverage import check_coverage
+                    status_fingerprints[entry.id] = status_row
+                    judgment = check_coverage(connection, entry, status)
+                    coverage_results.append(dict(entry_id=entry.id, **judgment))
+                    if not local_only:
+                        _check(checks, "full_range_coverage", "pass" if judgment['satisfied'] else "incomplete",
+                               scope=entry.id, code=judgment['reason'],
+                               expected="exhausted sealed input range and no pending work",
+                               actual=judgment['evidence'])
                     dataset = entry.spec.name
                     row = connection.execute(text(
                         "SELECT generation,row_count,byte_count,schema_id,rule,descriptor_json "
@@ -497,10 +516,14 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                     "SELECT name,generation FROM data_store_datasets "
                     "WHERE name=ANY(:names)"),
                     {"names": list(current_generations)}).all()
+                final_statuses = dict(connection.execute(text(
+                    'SELECT entry_id,summary_json FROM data_store_entry_status WHERE entry_id=ANY(:ids)'),
+                    {'ids': list(status_fingerprints)}).all())
                 connection.rollback()
             observed = {name: generation for name, generation in final}
             changed = any(observed.get(name) != generation
                           for name, generation in current_generations.items())
+            changed = changed or final_statuses != status_fingerprints
             _check(checks, "final_generation_stability", "fail" if changed else "pass",
                    scope="store", expected="unchanged after API sample",
                    actual="changed" if changed else "unchanged",
@@ -524,7 +547,10 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     runtime["spill_peak_bytes"] = None
     runtime["other_system_bytes"] = None
     runtime["completeness"] = "complete" if checks and all(c["status"] == "pass" for c in checks) else "incomplete"
+    runtime['global_acceptance'] = (not local_only and runtime['completeness']=='complete'
+                                   and {e.id for e in ENTRIES if e.business} <= selected)
     _json(output_dir / "runtime.json", runtime)
+    _json(output_dir / "full_coverage.json", coverage_results)
     _json(output_dir / "current_domains.json", domains)
     with (output_dir / "source_disposition.csv").open("x", newline="", encoding="utf-8") as handle:
         fields = list(dispositions[0]) if dispositions else []
@@ -537,6 +563,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     (output_dir / "RESULT.md").write_text(
         "# Current data store audit\n\n"
         f"Status: {runtime['completeness']}\n\n"
+        f"Coverage mode: {runtime['coverage_mode']}; scope: {runtime['scope']}.\n\n"
         f"Checked {used_files} current files and {used_rows} current rows. "
         "API checks cover sampled current keys only. Input counts describe the latest "
         "stored processing summary, not unique historical observations. "
@@ -546,6 +573,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
             for path in output_dir.iterdir() if path.is_file()}
     _json(output_dir / "SHA256SUMS.json", sums)
     return {"complete": runtime["completeness"] == "complete",
+            "coverage_mode": runtime['coverage_mode'], "global_acceptance": runtime['global_acceptance'],
             "status": runtime["completeness"], "checks": len(checks),
             "checked_files": used_files, "checked_rows": used_rows,
             "output": str(output_dir)}

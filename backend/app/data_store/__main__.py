@@ -33,6 +33,8 @@ def main(argv=None):
     parser.add_argument('--audit-bytes',type=int,default=8*1024**3)
     parser.add_argument('--audit-rows',type=int,default=20_000_000)
     parser.add_argument('--audit-api-samples',type=int,default=8)
+    parser.add_argument('--audit-local-only',action='store_true',
+                        help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
     resource_change=any(value is not None for value in
                         (args.pipeline_spill_bytes,args.scratch_bytes,args.issue_count))
@@ -70,6 +72,7 @@ def main(argv=None):
                                bytes=args.audit_bytes,rows=args.audit_rows,
                                api_samples=args.audit_api_samples)
             result=export_audit(get_engine(),args.root,args.output,entries=tuple(selected),
+                                local_only=args.audit_local_only,
                                 limits=limits,api_base_url=args.api_base_url,
                                 api_token=os.environ.get(args.api_token_env))
         except (ValueError,OSError) as error:

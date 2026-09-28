@@ -513,7 +513,14 @@ def status(engine, *, expect_database: str) -> dict:
 def finish_rebuild(engine, *, expect_database: str) -> dict:
     """Open the store only after all static business entries are qualified."""
     from app.data_store.adapters.registry import ENTRIES
-    with transaction(engine) as c:
+    from app.data_store.coverage import check_coverage
+    with transaction(engine, isolation_level='READ COMMITTED') as c:
+        # Fence both pipeline status writes and direct kernel commits before
+        # taking any evidence snapshot. The locks remain held through ready's
+        # commit, so a concurrent reset/contract change cannot win the gap.
+        c.execute(text('LOCK TABLE data_store_entry_status, data_store_datasets, '
+                       'data_store_files, data_store_scopes, data_store_issues, '
+                       'data_store_legacy_restrictions IN SHARE MODE'))
         live = snapshot(c,expect_database=expect_database)
         schema = live['database']['schema']
         state = _maintenance(c,schema,lock=True)
@@ -527,8 +534,8 @@ def finish_rebuild(engine, *, expect_database: str) -> dict:
         results = c.execute(text('SELECT entry_id,summary_json FROM data_store_entry_status '
                                  'WHERE entry_id=ANY(:ids)'),{'ids':list(business)}).mappings().all()
         statuses = {row['entry_id']:json.loads(row['summary_json']) for row in results}
-        if set(statuses)!=business or any(not item.get('complete') or not item.get('qualified')
-                                           for item in statuses.values()):
+        if set(statuses)!=business or any(not check_coverage(c,entry,statuses[entry.id])['satisfied']
+                                           for entry in ENTRIES if entry.business):
             raise ResetRefused('REBUILD_NOT_READY','新 reader 尚未完成全部业务入口的合格重建。')
         c.execute(text(f"UPDATE {ident(schema)}.data_store_legacy_maintenance "
             "SET phase='ready',updated_at=clock_timestamp() WHERE singleton=1"))
