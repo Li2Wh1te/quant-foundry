@@ -72,4 +72,26 @@ R01 的私有导出目录示例：先执行 `docker compose --env-file .env -f c
 
 ## 演练与尚未执行的生产阶段
 
+### 真实存量的有限资源预算
+
+完整扫描的临时磁盘需求与进程内存需求分别管理。默认预算保持不变；发现真实输入超过
+扫描磁盘或当前问题记录容量时，先记录原策略、失败范围、磁盘余量和保留断点，再使用
+`configure-resources` 显式增加共享策略。该命令仅允许增加 `scratch_bytes`、
+`pipeline_spill_bytes` 和 `issue_count`，不会扩大 RAM、单次提交、查询或 DuckDB 内存限额。
+它获取所有暂存槽位的独占锁，核对目录身份及原策略，并检查磁盘余量；活跃操作、缩容、
+不一致目录或不足的可用空间均会拒绝。原件、当前文件和续作文件不被删除。
+
+例如在资源充足且已核对预算的隔离环境中：
+
+```sh
+python -m app.data_store configure-resources --root "$ROOT" --scratch-bytes 34359738368 --pipeline-spill-bytes 17179869184 --issue-count 100000 --output "$OUT/resource-policy.json"
+python -m app.data_store rebuild --root "$ROOT" --max-passes 4096 --pass-seconds 3600 --output "$OUT/rebuild.json"
+```
+
+示例为 32 GiB 共享暂存、16 GiB 单个完整扫描暂存和 100000 条当前问题，不是通用默认值。
+重建、更新和调度器读取同一份已绑定的共享策略。升级策略前必须交付支持读取共享策略的
+运行版本；仍显式使用旧策略的进程会拒绝打开目录。CLI 优先处理保留断点，然后才开始新
+扫描。SQLite 容量耗尽报告 `SCRATCH_BUDGET_EXCEEDED`，不再变成通用执行异常；达到问题
+容量时仍保留范围限制。扩大记录容量不代表输入合格，不能据此运行 `finish`。
+
 LF-D05 的隔离演练、C01–C18/B01–B05 与共享回归见同包结果文件。生产部署、reset apply、真实业务 rebuild、逐领域生产验收和 B06 均由 P01/R01 另行记录，不能从开发测试或合成数据推断为已完成。

@@ -154,6 +154,27 @@ class Issue:
 
 
 class Catalog:
+    @staticmethod
+    def policy_limits(policy):
+        try:
+            value=json.loads(policy)
+            expected=set(asdict(StoreLimits()))
+            if not isinstance(value,dict) or set(value) not in (expected,expected-{'pipeline_spill_bytes'}):
+                raise ValueError('Incomplete stored policy')
+            # An older stored root used its DuckDB memory value as the scan
+            # disk quota. Preserve that exact positive capacity on first read.
+            value.setdefault('pipeline_spill_bytes',value['duckdb_memory_bytes'])
+            return StoreLimits(**value)
+        except (TypeError,ValueError,DataStoreError):
+            raise DataStoreError('CATALOG_MISMATCH') from None
+
+    @staticmethod
+    def existing_limits(engine):
+        """Load the shared policy before a new process opens the bound store."""
+        with engine.connect() as c:
+            policy=c.execute(text('SELECT policy_json FROM data_store_runtime WHERE singleton=1')).scalar_one_or_none()
+        return Catalog.policy_limits(policy) if policy is not None else StoreLimits()
+
     def __init__(self, engine: Engine, limits: StoreLimits):
         if engine.dialect.name != 'postgresql':
             raise DataStoreError('INVALID_CONFIGURATION')
@@ -177,7 +198,14 @@ class Catalog:
                            'ON CONFLICT (singleton) DO NOTHING'), {'root': root_token, 'policy': policy})
             row = c.execute(text('SELECT root_token, policy_json FROM data_store_runtime '
                                  'WHERE singleton=1')).mappings().one()
-            if row['root_token'] != root_token or row['policy_json'] != policy:
+            try:
+                # New optional policy fields retain their documented defaults
+                # for roots created before those fields existed. Other policy
+                # mismatches still reject an explicitly stale configuration.
+                stored=self.policy_limits(row['policy_json'])
+            except (TypeError,ValueError,DataStoreError):
+                raise DataStoreError('CATALOG_MISMATCH') from None
+            if row['root_token'] != root_token or stored != self.limits:
                 raise DataStoreError('CATALOG_MISMATCH')
 
     def dataset(self, name: str, c=None) -> dict:

@@ -13,13 +13,16 @@ import sys
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
     parser.add_argument('command',choices=('describe','status','rebuild','update','retry',
-                                           'cleanup','audit-export'))
+                                           'cleanup','audit-export','configure-resources'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
     parser.add_argument('--partition',action='append',default=[],help='Exact bounded target partition; repeat at most eight times')
     parser.add_argument('--max-passes',type=int,default=256)
     parser.add_argument('--pass-seconds',type=int,default=300)
+    parser.add_argument('--pipeline-spill-bytes',type=int,help='Explicit finite disk quota for a complete native scan; does not increase RAM')
+    parser.add_argument('--scratch-bytes',type=int,help='Explicit shared staging/spill disk budget, at most 128 GiB')
+    parser.add_argument('--issue-count',type=int,help='Explicit current unresolved-issue cap, at most 1000000')
     parser.add_argument('--allow-incompatible-rebuild',action='store_true')
     parser.add_argument('--rescue',type=Path,action='append',help='Self-contained qf-local-rescue-v1 file; never a legacy formal snapshot')
     parser.add_argument('--output',type=Path,help='New result file; for audit-export, a new evidence directory')
@@ -31,6 +34,12 @@ def main(argv=None):
     parser.add_argument('--audit-rows',type=int,default=20_000_000)
     parser.add_argument('--audit-api-samples',type=int,default=8)
     args=parser.parse_args(argv)
+    resource_change=any(value is not None for value in
+                        (args.pipeline_spill_bytes,args.scratch_bytes,args.issue_count))
+    if resource_change and args.command!='configure-resources':
+        parser.error('Resource changes require the explicit configure-resources command')
+    if args.command=='configure-resources' and (not resource_change or args.initialize or args.entry or args.rescue or args.partition):
+        parser.error('configure-resources requires explicit capacities and forbids source selection/initialization')
     from .adapters.registry import ENTRIES, BY_ID
     from .adapters.canonical import NativeInputError
     from .errors import DataStoreError
@@ -88,12 +97,19 @@ def main(argv=None):
             allow_incompatible_rebuild=args.allow_incompatible_rebuild)
         engine=get_engine()
         with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
+            if args.command=='configure-resources':
+                output.update(store.configure_resources(scratch_bytes=args.scratch_bytes,
+                    pipeline_spill_bytes=args.pipeline_spill_bytes,issue_count=args.issue_count))
             source_limits=SourceLimits(pass_seconds=args.pass_seconds)
             native=NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0])
             sources=(CombinedSources(native,RescueSources(args.rescue,limits=source_limits,
                      cancelled=lambda:cancelled[0])) if args.rescue else native)
             seen=set()
-            queue=list(selected)
+            queue=[] if args.command=='configure-resources' else list(selected)
+            # Drain durable scans before charging another complete acquisition.
+            # Import targets still run exactly once through the same queue.
+            pending=store.budget.pending_keys() if args.command in ('rebuild','update','retry') else set()
+            queue.sort(key=lambda entry:'pipeline.'+entry.id not in pending)
             for entry in queue:
                 if entry.id in seen: continue
                 seen.add(entry.id)
@@ -112,7 +128,10 @@ def main(argv=None):
                 try:
                     result=run_entry(store,entry,sources,options=options,cancelled=lambda:cancelled[0])
                 except (NativeInputError,DataStoreError) as error:
-                    result={'entry_id':entry.id,'state':'incomplete','complete':False,'reason':error.code}
+                    # Retain actual attempted-source and committed-partition
+                    # counts instead of replacing useful failure evidence.
+                    result={**read_entry_status(store,entry.id),'entry_id':entry.id,
+                            'state':'incomplete','complete':False,'qualified':False,'reason':error.code}
                 output['entries'].append(result)
                 output['complete'] &= result.get('complete',False)
                 if entry.disposition=='ingestion_channel' and entry.target not in seen:

@@ -38,6 +38,7 @@ class PipelineOptions:
     maximum_passes: int = 256
     pass_seconds: int = 300
     allow_incompatible_rebuild: bool = False
+    pipeline_spill_bytes: int | None = None
 
     def __post_init__(self):
         if (self.mode not in ('rebuild','update','retry') or
@@ -46,7 +47,10 @@ class PipelineOptions:
                 type(self.partitions_per_pass) is not int or not 1<=self.partitions_per_pass<=8 or
                 type(self.maximum_passes) is not int or not 1<=self.maximum_passes<=4096 or
                 type(self.pass_seconds) is not int or not 1<=self.pass_seconds<=3600 or
-                self.allow_incompatible_rebuild and self.mode!='rebuild'):
+                self.allow_incompatible_rebuild and self.mode!='rebuild' or
+                self.pipeline_spill_bytes is not None and
+                (type(self.pipeline_spill_bytes) is not int or
+                 not 1 <= self.pipeline_spill_bytes <= 64*1024**3)):
             raise ValueError('Invalid bounded pipeline options')
         from .schema import identifier
         for p in self.partitions: identifier(p)
@@ -243,7 +247,8 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                 return summary
             store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
             with store.budget.reserve('read',cancelled=cancelled,
-                                      pending='pipeline.'+entry.id) as space:
+                                      pending='pipeline.'+entry.id,
+                                      quota_bytes=options.pipeline_spill_bytes) as space:
                 space.deadline=time.monotonic()+options.pass_seconds
                 spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
                                  partition_count=None)
@@ -295,6 +300,17 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
                     summary['scan_normalized_units']=progress['normalized_units']
                     spool.cycle=progress['cycle']
                     spool.snapshot_representation=progress['representation']
+                    overflow=summary.get('overflow_restriction',{})
+                    if (summary.get('resumed') and overflow and not overflow.get('file')
+                            and overflow.get('partition','')>progress['after']):
+                        # Earlier versions could fail while writing the bounded
+                        # overflow receipt. Recreate it only from this unchanged
+                        # sealed continuation, never infer missing problem keys
+                        # from a later source scan or clear the placeholder.
+                        from .problem_samples import write_overflow
+                        summary['overflow_restriction']=write_overflow(
+                            store,entry,overflow['partition'],spool)
+                        _status(store,entry,summary)
                     for number in range(options.maximum_passes):
                         summary['passes']=number+1
                         space.deadline=time.monotonic()+options.pass_seconds
@@ -366,6 +382,11 @@ def run_entry(store, entry: Entry, sources, *, options=PipelineOptions(), cancel
             # Previously committed independent partitions remain authoritative.
             # Never mark a truncated pass as an empty or completed source range.
             _status(store,entry,summary)
+            if isinstance(error, sqlite3.Error):
+                # SQLite's bounded working file reports SQLITE_FULL as a native
+                # exception. Keep the same safe public reason as the persisted
+                # status, so the CLI can continue with independent entries.
+                raise DataStoreError(summary['reason']) from None
             raise
 
 
