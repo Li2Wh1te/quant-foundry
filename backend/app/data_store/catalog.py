@@ -161,6 +161,9 @@ class Catalog:
             expected=set(asdict(StoreLimits()))
             if not isinstance(value,dict) or set(value) not in (expected,expected-{'pipeline_spill_bytes'}):
                 raise ValueError('Incomplete stored policy')
+            # An older stored root used its DuckDB memory value as the scan
+            # disk quota. Preserve that exact positive capacity on first read.
+            value.setdefault('pipeline_spill_bytes',value['duckdb_memory_bytes'])
             return StoreLimits(**value)
         except (TypeError,ValueError,DataStoreError):
             raise DataStoreError('CATALOG_MISMATCH') from None

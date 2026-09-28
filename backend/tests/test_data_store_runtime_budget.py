@@ -78,7 +78,7 @@ def test_issue_overflow_uses_control_budget_and_can_drain_without_losing_issues(
 
 
 def test_growing_continuation_preserves_other_owner_and_writer_headroom(ready):
-    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
+    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,pipeline_spill_bytes=16*MiB,
                    query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,operation_slots=3)
     budget=Budget(ready.files,ready.locks,policy)
     for key in ('pipeline.E68','pipeline.E70'):

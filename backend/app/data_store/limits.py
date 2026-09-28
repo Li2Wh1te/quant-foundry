@@ -46,7 +46,7 @@ class StoreLimits:
     cleanup_batch: int = 128
     orphan_grace_seconds: int = 60
     scratch_bytes: int = 4 * GiB       # staging + DuckDB spill, one shared budget
-    pipeline_spill_bytes: int = 0      # zero preserves the legacy DuckDB-sized scan quota
+    pipeline_spill_bytes: int = 512 * MiB  # disk quota, independent of DuckDB resident memory
     minimum_free_bytes: int = GiB
     garbage_bytes: int = 512 * MiB
     batch_rows: int = 65_536
@@ -68,8 +68,6 @@ class StoreLimits:
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
-            if field.name=='pipeline_spill_bytes' and type(value) is int and value==0:
-                continue
             if type(value) is not int or not 0 < value <= 2**63 - 1:
                 raise DataStoreError('INVALID_CONFIGURATION')
         if (self.batch_bytes > self.scratch_bytes

@@ -93,7 +93,7 @@ def probe():
 @pytest.fixture
 def limits():
     return replace(StoreLimits(), file_rows=10, lock_timeout_ms=100, orphan_grace_seconds=1,
-                   duckdb_memory_bytes=64*MiB, log_bytes=4096)
+                   duckdb_memory_bytes=64*MiB, pipeline_spill_bytes=64*MiB, log_bytes=4096)
 
 
 @pytest.fixture

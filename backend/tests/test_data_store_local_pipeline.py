@@ -204,7 +204,7 @@ def test_B05_harness_only_tiny_development_smoke_not_capacity_acceptance(databas
     with database[0].begin() as c:entry_status.create(c)
     root=tmp_path/'b05';root.mkdir(mode=0o700)
     with probe(),CurrentStore(database[0],root,cursor_key=KEY,initialize=True,
-                      limits=replace(limits,duckdb_memory_bytes=128*1024**2)) as bench:
+                      limits=replace(limits,duckdb_memory_bytes=128*1024**2,pipeline_spill_bytes=128*1024**2)) as bench:
         result=module.execute(bench,32,2)
     assert result['complete'] and not result['full_B05_executed']
     assert result['current_rows']==34 and result['exact_event_samples']
@@ -409,7 +409,7 @@ def test_idle_continuations_remain_charged_and_are_reclaimed_only_when_done(read
     from app.data_store.budget import Budget
     from app.data_store.limits import MiB
     budget=Budget(ready.files,ready.locks,replace(ready.limits,scratch_bytes=64*MiB,
-        duckdb_memory_bytes=16*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,
+        duckdb_memory_bytes=16*MiB,pipeline_spill_bytes=16*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,
         operation_slots=3))
     for key in ('pipeline.E68','pipeline.E70'):
         with budget.reserve('read',pending=key) as reservation:
@@ -454,7 +454,7 @@ def test_run_local_drains_continuations_and_does_not_starve_later_entries(ready)
     from app.data_store.budget import Budget
     from app.data_store.limits import MiB
     from app.data_store.pipeline import run_local
-    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
+    policy=replace(ready.limits,scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,pipeline_spill_bytes=16*MiB,
                    query_bytes=8*MiB,batch_bytes=16*MiB,commit_bytes=MiB,operation_slots=3)
     ready.limits=policy
     ready.budget=Budget(ready.files,ready.locks,policy)
