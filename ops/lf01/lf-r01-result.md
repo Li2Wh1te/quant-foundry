@@ -1,25 +1,30 @@
-# LF-R01 前置工具兼容性阻断
+# LF-R01 显式原生层重建边界
 
-状态：`partial`，任务包未完成。`reset_applied=false`、`rebuild_complete=false`、`domains_accepted=false`。
+代码支持两种明确的旧原件处置方式：默认救回，或经维护者确认后放弃旧底座历史副本。
+代码交付不等于真实环境已完成 reset、rebuild 或领域验收；现场结果另存本地证据。
 
-## 阻断原因
+## 显式放弃旧副本
 
-现有 `backend/app/legacy_reset/rescue.py` 的 `_finish_baseline` 未分类处理以下旧基线类型，原件保全守卫会返回 `ORIGINAL_UNCLASSIFIED`：
+`plan --discard-legacy-originals` 把 `original_policy=discard_legacy_only` 纳入计划摘要。
+`apply` 必须同时传入相同选项和摘要，并且不能再提供 rescue/manifest。缺少任一侧确认、
+处置方式不一致或摘要变化，均在操作前拒绝。旧计划及默认计划保持原有救回要求。
 
-- `foundation / empty_local_scope`
-- `foundation / local_table_bootstrap_receipt`
-- `tonghuashun / report_identity_directory`
+此模式只允许放弃清单内旧底座专属容器的历史副本。原生采集表、配置、采集状态、
+共享任务与其他业务仍受保护。精确对象、数据库身份、外部依赖、活动写者、路径检查、
+锁内复查及分组续作保持生效。与保留原件相关的已确认/疑似问题继续保存；被明确放弃的
+未解析请求原文不再作为新原生层重建的输入或全局限制。
 
-这些类型的定义可以在仓库历史代码的 `scope_settlement.py`、`table_bootstrap.py`、`holding_commands.py` 中核对。前两类需要明确的运维回执分类；第三类包含审核身份、有效期和依据，应完成保护与读取设计，不能与旧派生对象一并忽略。
+后续从现存原生层执行完整 rebuild，不传救回文件；不把丢弃的副本记录为恢复成功。
+不救回模式解决的是维护者选择的数据保留边界，不宣称所有旧类型已有 rescue reader。
 
-目录与依赖计划通过不等于原件保全成功。在完整 export/verify 通过前，不执行 apply，也不按缩小输入范围的方式宣布重建完成。未知原件仍须拒绝处理。
+## 隔离验证
 
-## 恢复条件
+本地一次性 PostgreSQL 上的原有及新增 16 项测试通过，覆盖默认救回、双侧策略确认、
+摘要篡改、完整 CLI、原生记录/共享配置保留、旧问题保留、未知外部依赖、活动写者和续作。
+`make release-check` 与差异格式检查通过。全部夹具为合成数据。
 
-前序工具需在隔离环境补齐精确分类、必要的原件格式及 reader 支持，并覆盖 export、verify、apply 锁内重校验。修复制品经验证和维护部署后，重新生成目标环境计划与保全证据，再继续 R01 的清退、全量重建、更新交接、只读验收与尾部清理。
+## 生产与交付边界
 
-本交付不修改产品运行代码，不把开发测试或制品部署等同于真实数据验收。B06、reset apply、业务 rebuild/update、audit-export 和最终 cleanup 均未取得完成证据。
-
-## 证据边界
-
-现场证据含运行元数据，保留在维护者本地，未纳入公开仓库。公开提交仅记录可以从已有源代码及合成基线复现的工具兼容性缺口；它不是完整生产验收报告，也不声明 R01 已通过。
+命令语法与边界见 [D05/R01 执行手册](lf-d05-runbook.md)。必须用已验证维护制品重新生成
+目标环境计划后执行，不能修改旧计划绕过摘要。公开仓库不附主机、数据库、任务或业务
+统计等现场元数据；真实 reset/rebuild/audit/B06 状态由维护者本地结果包分别记录。

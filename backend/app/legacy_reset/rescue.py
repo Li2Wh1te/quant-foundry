@@ -22,7 +22,7 @@ from app.data_store.adapters.registry import BY_NATIVE
 from app.data_store.local_sources import TABLES
 
 from .catalog import ResetRefused, canonical, ident, snapshot
-from .operations import require_safe_output, transaction, write_new_json
+from .operations import require_safe_output, transaction, validate_original_policy, write_new_json
 
 MAX_RECORD_BYTES = 64 * 1024 * 1024
 MAX_RESCUE_BYTES = 4 * 1024 * 1024 * 1024
@@ -229,6 +229,7 @@ def _record_summary(c, plan: dict, sink=None) -> dict:
 
 
 def export(engine, *, plan: dict, output: Path, manifest_path: Path) -> dict:
+    validate_original_policy(plan)
     require_safe_output(output)
     require_safe_output(manifest_path)
     if output.suffix!='.gz' or output.exists() or manifest_path.exists():
@@ -257,6 +258,7 @@ def export(engine, *, plan: dict, output: Path, manifest_path: Path) -> dict:
 
 
 def verify(engine, *, plan: dict, rescue_path: Path, manifest_path: Path) -> dict:
+    validate_original_policy(plan)
     fd = os.open(manifest_path,os.O_RDONLY|os.O_NOFOLLOW)
     with os.fdopen(fd,'r',encoding='utf-8') as stream:
         body = json.load(stream)

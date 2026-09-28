@@ -78,6 +78,108 @@ def _run_groups(engine,plan,rescue=None):
     apply_files(engine,plan=plan,archive_root=None)
 
 
+def test_discard_policy_is_digest_bound_and_requires_repeat_acknowledgement(isolated,tmp_path):
+    from app.legacy_reset.operations import read_plan, write_new_json
+
+    engine,_ = isolated
+    enter(engine,expect_database=name())
+    preserve = create_plan(engine,expect_database=name())
+    discard = create_plan(engine,expect_database=name(),discard_legacy_originals=True)
+    assert preserve['digest']!=discard['digest']
+    for plan,flag in ((preserve,True),(discard,False)):
+        with pytest.raises(ResetRefused) as error:
+            apply_database_group(engine,plan=plan,group='hooks',discard_legacy_originals=flag)
+        assert error.value.code=='ORIGINAL_POLICY_MISMATCH'
+    assert status(engine,expect_database=name())['completed_groups']==[]
+    path=tmp_path/'plan.json'
+    write_new_json(path,discard)
+    tampered=json.loads(path.read_text())
+    tampered['original_policy']='rescue'
+    path.write_text(json.dumps(tampered))
+    with pytest.raises(ResetRefused) as error:
+        read_plan(path)
+    assert error.value.code=='PLAN_TAMPERED'
+    with pytest.raises(ResetRefused) as error:
+        export(engine,plan=discard,output=tmp_path/'unused.gz',manifest_path=tmp_path/'unused.json')
+    assert error.value.code=='ORIGINAL_POLICY_MISMATCH'
+    assert not (tmp_path/'unused.gz').exists()
+
+
+def test_discard_legacy_originals_preserves_native_shared_and_current_restrictions(isolated):
+    engine,_ = isolated
+    native_id=str(uuid4())
+    task=_task(engine,'data.ths.collect','active')
+    with engine.begin() as c:
+        c.execute(text('CREATE TABLE data_source_configs (name text PRIMARY KEY,config text)'))
+        c.execute(text("INSERT INTO data_source_configs VALUES ('synthetic','unchanged')"))
+        c.execute(text("INSERT INTO tonghuashun_observations VALUES (:id,'original collector payload')"),{'id':native_id})
+        c.execute(text("INSERT INTO etf_daily_bars VALUES ('tushare','SYNTH','2026-01-02',42.125)"))
+        # Deliberately unreadable legacy-only payloads cannot influence a
+        # native-only rebuild once their loss is explicitly acknowledged.
+        for dataset in ('report_identity_directory','unresolved_request_units'):
+            c.execute(text("""INSERT INTO foundation_baselines VALUES
+                (:id,'tonghuashun',:dataset,'{}',clock_timestamp(),1,'legacy-only')"""),
+                {'id':str(uuid4()),'dataset':dataset})
+        c.execute(text("""INSERT INTO foundation_record_issues VALUES
+            (:id,1,'retained-native-scope','retained-target','confirmed','[]','known native restriction')"""),
+            {'id':str(uuid4())})
+    enter(engine,expect_database=name())
+    plan=create_plan(engine,expect_database=name(),discard_legacy_originals=True)
+    assert plan['originals']['foundation_baselines'] and not plan['blockers']
+    for group in ('hooks','derived','originals','functions'):
+        apply_database_group(engine,plan=plan,group=group,discard_legacy_originals=True)
+    with pytest.raises(ResetRefused) as error:
+        apply_files(engine,plan=plan,archive_root=None)
+    assert error.value.code=='ORIGINAL_POLICY_MISMATCH'
+    apply_files(engine,plan=plan,archive_root=None,discard_legacy_originals=True)
+    # A later process can resume safely, but still must acknowledge the policy.
+    assert apply_database_group(engine,plan=plan,group='originals',
+        discard_legacy_originals=True)['status']=='already_complete'
+    with engine.connect() as c:
+        assert c.execute(text('SELECT data_json FROM tonghuashun_observations')).scalar_one()=='original collector payload'
+        assert str(c.execute(text('SELECT close FROM etf_daily_bars')).scalar_one())=='42.125'
+        assert c.execute(text('SELECT config FROM data_source_configs')).scalar_one()=='unchanged'
+        assert c.execute(text('SELECT state FROM scheduled_tasks WHERE id=:id'),{'id':task}).scalar_one()=='active'
+        assert c.execute(text('SELECT reason FROM data_store_legacy_restrictions')).scalar_one()=='known native restriction'
+        assert c.execute(text("SELECT to_regclass('foundation_baselines')")).scalar_one() is None
+    assert status(engine,expect_database=name())['phase']=='reset_done'
+
+
+def test_discard_policy_keeps_external_dependency_and_writer_guards(isolated):
+    engine,_ = isolated
+    enter(engine,expect_database=name())
+    plan=create_plan(engine,expect_database=name(),discard_legacy_originals=True)
+    with engine.begin() as c:
+        c.execute(text('CREATE TABLE protected_child (id uuid REFERENCES foundation_artifacts(id))'))
+    with pytest.raises(ResetRefused) as error:
+        apply_database_group(engine,plan=plan,group='hooks',discard_legacy_originals=True)
+    assert error.value.code=='CATALOG_CHANGED'
+    with engine.begin() as c:
+        c.execute(text('DROP TABLE protected_child'))
+        c.execute(text("INSERT INTO foundation_work(id,status) VALUES (:id,'running')"),{'id':str(uuid4())})
+    with pytest.raises(ResetRefused) as error:
+        apply_database_group(engine,plan=plan,group='hooks',discard_legacy_originals=True)
+    assert error.value.code=='LEGACY_WRITER_ACTIVE'
+
+
+def test_discard_cli_checks_digest_then_completes_without_rescue(isolated,tmp_path,monkeypatch):
+    from types import SimpleNamespace
+    from app.legacy_reset.__main__ import main
+
+    engine,_=isolated
+    monkeypatch.setattr('app.db.session.get_engine',lambda:engine)
+    monkeypatch.setattr('app.core.config.get_settings',lambda:SimpleNamespace(database_name=name()))
+    enter(engine,expect_database=name())
+    path=tmp_path/'discard-plan.json'
+    assert main(['plan','--expect-database',name(),'--out',str(path),
+                 '--discard-legacy-originals'])==0
+    common=['apply','--expect-database',name(),'--plan',str(path),'--discard-legacy-originals']
+    assert main([*common,'--sha256','wrong'])==2
+    assert status(engine,expect_database=name())['completed_groups']==[]
+    assert main([*common,'--sha256',json.loads(path.read_text())['digest']])==0
+    assert status(engine,expect_database=name())['phase']=='reset_done'
+
+
 def test_C17_old_schema_plan_apply_resume_and_protected_source(isolated):
     engine,_ = isolated
     legacy = _task(engine)
