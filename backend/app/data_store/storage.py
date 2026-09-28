@@ -75,7 +75,7 @@ class CurrentStore:
                  _fault: Callable[[str], None] | None = None):
         if not isinstance(cursor_key, bytes) or len(cursor_key) < 32:
             raise DataStoreError('INVALID_CONFIGURATION')
-        self.limits = limits or StoreLimits()
+        self.limits = limits or Catalog.existing_limits(engine)
         self.cursor_key = cursor_key
         self.fault = _fault or (lambda point: None)
         self.catalog = Catalog(engine, self.limits)
@@ -101,6 +101,42 @@ class CurrentStore:
         if self.locks is not None:
             self.locks.close()
         self.files.close()
+
+    @_public_errors
+    def configure_resources(self, *, scratch_bytes=None, pipeline_spill_bytes=None, issue_count=None):
+        """Grow only explicit shared disk/error capacities while all slots are idle.
+
+        Existing continuation files and their charges remain untouched. The root
+        identity and exact old policy are rechecked under the catalog lock;
+        subsequent processes adopt the stored policy. No RAM, commit or reader
+        safety limits can be changed through this maintenance operation.
+        """
+        from .limits import local_operation_limits
+        updated=local_operation_limits(base=self.limits,scratch_bytes=scratch_bytes,
+            pipeline_spill_bytes=pipeline_spill_bytes,issue_count=issue_count)
+        if (updated.scratch_bytes<self.limits.scratch_bytes or updated.issue_count<self.limits.issue_count or
+                (updated.pipeline_spill_bytes or updated.duckdb_memory_bytes)<
+                (self.limits.pipeline_spill_bytes or self.limits.duckdb_memory_bytes)):
+            raise DataStoreError('INVALID_CONFIGURATION')
+        with self.budget._hold('admission',self.limits.lock_timeout_ms), ExitStack() as stack:
+            for slot in range(self.limits.operation_slots):
+                stack.enter_context(self.budget._hold(f'scratch-{slot}'))
+                self.budget._quota(slot)  # Validate every retained owner without deleting its work.
+            available=os.fstatvfs(self.files.fd)
+            if available.f_bavail*available.f_frsize<updated.scratch_bytes+updated.minimum_free_bytes:
+                raise DataStoreError('DISK_PRESSURE')
+            root=self.files.root_token(self.locks)
+            with self.catalog.transaction() as c:
+                row=c.execute(text('SELECT root_token,policy_json FROM data_store_runtime '
+                                   'WHERE singleton=1 FOR UPDATE')).mappings().one()
+                if row['root_token']!=root or Catalog.policy_limits(row['policy_json'])!=self.limits:
+                    raise DataStoreError('CATALOG_MISMATCH')
+                c.execute(text('UPDATE data_store_runtime SET policy_json=:policy WHERE singleton=1'),
+                          {'policy':control_json(asdict(updated))})
+            previous=self.limits
+            self.limits=self.catalog.limits=updated
+            self.budget=Budget(self.files,self.locks,updated)
+        return {'complete':True,'previous':asdict(previous),'current':asdict(updated)}
 
     @_public_errors
     def register(self, spec: DatasetSpec, *, prepare_rebuild: bool = False):

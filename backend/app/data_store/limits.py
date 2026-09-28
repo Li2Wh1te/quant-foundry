@@ -3,12 +3,30 @@
 This policy is separate from the filesystem/process budget enforcers. Defining
 limits alone is not an admission check or evidence of bounded runtime usage.
 """
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 
 from .errors import DataStoreError
 
 MiB = 1024**2
 GiB = 1024**3
+
+
+def local_operation_limits(*, base=None, scratch_bytes=None, issue_count=None, pipeline_spill_bytes=None):
+    """Explicit finite maintenance/scheduler overrides; defaults stay unchanged.
+
+    Disk staging is independent of resident memory. A large native rescan may
+    need more temporary disk and current error records without increasing the
+    per-commit, process-memory or DuckDB-memory limits.
+    """
+    values = {}
+    for name, value, maximum in (('scratch_bytes', scratch_bytes, 128*GiB),
+                                  ('issue_count', issue_count, 1_000_000),
+                                  ('pipeline_spill_bytes', pipeline_spill_bytes, 64*GiB)):
+        if value is not None:
+            if type(value) is not int or not 1 <= value <= maximum:
+                raise DataStoreError('INVALID_CONFIGURATION')
+            values[name] = value
+    return replace(base or StoreLimits(), **values)
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,6 +46,7 @@ class StoreLimits:
     cleanup_batch: int = 128
     orphan_grace_seconds: int = 60
     scratch_bytes: int = 4 * GiB       # staging + DuckDB spill, one shared budget
+    pipeline_spill_bytes: int = 0      # zero preserves the legacy DuckDB-sized scan quota
     minimum_free_bytes: int = GiB
     garbage_bytes: int = 512 * MiB
     batch_rows: int = 65_536
@@ -49,12 +68,17 @@ class StoreLimits:
     def __post_init__(self):
         for field in fields(self):
             value = getattr(self, field.name)
+            if field.name=='pipeline_spill_bytes' and type(value) is int and value==0:
+                continue
             if type(value) is not int or not 0 < value <= 2**63 - 1:
                 raise DataStoreError('INVALID_CONFIGURATION')
         if (self.batch_bytes > self.scratch_bytes
                 or self.query_bytes > self.duckdb_memory_bytes
                 or self.parallel_writers > self.operation_slots
                 or self.operation_slots > 128):
+            raise DataStoreError('INVALID_CONFIGURATION')
+        if self.pipeline_spill_bytes and self.pipeline_spill_bytes + min(
+                self.scratch_bytes,self.commit_bytes*3+self.duckdb_memory_bytes)>self.scratch_bytes:
             raise DataStoreError('INVALID_CONFIGURATION')
 
     def check_write(self, *, staging_bytes: int, spill_bytes: int,

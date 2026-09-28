@@ -34,6 +34,7 @@ class LocalUpdateParameters(BaseModel):
     datasets: list[str] = Field(default_factory=list, max_length=60)
     maximum_passes: int = Field(default=256, ge=1, le=4096)
     pass_seconds: int = Field(default=300, ge=1, le=3600)
+    pipeline_spill_bytes: int | None = Field(default=None, ge=1, le=64*1024**3)
 
     @model_validator(mode="after")
     def validate_datasets(self) -> "LocalUpdateParameters":
@@ -65,6 +66,7 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
                 options=PipelineOptions(
                     mode="update", maximum_passes=parameters.maximum_passes,
                     pass_seconds=parameters.pass_seconds,
+                    pipeline_spill_bytes=parameters.pipeline_spill_bytes,
                 ),
             )
         except (DataStoreError, NativeInputError) as error:

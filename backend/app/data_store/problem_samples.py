@@ -41,7 +41,14 @@ def write_overflow(store,entry,partition,spool):
                     raise DataStoreError('UNSAFE_STORAGE_PATH')
                 total+=s.st_size
         if total+len(content)>MAX_TOTAL:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
-        spool.space.check(additional=len(content))
+        # This file has its own finite retention budget and is outside scratch.
+        # A read reservation has zero staging allowance; charging this control
+        # file as read staging would always mask ISSUE_BUDGET_EXCEEDED with an
+        # unrelated scratch error, even for a one-byte sample.
+        spool.space.check()
+        filesystem=os.fstatvfs(fd)
+        if filesystem.f_bavail*filesystem.f_frsize-len(content)<store.limits.minimum_free_bytes:
+            raise DataStoreError('DISK_PRESSURE')
         pending=name+'.pending'
         try:os.unlink(pending,dir_fd=fd)
         except FileNotFoundError:pass

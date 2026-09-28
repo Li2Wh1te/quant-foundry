@@ -127,14 +127,22 @@ class Budget:
         return cleaned
 
     @contextmanager
-    def reserve(self, kind: str, *, cancelled=None, metrics: Metrics | None = None, pending=None):
+    def reserve(self, kind: str, *, cancelled=None, metrics: Metrics | None = None, pending=None,
+                quota_bytes=None):
         if pending is not None and (kind != 'read' or not isinstance(pending,str) or not re.fullmatch(r'[a-zA-Z0-9.-]{1,128}', pending)):
             raise DataStoreError('INVALID_CONFIGURATION')
         if kind not in ('write', 'read'):
             raise DataStoreError('INVALID_CONFIGURATION')
+        if quota_bytes is not None and (pending is None or kind != 'read' or
+                type(quota_bytes) is not int or not 1 <= quota_bytes <= self.limits.scratch_bytes):
+            raise DataStoreError('INVALID_CONFIGURATION')
         quota = min(self.limits.scratch_bytes,
                     self.limits.commit_bytes * 3 + self.limits.duckdb_memory_bytes
                     if kind == 'write' else self.limits.duckdb_memory_bytes)
+        if quota_bytes is not None:
+            quota = quota_bytes
+        elif pending is not None and self.limits.pipeline_spill_bytes:
+            quota = self.limits.pipeline_spill_bytes
         held = ExitStack()
         slot = None
         try:
@@ -162,19 +170,23 @@ class Budget:
                         if owner is not None:
                             if owner == pending:
                                 slot = i
-                                quota = size
+                                # A reviewed larger disk budget may drain an
+                                # existing continuation. Never shrink its charge
+                                # or erase its contents to make admission pass.
+                                quota = max(size, quota) if quota_bytes is not None or self.limits.pipeline_spill_bytes else size
                             else:
                                 used += size
                         else:
                             self._clean_slot(i)
                             available_slots.append(i)
-                if pending is not None and slot is None:
+                if pending is not None:
                     # A sealed continuation needs a separate kernel writer to
                     # drain it. Idle pending scans must never occupy every slot
                     # or every byte and permanently prevent their own commits.
                     writer_quota=min(self.limits.scratch_bytes,
                                      self.limits.commit_bytes*3+self.limits.duckdb_memory_bytes)
-                    if len(available_slots)<2 or used+quota+writer_quota>self.limits.scratch_bytes:
+                    needed_slots=2 if slot is None else 1
+                    if len(available_slots)<needed_slots or used+quota+writer_quota>self.limits.scratch_bytes:
                         raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
                 if slot is None and available_slots:
                     slot = available_slots[0]
