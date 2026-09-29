@@ -108,6 +108,7 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
             qualified=result.get("qualified", False),
             outcome=result.get('outcome'), attempted=result.get('attempted'), refresh=result.get('refresh'),
             source_scanned=result.get('source_scanned',False),
+            source_metrics=result.get('source_metrics'),incremental=result.get('incremental'),
         )
     complete = all(row.get("complete") and row.get("qualified") for row in results)
     if not complete:

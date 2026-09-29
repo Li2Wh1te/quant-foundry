@@ -87,7 +87,13 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         _refresh(store,entry,{'last_attempt_at':now,'attempted':True,'outcome':'running','deferred_since':0})
         error=None
         try:
-            result=_run_entry_locked(store,entry,sources,options=options,cancelled=cancelled)
+            from .incremental import enabled, run as incremental_run
+            # Drain an already sealed pre-upgrade acquisition before switching
+            # to the range queue; its sole retained input must not be discarded.
+            legacy_pending=('pipeline.'+entry.id in store.budget.pending_keys() and
+                            not old.get('incremental') and old.get('scope')!='native_incremental')
+            execute=incremental_run if enabled(sources,entry,options) and not legacy_pending else _run_entry_locked
+            result=execute(store,entry,sources,options=options,cancelled=cancelled)
         except BaseException as caught:
             error=caught
             try:

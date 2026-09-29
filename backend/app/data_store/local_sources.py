@@ -73,11 +73,28 @@ def _scope(row):
     return tuple(row.get(k) for k in ('dataset', 'subject', 'variant'))
 
 
+class _Receipt(dict):
+    """Ephemeral indexed returned-key membership; JSON evidence stays unchanged."""
+    def contains(self, field, values, key):
+        if not hasattr(self,'_sets'):self._sets={}
+        if field not in self._sets:
+            # Evidence keys are scalar native IDs/dates. Malformed structured
+            # keys retain ordinary comparison behavior for domain validation.
+            try:self._sets[field]=frozenset(values)
+            except TypeError:self._sets[field]=values
+        try:return key in self._sets[field]
+        except TypeError:return key in values
+
+
+def _contains(request,field,values,key):
+    return request.contains(field,values,key) if isinstance(request,_Receipt) else key in values
+
+
 def _requests(row, limits):
     raw = _json(row.get('request_json', '[]'), limits.payload_bytes)
     if not isinstance(raw, list) or any(not isinstance(r, dict) for r in raw):
         raise NativeInputError('SOURCE_SCHEMA_INVALID', '来源请求依据格式无效。')
-    return raw
+    return [_Receipt(r) for r in raw]
 
 
 def _row_keys(data, field):
@@ -105,11 +122,11 @@ def _confirmed(key, rawkey, requests):
             return True
         returned=request.get('returned_keys',{})
         if (request.get('key_receipt')=='actual_returned_keys_v1' and isinstance(returned,dict)
-                and isinstance(returned.get(key),list) and rawkey in returned[key]):
+                and isinstance(returned.get(key),list) and _contains(request,key,returned[key],rawkey)):
             return True
         # Explicit confirmed IDs in a rescue record retain the original scope.
         keys = request.get('confirmed_keys')
-        if isinstance(keys, list) and len(keys) <= 100000 and rawkey in keys:
+        if isinstance(keys, list) and len(keys) <= 100000 and _contains(request,'confirmed_keys',keys,rawkey):
             return True
     return False
 
@@ -134,7 +151,7 @@ def _proof_order(field, key, requests, observed):
     return max(applicable) if applicable else observed
 
 
-def materialize_observation(row, lookup, limits=SourceLimits()):
+def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None):
     """Reconstruct and validate every dependency; never consult a mutable head."""
     chain, seen, cursor, size = [], set(), row, 0
     while True:
@@ -155,15 +172,20 @@ def materialize_observation(row, lookup, limits=SourceLimits()):
     data, basis, field = None, {}, POINT_KEYS.get(row['dataset']) or REPORT_KEYS.get(row['dataset']) or GROUP_KEYS.get(row['dataset'])
     for current in reversed(chain):
         body = _json(current.get('data_json'), limits.payload_bytes)
+        if metrics is not None:
+            metrics['decode_calls']+=1
+            if isinstance(body,dict):
+                metrics['decoded_rows']+=len(body.get('item',body.get('upserts',[])))
         if not isinstance(body, dict):
             raise NativeInputError('SOURCE_SCHEMA_INVALID', '原生观察不是对象。')
+        requests = _requests(current, limits)
         order = instant_ns(current['observed_at'])
         token = digest([_scope(current), current['content_hash'], current['observed_at'],
-                        _requests(current, limits)])
+                        requests])
         if data is None:
             data = body
             if field:
-                basis = {str(r.get(field)): (_proof_order(field,r.get(field),_requests(current,limits),order), token)
+                basis = {str(r.get(field)): (_proof_order(field,r.get(field),requests,order), token)
                          for r in _row_keys(data, field) if isinstance(r, dict)}
         else:
             if (not field or body.get('key_field') != field or not isinstance(body.get('metadata'), dict)
@@ -185,10 +207,10 @@ def materialize_observation(row, lookup, limits=SourceLimits()):
                 raise NativeInputError('SOURCE_DEPENDENCY_INVALID', '增量包含重复键。')
             for r in changes:
                 records[r[field]] = r
-                basis[str(r[field])] = _proof_order(field,r[field],_requests(current,limits),order), token
+                basis[str(r[field])] = _proof_order(field,r[field],requests,order), token
             for key in records:
-                if _confirmed(field, key, _requests(current, limits)):
-                    basis[str(key)] = _proof_order(field,key,_requests(current,limits),order), token
+                if _confirmed(field, key, requests):
+                    basis[str(key)] = _proof_order(field,key,requests,order), token
             try:
                 data = {**body['metadata'], 'item': [records[k] for k in sorted(records)]}
             except TypeError:

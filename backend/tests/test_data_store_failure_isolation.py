@@ -225,9 +225,11 @@ def test_A08_cli_isolates_failures_and_deduplicates_import_target(ready,monkeypa
     monkeypatch.setattr(session,'get_engine',lambda:ready.catalog.engine)
     monkeypatch.setenv('QF_CURSOR_SIGNING_KEY',KEY.decode())
     with ready.catalog.engine.begin() as c:c.exec_driver_sql('DROP TABLE trading_calendar_days')
-    calls=[];original=NativeSources.iter_entry
-    def counted(self,entry):calls.append(entry.id);yield from original(self,entry)
-    monkeypatch.setattr(NativeSources,'iter_entry',counted)
+    from app.data_store import pipeline
+    calls=[];original=pipeline.run_entry
+    def counted(store,entry,sources,**kwargs):
+        calls.append(entry.id);return original(store,entry,sources,**kwargs)
+    monkeypatch.setattr(pipeline,'run_entry',counted)
     changed(ready,1)
     target=BY_ID['E01'].target
     args=['update','--root',str(ready.files.root)]

@@ -411,6 +411,8 @@ def seed_native_sources(engine):
     with engine.begin() as connection:
         for table in metadata.sorted_tables:
             connection.execute(table.insert().values(**rows[table.name]))
+        from app.data_store.change_capture import install
+        install(connection)
 
 
 def add_observation(engine, entry_id, content, observed_at, *, base_id=None, stored_data=None, requests=()):
