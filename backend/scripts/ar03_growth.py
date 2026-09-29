@@ -192,12 +192,66 @@ def experiment(rows,root,rounds=100):
         admin.dispose()
 
 
+def validate_growth(result):
+    """Compare stable entry identities; fair scheduling may reorder results.
+
+    A saved report contains all per-process measurements, so a reporting-only
+    correction can revalidate them without replacing the measured source digest.
+    """
+    scales=result['scales']
+    assert len(scales)==2
+    assert [s['cold_business_rows_per_path'] for s in scales]==[100000,1000000]
+    assert scales[0]['policy']==scales[1]['policy']
+    for scale in scales:
+        baseline=scale['bootstrap'][-1]
+        assert baseline['state']['current_rows']==2*scale['cold_business_rows_per_path']+4
+        assert all(e['complete'] and e['qualified'] for e in baseline['entries'])
+        for name in ('G01_no_change_100','G05_updates_100'):
+            assert len(scale[name])==100
+            for run in scale[name]:
+                assert run['state']['pending_ranges']==0
+                assert run['state']['control_rows']==2
+                assert run['state']['control_bytes']<32768
+                assert all(e['complete'] and e['qualified'] for e in run['entries'])
+        for run in scale['G01_no_change_100']:
+            assert run['state']['generation']==baseline['state']['generation']
+            for entry in run['entries']:
+                assert entry['normalized_units']==entry['metrics']['files_written']==0
+                assert all(entry['source_metrics'][k]==0 for k in
+                    ('payload_rows','payload_bytes','dependency_rows','dependency_bytes','decoded_rows','decode_calls'))
+        final=scale['G05_updates_100'][-1]['state']
+        assert final['garbage_files']==0
+        assert final['parquet_files_on_disk']==final['current_files']
+        for entry_id in ('E50','E70'):
+            entries=[e for run in scale['bootstrap'] for e in run['entries'] if e['entry_id']==entry_id]
+            assert sum(e['source_metrics']['decoded_rows'] for e in entries)==scale['cold_business_rows_per_path']+2
+    assert len(scales[1]['bootstrap'])>1
+    for name in ('G02_small_append','G03_correction_late_delete'):
+        by_scale=[{e['entry_id']:e for e in scale[name]['entries']} for scale in scales]
+        assert set(by_scale[0])==set(by_scale[1])=={'E50','E70'}
+        for entry_id in sorted(by_scale[0]):
+            x,y=(entries[entry_id] for entries in by_scale)
+            assert x['complete'] and y['complete'] and x['qualified'] and y['qualified']
+            assert x['source_metrics']==y['source_metrics']
+            assert x['normalized_units']==y['normalized_units']
+            assert x['committed_partitions']==y['committed_partitions']
+    result['validation']={'passed':True,'comparison_key':'entry_id',
+                          'validator_sha256':hashlib.sha256(Path(__file__).read_bytes()).hexdigest()}
+
+
 def main():
-    parser=argparse.ArgumentParser();parser.add_argument('--worker');parser.add_argument('--root',type=Path,required=True)
+    parser=argparse.ArgumentParser();parser.add_argument('--worker');parser.add_argument('--root',type=Path)
     parser.add_argument('--output',type=Path);parser.add_argument('--scales',default='100000,1000000');parser.add_argument('--rounds',type=int,default=100)
+    parser.add_argument('--validate',type=Path,help='Revalidate a complete saved report without rerunning source processing.')
     args=parser.parse_args()
+    if args.validate:
+        result=json.loads(args.validate.read_text());validate_growth(result)
+        if args.output:args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2))
+        print('Growth acceptance passed (saved measurements, matched by entry_id)',flush=True);return
+    if args.root is None:parser.error('--root is required for source processing')
     if args.worker:
         print(json.dumps(worker(args.worker,args.root),ensure_ascii=False));return
+    if args.output is None:parser.error('--output is required for the growth experiment')
     code=hashlib.sha256(Path(__file__).read_bytes())
     for path in sorted((Path(__file__).resolve().parents[1]/'app').rglob('*.py')):
         code.update(str(path.relative_to(Path(__file__).resolve().parents[1])).encode());code.update(path.read_bytes())
@@ -205,13 +259,8 @@ def main():
     for rows in map(int,args.scales.split(',')):
         result['scales'].append(experiment(rows,args.root/str(rows),args.rounds))
         args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2))
-    if len(result['scales'])==2:
-        a,b=result['scales']
-        for name in ('G02_small_append','G03_correction_late_delete'):
-            for x,y in zip(a[name]['entries'],b[name]['entries']):
-                assert x['source_metrics']['payload_rows']==y['source_metrics']['payload_rows']
-                assert x['source_metrics']['dependency_rows']==y['source_metrics']['dependency_rows']
-                assert x['normalized_units']==y['normalized_units']
+    validate_growth(result)
+    args.output.write_text(json.dumps(result,ensure_ascii=False,indent=2))
     print('Growth acceptance passed',flush=True)
 
 
