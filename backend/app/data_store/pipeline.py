@@ -22,7 +22,7 @@ from .adapters.contracts import Unit, digest
 from .adapters.normalize import normalize
 from .adapters.registry import BY_ID, ENTRIES, Entry
 from .adapters.canonical import NativeInputError
-from .catalog import SourceUpdate, Issue, basis_hash
+from .catalog import SourceUpdate, Issue, basis_hash, validate_issue_changes, MAX_ISSUE_CHANGES, MAX_ISSUE_CHANGE_BYTES
 from .errors import DataStoreError
 from .merge import MergeSpool, restore_row
 from .schema import DatasetSpec
@@ -149,19 +149,22 @@ def _issue_from(record, partition, blocking):
 
 
 def _partition_issues(store,entry,partition,spool):
-    additions=[];resolved={};proofs={}
+    additions=[];resolved={};size=0
     for rec,blocking,fixed in spool.problem_records(partition):
         issue=_issue_from(rec,partition,blocking)
-        proofs[issue.key]=(rec,fixed)
-        if not fixed: additions.append(issue)
+        if not fixed:
+            size+=len(issue.target_json.encode())+len(issue.resolution_json.encode())+len(issue.key)+len(issue.scope)+len(issue.reason)+len(issue.evidence_token)
+            if len(additions)>=MAX_ISSUE_CHANGES or size>MAX_ISSUE_CHANGE_BYTES:
+                raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+            additions.append(issue)
     # Bound every read by the kernel's issue policy. Paging does not silently
     # truncate a large unresolved set and unrelated targets are never cleared.
-    after=''; old_by_key={}
+    after=''; old_count=0
     while True:
         page=store.catalog.issues(entry.spec.name,scope=_scope(partition),limit=500,after=after)
         for old in page:
-            old_by_key[old['issue_key']]=old
-            if len(old_by_key)>store.limits.issue_count: raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+            old_count+=1
+            if old_count>store.limits.issue_count: raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
             target=json.loads(old['target_json'])
             if target.get('scope_version')!='object-key-v1': continue
             prefix=target.get('prefix',[])
@@ -175,13 +178,15 @@ def _partition_issues(store,entry,partition,spool):
                 winner=spool.db.execute('SELECT * FROM scopes WHERE r=? AND s=?',tuple(prefix)).fetchone()
                 if (winner and winner['g']==target.get('group') and winner['n']>=int(target['order'])):
                     resolved[old['issue_key']]=old['evidence_token']
+        # Bound the retained delta while paging old metadata, rather than
+        # materializing an entire unresolved partition before checking it.
+        validate_issue_changes(additions,resolved)
         if len(page)<500: break
         after=page[-1]['issue_key']
     # A concurrently changed evidence token is never cleared: the kernel checks it.
     for issue in additions:
         resolved.pop(issue.key,None)
-    if len(additions)+len(resolved)>1000:
-        raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+    validate_issue_changes(additions,resolved)
     return tuple(additions),resolved
 
 
@@ -475,12 +480,16 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                                 summary['full_coverage']=dict(summary['full_coverage'],generation=generation)
                         _status(store,entry,summary)
                     space.discard=True
-            except BaseException:
+            except BaseException as scan_error:
+                # SQLite's progress callback can interrupt SQL for timeout,
+                # cancellation or memory pressure. Preserve that exact guard.
+                if isinstance(scan_error,sqlite3.Error) and spool._interrupt is not None:
+                    scan_error=spool._interrupt
                 # Unsealed acquisition cannot resume a repeatable-read DB
                 # transaction. Reclaim it immediately; sealed work survives.
                 if not spool.db.execute('SELECT 1 FROM progress WHERE id=1').fetchone():
                     space.discard=True
-                raise
+                raise scan_error
             finally:
                 # Include acquisition/merge scratch, not only the writer's
                 # staging metric. These are sampled per-reservation peaks.
@@ -500,7 +509,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
         return summary
     except (NativeInputError,DataStoreError,sqlite3.Error) as error:
         summary.update(state='incomplete',complete=False,qualified=False,
-                       reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else 'SCRATCH_BUDGET_EXCEEDED')
+                       reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else ('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL or 'database or disk is full' in str(error) else 'FILE_INVALID'))
         # Previously committed independent partitions remain authoritative.
         # Never mark a truncated pass as an empty or completed source range.
         _status(store,entry,summary)

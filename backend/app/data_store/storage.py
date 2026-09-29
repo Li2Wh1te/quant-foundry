@@ -240,8 +240,9 @@ class CurrentStore:
         identifier(partition)
         if lower >= upper or not callable(source_check) or (issues and source.qualified):
             raise DataStoreError('INVALID_VALUE')
-        if not isinstance(issues, tuple) or len(issues) + len(resolved) > 1000:
-            raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+        from .catalog import validate_issue_changes
+        if not isinstance(issues,tuple):raise DataStoreError('INVALID_VALUE')
+        validate_issue_changes(issues,resolved)
         resolved = dict(resolved)  # caller mutation cannot change a pending commit
         metrics = Metrics()
         try:

@@ -416,3 +416,66 @@ def test_multi_month_claim_resumes_same_order_after_partial_commit(ready,monkeyp
     assert r['complete'] and r['source_metrics']['payload_rows']==0
     assert set(before)<=set(files(ready,'E70'))
     for month in (1,2,3):assert obj(ready,'E70',f'2025-{month:02}-01')['found']
+
+
+@pytest.mark.parametrize('entry',['E23','E44'])
+def test_large_fund_series_use_bounded_native_ranges_and_noop(ready,entry):
+    from app.data_ingestion.tonghuashun.confirmation import returned_keys
+    body=deepcopy(sample(entry).content)
+    receipt={'parameters':{},**returned_keys(body)}
+    publish(ready.catalog.engine,entry,body=body,requests=[receipt])
+    first=update(ready,entry)
+    assert first['complete'] and first['qualified']
+    assert first['source_metrics']['payload_rows']==1
+    before=files(ready,entry)
+    second=update(ready,entry)
+    assert second['source_metrics']['payload_rows']==second['normalized_units']==0
+    assert files(ready,entry)==before
+    with ready.catalog.transaction() as c:
+        assert check_coverage(c,BY_ID[entry],read_entry_status(ready,entry))['satisfied']
+
+
+@pytest.mark.parametrize('entry',['E23','E44'])
+def test_fund_range_consumer_requires_its_capture_migration(ready,entry):
+    with ready.catalog.engine.begin() as c:c.execute(text('UPDATE data_store_capture_version SET version=1'))
+    with pytest.raises(NativeInputError) as error:update(ready,entry)
+    assert error.value.code=='SOURCE_INCREMENTAL_NOT_INITIALIZED'
+
+
+def test_manager_scopes_resume_without_rescanning_completed_payloads(ready):
+    from app.data_ingestion.tonghuashun.confirmation import returned_keys
+    for i in range(5):
+        body=deepcopy(sample('E23').content);body['collection_scope']['manager_id']='M'+str(i)
+        publish(ready.catalog.engine,'E23',body=body,subject='M'+str(i)+'.month',
+                requests=[{'parameters':{},**returned_keys(body)}])
+    payload=0
+    for _ in range(10):
+        result=update(ready,'E23',options=PipelineOptions(maximum_passes=2))
+        payload+=result['source_metrics']['payload_rows']
+        if result['complete']:break
+    assert result['complete'] and result['qualified']
+    assert payload==5
+    before=files(ready,'E23')
+    assert update(ready,'E23')['source_metrics']['payload_rows']==0
+    assert files(ready,'E23')==before
+
+
+def test_fund_batch_sealed_resume_keeps_same_native_claims(ready,monkeypatch):
+    from app.data_ingestion.tonghuashun.confirmation import returned_keys
+    from app.data_store.errors import DataStoreError
+    for i in range(3):
+        body=deepcopy(sample('E23').content);body['collection_scope']['manager_id']='M'+str(i)
+        publish(ready.catalog.engine,'E23',body=body,subject='M'+str(i)+'.month',requests=[{'parameters':{},**returned_keys(body)}])
+    original=ready.replace_partition
+    def fail(*args,**kwargs):raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
+    monkeypatch.setattr(ready,'replace_partition',fail)
+    with pytest.raises(DataStoreError):update(ready,'E23')
+    with ready.catalog.transaction() as c:
+        claims=c.execute(text('SELECT active FROM data_store_source_ranges ORDER BY subject')).scalars().all()
+    monkeypatch.setattr(ready,'replace_partition',original)
+    def forbidden(*args,**kwargs):raise AssertionError('Sealed source batch must not be decoded again')
+    monkeypatch.setattr(incremental.FundBatchSources,'iter_entry',forbidden)
+    result=update(ready,'E23')
+    assert result['complete'] and result['qualified']
+    assert result['source_metrics']['payload_rows']==0
+    assert len(claims)==3

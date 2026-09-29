@@ -153,6 +153,21 @@ class Issue:
         object.__setattr__(self, 'resolution_json', control_json(dict(self.resolution)))
 
 
+MAX_ISSUE_CHANGES = 65536
+MAX_ISSUE_CHANGE_BYTES = 16*1024*1024
+
+
+def validate_issue_changes(issues, resolved):
+    """Bound one atomic delta independently from the SQL execution batch size."""
+    if len(issues)+len(resolved)>MAX_ISSUE_CHANGES:
+        raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+    size=sum(len(v.target_json.encode())+len(v.resolution_json.encode())+
+             len(v.key)+len(v.scope)+len(v.reason)+len(v.evidence_token) for v in issues)
+    size+=sum(len(k)+len(v) for k,v in resolved.items())
+    if size>MAX_ISSUE_CHANGE_BYTES:
+        raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+
+
 class Catalog:
     @staticmethod
     def policy_limits(policy):
@@ -311,27 +326,29 @@ class Catalog:
 
     def change_issues(self, c, dataset: str, issues: tuple[Issue, ...],
                       resolved: Mapping[str, str], *, check=lambda: None):
-        if len(issues) + len(resolved) > 1000:
-            raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+        validate_issue_changes(issues,resolved)
         c.execute(text('SELECT singleton FROM data_store_runtime WHERE singleton=1 FOR UPDATE'))
-        for key, evidence in resolved.items():
+        # Execute bounded parameter batches inside this SAME transaction. The
+        # file directory, source checkpoint and all issue changes commit together;
+        # a failure in a later batch rolls back every earlier batch as well.
+        removals=[{'d':dataset,'k':identifier(key),'e':evidence} for key,evidence in resolved.items()]
+        insert=text('INSERT INTO data_store_issues '
+            '(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) '
+            'VALUES (:d,:k,:s,:r,:e,:t,:v) ON CONFLICT (dataset,issue_key) DO UPDATE SET '
+            'scope_key=EXCLUDED.scope_key,reason=EXCLUDED.reason,'
+            'evidence_token=EXCLUDED.evidence_token,target_json=EXCLUDED.target_json,'
+            'resolution_json=EXCLUDED.resolution_json,'
+            'attempts=LEAST(data_store_issues.attempts,9223372036854775806)+1,'
+            'last_seen=clock_timestamp()')
+        for offset in range(0,len(removals),256):
             check()
-            # Clearing one member's error cannot clear another member/field.
             c.execute(text('DELETE FROM data_store_issues WHERE dataset=:d AND issue_key=:k '
-                           'AND evidence_token=:e'), {'d': dataset, 'k': identifier(key), 'e': evidence})
-        for issue in issues:
+                           'AND evidence_token=:e'),removals[offset:offset+256])
+        for offset in range(0,len(issues),256):
             check()
-            c.execute(text('INSERT INTO data_store_issues '
-                           '(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) '
-                           'VALUES (:d,:k,:s,:r,:e,:t,:v) ON CONFLICT (dataset,issue_key) DO UPDATE SET '
-                           'scope_key=EXCLUDED.scope_key,reason=EXCLUDED.reason,'
-                           'evidence_token=EXCLUDED.evidence_token,target_json=EXCLUDED.target_json,'
-                           'resolution_json=EXCLUDED.resolution_json,'
-                           'attempts=LEAST(data_store_issues.attempts,9223372036854775806)+1,'
-                           'last_seen=clock_timestamp()'),
-                      {'d': dataset, 'k': issue.key, 's': issue.scope, 'r': issue.reason,
-                       'e': issue.evidence_token, 't': issue.target_json,
-                       'v': issue.resolution_json})
+            c.execute(insert,[{'d':dataset,'k':issue.key,'s':issue.scope,'r':issue.reason,
+                'e':issue.evidence_token,'t':issue.target_json,'v':issue.resolution_json}
+                for issue in issues[offset:offset+256]])
         total = c.execute(text('SELECT count(*) FROM data_store_issues')).scalar_one()
         if total > self.limits.issue_count:
             raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
