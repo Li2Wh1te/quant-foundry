@@ -16,10 +16,10 @@ from sqlalchemy import text
 from .adapters.canonical import NativeInputError
 from .adapters.contracts import LocalInput, digest, native_json, instant_ns
 from .local_sources import (NativeSources, TABLES, _json, _requests, _scope,
-                            materialize_observation, EffectiveBasis, _confirmed)
+                            materialize_observation, EffectiveBasis, _confirmed, _MERGED)
 from .errors import DataStoreError
 
-IDS = frozenset(('E50','E51','E52','E69','E70'))
+IDS = frozenset(('E23','E44','E50','E51','E52','E69','E70'))
 WHERE = 'source=:source AND dataset=:dataset AND subject=:subject AND variant=:variant AND range_key=:range_key'
 ZERO = '00000000-0000-0000-0000-000000000000'
 
@@ -32,9 +32,12 @@ def enabled(sources, entry, options):
 def _params(entry):return {'source':entry.source,'dataset':entry.native}
 
 
-def available(engine):
+def available(engine,entry=None):
     with engine.connect() as c:
         if not c.execute(text("SELECT to_regclass('data_store_capture_version') IS NOT NULL")).scalar_one():return False
+        if entry is not None and entry.id in ('E23','E44') and c.execute(
+                text('SELECT version FROM data_store_capture_version WHERE singleton=1')).scalar_one()<2:
+            return False
         # Disabled/bypassed capture is not a proven caught-up boundary. Ordinary
         # INSERT/UPDATE/DELETE/COPY execute these triggers; TRUNCATE is refused.
         return c.execute(text("SELECT count(*) FROM pg_trigger WHERE tgname='data_store_capture_range' AND tgenabled IN ('O','A') AND tgrelid IN (to_regclass('tonghuashun_observations'),to_regclass('tonghuashun_collection_states'),to_regclass('etf_daily_bars'),to_regclass('etf_adjustment_factors'))")).scalar_one()==4
@@ -62,6 +65,36 @@ def claim(sources,entry):
             c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb),pending=false,bootstrap_pending=false '
                            'WHERE '+WHERE),{**row,'a':json.dumps(active)})
         return row
+
+
+def claim_funds(sources,entry,limit):
+    """Claim a bounded set of fund scopes so small observations share file IO.
+
+    Existing active claims always resume as the same ordered group. Only native
+    identity/boundary metadata is held here; payloads remain in their original
+    tables and the merger still owns one finite, reusable working file.
+    """
+    with sources.engine.begin() as c:
+        active=c.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges '
+            'WHERE source=:source AND dataset=:dataset AND active IS NOT NULL)'),_params(entry)).scalar_one()
+        rows=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text '
+            'FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset '
+            'AND (:active=false OR active IS NOT NULL) '
+            "ORDER BY CASE WHEN :active THEN '-infinity'::timestamptz ELSE enqueued_at END,subject,variant LIMIT :n FOR UPDATE"),
+            {**_params(entry),'active':active,'n':64 if active else limit}).mappings().all()
+        jobs=[]
+        for value in rows:
+            job=dict(value)
+            if job['active'] is None:
+                stop=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
+                    'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+                    'AND observed_at>=CAST(:lower_text AS timestamptz) ORDER BY observed_at DESC,id DESC LIMIT 1'),job).mappings().first()
+                job['active']={'id':uuid4().hex,'bootstrap':job['bootstrap_pending'],'when':datetime.now(timezone.utc).isoformat(),
+                    'lower':job['lower_text'],'after':None,'stop':dict(stop) if stop else None}
+                c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb),pending=false,bootstrap_pending=false WHERE '+WHERE),
+                          {**job,'a':json.dumps(job['active'])})
+            jobs.append(job)
+        return sorted(jobs,key=lambda j:(j['subject'],j['variant']))
 
 
 def claim_tables(sources,entry,limit):
@@ -174,13 +207,41 @@ class RangeSources:
                 basis,uncertain=tracker.apply(row,body,basis,field,requests)
                 # Inherited equal values that were not returned need no new
                 # normalization. Ambiguous legacy confirmation stays restricted.
-                items=[r for r in body.get('item',[]) if str(r.get(field)) in uncertain or
+                items=[r for r in body.get('item',[]) if entry.native not in _MERGED or str(r.get(field)) in uncertain or
                        old_items.get(str(r.get(field)))!=r or _confirmed(field,r.get(field),requests)]
                 body=dict(body,item=items)
                 self.summary['source_rows']=1
                 yield LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],row['observed_at'],body,
                     digest([_scope(row),row['content_hash'],row['observed_at'],requests]),
                     row_basis=basis,basis_field=field,unconfirmed_keys=uncertain)
+        self.summary['complete']=True
+
+
+class FundBatchSources:
+    """Reuse complete source objects in a finite batch, never physical row slices."""
+    incremental_slice=True
+    snapshot_scope=None
+
+    def __init__(self,native,entry,pairs):
+        self.native,self.entry,self.pairs=native,entry,pairs
+        self.summary={}
+        self.metrics={'metadata_rows':0,'payload_rows':0,'payload_bytes':0,
+                      'dependency_rows':0,'dependency_bytes':0,'decoded_rows':0,'decode_calls':0}
+
+    def selection_key(self):
+        return digest([self.native.selection_key(),[(j['active']['id'],o) for j,o in self.pairs]])
+
+    def iter_entry(self,entry):
+        self.summary={'complete':False,'source_rows':0,'scan_policy':'transactional_native_fund_batch'}
+        for job,observation in self.pairs:
+            segment=RangeSources(self.native,entry,job,observation)
+            try:
+                for raw in segment.iter_entry(entry):
+                    self.summary['source_rows']+=1
+                    yield raw
+            finally:
+                for key,value in segment.metrics.items():self.metrics[key]+=value
+            if not segment.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','基金原生范围尚未完整读取。')
         self.summary['complete']=True
 
 
@@ -252,7 +313,7 @@ def _accumulate(totals,result,segment):
 def run(store,entry,sources,*,options,cancelled=None):
     from .pipeline import _run_entry_locked,read_entry_status,_status
     from .change_capture import seed
-    if not available(sources.engine):
+    if not available(sources.engine,entry):
         raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
     old=read_entry_status(store,entry.id)
     contract=digest(entry.spec.descriptor())
@@ -281,14 +342,28 @@ def run(store,entry,sources,*,options,cancelled=None):
     try:
         for _ in range(options.maximum_passes):
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
-            jobs=(claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
+            fund_batch=entry.id in ('E23','E44')
+            jobs=(claim_funds(sources,entry,min(64,options.maximum_passes)) if fund_batch else
+                  claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
             if not jobs or jobs[0] is None:break
             job=jobs[0]
-            observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
-            if entry.source=='tonghuashun' and observation is None:
-                check_state(sources,entry,job);acknowledge(sources,job);continue
-            segment=RangeSources(sources,entry,job,observation,jobs=jobs)
+            if fund_batch:
+                pairs=[]
+                for candidate in jobs:
+                    item=next_observation(sources,entry,candidate)
+                    if item is None:
+                        check_state(sources,entry,candidate);acknowledge(sources,candidate)
+                    else:pairs.append((candidate,item))
+                if not pairs:continue
+                jobs=[j for j,_ in pairs];job=jobs[0]
+                observation={'batch':[o for _,o in pairs]}
+                segment=FundBatchSources(sources,entry,pairs)
+            else:
+                observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
+                if entry.source=='tonghuashun' and observation is None:
+                    check_state(sources,entry,job);acknowledge(sources,job);continue
+                segment=RangeSources(sources,entry,job,observation,jobs=jobs)
             marker=read_entry_status(store,entry.id)
             marker['incremental']=dict(old.get('incremental',{}),version=1,contract=contract,
                 active_range={k:job[k] for k in ('source','dataset','subject','variant','range_key')},
@@ -303,7 +378,10 @@ def run(store,entry,sources,*,options,cancelled=None):
             if not result.get('complete'):break
             # This is intentionally after the file/catalog commit. A process exit
             # before this acknowledgement repeats only this unit, idempotently.
-            for done in jobs:acknowledge(sources,done,after=observation)
+            if fund_batch:
+                for done,item in pairs:acknowledge(sources,done,after=item)
+            else:
+                for done in jobs:acknowledge(sources,done,after=observation)
     except BaseException as error:
         # A finite pass may have committed many independent ranges. Preserve
         # their measured work even when the final range is interrupted.

@@ -30,7 +30,7 @@ def check_coverage(connection, entry, status):
         reason = 'FULL_RANGE_PENDING'
     elif status.get('coverage_pending'):
         reason = 'CURRENT_INPUT_PENDING'
-    if reason is None and entry.id in ('E50','E51','E52','E69','E70'):
+    if reason is None and entry.id in ('E23','E44','E50','E51','E52','E69','E70'):
         if connection.execute(text("SELECT to_regclass('data_store_source_ranges') IS NOT NULL")).scalar_one():
             if connection.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges WHERE source=:s AND dataset=:d)'),
                                   {'s':entry.source,'d':entry.native}).scalar_one():

@@ -15,6 +15,8 @@ def install(connection):
     from importlib import import_module
     migration=import_module('app.db.migrations.versions.20261008_01_current_source_ranges')
     migration.install(connection)
+    extension=import_module('app.db.migrations.versions.20261009_01_fund_source_ranges')
+    extension.install(connection)
 
 
 def seed(connection, source=None, dataset=None):
@@ -28,7 +30,7 @@ def seed(connection, source=None, dataset=None):
         connection.execute(text(f'''INSERT INTO data_store_source_ranges AS q
           (source,dataset,subject,variant,range_key,lower_at,bootstrap_pending)
           SELECT 'tonghuashun',dataset,subject,variant,'*','-infinity'::timestamptz,true FROM {table}
-          WHERE dataset IN ('stock_daily','etf_daily','index_daily')
+          WHERE dataset IN ('stock_daily','etf_daily','index_daily','fund_manager_performance','fund_nav')
            AND (CAST(:source AS text) IS NULL OR :source='tonghuashun')
            AND (CAST(:dataset AS text) IS NULL OR dataset=:dataset)
           GROUP BY dataset,subject,variant
