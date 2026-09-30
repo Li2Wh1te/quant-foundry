@@ -47,10 +47,13 @@ def claim(sources,entry):
     """Capture an active source boundary without holding locks during file IO."""
     with sources.engine.begin() as c:
         row=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text FROM data_store_source_ranges '
-            'WHERE source=:source AND dataset=:dataset '
+            "WHERE source=:source AND dataset=:dataset AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')) "
             'ORDER BY (active IS NOT NULL) DESC,enqueued_at,subject,variant,range_key LIMIT 1 FOR UPDATE'),_params(entry)).mappings().first()
         if row is None:return None
         row=dict(row)
+        if row['active'] is not None and row['active'].get('blocked'):
+            row['active']=dict(row['active']);row['active'].pop('blocked')
+            c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb) WHERE '+WHERE),{**row,'a':json.dumps(row['active'])})
         if row['active'] is None:
             # +infinity is a state-only event. UUID order is used solely inside
             # this captured boundary; later commits are independently dirtied.
@@ -76,15 +79,18 @@ def claim_funds(sources,entry,limit):
     """
     with sources.engine.begin() as c:
         active=c.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges '
-            'WHERE source=:source AND dataset=:dataset AND active IS NOT NULL)'),_params(entry)).scalar_one()
+            "WHERE source=:source AND dataset=:dataset AND active IS NOT NULL AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')))"),_params(entry)).scalar_one()
         rows=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text '
-            'FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset '
+            "FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')) "
             'AND (:active=false OR active IS NOT NULL) '
             "ORDER BY CASE WHEN :active THEN '-infinity'::timestamptz ELSE enqueued_at END,subject,variant LIMIT :n FOR UPDATE"),
             {**_params(entry),'active':active,'n':64 if active else limit}).mappings().all()
         jobs=[]
         for value in rows:
             job=dict(value)
+            if job['active'] is not None and job['active'].get('blocked'):
+                job['active']=dict(job['active']);job['active'].pop('blocked')
+                c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb) WHERE '+WHERE),{**job,'a':json.dumps(job['active'])})
             if job['active'] is None:
                 stop=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
                     'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
@@ -106,7 +112,7 @@ def claim_tables(sources,entry,limit):
     with sources.engine.begin() as c:
         has_active=c.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset AND active IS NOT NULL)'),_params(entry)).scalar_one()
         rows=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active '
-            'FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset '
+            "FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')) "
             'AND (:active=false OR active IS NOT NULL) '
             "ORDER BY CASE WHEN :active THEN '-infinity'::timestamptz ELSE enqueued_at END,range_key,subject,variant LIMIT :n FOR UPDATE"),
             {**_params(entry),'n':64 if has_active else limit,'active':has_active}).mappings().all()
@@ -232,7 +238,7 @@ class FundBatchSources:
         return digest([self.native.selection_key(),[(j['active']['id'],o) for j,o in self.pairs]])
 
     def iter_entry(self,entry):
-        self.summary={'complete':False,'source_rows':0,'scan_policy':'transactional_native_fund_batch'}
+        self.summary={'complete':False,'source_rows':0,'scan_policy':'transactional_native_object_batch'}
         for job,observation in self.pairs:
             segment=RangeSources(self.native,entry,job,observation)
             try:
@@ -262,11 +268,39 @@ def next_observation(sources,entry,job):
 
 
 def check_state(sources,entry,job):
+    with sources.engine.begin() as c:
+        state=c.execute(text("SELECT status,to_jsonb(t)->>'revision' AS revision FROM tonghuashun_collection_states t "
+            'WHERE dataset=:dataset AND subject=:subject AND variant=:variant'),job).mappings().first()
+        if state and state['status'] in ('failed','partial'):
+            current=c.execute(text('SELECT active FROM data_store_source_ranges WHERE '+WHERE+' FOR UPDATE'),job).scalar_one()
+            if current['id']!=job['active']['id']:raise DataStoreError('SOURCE_CONFLICT')
+            active=dict(current,blocked={'code':'SOURCE_REFRESH_FAILED','source_revision':state['revision']})
+            c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb) WHERE '+WHERE),
+                      {**job,'a':json.dumps(active)})
+            return False
+    return True
+
+
+def next_batch(sources,entry,job,limit=32):
+    """Bound captured observation metadata; values are streamed one at a time.
+
+    Reducing one source's remaining observations before the partition commit
+    avoids rewriting every monthly file once per historical observation. It
+    does not infer returned keys, reorder source authority or replay other scopes.
+    """
+    a=job['active']
+    if not a['stop']:return []
     with sources.engine.connect() as c:
-        status=c.execute(text('SELECT status FROM tonghuashun_collection_states '
-            'WHERE dataset=:dataset AND subject=:subject AND variant=:variant'),job).scalar_one_or_none()
-    if status in ('failed','partial'):
-        raise NativeInputError('SOURCE_REFRESH_FAILED','该本地行情范围的最近采集未成功，保留最后正确数据。')
+        rows=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
+            'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+            'AND observed_at>=CAST(:lower AS timestamptz) '
+            'AND (observed_at,id)>(CAST(:after_at AS timestamptz),CAST(:after_id AS uuid)) '
+            'AND (observed_at,id)<=(CAST(:stop_at AS timestamptz),CAST(:stop_id AS uuid)) '
+            'ORDER BY observed_at,id LIMIT :limit'),{**job,'lower':a['lower'],
+                'after_at':a['after']['at'] if a['after'] else '-infinity',
+                'after_id':a['after']['id'] if a['after'] else ZERO,
+                'stop_at':a['stop']['at'],'stop_id':a['stop']['id'],'limit':limit}).mappings().all()
+    return [dict(r) for r in rows]
 
 
 def seed_current(store,entry,sources):
@@ -353,7 +387,7 @@ def run(store,entry,sources,*,options,cancelled=None):
                 for candidate in jobs:
                     item=next_observation(sources,entry,candidate)
                     if item is None:
-                        check_state(sources,entry,candidate);acknowledge(sources,candidate)
+                        if check_state(sources,entry,candidate):acknowledge(sources,candidate)
                     else:pairs.append((candidate,item))
                 if not pairs:continue
                 jobs=[j for j,_ in pairs];job=jobs[0]
@@ -362,8 +396,17 @@ def run(store,entry,sources,*,options,cancelled=None):
             else:
                 observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
                 if entry.source=='tonghuashun' and observation is None:
-                    check_state(sources,entry,job);acknowledge(sources,job);continue
-                segment=RangeSources(sources,entry,job,observation,jobs=jobs)
+                    if check_state(sources,entry,job):acknowledge(sources,job)
+                    continue
+                marker=read_entry_status(store,entry.id)
+                legacy=('pipeline.'+entry.id in store.budget.pending_keys() and
+                        isinstance(marker.get('incremental',{}).get('active_observation'),dict) and
+                        'id' in marker['incremental']['active_observation'])
+                if entry.source=='tonghuashun' and not legacy:
+                    pairs=[(job,o) for o in next_batch(sources,entry,job)]
+                    observation={'batch':[o for _,o in pairs]}
+                    segment=FundBatchSources(sources,entry,pairs)
+                else:segment=RangeSources(sources,entry,job,observation,jobs=jobs)
             marker=read_entry_status(store,entry.id)
             marker['incremental']=dict(old.get('incremental',{}),version=1,contract=contract,
                 active_range={k:job[k] for k in ('source','dataset','subject','variant','range_key')},
@@ -378,8 +421,11 @@ def run(store,entry,sources,*,options,cancelled=None):
             if not result.get('complete'):break
             # This is intentionally after the file/catalog commit. A process exit
             # before this acknowledgement repeats only this unit, idempotently.
-            if fund_batch:
-                for done,item in pairs:acknowledge(sources,done,after=item)
+            if fund_batch or isinstance(segment,FundBatchSources):
+                # Each scope advances once to the last actually committed item.
+                final={}
+                for done,item in pairs:final[(done['subject'],done['variant'])]=(done,item)
+                for done,item in final.values():acknowledge(sources,done,after=item)
             else:
                 for done in jobs:acknowledge(sources,done,after=observation)
     except BaseException as error:
@@ -395,19 +441,19 @@ def run(store,entry,sources,*,options,cancelled=None):
             pass  # A catalog outage must not replace a process exit signal.
         raise
     with sources.engine.connect() as c:
-        remaining,bootstrap_remaining=c.execute(text("SELECT count(*),count(*) FILTER(WHERE bootstrap_pending OR coalesce((active->>'bootstrap')::boolean,false)) FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset"),_params(entry)).one()
+        remaining,bootstrap_remaining,blocked=c.execute(text("SELECT count(*),count(*) FILTER(WHERE bootstrap_pending OR coalesce((active->>'bootstrap')::boolean,false)),count(*) FILTER(WHERE active->'blocked' IS NOT NULL) FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset"),_params(entry)).one()
     latest=read_entry_status(store,entry.id)
     totals['incremental']={'version':1,'contract':contract,'remaining_ranges':remaining,
                            'reconciling':bool(old.get('incremental',{}).get('reconciling') and remaining),
                            'bootstrap_complete':bootstrap_remaining==0,
                            'bootstrap_boundary':old.get('incremental',{}).get('bootstrap_boundary'),
-                           'bootstrap_remaining_ranges':bootstrap_remaining}
+                           'bootstrap_remaining_ranges':bootstrap_remaining,'blocked_ranges':blocked}
     for key in ('full_coverage','last_complete_coverage','coverage_pending','overflow_restriction'):
         if key in latest:totals[key]=latest[key]
     totals['complete']=remaining==0
-    totals['qualified']=not store.catalog.issues(entry.spec.name,limit=1)
+    totals['qualified']=not blocked and not store.catalog.issues(entry.spec.name,limit=1)
     totals['state']='processed' if totals['complete'] else 'incomplete'
-    if not totals['complete']:totals['reason']='NATIVE_RANGES_PENDING'
+    if not totals['complete']:totals['reason']='SOURCE_RANGES_BLOCKED' if remaining==blocked else 'NATIVE_RANGES_PENDING'
     if not remaining or (not old.get('incremental',{}).get('bootstrap_complete') and not bootstrap_remaining):
         # Every seeded native range and transactionally captured change up to
         # this boundary was actually exhausted. Output metadata describes the

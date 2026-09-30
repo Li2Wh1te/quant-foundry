@@ -13,7 +13,7 @@ import sys
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
     parser.add_argument('command',choices=('describe','status','rebuild','update','retry',
-                                           'cleanup','audit-export','configure-resources'))
+                                           'cleanup','verify-coverage','compact-issues','audit-export','configure-resources'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
@@ -54,6 +54,8 @@ def main(argv=None):
     if len(set(e.id for e in selected))!=len(selected): parser.error('Duplicate entry')
     if args.command=='cleanup' and any(not e.business for e in selected):
         parser.error('cleanup accepts business entries only')
+    if args.command in ('compact-issues','verify-coverage') and (args.initialize or args.rescue or args.partition or any(not e.business for e in selected)):
+        parser.error('current metadata checks require existing business entries and native sources')
     if args.command=='describe':
         result={'entries':[e.describe_capability() for e in selected],
                 'source_entry_count':len(ENTRIES),'business_entries':sum(e.business for e in ENTRIES),
@@ -112,6 +114,20 @@ def main(argv=None):
                                             cancelled=lambda:cancelled[0])
                 output['complete']=all(row.get('complete') and row.get('qualified',True)
                                        for row in output['entries'])
+            elif args.command=='verify-coverage':
+                if args.initialize or args.rescue or args.partition or any(not e.business for e in selected):
+                    parser.error('verify-coverage requires existing business entries and native inputs')
+                from .verify_coverage import verify_existing
+                for e in selected:
+                    try:result=verify_existing(store,e,native,seconds=args.pass_seconds,cancelled=lambda:cancelled[0])
+                    except (NativeInputError,DataStoreError) as error:result={'entry_id':e.id,'complete':False,'reason':error.code}
+                    output['entries'].append(result)
+                output['complete']=all(r['complete'] for r in output['entries'])
+            elif args.command=='compact-issues':
+                if args.initialize or args.rescue or args.partition or any(not e.business for e in selected):
+                    parser.error('compact-issues accepts business entries and forbids source writes/initialization')
+                from .issue_sets import compact_entry
+                output['entries']=[compact_entry(store,e,cancelled=lambda:cancelled[0]) for e in selected]
             elif args.command=='status':
                 output['entries']=[read_entry_status(store,e.id) for e in selected]
             elif args.command=='cleanup':

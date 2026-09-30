@@ -17,6 +17,8 @@ def install(connection):
     migration.install(connection)
     extension=import_module('app.db.migrations.versions.20261009_01_fund_source_ranges')
     extension.install(connection)
+    fence=import_module('app.db.migrations.versions.20261010_01_current_issue_lookup')
+    fence.install(connection)
 
 
 def seed(connection, source=None, dataset=None):

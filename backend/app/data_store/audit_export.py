@@ -354,9 +354,8 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                     domain.update(generation=row["generation"], current_key_count=row["row_count"],
                                   current_file_bytes=row["byte_count"])
                     disposition["current_key_count"] = row["row_count"]
-                    issue_count = connection.execute(text(
-                        "SELECT count(*) FROM data_store_issues WHERE dataset=:dataset"),
-                        {"dataset": dataset}).scalar_one()
+                    from .issue_sets import logical_count
+                    issue_count = logical_count(connection,dataset)
                     scope_count = connection.execute(text(
                         "SELECT count(*) FROM data_store_scopes WHERE dataset=:dataset"),
                         {"dataset": dataset}).scalar_one()
