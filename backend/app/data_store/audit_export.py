@@ -356,6 +356,15 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                     disposition["current_key_count"] = row["row_count"]
                     from .issue_sets import logical_count
                     issue_count = logical_count(connection,dataset)
+                    # Independent audit expands actual rows instead of trusting
+                    # operational counters, and rejects any inventory drift.
+                    physical_count=connection.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),{'d':dataset}).scalar_one()
+                    inventory=connection.execute(text('SELECT physical_records,affected_objects FROM data_store_issue_totals WHERE dataset=:d'),{'d':dataset}).first()
+                    counted=(0,0) if inventory is None else tuple(map(int,inventory))
+                    actual_counts=(physical_count,issue_count)
+                    _check(checks,'issue_inventory_matches_actual','pass' if counted==actual_counts else 'incomplete',
+                        scope=entry.id,expected=list(actual_counts),actual=list(counted),
+                        code=None if counted==actual_counts else 'CATALOG_MISMATCH')
                     scope_count = connection.execute(text(
                         "SELECT count(*) FROM data_store_scopes WHERE dataset=:dataset"),
                         {"dataset": dataset}).scalar_one()

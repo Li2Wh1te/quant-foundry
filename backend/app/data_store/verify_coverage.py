@@ -27,7 +27,8 @@ from .pipeline import read_entry_status,_status
 def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
     """A mismatch remains pending; reading existing files never proves input scope."""
     started=time.monotonic();counts={'source_rows':0,'expected_objects':0,'current_objects':0,
-        'missing_objects':0,'mismatched_objects':0,'unexpected_objects':0,'disposed_failures':0}
+        'missing_objects':0,'mismatched_objects':0,'unexpected_objects':0,'disposed_failures':0,
+        'queued_ranges':0,'scanned_objects':0,'current_files':0}
     with store.locks._hold(entry.spec.name,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         with store.locks.read(entry.spec.name,timeout_ms=store.limits.lock_timeout_ms,cancelled=cancelled):
             dataset=store.catalog.dataset(entry.spec.name)
@@ -46,13 +47,18 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     path.unlink()  # Only this verification's unsealed fingerprint index.
                 fd=os.open(path,os.O_CREAT|os.O_EXCL|os.O_NOFOLLOW|os.O_WRONLY,0o600);os.close(fd)
                 db=sqlite3.connect(path);db.row_factory=sqlite3.Row
-                db.execute('PRAGMA journal_mode=OFF');db.execute('PRAGMA cache_size=-8192')
+                # This index is never a continuation or a coverage receipt. A crash
+                # discards it and repeats the authoritative snapshot; syncing it
+                # once per native point adds no correctness and dominates scans.
+                db.execute('PRAGMA journal_mode=OFF');db.execute('PRAGMA synchronous=OFF')
+                db.execute('PRAGMA page_size=8192');db.execute('PRAGMA cache_size=-8192')
                 db.execute('PRAGMA max_page_count='+str(space.quota//8192))
                 db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,PRIMARY KEY(k,g));')
                 def check():
                     if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
                     if time.monotonic()-started>seconds:raise DataStoreError('QUERY_TIMEOUT')
                     space.check()
+                phase='issues'
                 try:
                     after=''
                     while True:
@@ -66,7 +72,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             check()
                         if len(page)<500:break
                         after=page[-1]['issue_key']
-                    capture=False
+                    phase='capture_ranges';capture=False
                     if entry.source=='tushare' and entry.id in ('E69','E70'):
                         with store.catalog.transaction() as c:
                             capture=c.execute(text("SELECT version>=3 FROM data_store_capture_version WHERE singleton=1")).scalar_one()
@@ -74,12 +80,18 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                 pending=c.execution_options(stream_results=True,yield_per=500).execute(text(
                                     'SELECT subject,variant,range_key,change_revision FROM data_store_source_ranges '
                                     'WHERE source=:s AND dataset=:d AND active IS NULL'),{'s':entry.source,'d':entry.native})
-                                for row in pending:check();db.execute('INSERT INTO queued VALUES (?,?,?,?)',tuple(row))
-                    boundary=hashlib.sha256()
+                                while True:
+                                    rows=pending.fetchmany(500)
+                                    if not rows:break
+                                    check();db.executemany('INSERT INTO queued VALUES (?,?,?,?)',[tuple(row) for row in rows])
+                                    counts['queued_ranges']+=len(rows)
+                                db.commit()
+                    phase='native_snapshot';boundary=hashlib.sha256()
                     for raw in sources.iter_entry(entry):
                         check();counts['source_rows']+=1
                         boundary.update(digest([raw.source,raw.dataset,raw.subject,raw.variant,raw.token,raw.order_ns]).encode())
                         for unit in normalize(entry,raw):
+                            counts['scanned_objects']+=1
                             state='invalid' if unit.failure or not unit.complete else 'withdrawn' if unit.withdrawn else 'valid'
                             h=value_hash(unit.rows) if state=='valid' else digest(state)
                             key=entry.spec.key_bytes(unit.key);part=entry.spec.partitioner((*unit.key,'root'))
@@ -93,11 +105,13 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                     elif old['t']>=unit.token:continue
                             db.execute('INSERT OR REPLACE INTO expected(k,p,r,s,o,g,n,t,h,state,stable_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                                 (key,part,*unit.key,unit.group,unit.order,unit.token,h,state,int(raw.order_kind!='current_table_snapshot')))
-                        db.commit()
+                        if counts['source_rows']%128==0:db.commit()
+                    db.commit()
                     if not sources.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','完整覆盖核验的本地读取未完成。')
                     counts['expected_objects']=db.execute('SELECT count(*) FROM expected').fetchone()[0]
                     with store.catalog.transaction() as c:
                         parts=c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d ORDER BY partition_key'),{'d':entry.spec.name}).scalars().all()
+                    phase='current_files'
                     def compare(rows):
                         if not rows:return
                         first=rows[0]
@@ -122,6 +136,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     for part in parts:
                         key=None;rows=[];last_key=None
                         for ref in store.catalog.files(entry.spec.name,part):
+                            counts['current_files']+=1
                             contract=DatasetSpec.from_descriptor(json.loads(ref['contract_json']))
                             if (not entry.spec.accepts(contract) or ref['schema_id']!=contract.schema_id or
                                     ref['rule']!=contract.rule):raise DataStoreError('REBUILD_REQUIRED')
@@ -153,6 +168,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                     if (seen!=ref['row_count'] or first!=bytes(ref['key_min']) or
                                             file_last!=bytes(ref['key_max'])):raise DataStoreError('FILE_INVALID')
                         compare(rows);db.commit()
+                    phase='missing_objects'
                     for row in db.execute('SELECT * FROM expected WHERE seen=0'):
                         if row['state']=='invalid':
                             evidence=db.execute('SELECT 1 FROM issues WHERE k=? AND g=? AND n>=?',(row['k'],row['g'],row['n'])).fetchone()
@@ -173,6 +189,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             'end':expected_parts[-1] if expected_parts else '', 'after':expected_parts[-1] if expected_parts else '',
                             'scan_complete':True,'complete':True,'remaining':0,'generation':generation}
                         if capture:
+                            phase='acknowledge'
                             # Each captured range revision was read before the
                             # authoritative native snapshot. A late writer changes
                             # its revision even while pending was already true.
@@ -180,13 +197,21 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             # active work and unseen concurrent commits survive.
                             with sources.engine.begin() as c:
                                 selected=db.execute('SELECT * FROM queued ORDER BY s,v,r')
-                                delete=text('DELETE FROM data_store_source_ranges WHERE source=:s AND dataset=:d '
-                                    'AND subject=:sub AND variant=:v AND range_key=:r AND change_revision=:n AND active IS NULL')
+                                # Bounded set deletion retains every exact
+                                # revision predicate. It shares the transaction
+                                # with the final receipt; late source commits or
+                                # active work cannot be acknowledged accidentally.
+                                delete=text('DELETE FROM data_store_source_ranges q USING '
+                                    'jsonb_to_recordset(CAST(:batch AS jsonb)) AS b(s text,v text,r text,n bigint) '
+                                    'WHERE q.source=:s AND q.dataset=:d AND q.subject=b.s '
+                                    'AND q.variant=b.v AND q.range_key=b.r AND q.change_revision=b.n AND q.active IS NULL')
                                 while True:
-                                    batch=selected.fetchmany(500)
+                                    batch=selected.fetchmany(128)
                                     if not batch:break
                                     check()
-                                    c.execute(delete,[{'s':entry.source,'d':entry.native,'sub':row['s'],'v':row['v'],'r':row['r'],'n':row['n']} for row in batch])
+                                    from .values import control_json
+                                    c.execute(delete,{'s':entry.source,'d':entry.native,
+                                        'batch':control_json([dict(row) for row in batch])})
                                 remaining=c.execute(text('SELECT count(*) FROM data_store_source_ranges WHERE source=:s AND dataset=:d'),{'s':entry.source,'d':entry.native}).scalar_one()
                                 status['incremental']=dict(status.get('incremental',{}),version=1,contract=digest(entry.spec.descriptor()),
                                     remaining_ranges=remaining,bootstrap_complete=not remaining,
@@ -203,6 +228,13 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         # unresolved quality. No complete/qualified flag is changed.
                     return {'entry_id':entry.id,'complete':complete,'reason':None if complete else 'CURRENT_SOURCE_MISMATCH',
                         'generation':generation,**counts,'seconds':round(time.monotonic()-started,3),'current_files_changed':False}
-                except sqlite3.Error as error:
-                    raise DataStoreError('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL else 'FILE_INVALID') from None
+                except BaseException as error:
+                    # Bounded counters identify the failed phase without leaking
+                    # source keys, payloads, SQL, paths or exception messages.
+                    if isinstance(error,sqlite3.Error):
+                        error=DataStoreError('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL else 'FILE_INVALID')
+                        error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3))
+                        raise error from None
+                    error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3))
+                    raise
                 finally:db.close();space.discard=True

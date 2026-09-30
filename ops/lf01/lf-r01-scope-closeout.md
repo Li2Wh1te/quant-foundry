@@ -30,5 +30,19 @@ acknowledged, in the same transaction as the coverage receipt. Late commits and
 active continuations remain queued. Shared full-coverage/read/audit gates still
 reject unresolved issues and queues.
 
+A transactional, trigger-maintained inventory keeps exact physical and member
+counts in one row per dataset; the physical capacity remains unchanged. The additive migration counts existing issues
+under a writer-excluding lock; failed transactions roll back inventory deltas.
+Logical issue counts and independent audit still expand the actual records.
+Compaction leaves identical physical records untouched and splits large exact
+member groups at the existing per-record JSON boundary. Partition pagination
+uses a compound scope/key index.
+
+Verification's fingerprint SQLite file is disposable, never resumed as a sealed
+proof. It uses bounded batched commits without syncing each individual source
+point, and native scalar Tushare rows use bounded cursor pages. Range acknowledgements
+are batched with the same exact revision and inactive-work predicates. All original
+file/schema/content checks and the atomic final coverage receipt remain required.
+
 Validation uses synthetic originals, real isolated PostgreSQL and supported local
 filesystems. Production operational evidence stays outside commits.

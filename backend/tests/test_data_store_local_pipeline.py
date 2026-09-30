@@ -245,8 +245,9 @@ def test_additive_D02_migration_executes_without_touching_existing_kernel(store,
     mod=importlib.util.module_from_spec(spec);spec.loader.exec_module(mod)
     with store.catalog.engine.begin() as c:
         monkeypatch.setattr(mod.op,'execute',lambda statement:c.exec_driver_sql(statement))
+        before=set(inspect(c).get_table_names())
         mod.upgrade()
-        assert len(inspect(c).get_table_names())==7
+        assert set(inspect(c).get_table_names())==before|{'data_store_entry_status'}
         c.execute(text("INSERT INTO data_store_entry_status (entry_id,summary_json) VALUES ('E01','{}')"))
         monkeypatch.setattr(mod.op,'get_bind',lambda:c)
         with pytest.raises(RuntimeError):mod.downgrade()

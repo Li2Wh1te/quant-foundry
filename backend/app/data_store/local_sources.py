@@ -332,12 +332,12 @@ class NativeSources:
                 when = c.execute(text('SELECT transaction_timestamp()')).scalar_one()
                 yield c, when
 
-    def _rows(self, c, table, where='', params=None, order=''):
+    def _rows(self, c, table, where='', params=None, order='', *, fetch_rows=1, payload_bytes=None):
         # Caller table and clauses originate exclusively in this module.
         sql = (f'SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:payload_budget '
                f'THEN row_to_json(t)::text ELSE NULL END FROM {table} t {where} {order}')
-        result = c.execution_options(stream_results=True, yield_per=1, max_row_buffer=1).execute(
-            text(sql),{**(params or {}),'payload_budget':self.limits.payload_bytes})
+        result = c.execution_options(stream_results=True, yield_per=fetch_rows, max_row_buffer=fetch_rows).execute(
+            text(sql),{**(params or {}),'payload_budget':payload_bytes or self.limits.payload_bytes})
         try:
             for (encoded,) in result:
                 self._check()
@@ -355,7 +355,13 @@ class NativeSources:
                     table, column = TABLES[entry.native]
                     where = f'WHERE t.{column}=:source' if column else ''
                     # Server cursor, no ORM materialization of the full table.
-                    for row in self._rows(c, table, where, {'source':'tushare'}):
+                    # These two reviewed native tables contain bounded scalar market
+                    # rows. Fetch at most 1000 x 64 KiB, avoiding one network
+                    # round trip per point without buffering large THS payloads.
+                    flat=entry.native in ('etf_daily','etf_adjustment_factors')
+                    for row in self._rows(c, table, where, {'source':'tushare'},
+                            fetch_rows=self.limits.page_rows if flat else 1,
+                            payload_bytes=min(self.limits.payload_bytes,65536) if flat else None):
                         self.summary['source_rows'] += 1
                         if not entry.business:
                             continue

@@ -72,6 +72,8 @@ def database():
         for statement in DDL.split(';'):
             if statement.strip():
                 c.exec_driver_sql(statement)
+        from app.data_store.issue_accounting import install
+        install(c)
     engine = make_engine(schema)
     yield engine, schema
     engine.dispose()
@@ -601,18 +603,24 @@ def test_catalog_metadata_matches_frozen_ddl(database):
     from sqlalchemy import MetaData
     from app.data_store.tables import metadata
 
-    # The fixture deliberately creates D01's frozen six-table schema. Check it
-    # without rewriting the historical DDL to include D02's independent table.
+    # Remove later derived accounting for the historical D01 comparison, then
+    # apply the real additive revisions. Never rewrite the frozen six-table DDL.
     frozen_metadata = MetaData()
     for table in metadata.sorted_tables:
-        if table.name != 'data_store_entry_status':
+        if table.name not in ('data_store_entry_status','data_store_issue_totals'):
             table.to_metadata(frozen_metadata)
+    for index in tuple(frozen_metadata.tables['data_store_issues'].indexes):
+        if index.name=='ix_data_store_issues_scope_page':
+            frozen_metadata.tables['data_store_issues'].indexes.remove(index)
     assert len(frozen_metadata.tables) == 6
-    assert len(metadata.tables) == 7
+    assert len(metadata.tables) == 8
     migration = import_module('app.db.migrations.versions.20261006_01_local_entry_status')
     assert migration.down_revision == '20261005_01'
     with database[0].begin() as c:
-        # Both checks use the fixture's private schema, never shared/public.
+        # All checks use the fixture's private schema, never shared/public.
+        inventory=import_module('app.db.migrations.versions.20261011_01_current_issue_totals')
+        with Operations.context(MigrationContext.configure(c)):
+            inventory.downgrade()
         options = {'compare_type': True, 'compare_server_default': True}
         context = MigrationContext.configure(c, opts=options)
         assert compare_metadata(context, frozen_metadata) == []
@@ -620,6 +628,7 @@ def test_catalog_metadata_matches_frozen_ddl(database):
         # which would hide a mismatch between deployed DDL and current models.
         with Operations.context(context):
             migration.upgrade()
+            inventory.upgrade()
         context = MigrationContext.configure(c, opts=options)
         assert compare_metadata(context, metadata) == []
 
@@ -724,6 +733,9 @@ def test_new_migration_only_downgrades_completely_unused_tables(database):
     engine=database[0]
     with engine.begin() as c:
         migration.op=Operations(MigrationContext.configure(c))
+        from importlib import import_module
+        with Operations.context(MigrationContext.configure(c)):
+            import_module('app.db.migrations.versions.20261011_01_current_issue_totals').downgrade()
         migration.downgrade()
         assert not any(t.startswith('data_store_') for t in inspect(c).get_table_names())
         migration.upgrade()
