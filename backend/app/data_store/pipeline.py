@@ -149,45 +149,49 @@ def _issue_from(record, partition, blocking):
 
 
 def _partition_issues(store,entry,partition,spool):
-    additions=[];resolved={};size=0
+    from .issue_sets import members,pack,record
+    logical={};prior={};resolved={};count=0
+    # These are exact pending objects, never samples or inferred date ranges.
     for rec,blocking,fixed in spool.problem_records(partition):
-        issue=_issue_from(rec,partition,blocking)
         if not fixed:
-            size+=len(issue.target_json.encode())+len(issue.resolution_json.encode())+len(issue.key)+len(issue.scope)+len(issue.reason)+len(issue.evidence_token)
-            if len(additions)>=MAX_ISSUE_CHANGES or size>MAX_ISSUE_CHANGE_BYTES:
-                raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
-            additions.append(issue)
-    # Bound every read by the kernel's issue policy. Paging does not silently
-    # truncate a large unresolved set and unrelated targets are never cleared.
-    after=''; old_count=0
+            issue=_issue_from(rec,partition,blocking);logical[issue.key]=record(issue)
+            if len(logical)>MAX_ISSUE_CHANGES:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+    after=''
     while True:
         page=store.catalog.issues(entry.spec.name,scope=_scope(partition),limit=500,after=after)
-        for old in page:
-            old_count+=1
-            if old_count>store.limits.issue_count: raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
-            target=json.loads(old['target_json'])
-            if target.get('scope_version')!='object-key-v1': continue
-            prefix=target.get('prefix',[])
-            if len(prefix)==3:
-                winner=spool.db.execute('SELECT * FROM objects WHERE k=?',
-                                       (entry.spec.key_bytes(tuple(prefix)),)).fetchone()
-                if (winner and winner['validated'] and winner['state']!='invalid' and
-                        winner['g']==target.get('group') and winner['n']>=int(target['order'])):
-                    resolved[old['issue_key']]=old['evidence_token']
-            elif len(prefix)==2:
-                winner=spool.db.execute('SELECT * FROM scopes WHERE r=? AND s=?',tuple(prefix)).fetchone()
-                if (winner and winner['g']==target.get('group') and winner['n']>=int(target['order'])):
-                    resolved[old['issue_key']]=old['evidence_token']
-        # Bound the retained delta while paging old metadata, rather than
-        # materializing an entire unresolved partition before checking it.
-        validate_issue_changes(additions,resolved)
-        if len(page)<500: break
+        for physical in page:
+            target=json.loads(physical['target_json'])
+            if target.get('scope_version') not in ('object-key-v1','object-key-set-v1'):continue
+            resolved[physical['issue_key']]=physical['evidence_token']
+            for old in members(physical):
+                count+=1
+                if count>MAX_ISSUE_CHANGES:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+                prior[old['issue_key']]=old;target=json.loads(old['target_json']);prefix=target.get('prefix',[])
+                fixed=False
+                if len(prefix)==3:
+                    winner=spool.db.execute('SELECT * FROM objects WHERE k=?',(entry.spec.key_bytes(tuple(prefix)),)).fetchone()
+                    fixed=bool(winner and winner['validated'] and winner['state']!='invalid' and
+                               winner['g']==target.get('group') and winner['n']>=int(target['order']))
+                elif len(prefix)==2:
+                    winner=spool.db.execute('SELECT * FROM scopes WHERE r=? AND s=?',tuple(prefix)).fetchone()
+                    fixed=bool(winner and winner['g']==target.get('group') and winner['n']>=int(target['order']))
+                if not fixed and old['issue_key'] not in logical:logical[old['issue_key']]=old
+                elif old['issue_key'] in logical:
+                    logical[old['issue_key']]=record(Issue(old['issue_key'],_scope(partition),logical[old['issue_key']]['reason'],
+                        logical[old['issue_key']]['evidence_token'],json.loads(logical[old['issue_key']]['target_json']),
+                        json.loads(logical[old['issue_key']]['resolution_json'])),old)
+        if len(page)<500:break
         after=page[-1]['issue_key']
-    # A concurrently changed evidence token is never cleared: the kernel checks it.
-    for issue in additions:
-        resolved.pop(issue.key,None)
-    validate_issue_changes(additions,resolved)
-    return tuple(additions),resolved
+    additions=pack(logical.values())
+    # Physical regrouping is not a resolved business problem. Keep these counts
+    # separate from the token-fenced catalog delta used by the atomic commit.
+    class Changes(dict):pass
+    changes=Changes(resolved)
+    changes.resolved_objects=len(set(prior)-set(logical))
+    changes.new_objects=len(set(logical)-set(prior))
+    changes.blocking_objects=sum(json.loads(r['target_json']).get('blocking',True) for r in logical.values())
+    validate_issue_changes(additions,changes)
+    return additions,changes
 
 
 def _commit_partition(store,entry,partition,spool,options,cancelled):
@@ -225,8 +229,8 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
                 complete=True,source_check=lambda current:(current['revision'] if current else 0)==revision,
                 cancelled=cancelled,issues=issues,resolved=resolved)
     return {'partition':partition,'generation':result.generation,'changed':result.changed,
-            'idempotent':result.idempotent,'new_issues':len(issues),'resolved':len(resolved),
-            'current_blocked':sum(json.loads(i.target_json).get('blocking',True) for i in issues),
+            'idempotent':result.idempotent,'new_issues':getattr(resolved,'new_objects',len(issues)),'resolved':getattr(resolved,'resolved_objects',len(resolved)),
+            'current_blocked':getattr(resolved,'blocking_objects',sum(json.loads(i.target_json).get('blocking',True) for i in issues)),
             'cleanup_pending':result.cleanup_pending,'metrics':asdict(result.metrics)}
 
 
@@ -500,8 +504,8 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
             summary['state']='incomplete';summary['reason']='PASS_BUDGET_EXCEEDED'
         else:
             with store.catalog.transaction() as c:
-                issue_count=c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
-                                      {'d':entry.spec.name}).scalar_one()
+                from .issue_sets import logical_count
+                issue_count=logical_count(c,entry.spec.name)
             summary['unresolved_issues']=issue_count
             summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['scan_normalized_units'] else 'processed'
             summary['qualified']=not issue_count and not summary.get('overflow_restriction',{}).get('blocking_objects')

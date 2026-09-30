@@ -1,6 +1,8 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'SOURCE_RANGES_BLOCKED':'来源采集仍失败，相关范围保留待处理，其余范围已继续。',
+    'CURRENT_SOURCE_MISMATCH':'本地来源与当前数据尚未完全对齐，完整覆盖核验未通过。',
     'LOCAL_UPDATE_BUDGET_EXCEEDED': '本次本地更新达到工作预算，未完成入口将在后续继续处理。',
     'DATA_STORE_REBUILDING': '数据底座正在维护或重建，当前数据暂不可读取。',
     'DATA_STORE_NOT_INITIALIZED': '当前数据目录尚未初始化，请先完成本地初始化。',

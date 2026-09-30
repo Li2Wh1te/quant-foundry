@@ -128,7 +128,9 @@ def test_I04_scoped_delete_sparse_empty_and_failed_source(ready):
     with Session(ready.catalog.engine) as s,s.begin():
         repo=CollectionRepository(s);old=repo.read('stock_daily','000001.SZ','default',with_data=False)
         repo.fail('stock_daily','000001.SZ','default',expected=old.revision,kind='temporary',now=NOW+timedelta(seconds=2))
-    with pytest.raises(NativeInputError,match='最近采集'):update(ready)
+    blocked=update(ready)
+    assert not blocked['complete'] and blocked['reason']=='SOURCE_RANGES_BLOCKED'
+    assert blocked['incremental']['blocked_ranges']==1
     assert obj(ready)['found']
     publish(ready.catalog.engine,now=NOW+timedelta(seconds=3));assert update(ready)['complete']
 

@@ -160,8 +160,8 @@ class CurrentStore:
             state = self.catalog.dataset(spec.name)
             self._spec_current(spec, state)
             with self.catalog.transaction() as c:
-                issue_count = c.execute(text('SELECT count(*) FROM data_store_issues WHERE dataset=:d'),
-                                        {'d': spec.name}).scalar_one()
+                from .issue_sets import logical_count
+                issue_count = logical_count(c,spec.name)
                 formats = c.execute(text('SELECT DISTINCT contract_json FROM data_store_files '
                                          'WHERE dataset=:d LIMIT 129'), {'d': spec.name}).scalars().all()
                 if len(formats) > 128:

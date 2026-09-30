@@ -291,20 +291,22 @@ def get_issues(
     params = {"dataset": dataset, "limit": limit, "offset": offset}
     where = "WHERE (:dataset IS NULL OR dataset=:dataset OR dataset IS NULL)"
     union = (
-        "SELECT dataset,scope_key,reason,last_seen AS updated_at,'current' AS kind "
+        "SELECT dataset,scope_key,reason,last_seen AS updated_at,'current' AS kind, "
+        "CASE WHEN target_json::jsonb->>'scope_version'='object-key-set-v1' THEN jsonb_array_length(target_json::jsonb->'members') ELSE 1 END AS affected_objects "
         "FROM data_store_issues " + where + " UNION ALL "
         "SELECT dataset,scope_key,'LEGACY_RESTRICTION' AS reason,"
-        "captured_at AS updated_at,'legacy' AS kind "
+        "captured_at AS updated_at,'legacy' AS kind,1 AS affected_objects "
         "FROM data_store_legacy_restrictions " + where
     )
     total = session.execute(text("SELECT count(*) FROM (" + union + ") AS issues"), params).scalar_one()
+    affected = session.execute(text("SELECT coalesce(sum(affected_objects),0) FROM (" + union + ") AS issues"), params).scalar_one()
     rows = session.execute(text(
         "SELECT * FROM (" + union + ") AS issues "
         "ORDER BY updated_at DESC,dataset,scope_key LIMIT :limit OFFSET :offset"
     ), params).mappings().all()
     return {
         "items": [{**dict(row), "updated_at": row["updated_at"].isoformat()} for row in rows],
-        "total": total,
+        "total": total, "affected_objects": affected,
         "next_offset": offset + limit if offset + limit < total else None,
     }
 
