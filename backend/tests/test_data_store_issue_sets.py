@@ -135,3 +135,34 @@ def test_verified_bootstrap_does_not_erase_concurrent_pending_change(ready):
     with ready.catalog.transaction() as c:
         assert c.execute(text("SELECT count(*) FROM data_store_source_ranges WHERE source='tushare' AND dataset='etf_daily'")).scalar_one()==1
         assert check_coverage(c,e,__import__('app.data_store.pipeline',fromlist=['read_entry_status']).read_entry_status(ready,e.id))['reason']=='CURRENT_INPUT_PENDING'
+
+
+def test_empty_revision_fence_can_downgrade_and_upgrade(ready,monkeypatch):
+    from importlib import import_module
+    migration=import_module('app.db.migrations.versions.20261010_01_current_issue_lookup')
+    with ready.catalog.engine.begin() as c:
+        monkeypatch.setattr(migration.op,'get_bind',lambda:c)
+        migration.downgrade()
+        assert c.execute(text('SELECT version FROM data_store_capture_version')).scalar_one()==2
+        assert not c.execute(text("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='data_store_source_ranges' AND column_name='change_revision')")).scalar_one()
+        migration.install(c)
+        assert c.execute(text('SELECT version FROM data_store_capture_version')).scalar_one()==3
+
+
+@pytest.mark.parametrize('kind',['pending_range','issue_members','verification_receipt'])
+def test_revision_fence_refuses_downgrade_of_persisted_evidence(ready,monkeypatch,kind):
+    from importlib import import_module
+    migration=import_module('app.db.migrations.versions.20261010_01_current_issue_lookup')
+    if kind=='pending_range':publish(ready.catalog.engine)
+    elif kind=='issue_members':
+        e,u,part=seed_issues(ready);compact_entry(ready,e)
+    else:
+        from tests.test_data_store_incremental import bar
+        from app.data_store.verify_coverage import verify_existing
+        from app.data_store.local_sources import NativeSources
+        bar(ready.catalog.engine);update(ready,'E70')
+        assert verify_existing(ready,BY_ID['E70'],NativeSources(ready.catalog.engine))['complete']
+    with ready.catalog.engine.begin() as c:
+        monkeypatch.setattr(migration.op,'get_bind',lambda:c)
+        with pytest.raises(RuntimeError,match='contains persisted evidence'):migration.downgrade()
+        assert c.execute(text('SELECT version FROM data_store_capture_version')).scalar_one()==3

@@ -31,6 +31,23 @@ def upgrade():install(op.get_bind())
 
 
 def downgrade():
-    # Consumers may already depend on the captured revision fence. An unsafe
-    # rollback must not quietly erase this concurrency evidence.
-    raise RuntimeError('Current source revision fence requires compatible rollback')
+    from importlib import import_module
+    c=op.get_bind()
+    previous=import_module('app.db.migrations.versions.20261008_01_current_source_ranges')
+    c.execute(text("SET LOCAL lock_timeout='5s'"))
+    for table in previous.TABLES:c.execute(text(f'LOCK TABLE {table} IN SHARE ROW EXCLUSIVE MODE'))
+    # Empty installations can round-trip normally. Captured work, issue sets
+    # and verification receipts require a compatible application rollback;
+    # removing their revision/member interpretation would erase evidence.
+    persisted=c.execute(text("SELECT EXISTS(SELECT 1 FROM data_store_source_ranges) "
+        "OR EXISTS(SELECT 1 FROM data_store_issues WHERE target_json::jsonb->>'scope_version'='object-key-set-v1') "
+        "OR EXISTS(SELECT 1 FROM data_store_entry_status WHERE summary_json::jsonb#>>'{full_coverage,boundary_kind}'='verified_native_current_fingerprints')")).scalar_one()
+    if persisted:raise RuntimeError('Current source revision fence contains persisted evidence; requires compatible rollback')
+    ddl=previous.DDL.split('CREATE FUNCTION data_store_mark_source_range()',1)[1].split('CREATE FUNCTION data_store_no_source_truncate()',1)[0]
+    ddl=('CREATE OR REPLACE FUNCTION data_store_mark_source_range()'+ddl).replace(
+        "('stock_daily','etf_daily','index_daily')",
+        "('stock_daily','etf_daily','index_daily','fund_manager_performance','fund_nav')")
+    c.execute(text(ddl))
+    c.execute(text('DROP INDEX IF EXISTS ix_data_store_issues_global'))
+    c.execute(text('ALTER TABLE data_store_source_ranges DROP COLUMN change_revision'))
+    c.execute(text('UPDATE data_store_capture_version SET version=2 WHERE singleton=1'))
