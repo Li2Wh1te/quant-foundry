@@ -144,7 +144,7 @@ def test_empty_revision_fence_can_downgrade_and_upgrade(ready,monkeypatch):
         monkeypatch.setattr(migration.op,'get_bind',lambda:c)
         migration.downgrade()
         assert c.execute(text('SELECT version FROM data_store_capture_version')).scalar_one()==2
-        assert not c.execute(text("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_name='data_store_source_ranges' AND column_name='change_revision')")).scalar_one()
+        assert not c.execute(text("SELECT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='data_store_source_ranges' AND column_name='change_revision')")).scalar_one()
         migration.install(c)
         assert c.execute(text('SELECT version FROM data_store_capture_version')).scalar_one()==3
 
