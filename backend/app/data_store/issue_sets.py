@@ -17,7 +17,14 @@ VERSION='object-key-set-v1'
 COUNT_SQL="CASE WHEN target_json::jsonb->>'scope_version'='object-key-set-v1' THEN greatest(1,jsonb_array_length(target_json::jsonb->'members')) ELSE 1 END"
 
 
-def logical_count(connection,dataset=None):
+def logical_count(connection,dataset=None,*,cached=False):
+    # Operational summaries use trigger-maintained member totals; an independent
+    # audit keeps the default actual-record expansion and detects real gaps.
+    if cached:
+        from .issue_accounting import check_enabled
+        check_enabled(connection)
+        return int(connection.execute(text('SELECT coalesce(sum(affected_objects),0) FROM data_store_issue_totals '
+            'WHERE (CAST(:d AS text) IS NULL OR dataset=:d)'),{'d':dataset}).scalar_one())
     return int(connection.execute(text('SELECT coalesce(sum('+COUNT_SQL+'),0) FROM data_store_issues '
                                    'WHERE (CAST(:d AS text) IS NULL OR dataset=:d)'),{'d':dataset}).scalar_one())
 
@@ -77,13 +84,29 @@ def pack(rows):
     for identity,values in groups.items():
         values.sort(key=lambda r:r['issue_key'])
         scope,reason,partition,prefix,group=identity
-        target={'scope_version':VERSION,'partition':partition,'prefix':list(prefix),'group':group,
-                'blocking':any(json.loads(r['target_json']).get('blocking',True) for r in values),
-                'affected_objects':len(values),'members':[_member(r) for r in values]}
-        if len(values)<2 and not values[0].get('_set_key') or len(native_json(target).encode())>65536:
-            opaque.extend(values);continue
-        output.append(Issue('localset.'+digest(identity),scope,reason,digest(target),target,
-                            {'retry':'same_local_pipeline','proof':'validate_each_exact_member','affected_objects':len(values)}))
+        # One large subject can exceed a single JSON record. Split its exact
+        # members into deterministic bounded sets rather than giving up and
+        # retaining thousands of individual records. The logical denominator
+        # and original metadata are unchanged in every chunk.
+        header={'scope_version':VERSION,'partition':partition,'prefix':list(prefix),'group':group,
+                'blocking':False,'affected_objects':0,'members':[]}
+        allowance=65536-len(native_json(header).encode())-16
+        chunks=[];chunk=[];size=0
+        for row in values:
+            item=_member(row);n=len(native_json(item).encode())+1
+            if n>allowance:
+                opaque.append(row);continue
+            if chunk and (size+n>allowance or len(chunk)>=4096):
+                chunks.append(chunk);chunk=[];size=0
+            chunk.append((row,item));size+=n
+        if chunk:chunks.append(chunk)
+        for chunk in chunks:
+            if len(chunk)<2 and not chunk[0][0].get('_set_key'):
+                opaque.append(chunk[0][0]);continue
+            target={**header,'blocking':any(item['target'].get('blocking',True) for _,item in chunk),
+                    'affected_objects':len(chunk),'members':[item for _,item in chunk]}
+            output.append(Issue('localset.'+digest([identity,chunk[0][0]['issue_key']]),scope,reason,digest(target),target,
+                                {'retry':'same_local_pipeline','proof':'validate_each_exact_member','affected_objects':len(chunk)}))
     output.extend(Issue(r['issue_key'],r['scope_key'],r['reason'],r['evidence_token'],
                         json.loads(r['target_json']),json.loads(r['resolution_json'])) for r in opaque)
     validate_issue_changes(output,{})
@@ -117,10 +140,22 @@ def compact_entry(store,entry,cancelled=None):
                         if len(logical)>65536:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
                         packed=pack(logical)
                         if len(packed)>=len(originals):continue
-                        resolved={r['issue_key']:r['evidence_token'] for r in originals}
-                        validate_issue_changes(packed,resolved)
+                        # Opaque or already identical physical rows retain their
+                        # attempts/first/last timestamps. Deleting and reinserting
+                        # them would change evidence despite unchanged targets.
+                        unchanged=set()
+                        old_by_key={r['issue_key']:r for r in originals}
+                        for issue in packed:
+                            old=old_by_key.get(issue.key)
+                            if old and (old['scope_key'],old['reason'],old['evidence_token'],
+                                    json.loads(old['target_json']),json.loads(old['resolution_json'])) == (
+                                    issue.scope,issue.reason,issue.evidence_token,dict(issue.target),dict(issue.resolution)):
+                                unchanged.add(issue.key)
+                        resolved={r['issue_key']:r['evidence_token'] for r in originals if r['issue_key'] not in unchanged}
+                        additions=tuple(i for i in packed if i.key not in unchanged)
+                        validate_issue_changes(additions,resolved)
                         before=fingerprint(logical)
-                        store.catalog.change_issues(c,entry.spec.name,packed,resolved,check=lambda:None)
+                        store.catalog.change_issues(c,entry.spec.name,additions,resolved,check=lambda:None)
                         observed=c.execute(text('SELECT * FROM data_store_issues WHERE dataset=:d AND scope_key=:s ORDER BY issue_key'),{'d':entry.spec.name,'s':scope}).mappings().all()
                         expanded=[v for r in observed for v in members(r)]
                         if len(expanded)!=len(logical) or fingerprint(expanded)!=before:

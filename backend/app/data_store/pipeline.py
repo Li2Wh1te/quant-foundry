@@ -505,7 +505,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
         else:
             with store.catalog.transaction() as c:
                 from .issue_sets import logical_count
-                issue_count=logical_count(c,entry.spec.name)
+                issue_count=logical_count(c,entry.spec.name,cached=True)
             summary['unresolved_issues']=issue_count
             summary['state']='processed_with_issues' if issue_count else 'empty' if not summary['scan_normalized_units'] else 'processed'
             summary['qualified']=not issue_count and not summary.get('overflow_restriction',{}).get('blocking_objects')

@@ -140,6 +140,8 @@ def isolated(parent, url, limits, inject):
         for statement in DDL.split(';'):
             if statement.strip():
                 c.exec_driver_sql(statement)
+        from app.data_store.issue_accounting import install
+        install(c)
     engine = create_engine(url, connect_args={'options': f'-csearch_path={schema}', 'connect_timeout': 3})
     try:
         with tempfile.TemporaryDirectory(prefix='lfd01-bench-', dir=parent) as root:

@@ -63,6 +63,12 @@ issues = Table('data_store_issues', metadata, dataset_fk(),
     CheckConstraint('attempts > 0'), *bounded('target_json','resolution_json'))
 Index('ix_data_store_issues_scope', issues.c.dataset, issues.c.scope_key)
 
+issue_totals = Table('data_store_issue_totals', metadata,
+    C('dataset', String(128), ForeignKey('data_store_datasets.name', ondelete='RESTRICT'), primary_key=True),
+    C('physical_records', BigInteger, nullable=False), C('affected_objects', BigInteger, nullable=False),
+    CheckConstraint('physical_records >= 0'), CheckConstraint('affected_objects >= 0'))
+Index('ix_data_store_issues_scope_page', issues.c.dataset, issues.c.scope_key, issues.c.issue_key)
+
 garbage = Table('data_store_garbage', metadata,
     C('path', String(256), primary_key=True), dataset_fk(), C('byte_count', BigInteger, nullable=False),
     instant('not_before'), instant('retry_after'),

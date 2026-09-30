@@ -120,7 +120,7 @@ def main(argv=None):
                 from .verify_coverage import verify_existing
                 for e in selected:
                     try:result=verify_existing(store,e,native,seconds=args.pass_seconds,cancelled=lambda:cancelled[0])
-                    except (NativeInputError,DataStoreError) as error:result={'entry_id':e.id,'complete':False,'reason':error.code}
+                    except (NativeInputError,DataStoreError) as error:result={'entry_id':e.id,'complete':False,'reason':error.code,**getattr(error,'verification',{})}
                     output['entries'].append(result)
                 output['complete']=all(r['complete'] for r in output['entries'])
             elif args.command=='compact-issues':

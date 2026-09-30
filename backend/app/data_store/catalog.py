@@ -327,6 +327,8 @@ class Catalog:
     def change_issues(self, c, dataset: str, issues: tuple[Issue, ...],
                       resolved: Mapping[str, str], *, check=lambda: None):
         validate_issue_changes(issues,resolved)
+        from .issue_accounting import check_enabled
+        check_enabled(c)
         c.execute(text('SELECT singleton FROM data_store_runtime WHERE singleton=1 FOR UPDATE'))
         # Execute bounded parameter batches inside this SAME transaction. The
         # file directory, source checkpoint and all issue changes commit together;
@@ -349,7 +351,10 @@ class Catalog:
             c.execute(insert,[{'d':dataset,'k':issue.key,'s':issue.scope,'r':issue.reason,
                 'e':issue.evidence_token,'t':issue.target_json,'v':issue.resolution_json}
                 for issue in issues[offset:offset+256]])
-        total = c.execute(text('SELECT count(*) FROM data_store_issues')).scalar_one()
+        # Triggers account for inserts, token-fenced deletes and transaction
+        # rollback exactly. Summing at most one row per dataset avoids scanning
+        # every unresolved record for each otherwise small partition commit.
+        total = c.execute(text('SELECT coalesce(sum(physical_records),0) FROM data_store_issue_totals')).scalar_one()
         if total > self.limits.issue_count:
             raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
 

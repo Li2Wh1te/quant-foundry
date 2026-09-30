@@ -61,6 +61,8 @@ def main():
         with engine.begin() as c:
             for stmt in DDL.split(';'):
                 if stmt.strip(): c.exec_driver_sql(stmt)
+            from app.data_store.issue_accounting import install
+            install(c)
     with CurrentStore(engine,ROOT,cursor_key=KEY,limits=LIMITS,initialize=mode=='init') as st:
         if mode == 'init':
             for name in ('bars','other'):
