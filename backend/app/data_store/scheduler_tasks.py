@@ -1,6 +1,8 @@
 """One current local update task using the same bounded D02 pipeline as CLI."""
 from __future__ import annotations
 
+from uuid import UUID
+
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.orm import Session
 import structlog
@@ -14,6 +16,7 @@ from .adapters.canonical import NativeInputError
 from .availability import require_ready
 from .errors import DataStoreError
 from .local_sources import NativeSources, SourceLimits
+from .handoff import scheduler_admission
 from .pipeline import PipelineOptions, run_local
 from .storage import CurrentStore
 
@@ -37,6 +40,7 @@ class LocalUpdateParameters(BaseModel):
     maximum_passes: int = Field(default=256, ge=1, le=4096)
     pass_seconds: int = Field(default=300, ge=1, le=3600)
     pipeline_spill_bytes: int | None = Field(default=None, ge=1, le=64*1024**3)
+    handoff_epoch: UUID | None = None
 
     @model_validator(mode="after")
     def validate_datasets(self) -> "LocalUpdateParameters":
@@ -44,10 +48,21 @@ class LocalUpdateParameters(BaseModel):
             dataset not in BUSINESS for dataset in self.datasets
         ):
             raise ValueError("datasets must be unique current catalog identifiers")
+        if self.handoff_epoch is not None and self.pass_seconds > 840:
+            raise ValueError('Cooperative handoff requires a pass budget of at most 840 seconds')
         return self
 
 
 def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dict:
+    settings = get_settings()
+    epoch = str(parameters.handoff_epoch) if parameters.handoff_epoch is not None else None
+    # Admission encloses the entire handler, including store/resource teardown
+    # and handler result creation. This opt-in never pauses an old process.
+    with scheduler_admission(settings.data_store_root, epoch):
+        return _update_local(context, parameters)
+
+
+def _update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dict:
     engine = get_engine()
     with Session(engine) as session:
         availability = require_ready(session)

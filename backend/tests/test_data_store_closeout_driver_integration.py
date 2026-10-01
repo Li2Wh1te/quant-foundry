@@ -2,6 +2,7 @@
 from datetime import UTC, datetime, timedelta
 import json
 import os
+from uuid import uuid4
 
 import pytest
 
@@ -17,21 +18,28 @@ pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1',
 def test_cli_drains_real_bounded_native_work_without_claiming_acceptance(ready, monkeypatch, tmp_path, capsys):
     from app.data_store.closeout import main
     from app.db import session
+    from app.data_store.handoff import HandoffGate
     many_calendar(ready, 3)
     monkeypatch.setattr(session, 'get_engine', lambda: ready.catalog.engine)
     monkeypatch.setenv('QF_CURSOR_SIGNING_KEY', KEY.decode())
-    state = tmp_path / 'closeout.json'
+    epoch, run_id = str(uuid4()), str(uuid4())
+    with HandoffGate(ready.files.root) as gate:
+        gate.adopt(epoch)
+        state = gate.state_path
     deadline = (datetime.now(UTC) + timedelta(seconds=60)).isoformat()
     args = ['--root', str(ready.files.root), '--state', str(state), '--entry', B.id,
-            '--deadline', deadline, '--max-passes', '1', '--max-attempts', '8']
+            '--deadline', deadline, '--max-passes', '1', '--max-attempts', '8',
+            '--handoff-epoch', epoch, '--run-id', run_id]
     assert main(args) == 0
     report = json.loads(capsys.readouterr().out)
     assert report['processing_finished'] and not report['acceptance_complete']
-    saved = json.loads(state.read_text())
+    journal = json.loads(state.read_text())
+    assert journal['phase'] == 'scheduler' and journal['run']['terminal']
+    saved = journal['run']['checkpoint']
     assert saved['jobs'][B.id]['status'] == 'done'
     assert saved['jobs'][B.id]['attempts'] >= 3
     assert not saved['supplier_collection_executed']
     assert len(calendar_rows(ready, B)) == 3
     assert main(args + ['--resume']) == 0
     capsys.readouterr()
-    assert json.loads(state.read_text())['jobs'][B.id]['attempts'] == saved['jobs'][B.id]['attempts']
+    assert json.loads(state.read_text())['run']['checkpoint']['jobs'][B.id]['attempts'] == saved['jobs'][B.id]['attempts']
