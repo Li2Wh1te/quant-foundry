@@ -220,8 +220,19 @@ def validate_bars(rows: list[dict], start: date, end: date, date_field="date_ms"
             value = row.get(field)
             if value is None and date_field == "nav_date":
                 continue
-            if isinstance(value, bool) or not isinstance(value, (int, Decimal)) or value < 0:
-                raise CollectionError("行情或净值存在缺失、负值或非法数值。")
+            # Report only a fixed field name, validated date and locally
+            # authored category. Never interpolate provider values: those can
+            # contain reflected credentials or arbitrarily large payloads.
+            problem = (
+                "缺失" if value is None else
+                "布尔类型" if isinstance(value, bool) else
+                "非数值类型" if not isinstance(value, (int, Decimal)) else
+                "非有限数值" if isinstance(value, Decimal) and not value.is_finite() else
+                "负值" if value < 0 else None
+            )
+            if problem:
+                raise CollectionError(
+                    f"行情或净值存在缺失、负值或非法数值：日期 {day.isoformat()}，字段 {field}，原因 {problem}。")
         if date_field == "nav_date":
             if all(row.get(f) is None for f in fields):
                 raise CollectionError("净值记录未提供任何净值。")

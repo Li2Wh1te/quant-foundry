@@ -265,6 +265,29 @@ def test_invalid_ohlc_and_duplicates_are_rejected():
             validate_bars(rows, day, day)
 
 
+@pytest.mark.parametrize("value,reason", [
+    (None, "缺失"), (True, "布尔类型"), (-1, "负值"),
+    ("private-key-do-not-echo", "非数值类型"),
+    (1.5, "非数值类型"), (Decimal("NaN"), "非有限数值"),
+    (Decimal("Infinity"), "非有限数值"),
+])
+def test_bar_failure_identifies_safe_field_date_and_category(value, reason):
+    day = date(2026, 9, 1)
+    with pytest.raises(CollectionError) as raised:
+        validate_bars([{**bar(day), "volume": value}], day, day)
+    message = str(raised.value)
+    assert "2026-09-01" in message and "volume" in message and reason in message
+    assert "private-key" not in message
+
+
+def test_nav_diagnostic_preserves_nullable_contract_and_reports_invalid_field():
+    day = date(2026, 9, 1)
+    row = {"nav_date": date_ms(day), "unit_nav": None, "adj_nav": Decimal("1.2")}
+    validate_bars([row], day, day, "nav_date")
+    with pytest.raises(CollectionError, match="adj_nav.*负值"):
+        validate_bars([{**row, "adj_nav": -1}], day, day, "nav_date")
+
+
 def test_etf_revision_refetches_full_history_before_publishing():
     old = {"item": [bar(date(2020, 1, 2)), bar(date(2026, 9, 1))]}
     client = Mock(interval_ms=0)

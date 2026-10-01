@@ -72,8 +72,24 @@ class TransportTest(unittest.TestCase):
                 with self.assertRaises(transport.TonghuashunError) as raised:
                     self.client.request("meta.tickers.list")
                 self.assertEqual(raised.exception.kind, kind)
+                self.assertEqual(raised.exception.business_code, code)
+                self.assertIn(f"供应商业务码：{code}", str(raised.exception))
                 self.assertNotIn("fixture-private-key", str(raised.exception))
                 self.assertEqual(get.call_count, 3 if kind in transport.RETRYABLE else 1)
+
+    def test_error_diagnostics_never_echo_unknown_or_mismatched_codes(self):
+        for code in (9999, "fixture-private-key", True, 2001):
+            error = transport.TonghuashunError("invalid_parameters", business_code=code)
+            self.assertIsNone(error.business_code)
+            self.assertNotIn("供应商业务码", str(error))
+            self.assertNotIn("fixture-private-key", str(error))
+        with patch.object(transport.requests, "get", return_value=response({
+            "code": 9999, "message": "fixture-private-key", "data": "private-payload"})):
+            with self.assertRaises(transport.TonghuashunError) as raised:
+                self.client.request("meta.tickers.list")
+            self.assertIsNone(raised.exception.business_code)
+            self.assertNotIn("9999", str(raised.exception))
+            self.assertNotIn("private", str(raised.exception))
 
     def test_http_and_business_rate_limits_back_off_and_recover(self):
         for limited in (response({}, 429, {"Retry-After": "4"}), response({"code": 4001}, headers={"Retry-After": "4"})):
