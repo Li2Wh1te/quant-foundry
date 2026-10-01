@@ -55,8 +55,15 @@ def _reject_json_constant(value: str):
 class TonghuashunError(SourceError):
     """No vendor message, response body, URL, or credential enters this error."""
 
-    def __init__(self, kind: str, *, retry_after: float = 0):
+    def __init__(self, kind: str, *, retry_after: float = 0, business_code: int | None = None):
         message, status = ERRORS[kind]
+        # Only retain a documented numeric code matching our fixed category.
+        # Unknown numbers, booleans and vendor text cannot enter persisted
+        # errors; the latter may reflect credentials or response payloads.
+        self.business_code = (business_code if type(business_code) is int
+                              and BUSINESS_ERRORS.get(business_code) == kind else None)
+        if self.business_code is not None:
+            message += f"（供应商业务码：{self.business_code}）"
         super().__init__(message, status_code=status)
         self.kind = kind
         self.retry_after = retry_after
@@ -204,7 +211,8 @@ class TonghuashunClient:
                 if not isinstance(body, dict) or type(body.get("code")) is not int:
                     raise TonghuashunError("invalid_response")
                 if body["code"] != 0:
-                    raise TonghuashunError(BUSINESS_ERRORS.get(body["code"], "rejected"), retry_after=retry_after)
+                    raise TonghuashunError(BUSINESS_ERRORS.get(body["code"], "rejected"),
+                        retry_after=retry_after, business_code=body["code"])
                 if path in ("/api/fund/quota/summary", "/api/fund/quota/list") and isinstance(body.get("data"), list):
                     # QDII has a documented array envelope. Preserve its shape
                     # explicitly when adapting to the collection container.
