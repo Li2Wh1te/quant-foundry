@@ -176,21 +176,36 @@ class Acquisition:
             # A calendar-day cushion avoids assuming a fixed holiday length.
             # The last ten stored trading dates additionally span long closures.
             start = min(provider_date(old_rows[max(0, len(old_rows) - 10)]["date_ms"]), end - timedelta(days=30))
-        rows, envelopes, by_date = [], [], {}
-        for a, b in windows(start, end, spec.years, overlap_days=30 if spec.adjust == "forward" else 0):
-            params = {"thscode": subject, "interval": "1d", "start": date_ms(a), "end": date_ms(b)}
-            if spec.key == "stock_daily":
-                params["adjust"] = "none"
-            data = self.read(spec.interface, params)
-            if data.get("thscode", subject) != subject:
-                raise CollectionError("历史行情响应标的与请求不一致。")
-            part = items(data, allow_empty=True)
-            validate_bars(part, a, b)
-            for row in part:
-                if row["date_ms"] in by_date and by_date[row["date_ms"]] != row:
-                    raise CollectionError("分段行情的重叠日期不一致，未发布可能混合复权基准的版本。")
-                by_date[row["date_ms"]] = row
-            envelopes.append({k: v for k, v in data.items() if k != "item"})
+        envelopes, by_date = [], {}
+
+        def read_windows(request_years):
+            # Every response retains its real returned-key receipt and passes
+            # the same scope, date and value validation before publication.
+            for a, b in windows(start, end, request_years, overlap_days=30 if spec.adjust == "forward" else 0):
+                params = {"thscode": subject, "interval": "1d", "start": date_ms(a), "end": date_ms(b)}
+                if spec.key == "stock_daily":
+                    params["adjust"] = "none"
+                data = self.read(spec.interface, params)
+                if data.get("thscode", subject) != subject:
+                    raise CollectionError("历史行情响应标的与请求不一致。")
+                part = items(data, allow_empty=True)
+                validate_bars(part, a, b)
+                for row in part:
+                    if row["date_ms"] in by_date and by_date[row["date_ms"]] != row:
+                        raise CollectionError("分段行情的重叠日期不一致，未发布可能混合复权基准的版本。")
+                    by_date[row["date_ms"]] = row
+                envelopes.append({k: v for k, v in data.items() if k != "item"})
+
+        read_windows(spec.years)
+        if not by_date and spec.key == "index_daily" and (end - start).days >= 365:
+            # The index endpoint can return an empty successful wide window
+            # despite real bars in annual windows. Re-read the entire original
+            # range in disjoint annual segments; a recent-only fallback would
+            # silently shorten the historical scope. CollectionControl keeps
+            # its existing request/time budgets and durable response journal,
+            # so a yield resumes these exact segments without publishing a
+            # partial head. A genuinely empty range still fails below.
+            read_windows(1)
         rows = [by_date[key] for key in sorted(by_date)]
         if not rows:
             raise CollectionError("历史行情为空，尚不能确认该范围覆盖。")
