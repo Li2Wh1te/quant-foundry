@@ -515,3 +515,153 @@ def test_automatic_scope_uses_last_complete_directory_without_deleting_history(e
     assert c.request.call_args.args[1] == {'thscodes': '000001.SH'}
     assert collect('index_quote', CollectionParameters(subjects=['950084.SH']), c, engine, now=NOW)['subjects'] == 1
     assert c.request.call_args.args[1] == {'thscodes': '950084.SH'}
+
+def _index_empty_wide_client(days):
+    """Reproduce real index wide-window omission with valid annual responses."""
+    from app.data_ingestion.tonghuashun.contracts import provider_date
+    client = Mock(interval_ms=0)
+
+    def request(interface, params):
+        assert interface == DATASETS["index_daily"].interface
+        start, end = provider_date(params["start"]), provider_date(params["end"])
+        rows = [bar(day) for day in days if start <= day <= end] if (end - start).days < 365 else []
+        return reply(rows)
+
+    client.request.side_effect = request
+    return client
+
+
+def test_index_empty_wide_window_replays_entire_history_in_annual_segments():
+    from app.data_ingestion.tonghuashun.contracts import provider_date
+    days = [date(2017, 3, 1), date(2024, 10, 6), date(2026, 9, 3)]
+    client = _index_empty_wide_client(days)
+    acquisition = Acquisition(client)
+    result = acquisition.fetch(DATASETS["index_daily"], "000300.SH", CollectionParameters(), None, NOW)
+    assert result["item"] == [bar(day) for day in days]
+    assert result["requested_start"] == "2016-09-14"
+    assert result["requested_end"] == "2026-09-14"
+    assert result["coverage"] == "observed_rows_only"
+    annual = [call.args[1] for call in client.request.call_args_list if call.args[1]["end"] - call.args[1]["start"] <= 364 * 86400000]
+    # The final ordinary short tail is not part of the annual re-read.
+    annual = annual[1:]
+    assert provider_date(annual[0]["start"]) == date(2016, 9, 14)
+    assert provider_date(annual[-1]["end"]) == date(2026, 9, 14)
+    for previous, current in zip(annual, annual[1:]):
+        assert provider_date(current["start"]) == provider_date(previous["end"]) + timedelta(days=1)
+    assert all("adjust" not in call.args[1] for call in client.request.call_args_list)
+    assert all(request["key_receipt"] == "actual_returned_keys_v1" for request in acquisition.requests)
+    confirmed = {key for request in acquisition.requests for key in request["returned_keys"].get("date_ms", [])}
+    assert confirmed == {date_ms(day) for day in days}
+
+
+def test_index_empty_wide_fallback_publishes_actual_rows_and_receipts(engine):
+    seed(engine, [ticker("000300.SH", "a-share-index")])
+    with Session(engine) as session:
+        CollectionRepository(session).fail("index_daily", "000300.SH", "default", expected=0,
+            kind="invalid_data", now=NOW)
+        session.commit()
+    days = [date(2017, 3, 1), date(2024, 10, 6), date(2026, 9, 3)]
+    result = collect("index_daily", CollectionParameters(subjects=["000300.SH"]),
+        _index_empty_wide_client(days), engine, now=NOW)
+    assert result["succeeded"] == 1 and result["received"] == len(days)
+    with Session(engine) as session:
+        state = session.get(State, ("index_daily", "000300.SH", "default"))
+        assert state.status == "succeeded" and state.revision == 2 and state.error_kind is None
+        observation = session.get(Observation, state.observation_id)
+        assert observation.row_count == len(days)
+        requests = json.loads(observation.request_json)
+        assert all(request["key_receipt"] == "actual_returned_keys_v1" for request in requests)
+        previous = CollectionRepository(session).read("index_daily", "000300.SH", "default")
+        assert previous.data["item"] == [bar(day) for day in days]
+        assert previous.data["requested_start"] == "2016-09-14"
+
+
+def test_genuinely_empty_index_fallback_never_advances_success(engine):
+    seed(engine, [ticker("000300.SH", "a-share-index")])
+    client = _index_empty_wide_client([])
+    with pytest.raises(CollectionError):
+        collect("index_daily", CollectionParameters(subjects=["000300.SH"]), client, engine, now=NOW)
+    with Session(engine) as session:
+        state = session.get(State, ("index_daily", "000300.SH", "default"))
+        assert state.status == "failed" and state.error_kind == "invalid_data"
+        assert state.observation_id is None and state.succeeded_at is None
+        assert session.scalar(select(func.count()).select_from(Observation)) == 0
+    # A finite ten-year range needs at most two normal plus eleven annual reads.
+    assert client.request.call_count == 13
+
+
+def test_index_annual_fallback_yield_resumes_exact_cached_windows(engine):
+    from app.data_ingestion.models.tonghuashun import TonghuashunWorkUnit
+    from app.data_ingestion.tonghuashun.control import CollectionControl, CollectionYield, active_control
+    TonghuashunWorkUnit.__table__.create(engine)
+    seed(engine, [ticker("000300.SH", "a-share-index")])
+    with Session(engine) as session:
+        CollectionRepository(session).fail("index_daily", "000300.SH", "default", expected=0,
+            kind="invalid_data", now=NOW)
+        session.commit()
+    days = [date(2017, 3, 1), date(2024, 10, 6), date(2026, 9, 3)]
+    client = _index_empty_wide_client(days)
+    parameters = CollectionParameters(subjects=["000300.SH"])
+    monitor = CollectionControl(engine, None, max_requests=3, max_seconds=180)
+    token = active_control.set(monitor)
+    try:
+        with pytest.raises(CollectionYield):
+            collect("index_daily", parameters, client, engine, now=NOW)
+    finally:
+        active_control.reset(token)
+    with Session(engine) as session:
+        state = session.get(State, ("index_daily", "000300.SH", "default"))
+        assert state.revision == 1 and state.status == "failed" and state.observation_id is None
+        assert session.scalar(select(func.count()).select_from(TonghuashunWorkUnit)) == 3
+    assert client.request.call_count == 3
+    resumed = CollectionControl(engine, None, max_requests=40, max_seconds=180)
+    token = active_control.set(resumed)
+    try:
+        result = collect("index_daily", parameters, client, engine, now=NOW)
+    finally:
+        active_control.reset(token)
+    assert result["received"] == len(days) and result["succeeded"] == 1
+    # The ordinary short tail is also an identical annual request: reuse it.
+    assert resumed.detail["reused"] == 4 and client.request.call_count == 12
+    with Session(engine) as session:
+        assert session.scalar(select(func.count()).select_from(TonghuashunWorkUnit)) == 0
+        assert CollectionRepository(session).read("index_daily", "000300.SH", "default").data["item"] == [bar(day) for day in days]
+
+
+@pytest.mark.parametrize("key", ["stock_daily", "etf_daily"])
+def test_empty_non_index_bars_do_not_add_annual_fallback(key):
+    client = Mock(interval_ms=0)
+    client.request.return_value = reply([])
+    with pytest.raises(CollectionError):
+        Acquisition(client).fetch(DATASETS[key], "000001.SH", CollectionParameters(), None, NOW)
+    assert client.request.call_count == 2
+
+
+@pytest.mark.parametrize("failure", ["invalid_parameters", "rate_limited", "upstream_error"])
+def test_index_request_errors_never_become_empty_fallback(failure):
+    client = Mock(interval_ms=0)
+    client.request.side_effect = TonghuashunError(failure)
+    with pytest.raises(TonghuashunError) as captured:
+        Acquisition(client).fetch(DATASETS["index_daily"], "000300.SH", CollectionParameters(), None, NOW)
+    assert captured.value.kind == failure and client.request.call_count == 1
+
+@pytest.mark.parametrize("malformed", ["wrong_subject", "negative_value", "outside_window"])
+def test_invalid_annual_index_response_never_publishes_partial_source(engine, malformed):
+    seed(engine, [ticker("000300.SH", "a-share-index")])
+    row = bar(date(2017, 3, 1))
+    metadata = {}
+    if malformed == "wrong_subject":
+        metadata["thscode"] = "399001.SZ"
+    elif malformed == "negative_value":
+        row["volume"] = -1
+    else:
+        row = bar(date(2026, 9, 1))
+    client = Mock(interval_ms=0)
+    client.request.side_effect = [reply([]), reply([]), reply([row], **metadata)]
+    with pytest.raises(CollectionError):
+        collect("index_daily", CollectionParameters(subjects=["000300.SH"]), client, engine, now=NOW)
+    with Session(engine) as session:
+        state = session.get(State, ("index_daily", "000300.SH", "default"))
+        assert state.status == "failed" and state.error_kind == "invalid_data"
+        assert state.observation_id is None and state.succeeded_at is None
+        assert session.scalar(select(func.count()).select_from(Observation)) == 0
