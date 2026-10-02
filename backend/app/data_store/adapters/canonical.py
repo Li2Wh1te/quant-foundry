@@ -9,6 +9,7 @@ from uuid import UUID
 # separators. Reuse changes allocation cost, never existing fingerprint bytes.
 _CANONICAL_ENCODER = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
                                      separators=(',', ':'), allow_nan=False)
+_CANONICAL_SCALARS = frozenset((str, int, bool, type(None)))
 
 
 class NativeInputError(ValueError):
@@ -18,7 +19,12 @@ class NativeInputError(ValueError):
         super().__init__(message)
 
 
-def normalized(value):
+def normalized(value, *, _sort=True):
+    # Most physical scalar-union values are already exact JSON primitives.
+    # Strict type dispatch avoids repeatedly testing dates/Decimal/containers
+    # for every string/int while subclasses retain the original checks below.
+    if type(value) in _CANONICAL_SCALARS:
+        return value
     if isinstance(value, Decimal):
         if not value.is_finite():
             raise ValueError("Non-finite Decimal")
@@ -37,16 +43,19 @@ def normalized(value):
     if isinstance(value, dict):
         if any(not isinstance(key, str) for key in value):
             raise ValueError("Canonical keys must be strings")
-        return {key: normalized(item) for key, item in sorted(value.items())}
+        items = sorted(value.items()) if _sort else value.items()
+        return {key: normalized(item, _sort=_sort) for key, item in items}
     if isinstance(value, (list, tuple)):
-        return [normalized(item) for item in value]
+        return [normalized(item, _sort=_sort) for item in value]
     if value is None or isinstance(value, (str, int, bool)):
         return value
     raise TypeError(type(value).__name__)
 
 
 def encode(value) -> str:
-    return _CANONICAL_ENCODER.encode(normalized(value))
+    # The encoder sorts every dictionary itself. Public normalized() retains
+    # its ordered mapping behavior; encoding need not sort the same keys twice.
+    return _CANONICAL_ENCODER.encode(normalized(value, _sort=False))
 
 
 def digest(domain: str, value) -> str:

@@ -62,6 +62,15 @@ class Layout:
         self.children = {}
         self.fields = []
         self._visit(model)
+        # Compile only the immutable, code-owned layout, never source values.
+        # Millions of scalar points share these same Arrow types and field
+        # positions; repeated type/child lookups add no validation evidence.
+        self._encode_plans = {cls: (index, tuple(
+            (name, *self.columns[cls,name], self.children.get((cls,name)),
+             pa.types.is_decimal(self.columns[cls,name][1]),
+             pa.types.is_timestamp(self.columns[cls,name][1]))
+            for name in cls.model_fields if (cls,name) in self.columns))
+            for index,cls in enumerate(self.models)}
 
     def _visit(self, model):
         if model in self.models:
@@ -138,14 +147,11 @@ class Layout:
         value = self.model.model_validate(body)
         result = []
         def walk(model, obj, path):
-            row = {'member_key': path, 'row_kind': self.models.index(model)}
+            index,plan = self._encode_plans[model]
+            row = {'member_key': path, 'row_kind': index}
             children = []
-            for name in model.model_fields:
-                if (model,name) not in self.columns:
-                    continue
-                col,t,encoding = self.columns[model,name]
+            for name,col,t,encoding,child,is_decimal,is_timestamp in plan:
                 value = getattr(obj, name)
-                child = self.children.get((model,name))
                 if child:
                     cls,repeated = child
                     row[col] = -1 if value is None else len(value) if repeated else 1
@@ -159,9 +165,9 @@ class Layout:
                     if len(encoded.encode()) > 8192:
                         raise NativeInputError('SOURCE_BUDGET_EXCEEDED','字段向量超过有界编码预算。')
                     row[col] = encoded
-                elif pa.types.is_decimal(t):
+                elif is_decimal:
                     row[col] = exact_decimal(value, precision=t.precision, scale=t.scale)
-                elif pa.types.is_timestamp(t):
+                elif is_timestamp:
                     if value.utcoffset() is None:
                         raise NativeInputError('SOURCE_SCHEMA_INVALID','时间字段缺少时区。')
                     row[col] = value.astimezone(timezone.utc)

@@ -37,3 +37,25 @@ def test_profile_refuses_unsafe_runtime_before_database_access(
         module['main']()
     assert caught.value.code == 2
     assert not output.exists()
+
+
+@pytest.mark.parametrize('entry,rows', [('E50', '1'), ('E69', '4000001')])
+def test_physical_fixture_cannot_select_an_unreviewed_table_or_unbounded_rows(monkeypatch, tmp_path, entry, rows):
+    root = Path(__file__).resolve().parents[2]
+    script = root / 'scripts' / 'profile_current_verification.py'
+    if not script.exists():
+        script = root / 'profile_current_verification.py'
+    monkeypatch.syspath_prepend(str(script.parent))
+    module = runpy.run_path(str(script))
+    output = tmp_path/'result.json'
+    for name,value in [('QF_ENVIRONMENT','test'),('QF_DATABASE_HOST','postgres'),('QF_DATABASE_NAME','lfd01_test')]:
+        monkeypatch.setenv(name,value)
+    monkeypatch.setattr('sys.argv', [str(script),'--root',str(tmp_path),'--output',str(output),
+                                   '--entry',entry,'--input','postgres','--rows',rows])
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unsafe physical fixture must not open a database')
+    monkeypatch.setitem(module['main'].__globals__,'isolated',forbidden)
+    with pytest.raises(SystemExit) as caught:
+        module['main']()
+    assert caught.value.code == 2
+    assert not output.exists()
