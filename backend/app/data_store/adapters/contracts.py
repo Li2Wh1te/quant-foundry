@@ -11,6 +11,11 @@ from uuid import UUID
 
 from .canonical import NativeInputError
 
+# The encoder holds only immutable formatting options, never a source payload.
+# Reusing it avoids constructing a JSONEncoder for every scalar/key while
+# preserving the collector's exact UTF-8 quoting and primitive representation.
+_NATIVE_ENCODER = json.JSONEncoder(ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+
 
 def native_json(value) -> str:
     """Match the collector's exact number encoding; reject floats at this boundary."""
@@ -23,13 +28,13 @@ def native_json(value) -> str:
     if isinstance(value, dict):
         if any(type(k) is not str for k in value):
             raise NativeInputError('SOURCE_SCHEMA_INVALID', '本地输入字段名无效。')
-        return '{' + ','.join(json.dumps(k, ensure_ascii=False)+':'+native_json(v)
+        return '{' + ','.join(_NATIVE_ENCODER.encode(k)+':'+native_json(v)
                               for k,v in sorted(value.items())) + '}'
     if isinstance(value, (tuple, list)):
         return '[' + ','.join(native_json(v) for v in value) + ']'
     if isinstance(value, (datetime, date, UUID)):
         value = value.isoformat() if not isinstance(value, UUID) else str(value)
-    return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+    return _NATIVE_ENCODER.encode(value)
 
 
 def digest(value) -> str:

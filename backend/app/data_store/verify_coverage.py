@@ -54,10 +54,22 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                 db.execute('PRAGMA page_size=8192');db.execute('PRAGMA cache_size=-8192')
                 db.execute('PRAGMA max_page_count='+str(space.quota//8192))
                 db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,PRIMARY KEY(k,g));')
-                def check():
+                resource_due=started;resource_steps=0
+                def check(*,sample=False):
+                    nonlocal resource_due,resource_steps
                     if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
-                    if time.monotonic()-started>seconds:raise DataStoreError('QUERY_TIMEOUT')
-                    space.check()
+                    now=time.monotonic()
+                    if now-started>seconds:raise DataStoreError('QUERY_TIMEOUT')
+                    resource_steps+=1
+                    # Fingerprint writes have a hard SQLite max_page_count. On
+                    # the scalar hot path, sample measured RSS/root/disk usage
+                    # at most 128 checks or 50 ms apart, rather than reopening
+                    # every filesystem ancestor for each point. Cancellation
+                    # and time limits still run on EVERY source/object, including
+                    # inside one large historical observation. File batches and
+                    # phase boundaries retain their unconditional measurements.
+                    if not sample or resource_steps>=128 or now>=resource_due:
+                        space.check();resource_due=now+.05;resource_steps=0
                 phase='issues'
                 try:
                     after=''
@@ -88,9 +100,10 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                 db.commit()
                     phase='native_snapshot';boundary=hashlib.sha256()
                     for raw in sources.iter_entry(entry):
-                        check();counts['source_rows']+=1
+                        check(sample=True);counts['source_rows']+=1
                         boundary.update(digest([raw.source,raw.dataset,raw.subject,raw.variant,raw.token,raw.order_ns]).encode())
                         for unit in normalize(entry,raw):
+                            check(sample=True)
                             counts['scanned_objects']+=1
                             state='invalid' if unit.failure or not unit.complete else 'withdrawn' if unit.withdrawn else 'valid'
                             h=value_hash(unit.rows) if state=='valid' else digest(state)
@@ -106,7 +119,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             db.execute('INSERT OR REPLACE INTO expected(k,p,r,s,o,g,n,t,h,state,stable_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
                                 (key,part,*unit.key,unit.group,unit.order,unit.token,h,state,int(raw.order_kind!='current_table_snapshot')))
                         if counts['source_rows']%128==0:db.commit()
-                    db.commit()
+                    db.commit();check()
                     if not sources.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','完整覆盖核验的本地读取未完成。')
                     counts['expected_objects']=db.execute('SELECT count(*) FROM expected').fetchone()[0]
                     with store.catalog.transaction() as c:

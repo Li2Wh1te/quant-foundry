@@ -5,6 +5,11 @@ import hashlib
 import json
 from uuid import UUID
 
+# This stateless encoder retains canonical-v1's exact sorting, quoting and
+# separators. Reuse changes allocation cost, never existing fingerprint bytes.
+_CANONICAL_ENCODER = json.JSONEncoder(ensure_ascii=False, sort_keys=True,
+                                     separators=(',', ':'), allow_nan=False)
+
 
 class NativeInputError(ValueError):
     """Stable machine code with a safe operator-facing Chinese explanation."""
@@ -41,8 +46,7 @@ def normalized(value):
 
 
 def encode(value) -> str:
-    return json.dumps(normalized(value), ensure_ascii=False, sort_keys=True,
-                      separators=(',', ':'), allow_nan=False)
+    return _CANONICAL_ENCODER.encode(normalized(value))
 
 
 def digest(domain: str, value) -> str:
