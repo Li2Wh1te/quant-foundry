@@ -165,7 +165,7 @@ class Episode:
         if command:
             validate_deployment(command, self.client.project())
         plan = {"episode": uuid4().hex, "created_at": self.now().isoformat(), "seconds": seconds, "project": self.client.project(),
-                "tasks": tasks, "runs": snapshot["runs"], "command": list(command)}
+                "tasks": tasks, "runs": snapshot["runs"], "command": list(command), "services": self.client.services()}
         value = {"version": 1, "plan": plan, "plan_sha256": digest(plan), "phase": "planned",
                  "confirmed": {}, "intent": None, "unresolved": [], "observations": [], "restore": {}, "errors": []}
         self.journal.save(value)
@@ -173,6 +173,8 @@ class Episode:
 
     def _guard(self, value):
         self.journal.unchanged()
+        if value["phase"] != "deploying" and self.client.services() != value["plan"]["services"]:
+            raise DrainError("application_services_changed")
         snapshot = self.client.snapshot()
         if active_tasks(snapshot):
             raise DrainError("unexpected_active_schedule")
@@ -250,6 +252,8 @@ class Episode:
             raise DrainError("reviewed_plan_required")
         if self.client.project() != value["plan"]["project"]:
             raise DrainError("project_changed")
+        if self.client.services() != value["plan"]["services"]:
+            raise DrainError("application_services_changed")
         current = self.client.snapshot()
         if task_vector(active_tasks(current)) != task_vector(value["plan"]["tasks"]):
             raise DrainError("active_scope_or_version_changed")
@@ -468,6 +472,27 @@ class DockerClient:
     def task(self, task_id): return self._call("task", id=task_id)
     def read_runs(self, ids): return self._call("read_runs", ids=ids)
     def new_runs(self, since): return self._call("new_runs", since=since)
+
+    def services(self):
+        """Freeze only application identity and mounts, never environment data."""
+        project = self.project()
+        try:
+            runner = subprocess.run(["docker", "ps", "-a", "--filter", "label=com.docker.compose.project=" + project, "--filter", "label=com.docker.compose.service=runner", "--format", "{{.Names}}"], capture_output=True, text=True, timeout=10)
+            names = runner.stdout.splitlines()
+            if runner.returncode or len(names) != 1:
+                raise DrainError("one_runner_required")
+            template = '{"id":{{json .Id}},"image":{{json .Image}},"status":{{json .State.Status}},"health":{{if index .State "Health"}}{{json (index (index .State "Health") "Status")}}{{else}}null{{end}},"project":{{json (index .Config.Labels "com.docker.compose.project")}},"service":{{json (index .Config.Labels "com.docker.compose.service")}},"mounts":{{json .Mounts}}}'
+            result = subprocess.run(["docker", "inspect", "--format", template, self.container, names[0]], capture_output=True, text=True, timeout=10)
+            values = [json.loads(line) for line in result.stdout.splitlines()]
+            if result.returncode or len(values) != 2 or {v["service"] for v in values} != {"backend", "runner"}:
+                raise DrainError("application_services_unavailable")
+            for value in values:
+                if value["project"] != project or value["status"] != "running" or value["health"] not in (None, "healthy"):
+                    raise DrainError("application_service_not_ready")
+                value["mounts"] = sorted(({k: m.get(k) for k in ("Type", "Name", "Destination", "RW")} for m in value["mounts"]), key=lambda m: m["Destination"])
+            return sorted(values, key=lambda v: v["service"])
+        except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
+            raise DrainError("application_identity_unknown") from None
     def change(self, task_id, version, target):
         if target not in ("paused", "active") or not isinstance(version, int) or version < 1:
             raise DrainError("unsupported_task_state_change")

@@ -50,9 +50,11 @@ class Client:
         self.on_read = lambda *_: None
         self.before_task = lambda *_: None
         self.project_name = "fixture-project"
+        self.application_services = [{"service": "backend", "id": "fixture-backend", "image": "fixture-old"}, {"service": "runner", "id": "fixture-runner", "image": "fixture-old"}]
         self.preservation = {"held_locks": [], "backtests": 0, "ingestion_leases": 0, "files": "fixture-v2", "spools": "fixture-seal"}
 
     def project(self): return self.project_name
+    def services(self): return deepcopy(self.application_services)
     def snapshot(self):
         return deepcopy({"tasks": list(self.tasks.values()), "runs": [r for r in self.runs.values() if r["status"] in ("queued", "running")]})
     def task(self, key):
@@ -234,6 +236,28 @@ class DrainTests(unittest.TestCase):
             self.run_episode(value, lambda *_: self.fail("lease still active"))
         self.assertTrue(all(self.client.tasks[k]["state"] == "active" for k in ("a", "b")))
 
+    def test_service_change_before_or_during_pause_prevents_switch(self):
+        value = self.plan(COMMAND)
+        self.client.application_services[0]["image"] = "concurrent-deployment"
+        with self.assertRaisesRegex(DrainError, "application_services_changed"):
+            self.run_episode(value)
+        self.assertEqual(self.client.calls, [])
+        self.client.application_services[0]["image"] = "fixture-old"
+        def changed(client, key, target):
+            if key == "b" and target == "paused": client.application_services[1]["id"] = "replacement"
+        self.client.after_change = changed
+        with self.assertRaisesRegex(DrainError, "application_services_changed"):
+            self.run_episode(value, lambda *_: self.fail("service changed"))
+        self.assertTrue(all(self.client.tasks[k]["state"] == "active" for k in ("a", "b")))
+
+    def test_expected_service_recreation_does_not_fail_post_command_guard(self):
+        value = self.plan(COMMAND)
+        def command(*_):
+            self.client.application_services[0].update(id="new-backend", image="fixture-new")
+            self.client.application_services[1].update(id="new-runner", image="fixture-new")
+        self.run_episode(value, command)
+        self.assertTrue(value["deployment_completed"])
+
     def test_start_event_contains_persisted_absolute_deadline_before_first_pause(self):
         value = self.plan()
         events = []
@@ -375,6 +399,18 @@ class DrainTests(unittest.TestCase):
 
 
 class AdapterTests(unittest.TestCase):
+    def test_service_snapshot_only_reads_application_identity_and_mounts(self):
+        values = [{"id": key, "image": "fixture-old", "status": "running", "health": "healthy" if key == "backend" else None, "project": "fixture-project", "service": key, "mounts": [{"Type": "volume", "Name": "fixture-volume", "Destination": "/app/data", "RW": True, "Source": "fixture-private-source"}]} for key in ("backend", "runner")]
+        runner = subprocess.CompletedProcess([], 0, stdout="fixture-runner\n")
+        inspected = subprocess.CompletedProcess([], 0, stdout="\n".join(json.dumps(v) for v in values))
+        with patch.object(DockerClient, "project", return_value="fixture-project"), patch("scripts.scheduler_drain.subprocess.run", side_effect=[runner, inspected]) as run:
+            result = DockerClient("fixture-backend").services()
+        self.assertNotIn("fixture-private-source", json.dumps(result))
+        self.assertNotIn(".Config.Env", run.call_args_list[1].args[0][3])
+        with patch.object(DockerClient, "project", return_value="fixture-project"), patch("scripts.scheduler_drain.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="one\ntwo\n")):
+            with self.assertRaisesRegex(DrainError, "one_runner_required"):
+                DockerClient("fixture-backend").services()
+
     def test_stable_backend_name_is_required_across_container_recreation(self):
         result = subprocess.CompletedProcess([], 0, stdout=json.dumps({"name": "/fixture-backend", "project": "fixture-project", "service": "backend"}))
         with patch("scripts.scheduler_drain.Path.is_file", return_value=True), patch("scripts.scheduler_drain.subprocess.run", return_value=result):

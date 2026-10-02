@@ -30,7 +30,9 @@ python3 scripts/scheduler_drain.py plan \
 
 Planning only reads scheduler metadata. It captures the complete registered
 active set, exact task versions, recurring cron definitions and digests of
-parameters, plus existing accepted run identities and frozen fields. The
+parameters, plus existing accepted run identities and frozen fields. It freezes
+the running backend/runner container IDs, image IDs, health and volume identities;
+another application's recreation or switch during the wait aborts this episode. The
 explicit expected count must match. Existing paused/completed tasks are not
 owned. Once tasks and unregistered pending work fail closed. Inspect the private
 state and emitted `plan_sha256`; review the explicit Compose profiles, current
@@ -88,7 +90,10 @@ policy, native range counts and pending SQLite spool hashes before/after the
 explicit application-only Compose command. These are preservation checks, not
 full source coverage, quality qualification or independent business acceptance.
 Image/health/mount verification and formal acceptance remain required after the
-normal Compose wait and must be reported separately. Maintenance is not exited.
+normal Compose wait and must be reported separately. Automatic recovery restores
+owned task states; it does not roll back images. If Compose fails or preservation
+differs, inspect the actual service versions and use only the separately reviewed
+original-profile rollback when appropriate. Maintenance is not exited.
 
 ## Failure and recovery
 
