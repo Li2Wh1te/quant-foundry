@@ -125,3 +125,38 @@ def test_corrupt_preserved_file_cannot_gain_coverage(ready,same_size):
     assert error.value.code=='FILE_INVALID'
     after=read_entry_status(ready,e.id)
     assert 'full_coverage' not in after and after['coverage_pending']
+
+
+def test_whole_report_across_arrow_batches_and_files_keeps_exact_hash(ready):
+    from decimal import Decimal
+    from tests.test_data_store_domain_samples import ths, NEXT_DAY_MS
+    from app.data_store.adapters.normalize import normalize
+
+    # One complete report spans both the 1024-row Arrow batch and a physical
+    # file boundary. Members cannot become separately confirmed objects.
+    entry=BY_ID['E07']
+    source=ths(entry.id,'FUND.SH',{'item':[
+        {'thscode':f'{i:06d}.SZ','stock_name':'持仓','end_date_ms':NEXT_DAY_MS,
+         'hold_ratio':Decimal('1.2'),'investment_rank':i+1} for i in range(2050)]})
+    larger=replace(ready.limits,file_rows=1600)
+    ready.limits=larger;ready.budget.limits=larger
+    built=run_entry(ready,entry,Inputs(source))
+    assert built['complete'] and built['qualified']
+    assert len(files(ready,entry))>=2
+    with ready.catalog.transaction() as c:
+        assert c.execute(text('SELECT max(row_count) FROM data_store_files WHERE dataset=:d'),
+                         {'d':entry.spec.name}).scalar_one()>1024
+    generation=ready.catalog.dataset(entry.spec.name)['generation']
+    before=files(ready,entry)
+    result=verify_existing(ready,entry,Inputs(source))
+    assert result['complete'] and result['current_objects']==1
+    assert files(ready,entry)==before
+    assert ready.catalog.dataset(entry.spec.name)['generation']==generation
+    assert not ready.budget.pending_keys()
+    assert len(next(normalize(entry,source)).rows)>1024
+
+    changed=replace(source,content={'item':[{**row,'hold_ratio':Decimal('1.3')}
+                                         for row in source.content['item']]})
+    mismatch=verify_existing(ready,entry,Inputs(changed))
+    assert not mismatch['complete'] and mismatch['mismatched_objects']==1
+    assert files(ready,entry)==before

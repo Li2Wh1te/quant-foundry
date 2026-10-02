@@ -6,11 +6,13 @@ is installed only after exact source/current disposition and generation checks.
 """
 import fcntl
 import hashlib
+from itertools import islice
 import json
 import sqlite3
 import time
 
 import pyarrow.parquet as pq
+import pyarrow as pa
 from sqlalchemy import text
 
 from .adapters.contracts import digest
@@ -19,9 +21,84 @@ from .adapters.canonical import NativeInputError
 from .errors import DataStoreError
 from .issue_sets import members
 from .locking import _deadline, _scope_key
-from .schema import DatasetSpec
+from .schema import DatasetSpec, _ordered
 from .merge import value_hash
 from .pipeline import read_entry_status,_status
+
+
+def _string_member_prefix(encoded):
+    # This is used ONLY after full typed-key validation of four string fields.
+    # Their unchanged _ordered encoding terminates with NUL/NUL and escapes
+    # embedded NUL as NUL/FF. Consume terminators FROM THE START, without overlap:
+    # a backward search could misread a field terminator plus the next field's
+    # leading escaped NUL. No caller value is re-encoded or cached here.
+    first=encoded.find(b'\x00\x00')+2
+    second=encoded.find(b'\x00\x00',first)+2
+    third=encoded.find(b'\x00\x00',second)+2
+    return encoded[:third]
+
+
+class _CurrentComparison:
+    """Bounded comparison against the SAME temporary authoritative index.
+
+    At most 128 physical rows are buffered, except one already bounded complete
+    report which is compared immediately. Callers flush after each Arrow batch,
+    so no extra decoded business rows survive into the next batch. Only lookup
+    and seen-marking are batched; all provenance, value and issue checks remain.
+    """
+    def __init__(self,db,counts,failure_disposed,check):
+        self.db=db;self.counts=counts;self.failure_disposed=failure_disposed;self.check=check
+        self.pending=[];self.physical_rows=0
+
+    def offer(self,key,rows):
+        if not rows:return
+        if self.pending and self.physical_rows+len(rows)>128:self.flush()
+        self.pending.append((key,rows));self.physical_rows+=len(rows)
+        if self.physical_rows>=128:self.flush()
+
+    def flush(self):
+        if not self.pending:return
+        self.check(sample=True)
+        placeholders=','.join('?' for _ in self.pending)
+        # Omit only metadata unused by comparison. The complete expected index
+        # retains partition/object/token fields for source reduction and receipt
+        # construction; no input, value, key or disposition is omitted.
+        selected=self.db.execute('SELECT k,r,s,g,n,h,state,stable_order,seen FROM expected '
+            'WHERE k IN ('+placeholders+')',[key for key,_ in self.pending]).fetchall()
+        expected_by_key={row['k']:row for row in selected}
+        marked=set()
+        for key,rows in self.pending:
+            self.check(sample=True)
+            first=rows[0]
+            # These provenance columns have already passed the nonnullable
+            # string/int Arrow contract. Comparing the first row to itself adds
+            # no check for those reflexive types. Every OTHER report member is
+            # still compared across all four fields; the first confirmation is
+            # checked against the expected source below, exactly as before.
+            if len(rows)>1:
+                fields=('basis_group','basis_ns','basis_token','basis_state')
+                basis=tuple(first.get(k) for k in fields)
+                if any(tuple(row.get(k) for k in fields)!=basis for row in islice(rows,1,None)):
+                    raise DataStoreError('FILE_INVALID')
+            self.counts['current_objects']+=1
+            expected=expected_by_key.get(key)
+            if not expected:self.counts['unexpected_objects']+=1;continue
+            # SQLite's seen field fences prior batches; this set fences repeated
+            # keys inside the current batch before its single bounded UPDATE.
+            if expected['seen'] or key in marked:raise DataStoreError('KEY_ORDER_INVALID')
+            marked.add(key)
+            if expected['state']=='invalid':
+                if self.failure_disposed(expected):self.counts['disposed_failures']+=1
+                else:self.counts['mismatched_objects']+=1
+            elif (first['basis_group']!=expected['g'] or
+                    (first['basis_ns']!=expected['n'] if expected['stable_order'] else not 0<first['basis_ns']<=expected['n']) or
+                    first['basis_state']!=expected['state'] or
+                    expected['state']=='valid' and value_hash(rows)!=expected['h']):
+                self.counts['mismatched_objects']+=1
+        if marked:
+            self.db.execute('UPDATE expected SET seen=1 WHERE k IN ('+
+                            ','.join('?' for _ in marked)+')',list(marked))
+        self.pending.clear();self.physical_rows=0
 
 
 def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
@@ -146,24 +223,11 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         scope=entry.spec.key_bytes((expected['r'],expected['s']))
                         return db.execute('SELECT 1 FROM issues WHERE k IN (?,?) AND g=? AND n>=? LIMIT 1',
                             (expected['k'],scope,expected['g'],expected['n'])).fetchone() is not None
-                    def compare(rows):
-                        if not rows:return
-                        first=rows[0]
-                        if any(any(row.get(k)!=first.get(k) for k in ('basis_group','basis_ns','basis_token','basis_state')) for row in rows):raise DataStoreError('FILE_INVALID')
-                        key=entry.spec.key_bytes(tuple(first[k] for k in entry.spec.key[:3]));counts['current_objects']+=1
-                        expected=db.execute('SELECT * FROM expected WHERE k=?',(key,)).fetchone()
-                        if not expected:counts['unexpected_objects']+=1;return
-                        if expected['seen']:raise DataStoreError('KEY_ORDER_INVALID')
-                        db.execute('UPDATE expected SET seen=1 WHERE k=?',(key,))
-                        # Invalid originals are disposed only by explicit, current
-                        # exact-key/scope evidence. They remain quality restrictions.
-                        if expected['state']=='invalid':
-                            if failure_disposed(expected):counts['disposed_failures']+=1
-                            else:counts['mismatched_objects']+=1
-                        elif (first['basis_group']!=expected['g'] or
-                              (first['basis_ns']!=expected['n'] if expected['stable_order'] else not 0<first['basis_ns']<=expected['n']) or
-                              first['basis_state']!=expected['state'] or
-                              expected['state']=='valid' and value_hash(rows)!=expected['h']):counts['mismatched_objects']+=1
+                    comparison=_CurrentComparison(db,counts,failure_disposed,check)
+                    suffix_fields=entry.spec.key[3:]
+                    suffix_types=entry.spec._key_types[3:]
+                    string_member=(len(entry.spec.key)==4 and
+                        all(pa.types.is_string(kind) for kind in entry.spec._key_types))
                     for part in parts:
                         key=None;rows=[];last_key=None
                         for ref in store.catalog.files(entry.spec.name,part):
@@ -191,14 +255,24 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                             if first is None:first=keys[0]
                                             last_key=file_last=keys[-1]
                                         seen+=batch.num_rows
-                                        for row in batch.to_pylist():
-                                            current=tuple(row[k] for k in entry.spec.key[:3])
-                                            if key is not None and current!=key:compare(rows);rows=[]
+                                        for encoded,row in zip(keys,batch.to_pylist()):
+                                            # Full typed keys were validated above.
+                                            # Remove their EXACT ordered suffix to
+                                            # reuse the three-field object prefix;
+                                            # NUL escaping and temporal/Decimal
+                                            # encoding still use _ordered unchanged.
+                                            if string_member:current=_string_member_prefix(encoded)
+                                            else:
+                                                suffix=b''.join(_ordered(row[name],kind)
+                                                    for name,kind in zip(suffix_fields,suffix_types))
+                                                current=encoded[:-len(suffix)] if suffix else encoded
+                                            if key is not None and current!=key:comparison.offer(key,rows);rows=[]
                                             key=current;rows.append(row)
                                             if len(rows)>100000:raise DataStoreError('BATCH_BUDGET_EXCEEDED')
+                                        comparison.flush()
                                     if (seen!=ref['row_count'] or first!=bytes(ref['key_min']) or
                                             file_last!=bytes(ref['key_max'])):raise DataStoreError('FILE_INVALID')
-                        compare(rows);db.commit()
+                        comparison.offer(key,rows);comparison.flush();db.commit()
                     enter_phase('missing_objects')
                     for row in db.execute('SELECT * FROM expected WHERE seen=0'):
                         if row['state']=='invalid' and failure_disposed(row):
