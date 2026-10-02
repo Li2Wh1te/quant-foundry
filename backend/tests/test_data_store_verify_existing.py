@@ -1,9 +1,13 @@
 """Existing current verification never rewrites output or fakes a receipt."""
+from dataclasses import replace
+import json
+
 import pytest
 from sqlalchemy import text
 from app.data_store.errors import DataStoreError
 from tests.test_data_store_kernel import database,limits,store
 from tests.test_data_store_local_pipeline import ready,Inputs,company
+from tests.test_data_store_domain_samples import sample
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.pipeline import run_entry,read_entry_status,_status
 from app.data_store.verify_coverage import verify_existing
@@ -44,6 +48,62 @@ def test_exact_disposed_failure_is_coverage_but_remains_unqualified(ready):
     result=verify_existing(ready,e,source)
     assert result['complete'] and result['disposed_failures']==1
     with ready.catalog.transaction() as c:assert check_coverage(c,e,read_entry_status(ready,e.id))['reason']=='CURRENT_QUALITY_UNRESOLVED'
+
+
+@pytest.mark.parametrize('entry_id', ['E04', 'E50'])
+def test_scope_failure_without_output_is_disposed_but_remains_restricted(ready, entry_id):
+    entry = BY_ID[entry_id]
+    raw = replace(sample(entry_id), content={}, failure='SOURCE_REFRESH_FAILED')
+    source = Inputs(raw)
+    run_entry(ready, entry, source)
+    before = ready.catalog.dataset(entry.spec.name)
+    issues = ready.catalog.issues(entry.spec.name)
+
+    result = verify_existing(ready, entry, source)
+
+    assert result['complete'] and result['disposed_failures'] == 1
+    assert result['current_objects'] == 0 and result['missing_objects'] == 0
+    assert ready.catalog.dataset(entry.spec.name) == before
+    assert ready.catalog.issues(entry.spec.name) == issues
+    with ready.catalog.transaction() as connection:
+        assert check_coverage(connection, entry, read_entry_status(ready, entry.id))[
+            'reason'] == 'CURRENT_QUALITY_UNRESOLVED'
+
+
+@pytest.mark.parametrize('mismatch', ['group', 'older_order', 'other_subject', 'no_issue'])
+def test_missing_failure_requires_matching_current_scope_evidence(ready, mismatch):
+    entry = BY_ID['E50']
+    raw = replace(sample(entry.id), content={}, failure='SOURCE_REFRESH_FAILED')
+    source = Inputs(raw)
+    run_entry(ready, entry, source)
+    status = read_entry_status(ready, entry.id)
+    status.pop('full_coverage', None)
+    _status(ready, entry, status)
+    with ready.catalog.engine.begin() as connection:
+        if mismatch == 'no_issue':
+            # This deletion is confined to the disposable fixture schema.
+            connection.execute(text('DELETE FROM data_store_issues WHERE dataset=:d'),
+                               {'d': entry.spec.name})
+        else:
+            target = json.loads(connection.execute(text(
+                'SELECT target_json FROM data_store_issues WHERE dataset=:d'),
+                {'d': entry.spec.name}).scalar_one())
+            if mismatch == 'group':
+                target['group'] = '0' * 64
+            elif mismatch == 'older_order':
+                target['order'] = str(raw.order_ns - 1)
+            else:
+                target['prefix'][1] = 'OTHER-FICTION.SH'
+            connection.execute(text('UPDATE data_store_issues SET target_json=:j WHERE dataset=:d'),
+                               {'j': json.dumps(target), 'd': entry.spec.name})
+
+    result = verify_existing(ready, entry, source)
+
+    assert not result['complete'] and result['missing_objects'] == 1
+    assert result['disposed_failures'] == 0
+    after = read_entry_status(ready, entry.id)
+    assert 'full_coverage' not in after
+    assert after['coverage_pending']
 
 
 @pytest.mark.parametrize('same_size',[False,True])
