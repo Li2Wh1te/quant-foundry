@@ -449,6 +449,12 @@ class DockerClient:
                 return output["value"]
             if not isinstance(output.get("reason"), str) or type(output.get("uncertain", False)) is not bool:
                 raise ValueError()
+        except DrainError as error:
+            # A signal during an in-flight API cannot be a definite rejection.
+            # Keep its persisted intent until a real acknowledgment is known.
+            if action == "change":
+                error.uncertain = True
+            raise
         except (OSError, subprocess.TimeoutExpired, ValueError, KeyError, TypeError):
             raise DrainError("container_response_unknown", uncertain=action == "change") from None
         raise DrainError(output["reason"], uncertain=output.get("uncertain", False))

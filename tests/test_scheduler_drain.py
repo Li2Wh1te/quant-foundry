@@ -434,6 +434,10 @@ class AdapterTests(unittest.TestCase):
             with self.assertRaises(DrainError) as caught:
                 DockerClient("fixture-backend").task("00000000-0000-0000-0000-000000000001")
             self.assertFalse(caught.exception.uncertain)
+        with patch("scripts.scheduler_drain.subprocess.run", side_effect=DrainError("operator_interrupted")):
+            with self.assertRaises(DrainError) as caught:
+                DockerClient("fixture-backend").change("00000000-0000-0000-0000-000000000001", 1, "paused")
+            self.assertTrue(caught.exception.uncertain)
 
     def test_committed_api_adapter_handles_ack_conflict_and_ambiguous_response(self):
         # Execute the actual committed adapter against synthetic modules and
