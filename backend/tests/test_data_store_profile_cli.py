@@ -59,9 +59,10 @@ def test_matched_current_requires_a_reviewed_physical_input(monkeypatch,tmp_path
 
 
 @pytest.mark.parametrize('current',['empty','matched'])
+@pytest.mark.parametrize('entry',['E69','E70'])
 @pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED')!='1',reason='isolated PostgreSQL required')
 def test_physical_fixture_verifies_actual_current_or_reports_every_missing_object(
-        database,monkeypatch,tmp_path,current):
+        database,monkeypatch,tmp_path,current,entry):
     # This positive end-to-end check uses a disposable schema, the real native
     # table, formal complete-scan commits and real Parquet verification. An
     # empty-current diagnostic must never manufacture a successful comparison.
@@ -73,7 +74,7 @@ def test_physical_fixture_verifies_actual_current_or_reports_every_missing_objec
     monkeypatch.setenv('QF_ENVIRONMENT','test')
     output=tmp_path/'result.json'
     arguments=[str(script),'--root',str(tmp_path),'--output',str(output),
-               '--entry','E69','--rows','257','--input','postgres','--current',current]
+               '--entry',entry,'--rows','257','--input','postgres','--current',current]
     # Exercise detailed CPU attribution on the matched fixture while retaining
     # the wall-time-only empty-current path and both actual disposition checks.
     if current=='empty':arguments.append('--no-profile')
@@ -83,6 +84,8 @@ def test_physical_fixture_verifies_actual_current_or_reports_every_missing_objec
     assert result['snapshot_complete'] and not result['production_acceptance']
     assert result['scratch_released'] and result['isolated_schema_and_store_removed']
     assert result['fixture']['before']==result['fixture']['after']
+    assert result['fixture']['schema_columns']==len(module['BY_ID'][entry].spec.schema)
+    assert result['verification_budget_seconds']==300
     assert result['result']['source_rows']==result['result']['expected_objects']==257
     assert {'native_snapshot','current_files','missing_objects'} <= result['result']['phase_seconds'].keys()
     if current=='matched':
@@ -99,7 +102,7 @@ def test_physical_fixture_verifies_actual_current_or_reports_every_missing_objec
         assert not result['profile_self'] and not result['profile_callers']
 
 
-@pytest.mark.parametrize('entry,rows', [('E50', '1'), ('E69', '4000001')])
+@pytest.mark.parametrize('entry,rows', [('E50', '1'), ('E69', '4000001'), ('E70','4000001')])
 def test_physical_fixture_cannot_select_an_unreviewed_table_or_unbounded_rows(monkeypatch, tmp_path, entry, rows):
     root = Path(__file__).resolve().parents[2]
     script = root / 'scripts' / 'profile_current_verification.py'
@@ -119,3 +122,23 @@ def test_physical_fixture_cannot_select_an_unreviewed_table_or_unbounded_rows(mo
         module['main']()
     assert caught.value.code == 2
     assert not output.exists()
+
+
+@pytest.mark.parametrize('option,value',[
+    ('--verification-seconds','0'),('--verification-seconds','3601'),
+    ('--fixture-seconds','0'),('--fixture-seconds','3601'),
+])
+def test_profile_deadlines_remain_bounded_before_database_access(monkeypatch,tmp_path,option,value):
+    root=Path(__file__).resolve().parents[2]
+    script=root/'scripts'/'profile_current_verification.py'
+    if not script.exists():script=root/'profile_current_verification.py'
+    monkeypatch.syspath_prepend(str(script.parent))
+    module=runpy.run_path(str(script))
+    for name,setting in [('QF_ENVIRONMENT','test'),('QF_DATABASE_HOST','postgres'),('QF_DATABASE_NAME','lfd01_test')]:
+        monkeypatch.setenv(name,setting)
+    monkeypatch.setattr('sys.argv',[str(script),'--root',str(tmp_path),'--output',str(tmp_path/'result.json'),
+        '--entry','E70','--input','postgres',option,value])
+    def forbidden(*args,**kwargs):pytest.fail('Unbounded diagnostic must not open a database')
+    monkeypatch.setitem(module['main'].__globals__,'isolated',forbidden)
+    with pytest.raises(SystemExit) as caught:module['main']()
+    assert caught.value.code==2

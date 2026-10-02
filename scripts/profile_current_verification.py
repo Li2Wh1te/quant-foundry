@@ -6,7 +6,8 @@ run owns one disposable random schema and one temporary current-store root.
 There are no supplier calls or production originals. Empty-current mode reports
 every expected object missing. Matched-current mode first builds real Parquet
 partitions through the ordinary complete-scan pipeline, then verifies both full
-scans under the unchanged 300-second deadline. Neither mode certifies production.
+scans under an explicit finite diagnostic deadline (300 seconds by default).
+Neither mode changes production limits or certifies production.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from app.data_store.local_sources import NativeSources, SourceLimits
 from app.data_store.errors import DataStoreError
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
+from app.data_ingestion.models.etf_daily import EtfDailyBar
 from app.data_store.tables import entry_status
 from app.data_store.pipeline import PipelineOptions, run_entry
 from app.data_store.source_range_tables import metadata as capture_metadata
@@ -106,14 +108,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--entry', choices=('E50', 'E69'), required=True)
+    parser.add_argument('--entry', choices=('E50', 'E69', 'E70'), required=True)
     parser.add_argument('--rows', type=int, default=20000)
     parser.add_argument('--input', choices=('generated', 'postgres'), default='generated',
-                        help='postgres exercises the real E69 server cursor and native row decoding')
+                        help='postgres exercises the real E69/E70 server cursor and native row decoding')
     parser.add_argument('--no-profile', action='store_true',
                         help='Measure wall time with the same complete scan and no profiler overhead')
     parser.add_argument('--current', choices=('empty','matched'), default='empty',
-                        help='matched builds actual current partitions before the 300-second verification')
+                        help='matched builds actual current partitions before bounded verification')
+    parser.add_argument('--verification-seconds', type=int, default=300,
+                        help='Finite local diagnostic budget, 1–3600 seconds; never changes production')
+    parser.add_argument('--fixture-seconds', type=int, default=1200,
+                        help='Separate finite fixture construction budget, 1–3600 seconds')
     args = parser.parse_args()
     host = os.getenv('QF_DATABASE_HOST', '127.0.0.1')
     database = os.getenv('QF_DATABASE_NAME', 'quant_foundry_test')
@@ -122,8 +128,12 @@ def main():
             or not database.endswith('_test')):
         parser.error('Only an explicit test environment and local *_test database are permitted')
     maximum = 4000000 if args.input == 'postgres' else 250000
-    if args.input == 'postgres' and args.entry != 'E69':
-        parser.error('The bounded physical-table fixture supports E69 only')
+    if args.input == 'postgres' and args.entry not in ('E69','E70'):
+        parser.error('The bounded physical-table fixture supports E69/E70 only')
+    if args.entry == 'E70' and args.input != 'postgres':
+        parser.error('E70 calibration requires the reviewed physical daily-bar table')
+    if not (1 <= args.verification_seconds <= 3600 and 1 <= args.fixture_seconds <= 3600):
+        parser.error('Fixture and diagnostic deadlines must stay within 1–3600 seconds')
     if args.current == 'matched' and args.input != 'postgres':
         parser.error('Matched-current fixtures require the reviewed physical PostgreSQL input')
     if not 1 <= args.rows <= maximum or not args.root.is_dir() or args.output.exists():
@@ -147,12 +157,13 @@ def main():
             capture_metadata.create_all(connection)
             connection.execute(text('INSERT INTO data_store_capture_version VALUES (1,3)'))
             if args.input == 'postgres':
-                EtfAdjustmentFactor.__table__.create(connection)
+                model=EtfAdjustmentFactor if entry.id=='E69' else EtfDailyBar
+                model.__table__.create(connection)
                 connection.execute(text("SET LOCAL statement_timeout='120s'"))
                 # PostgreSQL generates a finite unique native key set; Python
                 # never holds the full fixture. Use the real table's NUMERIC,
                 # date, timestamp and source columns, including its constraints.
-                connection.execute(text("""
+                if entry.id=='E69':connection.execute(text("""
                     INSERT INTO etf_adjustment_factors
                     (source,ts_code,trade_date,adj_factor,created_at,updated_at)
                     SELECT 'tushare',lpad((i/2500)::text,6,'0')||'.SH',
@@ -162,29 +173,54 @@ def main():
                            TIMESTAMPTZ '2026-01-01 00:00:00+00'
                     FROM generate_series(0,CAST(:rows AS bigint)-1) AS fixture(i)
                 """), {'rows': args.rows})
+                else:
+                    # Use the real wider daily-bar schema, not a factor row
+                    # padded with nulls. Deterministic varied exact decimals
+                    # exercise every price/volume/change field. The 2005–2026
+                    # calendar span creates about 4,128 monthly bucket files
+                    # at the full tier, close to the current workload's shape.
+                    # These are synthetic raw facts; no supplier is consulted.
+                    days=(date(2026,8,28)-date(2005,2,23)).days+1
+                    connection.execute(text("""
+                        INSERT INTO etf_daily_bars
+                        (source,ts_code,trade_date,open,high,low,close,vol,amount,
+                         pre_close,change,pct_chg,created_at,updated_at,source_revision)
+                        SELECT 'tushare',lpad((i/:days)::text,6,'0')||'.SH',
+                               DATE '2005-02-23'+(i%:days)::integer,
+                               p,p+1,p-1,p+0.25,v,(p+0.25)*v,
+                               p+0.1,0.15,round(0.15/(p+0.1)*100,6),
+                               TIMESTAMPTZ '2026-09-01 00:00:00+00',
+                               TIMESTAMPTZ '2026-09-01 00:00:00+00',
+                               repeat(md5(i::text),2)
+                        FROM (
+                            SELECT i,(10+((i*1103515245+12345)%9000000)::numeric/1000000) AS p,
+                                   (100+(i*2654435761)%10000000)::numeric AS v
+                            FROM generate_series(0,CAST(:rows AS bigint)-1) AS fixture(i)
+                        ) AS bars
+                    """),{'rows':args.rows,'days':days})
         store.register(entry.spec)
         seed_seconds = time.monotonic()-fixture_started
-        fixture = {'seed_seconds':seed_seconds,'current_mode':args.current}
+        fixture = {'seed_seconds':seed_seconds,'current_mode':args.current,
+                   'schema_columns':len(entry.spec.schema),
+                   'construction_budget_seconds':args.fixture_seconds}
         if args.current == 'matched':
             build_started = time.monotonic()
-            # The measured 20k/250k tiers project roughly 880 seconds for a
-            # 3.3M-row fixture. Preparation has a finite 1200-second ceiling,
-            # independent of the UNCHANGED 300-second verification deadline.
-            # It is never
-            # counted as a relaxed verification deadline or retried on failure.
+            # Construction and verification have separate explicit ceilings.
+            # A measured wider-table tier may justify a larger local fixture
+            # budget, never an unbounded retry or a production limit change.
             try:
                 fixture['build_result'] = run_entry(
                     store,entry,FixtureSources(store.catalog.engine,
-                                               limits=SourceLimits(pass_seconds=1200)),
+                                               limits=SourceLimits(pass_seconds=args.fixture_seconds)),
                     options=PipelineOptions(mode='rebuild',partitions_per_pass=8,
-                                            maximum_passes=4096,pass_seconds=1200),
-                    cancelled=lambda:time.monotonic()-build_started>=1200)
+                                            maximum_passes=4096,pass_seconds=args.fixture_seconds),
+                    cancelled=lambda:time.monotonic()-build_started>=args.fixture_seconds)
             except (DataStoreError,NativeInputError) as error:
                 fixture['build_result'] = getattr(error,'entry_result',
                     {'complete':False,'reason':error.code})
             fixture['build_seconds'] = time.monotonic()-build_started
         fixture['before'] = current_manifest(store,entry)
-        sources = (NativeSources(store.catalog.engine, limits=SourceLimits(pass_seconds=300))
+        sources = (NativeSources(store.catalog.engine, limits=SourceLimits(pass_seconds=args.verification_seconds))
                    if args.input == 'postgres' else SyntheticSources(args.rows))
         started = time.monotonic()
         if args.current == 'matched' and not fixture['build_result'].get('complete'):
@@ -195,7 +231,7 @@ def main():
                 raise AssertionError('Fixture construction did not commit every declared current row')
             try:
                 call = verify_existing if args.no_profile else lambda *a, **kw: profile.runcall(verify_existing, *a, **kw)
-                result = call(store, entry, sources, seconds=300)
+                result = call(store, entry, sources, seconds=args.verification_seconds)
             except (DataStoreError, NativeInputError) as error:
                 # A stopped scan is useful diagnosis, never a zero-difference proof.
                 # Retain the same incomplete phase/counters as the formal CLI.
@@ -228,6 +264,7 @@ def main():
         output = {'input_kind': 'synthetic', 'production_acceptance': False,
                   'source_path': args.input, 'profile_enabled': not args.no_profile,
                   'entry_id': entry.id, 'objects': args.rows, 'seconds': elapsed,
+                  'verification_budget_seconds':args.verification_seconds,
                   'fixture':fixture,
                   'snapshot_complete': snapshot_complete, 'source_summary': sources.summary,
                   'result': result, 'profile': report.getvalue(),
