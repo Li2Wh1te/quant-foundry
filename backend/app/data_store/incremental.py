@@ -127,6 +127,24 @@ def claim_tables(sources,entry,limit):
         return sorted(jobs,key=lambda j:(j['range_key'],j['subject'],j['variant']))
 
 
+def existing_claims(sources,entry):
+    """Read the ordinary active batch without claiming a producer's pending work.
+
+    Exact source-selection validation detects any different eligible claim set.
+    Failed ranges keep their existing blocked state, and recovered ranges are
+    not silently unblocked just to make an operator continuation pass its fence.
+    """
+    batch=entry.id in ('E23','E44') or entry.source=='tushare'
+    order=('range_key,subject,variant' if entry.source=='tushare' else
+           'subject,variant' if batch else 'enqueued_at,subject,variant,range_key')
+    with sources.engine.connect() as c:
+        rows=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text '
+            'FROM data_store_source_ranges WHERE source=:source AND dataset=:dataset AND active IS NOT NULL '
+            "AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')) "
+            'ORDER BY '+order+' LIMIT :n'),{**_params(entry),'n':64 if batch else 1}).mappings().all()
+    return [dict(row) for row in rows]
+
+
 def acknowledge(sources,job,*,after=None):
     """Never clear a producer's pending bit, even when no newer head exists."""
     with sources.engine.begin() as c:
@@ -345,12 +363,18 @@ def _accumulate(totals,result,segment):
 
 
 def run(store,entry,sources,*,options,cancelled=None):
-    from .pipeline import _run_entry_locked,read_entry_status,_status
+    from .pipeline import (_run_entry_locked,read_entry_status,_status,
+                           continuation_refused,validate_sealed_continuation)
     from .change_capture import seed
     if not available(sources.engine,entry):
         raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
     old=read_entry_status(store,entry.id)
     contract=digest(entry.spec.descriptor())
+    if options.resume_sealed_only and (old.get('incremental',{}).get('contract')!=contract or
+            'pipeline.'+entry.id not in store.budget.pending_keys()):
+        # A fenced continuation may not seed a fresh queue or register a new
+        # source contract. It starts only from the already captured work.
+        raise continuation_refused('SEALED_CONTINUATION_REQUIRED')
     store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
     if old.get('incremental',{}).get('contract')!=contract:
         # A new store/rule must enumerate source metadata even if a previous
@@ -374,19 +398,23 @@ def run(store,entry,sources,*,options,cancelled=None):
         'source_metrics':{'metadata_rows':0,'payload_rows':0,'payload_bytes':0,'dependency_rows':0,
                           'dependency_bytes':0,'decoded_rows':0,'decode_calls':0},'source_scanned':False}
     try:
-        for _ in range(options.maximum_passes):
+        for _ in range(options.claim_batches):
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
             fund_batch=entry.id in ('E23','E44')
-            jobs=(claim_funds(sources,entry,min(64,options.maximum_passes)) if fund_batch else
-                  claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
+            jobs=(existing_claims(sources,entry) if options.resume_sealed_only else
+                  claim_funds(sources,entry,min(64,options.claim_batches)) if fund_batch else
+                  claim_tables(sources,entry,min(64,options.claim_batches)) if entry.source=='tushare' else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
-            if not jobs or jobs[0] is None:break
+            if not jobs or jobs[0] is None:
+                if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
+                break
             job=jobs[0]
             if fund_batch:
                 pairs=[]
                 for candidate in jobs:
                     item=next_observation(sources,entry,candidate)
                     if item is None:
+                        if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
                         if check_state(sources,entry,candidate):acknowledge(sources,candidate)
                     else:pairs.append((candidate,item))
                 if not pairs:continue
@@ -396,6 +424,7 @@ def run(store,entry,sources,*,options,cancelled=None):
             else:
                 observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
                 if entry.source=='tonghuashun' and observation is None:
+                    if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
                     if check_state(sources,entry,job):acknowledge(sources,job)
                     continue
                 marker=read_entry_status(store,entry.id)
@@ -407,6 +436,10 @@ def run(store,entry,sources,*,options,cancelled=None):
                     observation={'batch':[o for _,o in pairs]}
                     segment=FundBatchSources(sources,entry,pairs)
                 else:segment=RangeSources(sources,entry,job,observation,jobs=jobs)
+            if options.resume_sealed_only:
+                # Validate the seal before changing the active-observation
+                # marker. The ordinary merger repeats this guard under quota.
+                sealed_progress=validate_sealed_continuation(store,entry,segment,options,cancelled=cancelled)
             marker=read_entry_status(store,entry.id)
             marker['incremental']=dict(old.get('incremental',{}),version=1,contract=contract,
                 active_range={k:job[k] for k in ('source','dataset','subject','variant','range_key')},
@@ -418,6 +451,20 @@ def run(store,entry,sources,*,options,cancelled=None):
                 _accumulate(totals,read_entry_status(store,entry.id),segment)
                 raise
             _accumulate(totals,result,segment)
+            if options.resume_sealed_only:
+                totals['sealed_continuation']={
+                    'complete':bool(result.get('complete')),
+                    'input_identity':options.expected_input_identity,
+                    'source_selection':options.expected_source_selection,
+                    'claim_batches':1,'partition_passes':result.get('passes',0),
+                    'last_partition':result.get('last_partition'),
+                    # This attempt decodes zero input. Report the sealed
+                    # batch's original disposition counts separately rather
+                    # than presenting zero new failures as a clean input.
+                    'source_rows':sealed_progress.get('source_rows',0),
+                    'normalized_units':sealed_progress.get('normalized_units',0),
+                    'input_failures':sealed_progress.get('input_failures',0),
+                }
             if not result.get('complete'):break
             # This is intentionally after the file/catalog commit. A process exit
             # before this acknowledgement repeats only this unit, idempotently.
@@ -428,6 +475,10 @@ def run(store,entry,sources,*,options,cancelled=None):
                 for done,item in final.values():acknowledge(sources,done,after=item)
             else:
                 for done in jobs:acknowledge(sources,done,after=observation)
+            if options.resume_sealed_only:
+                # Completing this sealed batch does not authorize another
+                # claim, even if new producer commits arrived during the run.
+                break
     except BaseException as error:
         # A finite pass may have committed many independent ranges. Preserve
         # their measured work even when the final range is interrupted.

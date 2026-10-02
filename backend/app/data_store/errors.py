@@ -1,6 +1,7 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'SEALED_CONTINUATION_REQUIRED':'只续作需要已完整封存且身份明确的现有输入，未开始新的来源读取。',
     'SOURCE_RANGES_BLOCKED':'来源采集仍失败，相关范围保留待处理，其余范围已继续。',
     'CURRENT_SOURCE_MISMATCH':'本地来源与当前数据尚未完全对齐，完整覆盖核验未通过。',
     'LOCAL_UPDATE_BUDGET_EXCEEDED': '本次本地更新达到工作预算，未完成入口将在后续继续处理。',

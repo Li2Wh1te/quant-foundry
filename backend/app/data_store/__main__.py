@@ -19,6 +19,16 @@ def main(argv=None):
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
     parser.add_argument('--partition',action='append',default=[],help='Exact bounded target partition; repeat at most eight times')
     parser.add_argument('--max-passes',type=int,default=256)
+    parser.add_argument('--max-claim-batches',type=int,
+                        help='Independent native claim-batch limit; defaults to --max-passes')
+    parser.add_argument('--max-partition-passes',type=int,
+                        help='Independent partition-pass limit; defaults to --max-passes')
+    parser.add_argument('--resume-sealed-only',action='store_true',
+                        help='Resume exactly one existing sealed batch; never claim new native work')
+    parser.add_argument('--expect-input-identity',
+                        help='Exact sealed input identity SHA256 for --resume-sealed-only')
+    parser.add_argument('--expect-source-selection',
+                        help='Exact sealed source-selection SHA256 for --resume-sealed-only')
     parser.add_argument('--pass-seconds',type=int,default=300)
     parser.add_argument('--pipeline-spill-bytes',type=int,help='Explicit finite disk quota for a complete native scan; does not increase RAM')
     parser.add_argument('--scratch-bytes',type=int,help='Explicit shared staging/spill disk budget, at most 128 GiB')
@@ -36,6 +46,20 @@ def main(argv=None):
     parser.add_argument('--audit-local-only',action='store_true',
                         help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
+    if args.resume_sealed_only:
+        if (args.command!='update' or not args.entry or len(args.entry)!=1 or
+                args.initialize or args.rescue or args.partition or args.allow_incompatible_rebuild or
+                args.max_claim_batches not in (None,1) or
+                any(not fence or not re.fullmatch(r'[0-9a-f]{64}',fence) for fence in
+                    (args.expect_input_identity,args.expect_source_selection))):
+            parser.error('--resume-sealed-only requires one existing update entry and both exact fences')
+    elif args.expect_input_identity is not None or args.expect_source_selection is not None:
+        parser.error('Input fences require --resume-sealed-only')
+    if any(value is not None for value in (args.max_claim_batches,args.max_partition_passes)):
+        if args.command not in ('rebuild','update','retry') or any(
+                value is not None and not 1<=value<=4096
+                for value in (args.max_claim_batches,args.max_partition_passes)):
+            parser.error('Independent pass limits require a bounded processing command')
     resource_change=any(value is not None for value in
                         (args.pipeline_spill_bytes,args.scratch_bytes,args.issue_count))
     if resource_change and args.command!='configure-resources':
@@ -52,6 +76,8 @@ def main(argv=None):
     except KeyError:
         parser.error('Unknown entry; use describe to list E01–E71')
     if len(set(e.id for e in selected))!=len(selected): parser.error('Duplicate entry')
+    if args.resume_sealed_only and not selected[0].business:
+        parser.error('Sealed continuation requires exactly one business entry')
     if args.command=='cleanup' and any(not e.business for e in selected):
         parser.error('cleanup accepts business entries only')
     if args.command in ('compact-issues','verify-coverage') and (args.initialize or args.rescue or args.partition or any(not e.business for e in selected)):
@@ -99,7 +125,10 @@ def main(argv=None):
     try:
         options=PipelineOptions(mode=args.command if args.command in ('rebuild','update','retry') else 'update',
             partitions=tuple(args.partition),maximum_passes=args.max_passes,pass_seconds=args.pass_seconds,
-            allow_incompatible_rebuild=args.allow_incompatible_rebuild)
+            allow_incompatible_rebuild=args.allow_incompatible_rebuild,
+            maximum_claim_batches=args.max_claim_batches,maximum_partition_passes=args.max_partition_passes,
+            resume_sealed_only=args.resume_sealed_only,expected_input_identity=args.expect_input_identity,
+            expected_source_selection=args.expect_source_selection)
         engine=get_engine()
         with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
             if args.command=='configure-resources':
