@@ -214,19 +214,31 @@ def main():
         if not 0 <= result.get('scanned_objects', 0) <= args.rows:
             raise AssertionError('Synthetic scope exceeded its declared row cap')
         report = io.StringIO()
+        self_report = io.StringIO()
+        caller_report = io.StringIO()
         if not args.no_profile:
             pstats.Stats(profile, stream=report).strip_dirs().sort_stats('cumulative').print_stats(40)
+            # Cumulative costs overlap between callers and callees. Exclusive
+            # time and the top callers distinguish decoding, exact validation,
+            # hashing and temporary-index cost without changing the measured
+            # scan. Reports contain only static code labels, never arguments or
+            # source values, and are limited to forty/thirty functions.
+            pstats.Stats(profile, stream=self_report).strip_dirs().sort_stats('tottime').print_stats(40)
+            pstats.Stats(profile, stream=caller_report).strip_dirs().sort_stats('cumulative').print_callers(30)
         output = {'input_kind': 'synthetic', 'production_acceptance': False,
                   'source_path': args.input, 'profile_enabled': not args.no_profile,
                   'entry_id': entry.id, 'objects': args.rows, 'seconds': elapsed,
                   'fixture':fixture,
                   'snapshot_complete': snapshot_complete, 'source_summary': sources.summary,
                   'result': result, 'profile': report.getvalue(),
+                  'profile_self': self_report.getvalue(),
+                  'profile_callers': caller_report.getvalue(),
                   'scratch_released': not store.budget.pending_keys()}
     output['isolated_schema_and_store_removed'] = True
     with args.output.open('x', encoding='utf-8') as handle:
         json.dump(output, handle, ensure_ascii=False, indent=2)
-    print(json.dumps({k: v for k, v in output.items() if k != 'profile'}))
+    print(json.dumps({k: v for k, v in output.items()
+                      if k not in ('profile','profile_self','profile_callers')}))
 
 
 if __name__ == '__main__':

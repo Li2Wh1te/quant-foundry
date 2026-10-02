@@ -72,9 +72,12 @@ def test_physical_fixture_verifies_actual_current_or_reports_every_missing_objec
     module=runpy.run_path(str(script))
     monkeypatch.setenv('QF_ENVIRONMENT','test')
     output=tmp_path/'result.json'
-    monkeypatch.setattr('sys.argv',[str(script),'--root',str(tmp_path),'--output',str(output),
-                                  '--entry','E69','--rows','257','--input','postgres',
-                                  '--current',current,'--no-profile'])
+    arguments=[str(script),'--root',str(tmp_path),'--output',str(output),
+               '--entry','E69','--rows','257','--input','postgres','--current',current]
+    # Exercise detailed CPU attribution on the matched fixture while retaining
+    # the wall-time-only empty-current path and both actual disposition checks.
+    if current=='empty':arguments.append('--no-profile')
+    monkeypatch.setattr('sys.argv',arguments)
     module['main']()
     result=json.loads(output.read_text())
     assert result['snapshot_complete'] and not result['production_acceptance']
@@ -88,9 +91,12 @@ def test_physical_fixture_verifies_actual_current_or_reports_every_missing_objec
         assert result['fixture']['before']['rows']==257
         assert result['result']['complete'] and result['result']['current_objects']==257
         assert result['result']['missing_objects']==result['result']['mismatched_objects']==0
+        assert 'value_hash' in result['profile_self']
+        assert 'native_json' in result['profile_callers']
     else:
         assert not result['result']['complete'] and result['result']['missing_objects']==257
         assert result['result']['current_objects']==result['fixture']['before']['rows']==0
+        assert not result['profile_self'] and not result['profile_callers']
 
 
 @pytest.mark.parametrize('entry,rows', [('E50', '1'), ('E69', '4000001')])
