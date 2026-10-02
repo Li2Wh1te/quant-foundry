@@ -1,5 +1,6 @@
 """AR-03 real PostgreSQL producer/consumer acceptance; no supplier access."""
 from copy import deepcopy
+from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -507,7 +508,7 @@ def test_r01_cancelled_two_month_batch_preserves_commits_and_dirty_range(ready, 
     checkpoint = ready.source_state(entry.spec.name, 'local.partition.' + first)
     paths = list(ready.files.root.glob('.scratch/*/spill/lfd02-merge.sqlite'))
     assert len(paths) == 1 and ready.budget.pending_keys() == {'pipeline.E50'}
-    with sqlite3.connect(paths[0]) as spool:
+    with closing(sqlite3.connect(paths[0])) as spool:
         progress = json.loads(spool.execute('SELECT body FROM progress').fetchone()[0])
         assert progress['scan_complete'] and progress['after'] == first
         assert progress['input_failures'] == 4
