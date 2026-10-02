@@ -439,7 +439,8 @@ class AdapterTests(unittest.TestCase):
 
     def test_only_explicit_same_project_application_recreation_is_accepted(self):
         validate_deployment(COMMAND, "fixture-project")
-        for command in (["make", "selfhost"], COMMAND[:-1] + ["postgres"], COMMAND[:-1] + ["frontend"], COMMAND[:], ["docker", "compose", "down"]):
+        mixed_projects = COMMAND[:6] + ["--project-name", "different"] + COMMAND[6:]
+        for command in (["make", "selfhost"], COMMAND[:-1] + ["postgres"], COMMAND[:-1] + ["frontend"], COMMAND[:], mixed_projects, ["docker", "compose", "down"]):
             with self.subTest(command=command):
                 project = "different" if command == COMMAND else "fixture-project"
                 with self.assertRaises(DrainError): validate_deployment(command, project)

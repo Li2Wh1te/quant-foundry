@@ -338,7 +338,8 @@ def validate_deployment(command, project):
         if flag not in ("-f", "--file", "-p", "--project-name", "--project-directory", "--env-file") or i + 1 >= index:
             raise DrainError("unsupported_compose_option")
         options.setdefault(flag, []).append(command[i + 1]); i += 2
-    if not (options.get("-f") or options.get("--file")) or options.get("-p", options.get("--project-name")) != [project]:
+    projects = options.get("-p", []) + options.get("--project-name", [])
+    if not (options.get("-f") or options.get("--file")) or projects != [project]:
         raise DrainError("compose_profile_or_project_mismatch")
     tail = list(command[index + 1:])
     required = {"-d", "--no-deps", "--no-build", "--wait"}
