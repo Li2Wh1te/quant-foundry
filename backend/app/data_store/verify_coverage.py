@@ -112,6 +112,14 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     with store.catalog.transaction() as c:
                         parts=c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d ORDER BY partition_key'),{'d':entry.spec.name}).scalars().all()
                     phase='current_files'
+                    def failure_disposed(expected):
+                        # A source-wide failure has no fabricated output object.
+                        # Apply the same exact-key/scope, group and order fence
+                        # whether a current row exists or not. This proves only
+                        # disposition; check_coverage still rejects quality issues.
+                        scope=entry.spec.key_bytes((expected['r'],expected['s']))
+                        return db.execute('SELECT 1 FROM issues WHERE k IN (?,?) AND g=? AND n>=? LIMIT 1',
+                            (expected['k'],scope,expected['g'],expected['n'])).fetchone() is not None
                     def compare(rows):
                         if not rows:return
                         first=rows[0]
@@ -124,10 +132,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         # Invalid originals are disposed only by explicit, current
                         # exact-key/scope evidence. They remain quality restrictions.
                         if expected['state']=='invalid':
-                            issue=db.execute('SELECT 1 FROM issues WHERE k=? AND g=? AND n>=?',(key,expected['g'],expected['n'])).fetchone()
-                            scope=entry.spec.key_bytes((expected['r'],expected['s']))
-                            if not issue:issue=db.execute('SELECT 1 FROM issues WHERE k=? AND g=? AND n>=?',(scope,expected['g'],expected['n'])).fetchone()
-                            if issue:counts['disposed_failures']+=1
+                            if failure_disposed(expected):counts['disposed_failures']+=1
                             else:counts['mismatched_objects']+=1
                         elif (first['basis_group']!=expected['g'] or
                               (first['basis_ns']!=expected['n'] if expected['stable_order'] else not 0<first['basis_ns']<=expected['n']) or
@@ -170,9 +175,8 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         compare(rows);db.commit()
                     phase='missing_objects'
                     for row in db.execute('SELECT * FROM expected WHERE seen=0'):
-                        if row['state']=='invalid':
-                            evidence=db.execute('SELECT 1 FROM issues WHERE k=? AND g=? AND n>=?',(row['k'],row['g'],row['n'])).fetchone()
-                            if evidence:counts['disposed_failures']+=1;continue
+                        if row['state']=='invalid' and failure_disposed(row):
+                            counts['disposed_failures']+=1;continue
                         counts['missing_objects']+=1
                     check()
                     if store.catalog.dataset(entry.spec.name)['generation']!=generation:raise DataStoreError('DATA_CHANGED')
