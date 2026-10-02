@@ -29,6 +29,19 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
     started=time.monotonic();counts={'source_rows':0,'expected_objects':0,'current_objects':0,
         'missing_objects':0,'mismatched_objects':0,'unexpected_objects':0,'disposed_failures':0,
         'queued_ranges':0,'scanned_objects':0,'current_files':0}
+    phase='setup';phase_started=started;phase_seconds={}
+    def enter_phase(next_phase):
+        # Constant-size phase timings explain which full scan consumes the
+        # existing deadline. They never alter its budget or receipt counters.
+        nonlocal phase,phase_started
+        now=time.monotonic()
+        phase_seconds[phase]=phase_seconds.get(phase,0)+now-phase_started
+        phase=next_phase;phase_started=now
+    def measured_phases():
+        now=time.monotonic()
+        measured=dict(phase_seconds)
+        measured[phase]=measured.get(phase,0)+now-phase_started
+        return {key:round(value,6) for key,value in measured.items()}
     with store.locks._hold(entry.spec.name,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         with store.locks.read(entry.spec.name,timeout_ms=store.limits.lock_timeout_ms,cancelled=cancelled):
             dataset=store.catalog.dataset(entry.spec.name)
@@ -70,7 +83,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     # phase boundaries retain their unconditional measurements.
                     if not sample or resource_steps>=128 or now>=resource_due:
                         space.check();resource_due=now+.05;resource_steps=0
-                phase='issues'
+                enter_phase('issues')
                 try:
                     after=''
                     while True:
@@ -84,7 +97,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             check()
                         if len(page)<500:break
                         after=page[-1]['issue_key']
-                    phase='capture_ranges';capture=False
+                    enter_phase('capture_ranges');capture=False
                     if entry.source=='tushare' and entry.id in ('E69','E70'):
                         with store.catalog.transaction() as c:
                             capture=c.execute(text("SELECT version>=3 FROM data_store_capture_version WHERE singleton=1")).scalar_one()
@@ -98,7 +111,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                     check();db.executemany('INSERT INTO queued VALUES (?,?,?,?)',[tuple(row) for row in rows])
                                     counts['queued_ranges']+=len(rows)
                                 db.commit()
-                    phase='native_snapshot';boundary=hashlib.sha256()
+                    enter_phase('native_snapshot');boundary=hashlib.sha256()
                     for raw in sources.iter_entry(entry):
                         check(sample=True);counts['source_rows']+=1
                         boundary.update(digest([raw.source,raw.dataset,raw.subject,raw.variant,raw.token,raw.order_ns]).encode())
@@ -124,7 +137,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     counts['expected_objects']=db.execute('SELECT count(*) FROM expected').fetchone()[0]
                     with store.catalog.transaction() as c:
                         parts=c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d ORDER BY partition_key'),{'d':entry.spec.name}).scalars().all()
-                    phase='current_files'
+                    enter_phase('current_files')
                     def failure_disposed(expected):
                         # A source-wide failure has no fabricated output object.
                         # Apply the same exact-key/scope, group and order fence
@@ -186,16 +199,18 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                     if (seen!=ref['row_count'] or first!=bytes(ref['key_min']) or
                                             file_last!=bytes(ref['key_max'])):raise DataStoreError('FILE_INVALID')
                         compare(rows);db.commit()
-                    phase='missing_objects'
+                    enter_phase('missing_objects')
                     for row in db.execute('SELECT * FROM expected WHERE seen=0'):
                         if row['state']=='invalid' and failure_disposed(row):
                             counts['disposed_failures']+=1;continue
                         counts['missing_objects']+=1
                     check()
+                    enter_phase('final_fences')
                     if store.catalog.dataset(entry.spec.name)['generation']!=generation:raise DataStoreError('DATA_CHANGED')
                     complete=not any(counts[k] for k in ('missing_objects','mismatched_objects','unexpected_objects'))
                     status=read_entry_status(store,entry.id)
                     if complete:
+                        enter_phase('receipt')
                         expected_parts=[r[0] for r in db.execute('SELECT DISTINCT p FROM expected ORDER BY p')]
                         h=hashlib.sha256()
                         for part in expected_parts:h.update(digest(part).encode())
@@ -206,7 +221,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             'end':expected_parts[-1] if expected_parts else '', 'after':expected_parts[-1] if expected_parts else '',
                             'scan_complete':True,'complete':True,'remaining':0,'generation':generation}
                         if capture:
-                            phase='acknowledge'
+                            enter_phase('acknowledge')
                             # Each captured range revision was read before the
                             # authoritative native snapshot. A late writer changes
                             # its revision even while pending was already true.
@@ -244,14 +259,15 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         # check_coverage still rejects any pending native queue or
                         # unresolved quality. No complete/qualified flag is changed.
                     return {'entry_id':entry.id,'complete':complete,'reason':None if complete else 'CURRENT_SOURCE_MISMATCH',
-                        'generation':generation,**counts,'seconds':round(time.monotonic()-started,3),'current_files_changed':False}
+                        'generation':generation,**counts,'seconds':round(time.monotonic()-started,3),
+                        'phase_seconds':measured_phases(),'current_files_changed':False}
                 except BaseException as error:
                     # Bounded counters identify the failed phase without leaking
                     # source keys, payloads, SQL, paths or exception messages.
                     if isinstance(error,sqlite3.Error):
                         error=DataStoreError('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL else 'FILE_INVALID')
-                        error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3))
+                        error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3),phase_seconds=measured_phases())
                         raise error from None
-                    error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3))
+                    error.verification=dict(counts,phase=phase,seconds=round(time.monotonic()-started,3),phase_seconds=measured_phases())
                     raise
                 finally:db.close();space.discard=True

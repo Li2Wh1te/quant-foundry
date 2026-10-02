@@ -51,6 +51,7 @@ def test_cancel_inside_one_historical_observation_is_not_delayed_to_file_scan(re
         verification.verify_existing(ready, entry, Window(window()), cancelled=cancelled)
     assert caught.value.code == 'OPERATION_CANCELLED'
     assert caught.value.verification['phase'] == 'native_snapshot'
+    assert 'native_snapshot' in caught.value.verification['phase_seconds']
     assert 0 < caught.value.verification['scanned_objects'] < 200
     unchanged_and_released(ready, entry, 0)
 
@@ -78,6 +79,7 @@ def test_timeout_inside_one_historical_observation_preserves_pending(ready, monk
         verification.verify_existing(ready, entry, Window(window()), seconds=3)
     assert caught.value.code == 'QUERY_TIMEOUT'
     assert caught.value.verification['phase'] == 'native_snapshot'
+    assert caught.value.verification['phase_seconds']['native_snapshot'] >= 3
     assert 0 < caught.value.verification['scanned_objects'] < 200
     unchanged_and_released(ready, entry, 0)
 

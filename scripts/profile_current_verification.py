@@ -3,9 +3,10 @@
 
 The database must be local, explicitly marked as test, and named *_test. Each
 run owns one disposable random schema and one temporary current-store root.
-There are no supplier calls or production originals. The deliberately empty
-current dataset makes the full expected-key scan report missing objects; this
-profiles the native_snapshot phase without pretending to certify acceptance.
+There are no supplier calls or production originals. Empty-current mode reports
+every expected object missing. Matched-current mode first builds real Parquet
+partitions through the ordinary complete-scan pipeline, then verifies both full
+scans under the unchanged 300-second deadline. Neither mode certifies production.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ from app.data_store.errors import DataStoreError
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_store.tables import entry_status
+from app.data_store.pipeline import PipelineOptions, run_entry
 from app.data_store.source_range_tables import metadata as capture_metadata
 from app.data_store.verify_coverage import verify_existing
 
@@ -76,6 +78,30 @@ class SyntheticSources:
         self.summary['complete'] = True
 
 
+class FixtureSources(NativeSources):
+    """Use the formal complete-scan builder for this disposable native fixture.
+
+    The isolated schema has one physical native table, not a migrated production
+    capture subsystem. This explicit subclass follows the existing full-scan
+    route, preserving real decoding, normalization, partitioning and commits.
+    Verification itself uses unmodified NativeSources and its revision fence.
+    """
+
+
+def current_manifest(store, entry):
+    """Bounded file metadata proves verification did not rewrite fixture rows."""
+    with store.catalog.transaction() as connection:
+        refs = connection.execute(text(
+            'SELECT partition_key,path,content_hash,row_count,byte_count '
+            'FROM data_store_files WHERE dataset=:d ORDER BY partition_key,path'),
+            {'d':entry.spec.name}).mappings().all()
+    return {'generation':store.catalog.dataset(entry.spec.name)['generation'],
+            'files':len(refs),'partitions':len({r['partition_key'] for r in refs}),
+            'rows':sum(r['row_count'] for r in refs),
+            'bytes':sum(r['byte_count'] for r in refs),
+            'file_set_digest':digest([dict(r) for r in refs])}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
@@ -86,6 +112,8 @@ def main():
                         help='postgres exercises the real E69 server cursor and native row decoding')
     parser.add_argument('--no-profile', action='store_true',
                         help='Measure wall time with the same complete scan and no profiler overhead')
+    parser.add_argument('--current', choices=('empty','matched'), default='empty',
+                        help='matched builds actual current partitions before the 300-second verification')
     args = parser.parse_args()
     host = os.getenv('QF_DATABASE_HOST', '127.0.0.1')
     database = os.getenv('QF_DATABASE_NAME', 'quant_foundry_test')
@@ -96,6 +124,8 @@ def main():
     maximum = 4000000 if args.input == 'postgres' else 250000
     if args.input == 'postgres' and args.entry != 'E69':
         parser.error('The bounded physical-table fixture supports E69 only')
+    if args.current == 'matched' and args.input != 'postgres':
+        parser.error('Matched-current fixtures require the reviewed physical PostgreSQL input')
     if not 1 <= args.rows <= maximum or not args.root.is_dir() or args.output.exists():
         parser.error(f'Use 1–{maximum} synthetic objects, an existing root and a new output')
     url = URL.create('postgresql+psycopg', host=host,
@@ -109,6 +139,7 @@ def main():
     limits = replace(StoreLimits(), scratch_bytes=32*1024**3,
                      pipeline_spill_bytes=16*1024**3)
     with isolated(args.root, url, limits, False) as store:
+        fixture_started = time.monotonic()
         with store.catalog.engine.begin() as connection:
             entry_status.create(connection)
             # Include the real capture schema so Tushare verification exercises
@@ -132,21 +163,54 @@ def main():
                     FROM generate_series(0,CAST(:rows AS bigint)-1) AS fixture(i)
                 """), {'rows': args.rows})
         store.register(entry.spec)
+        seed_seconds = time.monotonic()-fixture_started
+        fixture = {'seed_seconds':seed_seconds,'current_mode':args.current}
+        if args.current == 'matched':
+            build_started = time.monotonic()
+            # The measured 20k/250k tiers project roughly 880 seconds for a
+            # 3.3M-row fixture. Preparation has a finite 1200-second ceiling,
+            # independent of the UNCHANGED 300-second verification deadline.
+            # It is never
+            # counted as a relaxed verification deadline or retried on failure.
+            try:
+                fixture['build_result'] = run_entry(
+                    store,entry,FixtureSources(store.catalog.engine,
+                                               limits=SourceLimits(pass_seconds=1200)),
+                    options=PipelineOptions(mode='rebuild',partitions_per_pass=8,
+                                            maximum_passes=4096,pass_seconds=1200),
+                    cancelled=lambda:time.monotonic()-build_started>=1200)
+            except (DataStoreError,NativeInputError) as error:
+                fixture['build_result'] = getattr(error,'entry_result',
+                    {'complete':False,'reason':error.code})
+            fixture['build_seconds'] = time.monotonic()-build_started
+        fixture['before'] = current_manifest(store,entry)
         sources = (NativeSources(store.catalog.engine, limits=SourceLimits(pass_seconds=300))
                    if args.input == 'postgres' else SyntheticSources(args.rows))
         started = time.monotonic()
-        try:
-            call = verify_existing if args.no_profile else lambda *a, **kw: profile.runcall(verify_existing, *a, **kw)
-            result = call(store, entry, sources, seconds=300)
-        except (DataStoreError, NativeInputError) as error:
-            # A stopped scan is useful diagnosis, never a zero-difference proof.
-            # Retain the same incomplete phase/counters as the formal CLI.
-            result = {'entry_id': entry.id, 'complete': False, 'reason': error.code,
-                      **getattr(error, 'verification', {})}
+        if args.current == 'matched' and not fixture['build_result'].get('complete'):
+            result = {'entry_id':entry.id,'complete':False,'phase':'fixture_build',
+                      'reason':fixture['build_result'].get('reason','FIXTURE_BUILD_INCOMPLETE')}
+        else:
+            if args.current == 'matched' and fixture['before']['rows'] != args.rows:
+                raise AssertionError('Fixture construction did not commit every declared current row')
+            try:
+                call = verify_existing if args.no_profile else lambda *a, **kw: profile.runcall(verify_existing, *a, **kw)
+                result = call(store, entry, sources, seconds=300)
+            except (DataStoreError, NativeInputError) as error:
+                # A stopped scan is useful diagnosis, never a zero-difference proof.
+                # Retain the same incomplete phase/counters as the formal CLI.
+                result = {'entry_id': entry.id, 'complete': False, 'reason': error.code,
+                          **getattr(error, 'verification', {})}
         elapsed = time.monotonic() - started
+        fixture['after'] = current_manifest(store,entry)
+        if fixture['before'] != fixture['after']:
+            raise AssertionError('Verification rewrote the disposable current fixture')
         snapshot_complete = result.get('expected_objects') == args.rows
-        if snapshot_complete and result['missing_objects'] != args.rows:
-            raise AssertionError('Synthetic scope was not fully verified')
+        if snapshot_complete and args.current == 'empty' and result['missing_objects'] != args.rows:
+            raise AssertionError('Empty synthetic scope was not fully verified')
+        if result.get('complete') and (result['current_objects'] != args.rows
+                or any(result[k] for k in ('missing_objects','mismatched_objects','unexpected_objects'))):
+            raise AssertionError('Matched synthetic scope was not exactly compared')
         if not 0 <= result.get('scanned_objects', 0) <= args.rows:
             raise AssertionError('Synthetic scope exceeded its declared row cap')
         report = io.StringIO()
@@ -155,9 +219,11 @@ def main():
         output = {'input_kind': 'synthetic', 'production_acceptance': False,
                   'source_path': args.input, 'profile_enabled': not args.no_profile,
                   'entry_id': entry.id, 'objects': args.rows, 'seconds': elapsed,
+                  'fixture':fixture,
                   'snapshot_complete': snapshot_complete, 'source_summary': sources.summary,
                   'result': result, 'profile': report.getvalue(),
                   'scratch_released': not store.budget.pending_keys()}
+    output['isolated_schema_and_store_removed'] = True
     with args.output.open('x', encoding='utf-8') as handle:
         json.dump(output, handle, ensure_ascii=False, indent=2)
     print(json.dumps({k: v for k, v in output.items() if k != 'profile'}))

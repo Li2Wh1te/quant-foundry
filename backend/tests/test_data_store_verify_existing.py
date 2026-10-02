@@ -26,6 +26,11 @@ def test_actual_native_match_restores_missing_receipt_without_rebuild(ready):
     before=files(ready,e);generation=ready.catalog.dataset(e.spec.name)['generation']
     result=verify_existing(ready,e,source)
     assert result['complete'] and result['current_objects']==1
+    phases=result['phase_seconds']
+    assert {'setup','issues','capture_ranges','native_snapshot','current_files',
+            'missing_objects','final_fences','receipt'} <= phases.keys()
+    assert all(seconds>=0 for seconds in phases.values())
+    assert abs(sum(phases.values())-result['seconds'])<.01
     assert files(ready,e)==before and ready.catalog.dataset(e.spec.name)['generation']==generation
     with ready.catalog.transaction() as c:assert check_coverage(c,e,read_entry_status(ready,e.id))['satisfied']
 
