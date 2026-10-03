@@ -20,6 +20,14 @@ from app.data_store.pipeline import PipelineOptions
      '--expect-input-identity','0'*64,'--expect-source-selection','1'*64],
     ['update','--entry','E71','--resume-sealed-only',
      '--expect-input-identity','0'*64,'--expect-source-selection','1'*64],
+    ['plan-active','--entry','E50'],
+    ['plan-active','--entry','E23','--entry','E44'],
+    ['plan-active','--entry','E44','--initialize'],
+    ['update','--entry','E44','--admit-active-only'],
+    ['update','--entry','E50','--admit-active-only',
+     '--expect-input-identity','0'*64,'--expect-source-selection','1'*64],
+    ['update','--entry','E44','--admit-active-only','--resume-sealed-only',
+     '--expect-input-identity','0'*64,'--expect-source-selection','1'*64],
 ])
 def test_invalid_operator_boundaries_refused(args):
     with pytest.raises(SystemExit) as error:main(args)
@@ -31,6 +39,9 @@ def test_invalid_operator_boundaries_refused(args):
     {'expected_source_selection':'1'*64}, {'resume_sealed_only':True},
     {'resume_sealed_only':True,'expected_input_identity':'0'*64,
      'expected_source_selection':'1'*64,'partitions':('2017-03.b07',)},
+    {'admit_active_only':True}, {'admit_active_only':1},
+    {'admit_active_only':True,'resume_sealed_only':True,
+     'expected_input_identity':'0'*64,'expected_source_selection':'1'*64},
 ])
 def test_direct_callers_cannot_bypass_option_validation(kwargs):
     with pytest.raises(ValueError):PipelineOptions(**kwargs)

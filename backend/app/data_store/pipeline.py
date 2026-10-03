@@ -43,6 +43,7 @@ class PipelineOptions:
     maximum_claim_batches: int | None = None
     maximum_partition_passes: int | None = None
     resume_sealed_only: bool = False
+    admit_active_only: bool = False
     expected_input_identity: str | None = None
     expected_source_selection: str | None = None
 
@@ -50,7 +51,7 @@ class PipelineOptions:
     def claim_batches(self):
         # An operator-fenced continuation can consume only its existing batch.
         # Legacy callers retain the original shared maximum_passes behavior.
-        return 1 if self.resume_sealed_only else (
+        return 1 if self.resume_sealed_only or self.admit_active_only else (
             self.maximum_claim_batches if self.maximum_claim_batches is not None else self.maximum_passes)
 
     @property
@@ -74,9 +75,11 @@ class PipelineOptions:
             if limit is not None and (type(limit) is not int or not 1<=limit<=4096):
                 raise ValueError('Invalid independent pipeline limit')
         fences=(self.expected_input_identity,self.expected_source_selection)
-        if type(self.resume_sealed_only) is not bool:
+        if type(self.resume_sealed_only) is not bool or type(self.admit_active_only) is not bool:
             raise ValueError('Invalid sealed continuation mode')
-        if self.resume_sealed_only:
+        if self.resume_sealed_only and self.admit_active_only:
+            raise ValueError('Choose one input admission mode')
+        if self.resume_sealed_only or self.admit_active_only:
             if (self.mode!='update' or self.partitions or self.allow_incompatible_rebuild or
                     self.maximum_claim_batches not in (None,1) or
                     any(not isinstance(fence,str) or not re.fullmatch(r'[0-9a-f]{64}',fence)
@@ -371,6 +374,12 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                 identity=input_identity(entry,sources,options)
                 record=spool.db.execute('SELECT body FROM progress WHERE id=1').fetchone()
                 progress=json.loads(record[0]) if record else {}
+                if options.admit_active_only and progress.get('scan_complete') and (
+                        progress.get('active_input_fence')!=options.expected_source_selection):
+                    # A newly planned acquisition cannot reuse a different
+                    # protected seal, including one made before this admission
+                    # protocol. Its original sealed-only route remains intact.
+                    raise continuation_refused('SOURCE_CONFLICT')
                 if options.resume_sealed_only and (
                         not progress.get('scan_complete') or
                         progress.get('identity')!=options.expected_input_identity or
@@ -445,11 +454,18 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                               'normalized_units':summary['normalized_units'],
                               'input_failures':summary['input_failures'],
                               'boundary':input_hash.hexdigest(),'source_selection':source_selection}
+                    if options.admit_active_only:
+                        progress['active_input_fence']=options.expected_source_selection
                     spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
                                      (json.dumps(progress),))
                     spool.db.commit();spool.check()
                 else:
                     summary['resumed']=True
+                if options.admit_active_only:
+                    # Distinguish this attempt's zero new decodes from the
+                    # original sealed batch's unresolved input failures.
+                    summary['active_input_disposition']={key:progress.get(key,0) for key in
+                        ('source_rows','normalized_units','input_failures')}
                 if full_scan:
                     # Upgrade a legacy sealed continuation from its actual
                     # ordered range and cursor, never from old booleans.

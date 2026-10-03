@@ -12,7 +12,7 @@ import sys
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
-    parser.add_argument('command',choices=('describe','status','rebuild','update','retry',
+    parser.add_argument('command',choices=('describe','status','plan-active','rebuild','update','retry',
                                            'cleanup','verify-coverage','compact-issues','audit-export','configure-resources'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
@@ -25,6 +25,8 @@ def main(argv=None):
                         help='Independent partition-pass limit; defaults to --max-passes')
     parser.add_argument('--resume-sealed-only',action='store_true',
                         help='Resume exactly one existing sealed batch; never claim new native work')
+    parser.add_argument('--admit-active-only',action='store_true',
+                        help='Atomically admit one existing E23/E44 batch using exact plan-active fences')
     parser.add_argument('--expect-input-identity',
                         help='Exact sealed input identity SHA256 for --resume-sealed-only')
     parser.add_argument('--expect-source-selection',
@@ -48,7 +50,9 @@ def main(argv=None):
     parser.add_argument('--audit-local-only',action='store_true',
                         help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
-    if args.resume_sealed_only:
+    if args.resume_sealed_only and args.admit_active_only:
+        parser.error('Choose one input admission mode')
+    if args.resume_sealed_only or args.admit_active_only:
         if (args.command!='update' or not args.entry or len(args.entry)!=1 or
                 args.initialize or args.rescue or args.partition or args.allow_incompatible_rebuild or
                 args.max_claim_batches not in (None,1) or
@@ -56,7 +60,11 @@ def main(argv=None):
                     (args.expect_input_identity,args.expect_source_selection))):
             parser.error('--resume-sealed-only requires one existing update entry and both exact fences')
     elif args.expect_input_identity is not None or args.expect_source_selection is not None:
-        parser.error('Input fences require --resume-sealed-only')
+        parser.error('Input fences require an explicit admission mode')
+    if args.command=='plan-active' or args.admit_active_only:
+        if (not args.entry or len(args.entry)!=1 or args.entry[0] not in ('E23','E44') or
+                args.initialize or args.rescue or args.partition or args.allow_incompatible_rebuild):
+            parser.error('Active input planning/admission requires one existing E23/E44 entry')
     if any(value is not None for value in (args.max_claim_batches,args.max_partition_passes)):
         if args.command not in ('rebuild','update','retry') or any(
                 value is not None and not 1<=value<=4096
@@ -131,7 +139,7 @@ def main(argv=None):
             allow_incompatible_rebuild=args.allow_incompatible_rebuild,
             maximum_claim_batches=args.max_claim_batches,maximum_partition_passes=args.max_partition_passes,
             resume_sealed_only=args.resume_sealed_only,expected_input_identity=args.expect_input_identity,
-            expected_source_selection=args.expect_source_selection)
+            expected_source_selection=args.expect_source_selection,admit_active_only=args.admit_active_only)
         engine=get_engine()
         with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
             if args.command=='configure-resources':
@@ -141,7 +149,11 @@ def main(argv=None):
             native=NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0])
             sources=(CombinedSources(native,RescueSources(args.rescue,limits=source_limits,
                      cancelled=lambda:cancelled[0])) if args.rescue else native)
-            if args.command in ('rebuild','update','retry'):
+            if args.command=='plan-active':
+                from .active_input import active_input_plan
+                output['entries']=[active_input_plan(store,selected[0],native).plan]
+                output['plan_ready']=True
+            elif args.command in ('rebuild','update','retry'):
                 output['entries']=run_local(store,sources,entries=selected,options=options,
                                             cancelled=lambda:cancelled[0])
                 output['complete']=all(row.get('complete') and row.get('qualified',True)

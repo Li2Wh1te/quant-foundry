@@ -6,6 +6,7 @@ commit. Concurrent writes merge into a separate pending range, so an acknowledge
 cannot erase a late commit or r+1. No completed observation ledger is retained.
 """
 from dataclasses import replace
+from contextlib import nullcontext
 from datetime import date, datetime, timezone
 import hashlib
 import json
@@ -269,10 +270,10 @@ class FundBatchSources:
         self.summary['complete']=True
 
 
-def next_observation(sources,entry,job):
+def next_observation(sources,entry,job,*,connection=None):
     a=job['active']
     if not a['stop']:return None
-    with sources.engine.connect() as c:
+    with (nullcontext(connection) if connection is not None else sources.engine.connect()) as c:
         row=c.execute(text('SELECT observed_at::text AS at,id::text AS id FROM tonghuashun_observations '
             'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
             'AND observed_at>=CAST(:lower AS timestamptz) '
@@ -362,7 +363,7 @@ def _accumulate(totals,result,segment):
     totals['work_admitted']=result.get('work_admitted',False)
 
 
-def run(store,entry,sources,*,options,cancelled=None):
+def run(store,entry,sources,*,options,cancelled=None,admitted=None):
     from .pipeline import (_run_entry_locked,read_entry_status,_status,
                            continuation_refused,validate_sealed_continuation)
     from .change_capture import seed
@@ -370,6 +371,9 @@ def run(store,entry,sources,*,options,cancelled=None):
         raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
     old=read_entry_status(store,entry.id)
     contract=digest(entry.spec.descriptor())
+    if options.admit_active_only and admitted is None:
+        # Direct callers cannot bypass atomic admission in updates.run_entry.
+        raise continuation_refused('ACTIVE_INPUT_REQUIRED')
     if options.resume_sealed_only and (old.get('incremental',{}).get('contract')!=contract or
             'pipeline.'+entry.id not in store.budget.pending_keys()):
         # A fenced continuation may not seed a fresh queue or register a new
@@ -401,7 +405,8 @@ def run(store,entry,sources,*,options,cancelled=None):
         for _ in range(options.claim_batches):
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
             fund_batch=entry.id in ('E23','E44')
-            jobs=(existing_claims(sources,entry) if options.resume_sealed_only else
+            jobs=([j for j,_ in admitted.pairs] if options.admit_active_only else
+                  existing_claims(sources,entry) if options.resume_sealed_only else
                   claim_funds(sources,entry,min(64,options.claim_batches)) if fund_batch else
                   claim_tables(sources,entry,min(64,options.claim_batches)) if entry.source=='tushare' else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
@@ -410,8 +415,8 @@ def run(store,entry,sources,*,options,cancelled=None):
                 break
             job=jobs[0]
             if fund_batch:
-                pairs=[]
-                for candidate in jobs:
+                pairs=list(admitted.pairs) if options.admit_active_only else []
+                for candidate in ([] if options.admit_active_only else jobs):
                     item=next_observation(sources,entry,candidate)
                     if item is None:
                         if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
@@ -451,6 +456,16 @@ def run(store,entry,sources,*,options,cancelled=None):
                 _accumulate(totals,read_entry_status(store,entry.id),segment)
                 raise
             _accumulate(totals,result,segment)
+            if options.admit_active_only:
+                # Persist only the finite batch receipt. Exact descriptors stay
+                # in the operator's private plan, not a second source ledger.
+                totals['active_input_admission']={
+                    'input_identity':admitted.plan['input_identity'],
+                    'source_selection':admitted.plan['source_selection'],
+                    'scope_count':admitted.plan['scope_count'],'claim_batches':1,
+                    'batch_complete':bool(result.get('complete')),
+                    'input_disposition':result.get('active_input_disposition',{}),
+                }
             if options.resume_sealed_only:
                 totals['sealed_continuation']={
                     'complete':bool(result.get('complete')),
@@ -475,7 +490,7 @@ def run(store,entry,sources,*,options,cancelled=None):
                 for done,item in final.values():acknowledge(sources,done,after=item)
             else:
                 for done in jobs:acknowledge(sources,done,after=observation)
-            if options.resume_sealed_only:
+            if options.resume_sealed_only or options.admit_active_only:
                 # Completing this sealed batch does not authorize another
                 # claim, even if new producer commits arrived during the run.
                 break

@@ -520,12 +520,20 @@ def _read_worker(path: Path, scope: Scope, operation_id: str):
     return safe
 
 
-def supervise(scope: Scope, output: Path, *, _budget=MAX_SECONDS, _popen=None) -> dict:
+def supervise(scope: Scope, output: Path, *, _budget=MAX_SECONDS, _popen=None,
+              _deadline=None) -> dict:
     """One attempt; reserve termination/reaping inside the absolute wall limit."""
     if not math.isfinite(_budget) or not 0 < _budget <= MAX_SECONDS:
         raise ValueError("invalid_budget")
     started = time.monotonic()
     deadline = started + _budget
+    if _deadline is not None:
+        if not math.isfinite(_deadline):
+            raise ValueError("invalid_deadline")
+        # A containing batch passes one unchanged absolute deadline. Starting
+        # the next scope must never reset the batch's wall-clock allowance.
+        deadline = min(deadline, _deadline)
+    available_budget = max(0.0, deadline - started)
     scope.parameters()
     output.mkdir(mode=0o700, parents=False, exist_ok=False)
     operation_id = str(uuid4())
@@ -555,8 +563,8 @@ def supervise(scope: Scope, output: Path, *, _budget=MAX_SECONDS, _popen=None) -
         record["child_pid"] = process.pid
         record["process_started"] = True
         # A fixed reserve also scales for short, supplier-free fixture tests.
-        term_at = deadline - min(10.0, _budget * .10) - min(5.0, _budget * .05)
-        kill_at = deadline - min(5.0, _budget * .05)
+        term_at = deadline - min(10.0, available_budget * .10) - min(5.0, available_budget * .05)
+        kill_at = deadline - min(5.0, available_budget * .05)
         while process.poll() is None and time.monotonic() < deadline:
             now = time.monotonic()
             if (interrupted.is_set() or now >= term_at) and not record["termination_sent"]:
