@@ -81,12 +81,17 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
     dataset=entry.spec.name if entry.business else 'local.entry.'+entry.id.lower()
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old=_read(store,entry);previous=old.get('refresh',{});now=int(clock())
-        admitted=None
+        admitted=None;restored=None
         if options.admit_active_only:
             from .active_input import active_input_plan
             # Rejection must leave the existing status, queue and scratch
             # untouched, including pending/qualified and refresh counters.
             admitted=active_input_plan(store,entry,sources,options=options,cancelled=cancelled)
+        if options.resume_sealed_only and entry.id in ('E23','E44'):
+            from .sealed_funds import restore_fund_batch
+            # A stale original member cannot mutate refresh/quality counters;
+            # unrelated newly eligible claims remain outside this old batch.
+            restored=restore_fund_batch(store,entry,sources,options,old,cancelled=cancelled)
         if (_policy is not None and options.mode!='retry' and previous.get('next_retry_at',0)>now):
             state=_refresh(store,entry,{'outcome':'backoff','attempted':False})
             return dict(_skipped(old,'backoff','RETRY_BACKOFF'),refresh=state)
@@ -100,6 +105,7 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                             not old.get('incremental') and old.get('scope')!='native_incremental')
             execute=incremental_run if enabled(sources,entry,options) and not legacy_pending else _run_entry_locked
             extra={'admitted':admitted} if options.admit_active_only else {}
+            if restored is not None:extra['restored']=restored
             result=execute(store,entry,sources,options=options,cancelled=cancelled,**extra)
         except BaseException as caught:
             error=caught

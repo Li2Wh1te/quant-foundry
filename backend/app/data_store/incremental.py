@@ -363,7 +363,7 @@ def _accumulate(totals,result,segment):
     totals['work_admitted']=result.get('work_admitted',False)
 
 
-def run(store,entry,sources,*,options,cancelled=None,admitted=None):
+def run(store,entry,sources,*,options,cancelled=None,admitted=None,restored=None):
     from .pipeline import (_run_entry_locked,read_entry_status,_status,
                            continuation_refused,validate_sealed_continuation)
     from .change_capture import seed
@@ -371,6 +371,9 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None):
         raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
     old=read_entry_status(store,entry.id)
     contract=digest(entry.spec.descriptor())
+    if options.resume_sealed_only and entry.id in ('E23','E44') and restored is None:
+        from .sealed_funds import restore_fund_batch
+        restored=restore_fund_batch(store,entry,sources,options,old,cancelled=cancelled)
     if options.admit_active_only and admitted is None:
         # Direct callers cannot bypass atomic admission in updates.run_entry.
         raise continuation_refused('ACTIVE_INPUT_REQUIRED')
@@ -405,7 +408,8 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None):
         for _ in range(options.claim_batches):
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
             fund_batch=entry.id in ('E23','E44')
-            jobs=([j for j,_ in admitted.pairs] if options.admit_active_only else
+            jobs=([j for j,_ in restored.pairs] if restored is not None else
+                  [j for j,_ in admitted.pairs] if options.admit_active_only else
                   existing_claims(sources,entry) if options.resume_sealed_only else
                   claim_funds(sources,entry,min(64,options.claim_batches)) if fund_batch else
                   claim_tables(sources,entry,min(64,options.claim_batches)) if entry.source=='tushare' else [claim(sources,entry)])
@@ -415,8 +419,9 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None):
                 break
             job=jobs[0]
             if fund_batch:
-                pairs=list(admitted.pairs) if options.admit_active_only else []
-                for candidate in ([] if options.admit_active_only else jobs):
+                pairs=(list(restored.pairs) if restored is not None else
+                       list(admitted.pairs) if options.admit_active_only else [])
+                for candidate in ([] if options.admit_active_only or restored is not None else jobs):
                     item=next_observation(sources,entry,candidate)
                     if item is None:
                         if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
@@ -457,8 +462,9 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None):
                 raise
             _accumulate(totals,result,segment)
             if options.admit_active_only:
-                # Persist only the finite batch receipt. Exact descriptors stay
-                # in the operator's private plan, not a second source ledger.
+                # Persist only the finite batch receipt here. Exact descriptors
+                # live in the disposable seal and the operator's private plan,
+                # never in a second source ledger or completed-row history.
                 totals['active_input_admission']={
                     'input_identity':admitted.plan['input_identity'],
                     'source_selection':admitted.plan['source_selection'],
