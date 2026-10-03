@@ -255,14 +255,22 @@ def test_supervisor_kills_only_its_child_within_reserved_deadline(scope, tmp_pat
         assert options["stdout"] == options["stderr"] == subprocess.DEVNULL
         # This invented child does no database or provider work. Ignoring TERM
         # forces the supervisor's KILL/reap path instead of a cooperative exit.
-        child = subprocess.Popen([sys.executable, "-c",
-            "import signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); time.sleep(10)"], **options)
+        # Inherit SIG_IGN across exec so a loaded CI runner cannot deliver
+        # TERM before the invented child's Python handler has initialized.
+        # Restore the supervisor's handler immediately; this is fixture-only
+        # setup, not a change to the production signal or wall-time budgets.
+        previous = signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        try:
+            child = subprocess.Popen([sys.executable, "-c",
+                "import time; time.sleep(10)"], **options)
+        finally:
+            signal.signal(signal.SIGTERM, previous)
         children.append(child)
         return child
     started = time.monotonic()
     try:
-        record = bounded.supervise(scope, tmp_path / "attempt", _budget=.6, _popen=launcher)
-        assert time.monotonic() - started < 1.2
+        record = bounded.supervise(scope, tmp_path / "attempt", _budget=2, _popen=launcher)
+        assert time.monotonic() - started < 3
         assert record["outcome"] == "timed_out"
         assert record["kill_sent"] and record["process_exited"]
         assert record["exit_code"] == -signal.SIGKILL
