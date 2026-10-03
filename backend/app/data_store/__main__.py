@@ -33,6 +33,8 @@ def main(argv=None):
     parser.add_argument('--audit-bytes',type=int,default=8*1024**3)
     parser.add_argument('--audit-rows',type=int,default=20_000_000)
     parser.add_argument('--audit-api-samples',type=int,default=8)
+    parser.add_argument('--audit-api-entry',action='append',
+                        help='Audit only: required business API entry; repeat to require every exact member')
     parser.add_argument('--audit-local-only',action='store_true',
                         help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
@@ -75,6 +77,7 @@ def main(argv=None):
                                api_samples=args.audit_api_samples)
             result=export_audit(get_engine(),args.root,args.output,entries=tuple(selected),
                                 local_only=args.audit_local_only,
+                                api_entries=tuple(args.audit_api_entry) if args.audit_api_entry else None,
                                 limits=limits,api_base_url=args.api_base_url,
                                 api_token=os.environ.get(args.api_token_env))
         except (ValueError,OSError) as error:

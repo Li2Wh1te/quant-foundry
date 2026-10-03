@@ -102,6 +102,10 @@ class TaskCreate(BaseModel):
     task_type: str = Field(min_length=1, max_length=64)
     parameters: dict[str, Any] = Field(default_factory=dict)
     schedule: ScheduleConfig
+    # A handoff can persist an inert task in its creation transaction. Restrict
+    # this to runnable lifecycle states; completed/archived remain transitions
+    # on an existing task, and older clients retain their active default.
+    initial_state: Literal[TaskState.ACTIVE, TaskState.PAUSED] = TaskState.ACTIVE
     concurrency_limit: int = Field(default=1, ge=1, le=32)
     overlap_policy: OverlapPolicy = OverlapPolicy.SKIP
     queue_limit: int = Field(default=1, ge=1, le=10_000)
