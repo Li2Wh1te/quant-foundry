@@ -345,6 +345,92 @@ def test_financials_preserve_disclosure_and_period_dates():
     assert result["historical_revision_evidence"] is False
 
 
+def _financial_row(day):
+    return {"thscode": "600519.SH", "period_end_ms": date_ms(day),
+            "report_date_ms": date_ms(day + timedelta(days=90)), "profit": None}
+
+
+def _financial_client(dataset, rows):
+    """Return only the reports actually inside each synthetic source request."""
+    client = Mock(interval_ms=0)
+    def fetch(interface, params):
+        assert interface == DATASETS[dataset].interface
+        return reply([row for row in rows if params["start"] <= row["period_end_ms"] <= params["end"]])
+    client.request.side_effect = fetch
+    return client
+
+
+@pytest.mark.parametrize("dataset", ["stock_income", "stock_balance", "stock_cash_flow"])
+def test_financial_incremental_retains_history_start_without_claiming_old_confirmation(dataset):
+    old, recent = _financial_row(date(2010, 6, 30)), _financial_row(date(2026, 6, 30))
+    previous = {"item": [old], "requested_start": "2010-01-01"}
+    client = _financial_client(dataset, [recent]); acquisition = Acquisition(client)
+    result = acquisition.fetch(DATASETS[dataset], "600519.SH", CollectionParameters(), previous, NOW)
+    assert result["requested_start"] == "2010-01-01"
+    assert result["item"] == [old, recent]
+    assert client.request.call_count == 1
+    assert client.request.call_args.args[1]["start"] == date_ms(date(2024, 9, 14))
+    confirmed = {key for request in acquisition.requests for key in request["returned_keys"].get("period_end_ms", [])}
+    assert confirmed == {recent["period_end_ms"]}
+
+
+@pytest.mark.parametrize("dataset", ["stock_income", "stock_balance", "stock_cash_flow"])
+@pytest.mark.parametrize("previous_start, expected_start", [
+    ("2010-01-01", "2010-01-01"), ("2024-09-14", "2010-06-30"), (None, "2010-06-30")])
+def test_financial_reconcile_covers_original_or_oldest_retained_report(dataset,previous_start,expected_start):
+    old, recent = _financial_row(date(2010, 6, 30)), _financial_row(date(2026, 6, 30))
+    previous = {"item": [old]}
+    if previous_start is not None: previous["requested_start"] = previous_start
+    client = _financial_client(dataset, [old, recent]); acquisition = Acquisition(client)
+    parameters = CollectionParameters(mode="reconcile")
+    result = acquisition.fetch(DATASETS[dataset], "600519.SH", parameters, previous, NOW)
+    assert result["requested_start"] == expected_start
+    assert result["item"] == [old, recent]
+    requests = [call.args[1] for call in client.request.call_args_list]
+    assert requests[0]["start"] == date_ms(date.fromisoformat(expected_start))
+    assert requests[-1]["end"] == date_ms(date(2026, 9, 14))
+    assert all((request["end"]-request["start"])//86400000 < 3650 for request in requests)
+    assert all(right["start"] == left["end"]+86400000 for left,right in zip(requests,requests[1:]))
+    confirmed = {key for request in acquisition.requests for key in request["returned_keys"].get("period_end_ms", [])}
+    assert confirmed == {old["period_end_ms"], recent["period_end_ms"]}
+
+
+def test_financial_reconcile_does_not_fabricate_receipt_for_an_omitted_old_report():
+    old, recent = _financial_row(date(2010, 6, 30)), _financial_row(date(2026, 6, 30))
+    previous = {"item": [old], "requested_start": "2010-01-01"}
+    client = _financial_client("stock_income", [recent]); acquisition = Acquisition(client)
+    result = acquisition.fetch(DATASETS["stock_income"], "600519.SH", CollectionParameters(mode="reconcile"), previous, NOW)
+    assert result["requested_start"] == "2010-01-01" and result["item"] == [old, recent]
+    confirmed = {key for request in acquisition.requests for key in request["returned_keys"].get("period_end_ms", [])}
+    assert old["period_end_ms"] not in confirmed
+    assert confirmed == {recent["period_end_ms"]}
+
+
+def test_financial_explicit_date_variant_cannot_reconfirm_or_modify_default(engine):
+    from app.data_ingestion.tonghuashun.confirmation import returned_keys
+    seed(engine, [ticker("600519.SH", "a-share")])
+    old = _financial_row(date(2010, 6, 30))
+    default = {"item": [old], "requested_start": "2010-01-01", "requested_end": "2026-09-14"}
+    with Session(engine) as session:
+        CollectionRepository(session).publish("stock_income", "600519.SH", "default", expected=0,
+            data=default, requests=[{"parameters": {}, **returned_keys(default)}], now=NOW)
+        session.commit()
+        before = session.get(State, ("stock_income", "600519.SH", "default")).observation_id
+    recent = _financial_row(date(2025, 9, 30))
+    parameters = CollectionParameters(subjects=["600519.SH"], mode="reconcile",
+        start_date=date(2025,1,1), end_date=date(2025,12,31))
+    client = _financial_client("stock_income", [recent])
+    assert collect("stock_income", parameters, client, engine, now=NOW)["succeeded"] == 1
+    with Session(engine) as session:
+        repo = CollectionRepository(session)
+        state = session.get(State, ("stock_income", "600519.SH", "default"))
+        assert state.observation_id == before and state.revision == 1
+        assert repo.read("stock_income", "600519.SH", "default").data == default
+        variant = repo.read("stock_income", "600519.SH", "2025-01-01_2025-12-31")
+        assert variant.data["item"] == [recent] and variant.data["requested_start"] == "2025-01-01"
+    assert client.request.call_count == 1
+
+
 def test_legal_empty_dividends_are_preserved_as_empty_observation(engine):
     seed(engine, [ticker()])
     client = Mock(interval_ms=0)

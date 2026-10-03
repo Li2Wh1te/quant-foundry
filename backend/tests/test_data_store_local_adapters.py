@@ -4,6 +4,7 @@ from decimal import Decimal
 from pathlib import Path
 import ast
 import json
+from types import SimpleNamespace
 import pytest
 
 from app.data_store.adapters.contracts import LocalInput,digest,native_json
@@ -12,6 +13,7 @@ from app.data_store.adapters.normalize import normalize
 from app.data_store.local_sources import materialize_observation,EffectiveBasis,SourceLimits,RescueSources
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.tonghuashun.confirmation import returned_keys
+from app.data_store.merge import MergeSpool
 
 NOW=datetime(2026,1,1,tzinfo=timezone.utc)
 
@@ -127,3 +129,114 @@ def test_import_receipt_keeps_inherited_groups_and_original_acquisition_order():
     assert not uncertain and basis['1743350400000']==old['1743350400000']
     from app.data_store.adapters.contracts import instant_ns
     assert basis['1743436800000'][0]==instant_ns(NOW+timedelta(seconds=2))
+
+
+def _tracked_units(tracker, row):
+    """Exercise the same native materialization and normalization as the reader."""
+    data,basis,field=materialize_observation(row,lambda _:None)
+    requests=json.loads(row['request_json'])
+    basis,uncertain=tracker.apply(row,data,basis,field,requests)
+    scope=(row['dataset'],row['subject'],row['variant'])
+    source=LocalInput('tonghuashun',row['dataset'],row['subject'],row['variant'],
+                     row['observed_at'],data,
+                     digest([scope,row['content_hash'],row['observed_at'],requests]),
+                     row_basis=basis,basis_field=field,unconfirmed_keys=uncertain)
+    return tuple(normalize(BY_ID['E50'],source))
+
+
+def _spool(tmp_path):
+    # Use only a bounded, disposable working file. These pure tests neither
+    # create a current store nor depend on PostgreSQL or supplier access.
+    space=SimpleNamespace(spill=tmp_path,spill_limit=16*1024*1024,check=lambda:None)
+    return MergeSpool(space,BY_ID['E50'].spec,partition_count=None)
+
+
+def _problem(spool, key):
+    partition=spool.spec.partitioner((*key,'root'))
+    return next((problem,blocking,resolved) for problem,blocking,resolved in
+                spool.problem_records(partition) if problem['o']==key[2])
+
+
+@pytest.mark.parametrize('later_receipt', ['empty','other_key','outside_range','legacy'])
+def test_rescued_unconfirmed_basis_stays_blocking_until_actual_returned_key(tmp_path,later_receipt):
+    old,recent=price(),price(1743436800000)
+    data=daily([old,recent]).content
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[recent]})}]
+    if later_receipt=='empty':
+        requests=[{'parameters':{},**returned_keys({'item':[]})}]
+    elif later_receipt=='other_key':
+        requests=[{'parameters':{},**returned_keys({'item':[recent]})}]
+    elif later_receipt=='outside_range':
+        requests=[{'parameters':{'start':recent['date_ms'],'end':recent['date_ms']}}]
+    else:
+        requests=[]
+    tracker=EffectiveBasis();spool=_spool(tmp_path)
+    try:
+        first=_tracked_units(tracker,observation('import',data,requests=imported))
+        key=first[0].key
+        assert first[0].failure=='SOURCE_CONFIRMATION_UNPROVEN'
+        for unit in first:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        # Empty, excluded and unrelated receipts may keep an old *confirmed*
+        # basis. They must never validate a basis that was unproven at import.
+        second=_tracked_units(tracker,observation('later',data,1,requests=requests))
+        assert second[0].failure=='SOURCE_CONFIRMATION_UNPROVEN'
+        for unit in second:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        real=[{'parameters':{},**returned_keys({'item':[old,recent]})}]
+        third=_tracked_units(tracker,observation('real',data,2,requests=real))
+        assert all(unit.failure is None for unit in third)
+        for unit in third:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(False,True)
+    finally:spool.close()
+
+
+def test_rescued_unconfirmed_key_cannot_become_confirmed_by_absence_and_reappearance(tmp_path):
+    old,recent=price(),price(1743436800000)
+    data=daily([old,recent]).content
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[recent]})}]
+    other=[{'parameters':{},**returned_keys({'item':[recent]})}]
+    tracker=EffectiveBasis();spool=_spool(tmp_path)
+    try:
+        first=_tracked_units(tracker,observation('import',data,requests=imported))
+        key=first[0].key
+        for unit in first:spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('gap',daily([recent]).content,1,requests=other)):
+            spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('again',data,2,requests=other)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+    finally:spool.close()
+
+
+def test_ordinary_sparse_basis_cannot_clear_a_newer_unconfirmed_observation(tmp_path):
+    data=daily([price()]).content;tracker=EffectiveBasis();spool=_spool(tmp_path)
+    confirmed=[{'parameters':{},**returned_keys(data)}]
+    empty=[{'parameters':{},**returned_keys({'item':[]})}]
+    try:
+        first=_tracked_units(tracker,observation('real',data,requests=confirmed))
+        key=first[0].key
+        for unit in first:spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('ambiguous',data,1)):
+            spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('empty',data,2,requests=empty)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        for unit in _tracked_units(tracker,observation('confirmed',data,3,requests=confirmed)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(False,True)
+    finally:spool.close()
+
+
+@pytest.mark.parametrize('changed_scope',['subject','variant'])
+def test_unproven_import_basis_is_scoped_to_the_native_subject_and_variant(changed_scope):
+    data=daily([price()]).content;tracker=EffectiveBasis()
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[]})}]
+    assert _tracked_units(tracker,observation('import',data,requests=imported))[0].failure
+    other=observation('other',data,1)
+    # Readers promise lexicographically sorted native scopes, not time alone.
+    other[changed_scope]='ZZZ.SH' if changed_scope=='subject' else 'zz_date_variant'
+    if changed_scope=='subject':
+        content={**data,'thscode':other['subject']}
+        other.update(content_hash=digest(content),data_json=native_json(content))
+    assert _tracked_units(tracker,other)[0].failure is None
