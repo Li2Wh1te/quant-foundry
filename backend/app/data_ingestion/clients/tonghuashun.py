@@ -159,7 +159,13 @@ class TonghuashunClient:
             raise SourceError("同花顺接口尚未登记，无法发起请求。")
         deadline = time.monotonic() + self.deadline_seconds
         for attempt in range(self.max_attempts):
+            # A bounded collector may be cancelled between transport retries.
+            # This does not alter the client defaults, response validation or
+            # three-attempt logical deadline for ordinary scheduler work.
+            from app.data_ingestion.tonghuashun.control import check_execution
+            check_execution()
             _gate.enter(deadline, self.interval_ms / 1000)
+            check_execution()
             failure = None
             try:
                 return self._get(interface.path, dict(params or {}), deadline)
@@ -185,6 +191,8 @@ class TonghuashunClient:
         try:
             # No persistent session means no cookies or credential-bearing
             # redirects. The API key is a header, never a query parameter.
+            from app.data_ingestion.tonghuashun.control import note_execution
+            note_execution('http_attempts')
             with requests.get(self._api_url + path, params=params,
                 headers={"X-api-key": self._api_key, "Accept": "application/json"},
                 timeout=(min(3, remaining), min(8, remaining)),

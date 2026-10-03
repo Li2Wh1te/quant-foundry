@@ -37,6 +37,8 @@ class BudgetedClient:
         self.client, self.engine = client, engine
 
     def request(self, interface, params):
+        from app.data_ingestion.tonghuashun.control import check_execution, note_response, wait_for_pacing
+        check_execution()
         if self.engine.dialect.name != "postgresql":
             return self.client.request(interface, params)
         failure = None
@@ -50,7 +52,8 @@ class BudgetedClient:
             if delay > 60:
                 raise TonghuashunError("rate_limited", retry_after=delay)
             if delay:
-                time.sleep(delay)
+                wait_for_pacing(delay)
+            check_execution()
             try:
                 result = self.client.request(interface, params)
             except TonghuashunError as exc:
@@ -61,6 +64,13 @@ class BudgetedClient:
                 max(1, failure.retry_after) if failure and failure.kind == "rate_limited" else 0)
             budget.next_allowed_at = datetime.now(UTC) + timedelta(seconds=cooldown)
             session.commit()
+        # Keep the ordinary shared cooldown transaction intact before checking
+        # a cancellation that arrived while the supplier request was in flight.
+        # A true return remains bounded diagnostic evidence even if cancellation
+        # prevents its response journal and source version from being published.
+        if failure is None:
+            note_response(result.data, params)
+        check_execution()
         if failure:
             raise failure from None
         return result
@@ -184,6 +194,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if acquisition.failures:
                 data = {**data, "failed_requests": acquisition.failures}
             published_at = datetime.now(UTC)
+            from app.data_ingestion.tonghuashun.control import check_execution
+            check_execution()
             with Session(engine) as session:
                 result = CollectionRepository(session).publish(dataset, subject, variant,
                     expected=previous.revision, data=data, requests=acquisition.requests,
@@ -191,6 +203,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                     reconcile=parameters.mode == "reconcile")
                 if monitor:
                     monitor.published(session)
+                check_execution()
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
             result["fetched_count"] = acquisition.fetched_count
