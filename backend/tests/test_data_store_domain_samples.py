@@ -373,7 +373,8 @@ def seed_native_sources(engine):
             id uuid PRIMARY KEY, dataset text NOT NULL, subject text NOT NULL,
             variant text NOT NULL, observed_at timestamptz NOT NULL,
             content_hash text NOT NULL, data_json text NOT NULL,
-            request_json text NOT NULL, base_observation_id uuid)''')
+            request_json text NOT NULL, base_observation_id uuid,
+            chain_depth integer NOT NULL DEFAULT 0)''')
         connection.exec_driver_sql('''CREATE TABLE tonghuashun_collection_states (
             dataset text, status text, subject text, variant text,
             attempted_at timestamptz, error_kind text)''')
@@ -420,13 +421,19 @@ def add_observation(engine, entry_id, content, observed_at, *, base_id=None, sto
     raw = sample(entry_id)
     identity = uuid4()
     with engine.begin() as connection:
+        # Match the production observation metadata now read by sealed fund
+        # membership. Full snapshots have depth zero; actual deltas inherit
+        # their existing base depth, never an invented confirmation identity.
+        chain_depth = (connection.execute(text(
+            'SELECT chain_depth + 1 FROM tonghuashun_observations WHERE id=:id'),
+            {'id': base_id}).scalar_one() if base_id is not None else 0)
         connection.execute(text('''INSERT INTO tonghuashun_observations
-            (id,dataset,subject,variant,observed_at,content_hash,data_json,request_json,base_observation_id)
-            VALUES (:id,:dataset,:subject,:variant,:observed_at,:content_hash,:data_json,:request_json,:base_id)'''),
+            (id,dataset,subject,variant,observed_at,content_hash,data_json,request_json,base_observation_id,chain_depth)
+            VALUES (:id,:dataset,:subject,:variant,:observed_at,:content_hash,:data_json,:request_json,:base_id,:chain_depth)'''),
             {'id': identity, 'dataset': raw.dataset, 'subject': raw.subject, 'variant': raw.variant,
              'observed_at': observed_at, 'content_hash': digest(content),
              'data_json': native_json(content if stored_data is None else stored_data),
-             'request_json': native_json(requests), 'base_id': base_id})
+             'request_json': native_json(requests), 'base_id': base_id, 'chain_depth': chain_depth})
     return identity
 
 

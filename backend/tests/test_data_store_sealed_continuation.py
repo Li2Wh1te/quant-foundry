@@ -182,13 +182,18 @@ def test_unsealed_input_is_not_acquired_or_called_complete(ready,monkeypatch,uns
                 requests=[{'parameters':{},**returned_keys(body)}])
         progress={'identity':'0'*64,'source_selection':'0'*64}
     source_before=ranges(ready)
+    status_before=read_entry_status(ready,'E44')
     monkeypatch.setattr(incremental,'claim_funds',no_new_claim)
     monkeypatch.setattr(incremental.FundBatchSources,'iter_entry',no_new_claim)
     with pytest.raises(DataStoreError) as error:
         update(ready,'E44',options=continuation(progress))
     assert error.value.code=='SEALED_CONTINUATION_REQUIRED'
     assert ranges(ready)==source_before
-    assert not read_entry_status(ready,'E44').get('qualified',False)
+    # Rejection occurs before refresh/quality mutation. Preserve the actual
+    # previous status; an incomplete entry's domain-quality bit is not proof
+    # that its captured input or full coverage completed.
+    assert read_entry_status(ready,'E44')==status_before
+    assert not status_before.get('complete',False)
     if unsealed=='incomplete':assert hashlib.sha256(path.read_bytes()).hexdigest()==before
     else:assert not ready.budget.pending_keys()
 

@@ -401,6 +401,13 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     conflict=DataStoreError('SOURCE_CONFLICT');conflict.preserve_continuation=True
                     raise conflict
                 if progress.get('identity') not in (identity,compatible_identity) or not progress.get('scan_complete'):
+                    source_members=None
+                    from .incremental import FundBatchSources
+                    if entry.id in ('E23','E44') and isinstance(sources,FundBatchSources):
+                        from .sealed_funds import checkpoint_members
+                        source_members=checkpoint_members(sources.native,entry,sources.pairs,
+                            expected_active_fence=options.expected_source_selection if options.admit_active_only else None,
+                            cancelled=cancelled)
                     # A failed/incomplete scan provides no deletion evidence.
                     # It is safe to restart acquisition because none of it was
                     # published. A sealed scan instead resumes without IO.
@@ -456,6 +463,11 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                               'boundary':input_hash.hexdigest(),'source_selection':source_selection}
                     if options.admit_active_only:
                         progress['active_input_fence']=options.expected_source_selection
+                    if source_members is not None:
+                        # The same disposable seal owns these at most64 source
+                        # descriptors. No payloads or completed source history
+                        # are retained outside the ordinary working checkpoint.
+                        progress['source_members']=source_members
                     spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
                                      (json.dumps(progress),))
                     spool.db.commit();spool.check()
