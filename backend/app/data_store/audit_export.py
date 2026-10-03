@@ -137,6 +137,33 @@ def _read_file(files: LocalFiles, row: dict, spec: DatasetSpec,
                 return seen, sample
 
 
+def _catalog_files(connection, dataset: str):
+    """Stream ordered references with a finite driver buffer, closing on abort.
+
+    Contracts can contain up to 64 KiB each. A normal buffered SQL result would
+    retain every file contract even though the Parquet reader itself is bounded.
+    The path tie-breaker also makes the reference digest deterministic when an
+    invalid catalog contains overlapping first keys.
+    """
+    statement = text(
+        "SELECT partition_key,path,content_hash,row_count,byte_count,"
+        "schema_id,rule,contract_json,key_min,key_max "
+        "FROM data_store_files WHERE dataset=:dataset "
+        "ORDER BY partition_key,key_min,path"
+    ).execution_options(stream_results=True, yield_per=64)
+    with connection.execute(statement, {"dataset": dataset}) as result:
+        yield from result.mappings()
+
+
+def _digest_file_reference(digest, row) -> None:
+    """Hash bounded catalog metadata, never export a private object path."""
+    record = dict(row)
+    for key in ("key_min", "key_max"):
+        record[key] = bytes(record[key]).hex()
+    digest.update(json.dumps(record, sort_keys=True, separators=(",", ":")).encode())
+    digest.update(b"\n")
+
+
 def _api_client(base_url: str, token: str, timeout: int):
     url = urlparse.urlsplit(base_url)
     if (url.scheme not in ("http", "https") or not url.netloc or url.username
@@ -164,6 +191,16 @@ def _api_client(base_url: str, token: str, timeout: int):
                 response.close()
 
     return call
+
+
+def _require_api_available(status: int, response: dict) -> None:
+    # The real routes hide current metadata until maintenance is ready. That
+    # gate is incomplete acceptance, not a disagreement with stored files.
+    # A gate reached between the descriptor and query is reported identically.
+    detail = response.get('detail')
+    if ((status == 200 and response.get('status') == 'rebuilding') or
+            (status == 503 and isinstance(detail, dict) and detail.get('code') == 'DATA_STORE_REBUILDING')):
+        raise AuditIncomplete('DATA_STORE_REBUILDING')
 
 
 def _directory_bytes(files: LocalFiles, directory: str, *, cap: int,
@@ -203,13 +240,22 @@ def _directory_bytes(files: LocalFiles, directory: str, *, cap: int,
 
 def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, ...] = ENTRIES,
                  limits: AuditLimits = AuditLimits(), api_base_url: str | None = None,
-                 api_token: str | None = None, api_request=None, local_only: bool = False) -> dict:
+                 api_token: str | None = None, api_request=None, local_only: bool = False,
+                 api_entries: tuple[str, ...] | None = None) -> dict:
     """Export finite evidence; any truncation or unchecked source is incomplete.
 
     The caller supplies an existing PostgreSQL engine. A snapshot anchors all
     catalog counts; a fresh final read detects generation changes before a pass
     can be reported. No untrusted business value, DSN or raw file path is saved.
     """
+    entry_by_id = {entry.id: entry for entry in entries}
+    required_api_ids = tuple(api_entries) if api_entries is not None else None
+    if required_api_ids is not None and (
+            not required_api_ids or len(set(required_api_ids)) != len(required_api_ids)
+            or len(required_api_ids) > limits.api_samples
+            or any(identity not in entry_by_id or not entry_by_id[identity].business
+                   for identity in required_api_ids)):
+        raise ValueError("API entries must be unique selected business entries within the sample budget")
     root, output_dir = Path(root), Path(output_dir)
     if not root.is_absolute() or not output_dir.is_absolute() or output_dir.exists():
         raise ValueError("Existing absolute root and new absolute output directory required")
@@ -236,6 +282,13 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     coverage_results = []
     status_fingerprints = {}
     current_generations: dict[str, int] = {}
+    catalog_fingerprints: dict[str, tuple] = {}
+    file_catalog_digests: dict[str, str] = {}
+    snapshot_phase = None
+    snapshot_dataset_names = None
+    all_business_selected = {entry.id for entry in ENTRIES if entry.business} <= selected
+    api_attempted = []
+    api_passed = []
     samples: list[tuple[Entry, tuple[str, str, str], int, int]] = []
     used_files = used_bytes = used_rows = 0
     attempted_files = attempted_bytes = attempted_rows = 0
@@ -265,6 +318,20 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                     text("SELECT current_setting('transaction_read_only')")).scalar_one() == "on"
                 if not runtime["postgres_read_only"]:
                     raise AuditIncomplete("POSTGRES_NOT_READ_ONLY")
+                snapshot_phase = connection.execute(text(
+                    "SELECT phase FROM data_store_legacy_maintenance WHERE singleton=1"
+                )).scalar_one_or_none()
+                runtime["maintenance_phase"] = snapshot_phase
+                if all_business_selected:
+                    expected_names = {entry.spec.name for entry in ENTRIES if entry.business}
+                    snapshot_dataset_names = set(connection.execute(text(
+                        "SELECT name FROM data_store_datasets ORDER BY name LIMIT :cap"
+                    ), {"cap": len(expected_names) + 1}).scalars())
+                    _check(checks, "catalog_dataset_membership",
+                           "pass" if snapshot_dataset_names == expected_names else "incomplete",
+                           scope="store", expected=sorted(expected_names),
+                           actual=sorted(snapshot_dataset_names),
+                           code=None if snapshot_dataset_names == expected_names else "CATALOG_MISMATCH")
                 runtime_row = connection.execute(text(
                     "SELECT root_token FROM data_store_runtime WHERE singleton=1")).scalar_one_or_none()
                 if runtime_row != root_id:
@@ -312,6 +379,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                         input_failures_processed=status.get("input_failures") if status else None,
                         passes=status.get("passes") if status else None)
                     if entry.id in selected:
+                        status_fingerprints[entry.id] = status_row
                         counts = ("source_rows", "normalized_units", "input_failures", "passes")
                         if (status is None or status.get("complete") is not True or
                                 any(type(status.get(name)) is not int or status[name] < 0
@@ -325,7 +393,6 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                     if entry.id not in selected or not entry.business:
                         continue
                     from .coverage import check_coverage
-                    status_fingerprints[entry.id] = status_row
                     judgment = check_coverage(connection, entry, status)
                     coverage_results.append(dict(entry_id=entry.id, **judgment))
                     if not local_only:
@@ -351,6 +418,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                                code="DATASET_MISSING")
                         continue
                     current_generations[dataset] = row["generation"]
+                    catalog_fingerprints[dataset] = tuple(row.values())
                     domain.update(generation=row["generation"], current_key_count=row["row_count"],
                                   current_file_bytes=row["byte_count"])
                     disposition["current_key_count"] = row["row_count"]
@@ -404,34 +472,33 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                                code="AUDIT_BUDGET_EXCEEDED")
                         continue
                     verified_rows = 0
-                    last_by_partition: dict[str, bytes] = {}
+                    previous_partition = previous_key = None
+                    reference_digest = hashlib.sha256()
                     first_sample = None
                     try:
-                        rows = connection.execute(text(
-                            "SELECT partition_key,path,content_hash,row_count,byte_count,"
-                            "schema_id,rule,contract_json,key_min,key_max "
-                            "FROM data_store_files WHERE dataset=:dataset "
-                            "ORDER BY partition_key,key_min"),
-                            {"dataset": dataset}).mappings()
-                        for file_row in rows:
-                            time_check()
-                            attempted_files += 1
-                            attempted_bytes += file_row["byte_count"]
-                            attempted_rows += file_row["row_count"]
-                            actual_rows, sample = _read_file(files, dict(file_row), entry.spec, time_check)
-                            first = bytes(file_row["key_min"])
-                            previous = last_by_partition.get(file_row["partition_key"])
-                            if previous is not None and first <= previous:
-                                raise DataStoreError("KEY_ORDER_INVALID")
-                            last_by_partition[file_row["partition_key"]] = bytes(file_row["key_max"])
-                            verified_rows += actual_rows
-                            if first_sample is None and sample is not None:
-                                first_sample = sample
+                        with closing(_catalog_files(connection, dataset)) as rows:
+                            for file_row in rows:
+                                time_check()
+                                attempted_files += 1
+                                attempted_bytes += file_row["byte_count"]
+                                attempted_rows += file_row["row_count"]
+                                actual_rows, sample = _read_file(files, dict(file_row), entry.spec, time_check)
+                                first = bytes(file_row["key_min"])
+                                if (file_row["partition_key"] == previous_partition
+                                        and previous_key is not None and first <= previous_key):
+                                    raise DataStoreError("KEY_ORDER_INVALID")
+                                previous_partition = file_row["partition_key"]
+                                previous_key = bytes(file_row["key_max"])
+                                _digest_file_reference(reference_digest, file_row)
+                                verified_rows += actual_rows
+                                if first_sample is None and sample is not None:
+                                    first_sample = sample
                         if verified_rows != row["row_count"]:
                             raise DataStoreError("FILE_INVALID")
                         used_files += file_stats["files"]
                         used_bytes += file_stats["bytes"]
                         used_rows += file_stats["rows"]
+                        file_catalog_digests[dataset] = reference_digest.hexdigest()
                         _check(checks, "full_file_scan", "pass", scope=entry.id,
                                expected={"rows": row["row_count"], "files": file_stats["files"]},
                                actual={"rows": verified_rows, "files": file_stats["files"]})
@@ -474,15 +541,28 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
             api_request = _api_client(api_base_url, api_token, min(limits.seconds, 20))
         except ValueError:
             api_request = None
+    sample_by_id = {sample[0].id: sample for sample in samples}
+    targets = (list(required_api_ids) if required_api_ids is not None else
+               [sample[0].id for sample in samples[:limits.api_samples]])
     if api_request is None:
-        _check(checks, "api_sample", "incomplete", scope="selected", code="API_NOT_CONFIGURED")
-    elif not samples:
+        for identity in required_api_ids or ("selected",):
+            _check(checks, "api_sample", "incomplete", scope=identity, code="API_NOT_CONFIGURED")
+    elif not samples and required_api_ids is None:
         _check(checks, "api_sample", "incomplete", scope="selected", code="NO_CURRENT_SAMPLE")
     else:
-        for entry, sample, generation, expected_rows in samples[:limits.api_samples]:
+        for identity in targets:
+            if identity not in sample_by_id:
+                # Explicit acceptance members cannot disappear or be replaced
+                # by a ninth available domain after a cap, empty scope or error.
+                _check(checks, "api_sample", "incomplete", scope=identity,
+                       code="API_SAMPLE_MISSING")
+                continue
+            entry, sample, generation, expected_rows = sample_by_id[identity]
             try:
                 time_check()
+                api_attempted.append(entry.id)
                 status, detail = api_request("GET", "/datasets/" + urlparse.quote(entry.spec.name, safe=""))
+                _require_api_available(status, detail)
                 if (status != 200 or detail.get("generation") != generation
                         or detail.get("row_count") != expected_rows):
                     raise AuditIncomplete("API_DESCRIPTOR_MISMATCH")
@@ -491,6 +571,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                            "representation": sample[0], "subject": sample[1],
                            "from_key": sample[2], "to_key": sample[2], "page_size": 1}
                 status, page = api_request("POST", "/query", payload)
+                _require_api_available(status, page)
                 if status != 200 or page.get("generation") != generation or not page.get("rows"):
                     raise AuditIncomplete("API_QUERY_MISMATCH")
                 if (tuple(str(page["rows"][0].get(key)) for key in
@@ -506,12 +587,24 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                 _check(checks, "api_sample", "pass", scope=entry.id,
                        expected={"generation": generation, "sample_key_sha256": sample_hash},
                        actual={"generation": page["generation"], "sample_key_sha256": sample_hash})
+                api_passed.append(entry.id)
                 next(domain for domain in domains if domain["entry_id"] == entry.id)["api_sampled"] = True
             except (AuditIncomplete, OSError, ValueError, KeyError, TypeError) as exc:
                 _check(checks, "api_sample", "incomplete", scope=entry.id,
                        code=str(exc) if isinstance(exc, AuditIncomplete) else "API_UNAVAILABLE")
         if limits.api_samples == 0:
             _check(checks, "api_sample", "incomplete", scope="selected", code="API_SAMPLE_BUDGET_ZERO")
+    if required_api_ids is not None:
+        satisfied = set(api_passed) == set(required_api_ids)
+        _check(checks, "api_sample_set", "pass" if satisfied else "incomplete",
+               scope="selected", expected=list(required_api_ids), actual=api_passed,
+               code=None if satisfied else "API_SAMPLE_SET_INCOMPLETE")
+    required_api_count = (len(required_api_ids) if required_api_ids is not None else
+                          min(limits.api_samples, sum(entry.business for entry in entries)))
+    _check(checks, "api_sample_count",
+           "pass" if len(api_passed) == required_api_count else "incomplete",
+           scope="selected", expected=required_api_count, actual=len(api_passed),
+           code=None if len(api_passed) == required_api_count else "API_SAMPLE_COUNT_INCOMPLETE")
 
     if current_generations:
         try:
@@ -521,24 +614,71 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                 connection.exec_driver_sql("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
                 connection.exec_driver_sql(f"SET LOCAL statement_timeout = {limits.seconds * 1000}")
                 final = connection.execute(text(
-                    "SELECT name,generation FROM data_store_datasets "
+                    "SELECT name,generation,row_count,byte_count,schema_id,rule,descriptor_json "
+                    "FROM data_store_datasets "
                     "WHERE name=ANY(:names)"),
                     {"names": list(current_generations)}).all()
                 final_statuses = dict(connection.execute(text(
                     'SELECT entry_id,summary_json FROM data_store_entry_status WHERE entry_id=ANY(:ids)'),
                     {'ids': list(status_fingerprints)}).all())
+                final_phase = connection.execute(text(
+                    "SELECT phase FROM data_store_legacy_maintenance WHERE singleton=1"
+                )).scalar_one_or_none()
+                # Quality issues and capture queues can change independently
+                # of current generations or the last pipeline status write.
+                # Reuse the official all-range judgment inside this fresh
+                # snapshot so those late changes cannot retain acceptance.
+                changed_coverage = []
+                for initial in coverage_results:
+                    identity = initial["entry_id"]
+                    entry = entry_by_id[identity]
+                    status = json.loads(final_statuses.get(identity) or "{}")
+                    judgment = dict(entry_id=identity, **check_coverage(connection, entry, status))
+                    if judgment != initial:
+                        changed_coverage.append(identity)
+                final_names = None
+                if snapshot_dataset_names is not None:
+                    final_names = set(connection.execute(text(
+                        "SELECT name FROM data_store_datasets ORDER BY name LIMIT :cap"
+                    ), {"cap": len(expected_names) + 1}).scalars())
+                changed_files = []
+                final_metadata_files = 0
+                for dataset, initial_digest in file_catalog_digests.items():
+                    digest = hashlib.sha256()
+                    with closing(_catalog_files(connection, dataset)) as references:
+                        for reference in references:
+                            time_check()
+                            final_metadata_files += 1
+                            if final_metadata_files > limits.files:
+                                raise AuditIncomplete("AUDIT_BUDGET_EXCEEDED")
+                            _digest_file_reference(digest, reference)
+                    if digest.hexdigest() != initial_digest:
+                        changed_files.append(dataset)
                 connection.rollback()
-            observed = {name: generation for name, generation in final}
-            changed = any(observed.get(name) != generation
-                          for name, generation in current_generations.items())
-            changed = changed or final_statuses != status_fingerprints
+            observed = {row[0]: tuple(row[1:]) for row in final}
+            changed = observed != catalog_fingerprints
+            changed = changed or {identity: final_statuses.get(identity)
+                                  for identity in status_fingerprints} != status_fingerprints
             _check(checks, "final_generation_stability", "fail" if changed else "pass",
                    scope="store", expected="unchanged after API sample",
                    actual="changed" if changed else "unchanged",
                    code="DATA_CHANGED" if changed else None)
-        except Exception:
+            for name, changed, actual in (
+                    ("final_coverage_stability", bool(changed_coverage), changed_coverage),
+                    ("final_maintenance_stability", final_phase != snapshot_phase, final_phase),
+                    ("final_file_catalog_stability", bool(changed_files), changed_files)):
+                _check(checks, name, "fail" if changed else "pass", scope="store",
+                       expected="unchanged after API sample", actual=actual,
+                       code="DATA_CHANGED" if changed else None)
+            if snapshot_dataset_names is not None:
+                changed = snapshot_dataset_names != final_names
+                _check(checks, "final_catalog_membership_stability", "fail" if changed else "pass",
+                       scope="store", expected="unchanged after API sample",
+                       actual="changed" if changed else "unchanged",
+                       code="DATA_CHANGED" if changed else None)
+        except Exception as exc:
             _check(checks, "final_generation_stability", "incomplete", scope="store",
-                   code="CATALOG_UNAVAILABLE")
+                   code=str(exc) if isinstance(exc, AuditIncomplete) else "CATALOG_UNAVAILABLE")
 
     runtime["checked_files"] = used_files
     runtime["checked_bytes"] = used_bytes
@@ -549,6 +689,11 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     runtime["official_active_bytes_checked"] = used_bytes
     runtime["duration_seconds"] = round(time.monotonic() - started, 3)
     runtime["api_scope"] = "sampled_current_keys_only"
+    runtime["api_selection_mode"] = "explicit_entries" if required_api_ids is not None else "first_available"
+    runtime["api_required_entries"] = targets
+    runtime["api_required_count"] = required_api_count
+    runtime["api_attempted_entries"] = api_attempted
+    runtime["api_passed_entries"] = api_passed
     runtime["input_scope"] = "latest_entry_status_not_unique_historical_observations"
     runtime["raw_preserved_bytes"] = None
     runtime["staging_peak_bytes"] = None
@@ -584,4 +729,6 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
             "coverage_mode": runtime['coverage_mode'], "global_acceptance": runtime['global_acceptance'],
             "status": runtime["completeness"], "checks": len(checks),
             "checked_files": used_files, "checked_rows": used_rows,
+            "api_required_entries": targets, "api_attempted_entries": api_attempted,
+            "api_passed_entries": api_passed, "api_required_count": required_api_count,
             "output": str(output_dir)}

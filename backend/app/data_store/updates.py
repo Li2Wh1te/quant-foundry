@@ -154,6 +154,10 @@ def run_local(store,sources,*,entries,options,cancelled=None,policy=None,clock=N
     policy=policy or RetryPolicy();clock=clock or time.time;monotonic=monotonic or time.monotonic
     deadline=monotonic()+policy.call_seconds
     selected=list(ENTRIES if entries is None else entries)
+    if options.resume_sealed_only and (len(selected)!=1 or not selected[0].business):
+        # A single input fence belongs to one business entry. In particular,
+        # ingestion-channel expansion must not admit an unapproved target.
+        raise DataStoreError('INVALID_CONFIGURATION')
     if len(selected)>len(ENTRIES):raise ValueError('Too many source entries')
     selected=list({e.id:e for e in selected}.values())
     for entry in list(selected):

@@ -208,6 +208,21 @@ class SchedulerServiceTestCase(unittest.TestCase):
         self.service = SchedulerService(self.session, make_test_registry())
         self.service.repository = Mock()
 
+    def test_creation_stages_paused_atomically_and_preserves_active_default(self) -> None:
+        payload = dict(name="Handoff", task_type=TEST_TASK_TYPE,
+                       schedule={"type": "cron", "expression": "0 * * * *", "timezone": "UTC"})
+        for initial_state in (None, "paused"):
+            with self.subTest(initial_state=initial_state):
+                request = dict(payload)
+                if initial_state is not None:
+                    request["initial_state"] = initial_state
+                task = self.service.create_task(TaskCreate.model_validate(request))
+                self.assertEqual(task.state, initial_state or "active")
+        for invalid in ("completed", "archived", "unknown", None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValidationError):
+                    TaskCreate.model_validate({**payload, "initial_state": invalid})
+
     def test_creates_skipped_run_when_skip_policy_is_at_capacity(self) -> None:
         task = make_task()
         expected_run = object()
