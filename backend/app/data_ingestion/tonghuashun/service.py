@@ -5,18 +5,23 @@ provider request-budget transaction spans network I/O, serializing worker
 processes without imposing a lock on readers of already published data.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+import re
+import sys
 import time
+import traceback
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 import structlog
 
-from app.data_ingestion.clients.tonghuashun import TonghuashunError
+from app.data_ingestion.clients.tonghuashun import BUSINESS_ERRORS, TonghuashunError
 from app.data_ingestion.models.tonghuashun import TonghuashunRequestBudget
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
-from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI
+from app.data_ingestion.tonghuashun.contracts import (
+    CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI, exact_json, provider_date,
+)
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +37,8 @@ class BudgetedClient:
         self.client, self.engine = client, engine
 
     def request(self, interface, params):
+        from app.data_ingestion.tonghuashun.control import check_execution, note_response, wait_for_pacing
+        check_execution()
         if self.engine.dialect.name != "postgresql":
             return self.client.request(interface, params)
         failure = None
@@ -45,7 +52,8 @@ class BudgetedClient:
             if delay > 60:
                 raise TonghuashunError("rate_limited", retry_after=delay)
             if delay:
-                time.sleep(delay)
+                wait_for_pacing(delay)
+            check_execution()
             try:
                 result = self.client.request(interface, params)
             except TonghuashunError as exc:
@@ -56,6 +64,13 @@ class BudgetedClient:
                 max(1, failure.retry_after) if failure and failure.kind == "rate_limited" else 0)
             budget.next_allowed_at = datetime.now(UTC) + timedelta(seconds=cooldown)
             session.commit()
+        # Keep the ordinary shared cooldown transaction intact before checking
+        # a cancellation that arrived while the supplier request was in flight.
+        # A true return remains bounded diagnostic evidence even if cancellation
+        # prevents its response journal and source version from being published.
+        if failure is None:
+            note_response(result.data, params)
+        check_execution()
         if failure:
             raise failure from None
         return result
@@ -179,6 +194,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if acquisition.failures:
                 data = {**data, "failed_requests": acquisition.failures}
             published_at = datetime.now(UTC)
+            from app.data_ingestion.tonghuashun.control import check_execution
+            check_execution()
             with Session(engine) as session:
                 result = CollectionRepository(session).publish(dataset, subject, variant,
                     expected=previous.revision, data=data, requests=acquisition.requests,
@@ -186,6 +203,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                     reconcile=parameters.mode == "reconcile")
                 if monitor:
                     monitor.published(session)
+                check_execution()
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
             result["fetched_count"] = acquisition.fetched_count
@@ -214,7 +232,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if monitor:
                 monitor.completed(summary, advanced=False)
             log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
-                       error_message=str(exc))
+                       error_message=str(exc), failure_request=acquisition.bar_request_context,
+                       supplier_business_code=exc.business_code if isinstance(exc, TonghuashunError) else None)
             if kind in ("unauthenticated", "forbidden", "rate_limited"):
                 # Account-wide failures must not repeat thousands of times.
                 break
@@ -232,9 +251,90 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     return summary
 
 
-def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
+def bounded_bar_failure(spec, subject, context):
+    """Rebuild diagnostic fields from a bounded, source-specific allowlist.
+
+    An unexpected caller or future adapter must not turn this log sink into a
+    response/credential dump. Reject malformed identities and dates instead
+    of truncating them into apparently valid evidence; ignore unknown fields.
+    No response value, URL, header, request ID or provider message is accepted.
+    """
+    if spec.key not in ("etf_daily", "index_daily") or type(context) is not dict:
+        return None
+    parameters = context.get("parameters")
+    stage = context.get("stage")
+    if (context.get("interface") != spec.interface
+        or stage not in ("request", "response_validation", "history_validation")
+        or type(parameters) is not dict):
+        return None
+    identity = parameters.get("thscode")
+    if (type(identity) is not str or len(identity) > 64 or identity != subject
+        or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", identity) is None
+        or parameters.get("interval") != "1d"):
+        return None
+    start, end = parameters.get("start"), parameters.get("end")
+    if any(type(value) is not int or abs(value) >= 10 ** 15 for value in (start, end)):
+        return None
+    try:
+        first, last = provider_date(start), provider_date(end)
+        if start > end:
+            return None
+        safe = {"interface": spec.interface, "stage": stage,
+                "parameters": {"thscode": identity, "interval": "1d", "start": start, "end": end}}
+        if stage == "history_validation":
+            scope = context.get("validation_range")
+            if type(scope) is not dict:
+                return None
+            dates = [scope.get(key) for key in ("start_date", "end_date")]
+            if any(type(value) is not str or len(value) != 10 for value in dates):
+                return None
+            a, b = (date.fromisoformat(value) for value in dates)
+            if not a <= first <= last <= b:
+                return None
+            safe["validation_range"] = {"start_date": a.isoformat(), "end_date": b.isoformat()}
+    except (CollectionError, ValueError):
+        return None
+    # The encoded cap is in UTF-8 bytes and supplements the per-field limits.
+    # A rejected diagnostic never alters the failed state or its checkpoint.
+    return safe if len(exact_json(safe).encode("utf-8")) <= 512 else None
+
+
+def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None,
+               *, failure_request=None, supplier_business_code=None):
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
+    details = {}
+    exc_info = error_message is not None
+    if not succeeded and spec.key in ("etf_daily", "index_daily"):
+        # Source errors use fixed transport text or locally authored validation
+        # text. Retain a bounded call stack without locals or an exception-chain
+        # rendering that could reintroduce a discarded provider response.
+        error_message = error_message[:512] if type(error_message) is str else None
+        details["exception"] = "".join(traceback.format_tb(sys.exc_info()[2], limit=20))[:4096]
+        exc_info = False
+        if type(subject) is not str or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subject) is None:
+            subject = "无效标的（已省略）"
+    if not succeeded and failure_request is not None:
+        # An automatic collection has no top-level dates, and a manual range
+        # may span several calls. Report the failing request's generated dates;
+        # a history-wide validation error instead retains its aggregate range
+        # beside the last request so an operator cannot mistake it for a
+        # transport rejection of just that final window.
+        # Recheck the business-code allowlist at the sink as well as transport.
+        code = (supplier_business_code if type(supplier_business_code) is int
+                and BUSINESS_ERRORS.get(supplier_business_code) == kind else None)
+        safe_request = bounded_bar_failure(spec, subject, failure_request)
+        details["supplier_business_code"] = code
+        if safe_request is None:
+            details["failure_request_omitted"] = True
+        else:
+            request_parameters = safe_request["parameters"]
+            start = provider_date(request_parameters["start"]).isoformat()
+            end = provider_date(request_parameters["end"]).isoformat()
+            if safe_request["stage"] == "history_validation":
+                start = safe_request["validation_range"]["start_date"]
+                end = safe_request["validation_range"]["end_date"]
+            details["failure_request"] = safe_request
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"
     counts = {"fetched_count": result.get("fetched_count", 0), "changed_count": result.get("changed", 0),
               "unchanged_count": result.get("unchanged", 0), "failed_count": 0 if succeeded else 1}
@@ -251,4 +351,4 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
         source="tonghuashun", data_type=spec.key, subject=subject,
         start_date=start, end_date=end, checkpoint_advanced=succeeded,
         version_id=result.get("version_id"), error_type=kind,
-        error_message=error_message, exc_info=error_message is not None, **counts)
+        error_message=error_message, exc_info=exc_info, **counts, **details)

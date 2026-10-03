@@ -255,6 +255,7 @@ class EffectiveBasis:
     """
     def __init__(self):
         self.scope=None;self.position=None;self.rows={};self.basis={}
+        self.unproven={}
 
     def apply(self,row,data,basis,field,requests):
         scope=_scope(row);ns=instant_ns(row['observed_at'])
@@ -264,6 +265,12 @@ class EffectiveBasis:
         self.position=position
         token=digest([scope,row['content_hash'],row['observed_at'],requests])
         current={};uncertain=[]
+        # An imported merged anchor may lack the original observation for an
+        # inherited row. Keep that *basis* unproven within this temporary scope;
+        # a later empty/excluding receipt cannot validate the identical input.
+        # Retain absent keys too: omission and reappearance are not confirmation.
+        # This map contains only unresolved bases, never a persisted success log.
+        unproven=dict(self.unproven) if scope==self.scope else {}
         if field:
             grouped={}
             for item in _row_keys(data,field):
@@ -277,19 +284,34 @@ class EffectiveBasis:
                 merged=(row['dataset'] in _MERGED and (row['dataset']!='stock_actions' or
                         any(r.get('artifact_sha256') for r in requests)))
                 proof_order=_proof_order(field,rawkey,requests,ns)
-                if scope==self.scope and self.rows.get(key)==hashed and merged:
-                    if confirmed:basis[key]=(proof_order,token)
+                missing_basis=unproven.get(key)
+                still_unproven=bool(missing_basis and missing_basis[0]==hashed)
+                if merged and (scope==self.scope and self.rows.get(key)==hashed or still_unproven):
+                    if confirmed:
+                        basis[key]=(proof_order,token)
+                        unproven.pop(key,None)
                     else:
-                        basis[key]=self.basis.get(key,basis.get(key,(ns,token)))
-                        if not (_excluded(field,rawkey,requests) or _receipt_excludes(field,rawkey,requests)):
+                        basis[key]=(missing_basis[1] if still_unproven else
+                                    self.basis.get(key,basis.get(key,(ns,token))))
+                        if still_unproven or not (_excluded(field,rawkey,requests) or _receipt_excludes(field,rawkey,requests)):
                             uncertain.append(key)
                 elif not merged or confirmed:
                     basis[key]=(proof_order,token)
+                    unproven.pop(key,None)
                 elif any(r.get('artifact_sha256') for r in requests):
                     # A rescued already-merged import without its old originals
                     # cannot turn inherited rows into freshly acquired evidence.
                     uncertain.append(key)
+                    unproven[key]=(hashed,basis.get(key,(ns,token)))
+                else:
+                    # A genuinely different directly acquired row follows the
+                    # original native-input contract; it does not inherit the
+                    # missing proof of an equal rescued row.
+                    unproven.pop(key,None)
+                if len(unproven)>1000000:
+                    raise NativeInputError('SOURCE_BUDGET_EXCEEDED','单个来源的未确认基准数量超过有界预算。')
         self.scope,self.rows,self.basis=scope,current,dict(basis)
+        self.unproven=unproven
         return basis,tuple(uncertain)
 
 

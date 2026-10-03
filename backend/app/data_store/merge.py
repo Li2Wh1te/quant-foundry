@@ -7,6 +7,7 @@ A charged scratch slot retains this working file only until the sweep completes.
 """
 from __future__ import annotations
 
+from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
@@ -41,13 +42,49 @@ def restore_row(schema, row):
 def value_hash(rows):
     # Canonical model fields, excluding provenance/confirmation and null columns
     # from unrelated node types in the declared scalar union schema.
-    from .adapters.canonical import encode
-    clean=[{k:v for k,v in row.items() if (k in ('member_key','row_kind','quality_json') or k.startswith('f')) and v is not None}
+    from .adapters.canonical import normalized, _CANONICAL_ENCODER
+    # Projection and exact-value normalization can share one pass. The selected
+    # names are declared scalar-union field strings; nested values still use the
+    # same recursive validator, including float/nonfinite rejection. Reuse the
+    # canonical-v1 encoder so persisted fingerprints keep identical bytes.
+    clean=[{k:normalized(v,_sort=False) for k,v in row.items() if (k in ('member_key','row_kind','quality_json') or k.startswith('f')) and v is not None}
            for row in rows]
-    return hashlib.sha256(encode(clean).encode()).hexdigest()
+    return hashlib.sha256(_CANONICAL_ENCODER.encode(clean).encode()).hexdigest()
 
 
 class MergeSpool:
+    @staticmethod
+    def read_sealed_progress(space):
+        """Read an existing seal in place; never create or recover a new spool.
+
+        The charged slot and entry locks are held by the operator continuation.
+        A hot journal or an incomplete acquisition is refused rather than being
+        rewritten by this preflight. Normal pipeline recovery remains available.
+        """
+        from .pipeline import continuation_refused
+        import json
+        path=space.spill/'lfd02-merge.sqlite'
+        try:
+            info=path.lstat()
+        except FileNotFoundError:
+            raise continuation_refused('SEALED_CONTINUATION_REQUIRED') from None
+        if not stat.S_ISREG(info.st_mode) or info.st_mode & stat.S_IWOTH:
+            raise continuation_refused('UNSAFE_STORAGE_PATH')
+        space.check()
+        try:
+            with closing(sqlite3.connect(path.as_uri()+'?mode=ro',uri=True)) as db:
+                db.execute('PRAGMA query_only=ON')
+                db.execute('PRAGMA cache_size=-4096')
+                row=db.execute('SELECT CASE WHEN length(body)<=65536 THEN body END '
+                               'FROM progress WHERE id=1').fetchone()
+                progress=json.loads(row[0]) if row and row[0] is not None else {}
+        except (sqlite3.Error,ValueError,TypeError):
+            raise continuation_refused('SEALED_CONTINUATION_REQUIRED') from None
+        space.check()
+        if not isinstance(progress,dict) or progress.get('scan_complete') is not True:
+            raise continuation_refused('SEALED_CONTINUATION_REQUIRED')
+        return progress
+
     def __init__(self, space, spec, *, after='', partitions=None, partition_count=1):
         self.space,self.spec=space,spec
         self.after,self.only,self.count=after,set(partitions) if partitions else None,partition_count

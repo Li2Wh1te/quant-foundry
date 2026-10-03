@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from functools import cached_property
 import base64
 import hashlib
 import json
@@ -186,11 +187,17 @@ class DatasetSpec:
         except (pa.ArrowException, OverflowError, UnicodeError):
             raise DataStoreError('INVALID_VALUE') from None
 
+    @cached_property
+    def _key_types(self):
+        # The schema and key tuple are immutable, code-owned contract metadata.
+        # Resolve Arrow field types once; never cache caller values or encoded
+        # keys. Descriptors, ordering and every _ordered validation stay exact.
+        return tuple(self.schema.field(name).type for name in self.key)
+
     def key_bytes(self, values: tuple) -> bytes:
         if len(values) > len(self.key) or not values:
             raise DataStoreError('INVALID_VALUE')
-        result = b''.join(_ordered(v, self.schema.field(k).type)
-                          for k, v in zip(self.key, values))
+        result = b''.join(_ordered(v, kind) for kind, v in zip(self._key_types, values))
         if len(result) > 2048:
             raise DataStoreError('INVALID_VALUE')
         return result

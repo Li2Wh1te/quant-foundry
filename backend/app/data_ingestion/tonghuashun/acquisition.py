@@ -21,6 +21,10 @@ class Acquisition:
         self.requests: list[dict] = []
         self.failures: list[dict] = []
         self.fetched_count = 0
+        # Keep only the current ETF/index bar window for failure diagnostics.
+        # This is not a successful response or a returned-key receipt: request
+        # errors occur before read() appends such proof, and cannot confirm data.
+        self.bar_request_context: dict | None = None
 
     def read(self, interface: str, params: dict) -> dict:
         from app.data_ingestion.tonghuashun.control import control
@@ -101,6 +105,7 @@ class Acquisition:
 
     def fetch(self, spec: Dataset, subject: str, parameters: CollectionParameters,
               previous: dict | None, now: datetime) -> dict:
+        self.bar_request_context = None
         if spec.kind == "directory":
             return self.directory(spec, subject)
         if spec.kind == "bars":
@@ -185,7 +190,16 @@ class Acquisition:
                 params = {"thscode": subject, "interval": "1d", "start": date_ms(a), "end": date_ms(b)}
                 if spec.key == "stock_daily":
                     params["adjust"] = "none"
+                if spec.key in ("etf_daily", "index_daily"):
+                    # These four parameters are generated locally from the
+                    # selected native identity and this exact window. Snapshot
+                    # them before calling the client; never copy credentials,
+                    # connection URLs, vendor messages or response payloads.
+                    self.bar_request_context = {"interface": spec.interface,
+                        "parameters": dict(params), "stage": "request"}
                 data = self.read(spec.interface, params)
+                if self.bar_request_context is not None:
+                    self.bar_request_context["stage"] = "response_validation"
                 if data.get("thscode", subject) != subject:
                     raise CollectionError("历史行情响应标的与请求不一致。")
                 part = items(data, allow_empty=True)
@@ -206,6 +220,13 @@ class Acquisition:
             # so a yield resumes these exact segments without publishing a
             # partial head. A genuinely empty range still fails below.
             read_windows(1)
+        if self.bar_request_context is not None:
+            # Empty history and forward-adjustment completeness are aggregate
+            # checks. The last window supplies context, not a claim that the
+            # transport rejected that window or that earlier dates were absent.
+            self.bar_request_context["stage"] = "history_validation"
+            self.bar_request_context["validation_range"] = {
+                "start_date": start.isoformat(), "end_date": end.isoformat()}
         rows = [by_date[key] for key in sorted(by_date)]
         if not rows:
             raise CollectionError("历史行情为空，尚不能确认该范围覆盖。")
@@ -222,6 +243,7 @@ class Acquisition:
             if not required_dates <= returned_dates:
                 raise CollectionError("前复权历史重采缺少已有日期，未发布不完整或混合基准版本。")
         merged = self.merge_rows(previous, rows, "date_ms")
+        self.bar_request_context = None
         return {"item": merged, "adjust": spec.adjust or "not_applicable",
                 "requested_start": full_start.isoformat(), "requested_end": end.isoformat(),
                 "coverage": "observed_rows_only", "provider_envelopes": envelopes}
@@ -249,7 +271,25 @@ class Acquisition:
 
     def financials(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)
-        start = parameters.start_date or years_before(end, 10 if not previous or parameters.mode == "reconcile" else 2)
+        full_start = parameters.start_date or years_before(end, 10)
+        if parameters.start_date is None and previous:
+            # The ordinary two-year refresh merges older reports into its head.
+            # Preserve their historical boundary even if old collector metadata
+            # already drifted forward. Reconciliation must actually request the
+            # oldest retained report, rather than silently keeping it forever
+            # outside the moving ten-year window without a new source receipt.
+            starts = [full_start]
+            if previous.get("requested_start"):
+                starts.append(date.fromisoformat(previous["requested_start"]))
+            if previous.get("item"):
+                starts.append(min(provider_date(row["period_end_ms"]) for row in previous["item"]))
+            full_start = min(starts)
+        start = full_start
+        if previous and parameters.mode == "incremental" and parameters.start_date is None:
+            # Keep the small recent request scope separate from the historical
+            # head boundary. Actual returned-key receipts alone reconfirm rows;
+            # neither this metadata nor a requested range invents confirmation.
+            start = years_before(end, 2)
         rows = []
         for a, b in windows(start, end, 10):
             data = self.read(spec.interface, {"thscode": subject, "period": "quarterly", "start": date_ms(a), "end": date_ms(b)})
@@ -266,7 +306,7 @@ class Acquisition:
             raise CollectionError("财务报表包含重复报告期。")
         return {"item": self.merge_rows(previous, rows, "period_end_ms"),
                 "period": "quarterly", "historical_revision_evidence": False,
-                "requested_start": start.isoformat(), "requested_end": end.isoformat()}
+                "requested_start": full_start.isoformat(), "requested_end": end.isoformat()}
 
     def indicators(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)

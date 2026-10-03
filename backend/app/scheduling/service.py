@@ -65,7 +65,9 @@ class SchedulerService:
             parameters=parameters,
             parameter_version=parameter_version,
             schedule=payload.schedule.model_dump(mode="json"),
-            state=TaskState.ACTIVE.value,
+            # Persist the requested initial state before runtime.sync_task can
+            # register a schedule, avoiding a create-then-pause enqueue race.
+            state=payload.initial_state.value,
             concurrency_limit=payload.concurrency_limit,
             overlap_policy=payload.overlap_policy.value,
             queue_limit=payload.queue_limit,
