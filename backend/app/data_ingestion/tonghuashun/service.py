@@ -16,7 +16,9 @@ import structlog
 from app.data_ingestion.clients.tonghuashun import TonghuashunError
 from app.data_ingestion.models.tonghuashun import TonghuashunRequestBudget
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
-from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI
+from app.data_ingestion.tonghuashun.contracts import (
+    CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI, provider_date,
+)
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
 
 logger = structlog.get_logger(__name__)
@@ -214,7 +216,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if monitor:
                 monitor.completed(summary, advanced=False)
             log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
-                       error_message=str(exc))
+                       error_message=str(exc), failure_request=acquisition.bar_request_context,
+                       supplier_business_code=exc.business_code if isinstance(exc, TonghuashunError) else None)
             if kind in ("unauthenticated", "forbidden", "rate_limited"):
                 # Account-wide failures must not repeat thousands of times.
                 break
@@ -232,9 +235,25 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     return summary
 
 
-def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
+def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None,
+               *, failure_request=None, supplier_business_code=None):
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
+    details = {}
+    if not succeeded and failure_request is not None:
+        # An automatic collection has no top-level dates, and a manual range
+        # may span several calls. Report the failing request's generated dates;
+        # a history-wide validation error instead retains its aggregate range
+        # beside the last request so an operator cannot mistake it for a
+        # transport rejection of just that final window.
+        # The transport already restricts business_code to known numeric codes.
+        request_parameters = failure_request["parameters"]
+        start = provider_date(request_parameters["start"]).isoformat()
+        end = provider_date(request_parameters["end"]).isoformat()
+        if failure_request["stage"] == "history_validation":
+            start = failure_request["validation_range"]["start_date"]
+            end = failure_request["validation_range"]["end_date"]
+        details = {"failure_request": failure_request, "supplier_business_code": supplier_business_code}
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"
     counts = {"fetched_count": result.get("fetched_count", 0), "changed_count": result.get("changed", 0),
               "unchanged_count": result.get("unchanged", 0), "failed_count": 0 if succeeded else 1}
@@ -251,4 +270,4 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
         source="tonghuashun", data_type=spec.key, subject=subject,
         start_date=start, end_date=end, checkpoint_advanced=succeeded,
         version_id=result.get("version_id"), error_type=kind,
-        error_message=error_message, exc_info=error_message is not None, **counts)
+        error_message=error_message, exc_info=error_message is not None, **counts, **details)
