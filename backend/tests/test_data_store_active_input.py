@@ -139,8 +139,9 @@ def test_atomic_row_locks_keep_producer_append_outside_admitted_boundary(ready, 
     locked, entered, published = threading.Event(), threading.Event(), threading.Event()
     failures = []
     original = active_input._read_selection
-    def inspect_lock(connection, entry, sources, *, lock):
-        result = original(connection, entry, sources, lock=lock)
+    def inspect_lock(connection, entry, sources, **kwargs):
+        result = original(connection, entry, sources, **kwargs)
+        lock = kwargs['lock']
         if lock:
             locked.set()
             assert entered.wait(2)
@@ -228,3 +229,19 @@ def test_changed_receipt_plan_cannot_reuse_previous_fixed_seal(ready):
     assert error.value.code == 'SOURCE_CONFLICT' and error.value.preserve_continuation
     assert hashlib.sha256(path.read_bytes()).hexdigest() == before
     assert ready.catalog.dataset(BY_ID['E44'].spec.name)['generation'] == generation
+
+
+def test_cancellation_during_metadata_admission_releases_locks_without_mutation(ready):
+    plan = captured(ready, 'E44')
+    before, status = queue(ready), read_entry_status(ready, 'E44')
+    checks = []
+    def cancel():
+        checks.append(1)
+        return len(checks) >= 4
+    with pytest.raises(DataStoreError) as error:
+        update(ready, 'E44', options=options(plan), cancelled=cancel)
+    assert error.value.code == 'OPERATION_CANCELLED'
+    assert queue(ready) == before and read_entry_status(ready, 'E44') == status
+    # A fresh admission and commit prove rollback released both PG row locks
+    # and the ordinary entry pipeline lock after cancellation.
+    assert update(ready, 'E44', options=options(plan))['active_input_admission']['batch_complete']

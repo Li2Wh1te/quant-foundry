@@ -6,6 +6,8 @@ and locks these range rows in one repeatable-read transaction. Producers may
 append later pending work after that transaction; it remains outside this batch.
 """
 from dataclasses import dataclass
+import math
+import time
 
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,6 +19,7 @@ from .pipeline import PipelineOptions, continuation_refused, input_identity, rea
 
 
 MAX_SCOPES = 64
+MAX_METADATA_SECONDS = 30
 
 
 @dataclass(frozen=True)
@@ -25,9 +28,22 @@ class ActiveInput:
     pairs: tuple
 
 
-def _read_selection(connection, entry, sources, *, lock):
+def _metadata_check(connection, deadline, cancelled):
+    if cancelled and cancelled():
+        raise continuation_refused('OPERATION_CANCELLED')
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise continuation_refused('LOCAL_UPDATE_BUDGET_EXCEEDED')
+    # Refresh the per-statement cap from the remaining *shared* metadata wall.
+    # A succession of individually bounded reads must not reset that allowance.
+    connection.execute(text("SELECT set_config('statement_timeout',:milliseconds,true)"),
+        {'milliseconds': str(max(1, min(5000, math.ceil(remaining * 1000))))})
+
+
+def _read_selection(connection, entry, sources, *, lock, deadline, cancelled):
     # The extra row detects an oversized active set rather than silently
     # shrinking an operator-approved scope to the first 64 eligible ranges.
+    _metadata_check(connection, deadline, cancelled)
     rows = connection.execute(text(
         'SELECT source,dataset,subject,variant,range_key,active '
         'FROM data_store_source_ranges r '
@@ -41,18 +57,22 @@ def _read_selection(connection, entry, sources, *, lock):
     pairs, manifest = [], []
     for row in rows:
         job = dict(row)
+        _metadata_check(connection, deadline, cancelled)
         observation = next_observation(sources, entry, job, connection=connection)
         if observation is None:
             # State-only or exhausted claims need their normal consumer, not
             # an implicit acknowledgement inside an approved decoding attempt.
             raise continuation_refused('ACTIVE_INPUT_REQUIRED')
+        _metadata_check(connection, deadline, cancelled)
         metadata = connection.execute(text(
             "SELECT content_hash,chain_depth,base_observation_id::text AS base_id,"
             "encode(sha256(convert_to(request_json,'UTF8')),'hex') AS request_sha256 "
             'FROM tonghuashun_observations WHERE id=CAST(:id AS uuid)'), observation).mappings().one()
         manifest.append({**job, 'observation': {**observation, **dict(metadata)}})
         pairs.append((job, observation))
+    _metadata_check(connection, deadline, cancelled)
     namespace = connection.execute(text('SELECT current_database(),current_schema()')).one()
+    _metadata_check(connection, deadline, cancelled)
     capture_version = connection.execute(text(
         'SELECT version FROM data_store_capture_version WHERE singleton=1')).scalar_one()
     native_selection = digest(['native', sources.engine.url.host, sources.engine.url.port, *namespace])
@@ -60,6 +80,7 @@ def _read_selection(connection, entry, sources, *, lock):
     plan = {
         'version': 1, 'entry_id': entry.id, 'source': entry.source, 'dataset': entry.native,
         'scope_count': len(pairs), 'scopes': manifest,
+        'metadata_seconds_max': MAX_METADATA_SECONDS,
         'capture_version': capture_version,
         'input_identity': input_identity(entry, segment, PipelineOptions()),
         'source_selection': digest(['active-input@1', entry.id, native_selection, capture_version, manifest]),
@@ -80,6 +101,7 @@ def active_input_plan(store, entry, sources, *, options=None, cancelled=None):
     """
     if type(sources) is not NativeSources or entry.id not in ('E23', 'E44'):
         raise continuation_refused('ACTIVE_INPUT_REQUIRED')
+    deadline = time.monotonic() + min(MAX_METADATA_SECONDS, options.pass_seconds if options else MAX_METADATA_SECONDS)
     if cancelled and cancelled():
         raise continuation_refused('OPERATION_CANCELLED')
     old = read_entry_status(store, entry.id)
@@ -93,13 +115,13 @@ def active_input_plan(store, entry, sources, *, options=None, cancelled=None):
                     connection.execute(text('SET TRANSACTION READ ONLY'))
                 connection.execute(text("SELECT set_config('statement_timeout','5000',true)"))
                 connection.execute(text("SELECT set_config('lock_timeout','5000',true)"))
-                admitted = _read_selection(connection, entry, sources, lock=options is not None)
+                admitted = _read_selection(connection, entry, sources, lock=options is not None,
+                    deadline=deadline, cancelled=cancelled)
                 if options is not None and (
                         admitted.plan['input_identity'] != options.expected_input_identity or
                         admitted.plan['source_selection'] != options.expected_source_selection):
                     raise continuation_refused('SOURCE_CONFLICT')
-                if cancelled and cancelled():
-                    raise continuation_refused('OPERATION_CANCELLED')
+                _metadata_check(connection, deadline, cancelled)
         return admitted
     except SQLAlchemyError:
         # A serialization/lock/database failure grants no partial admission and
