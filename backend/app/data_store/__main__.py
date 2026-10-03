@@ -141,7 +141,16 @@ def main(argv=None):
             resume_sealed_only=args.resume_sealed_only,expected_input_identity=args.expect_input_identity,
             expected_source_selection=args.expect_source_selection,admit_active_only=args.admit_active_only)
         engine=get_engine()
-        with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
+        if args.command=='plan-active':
+            from .active_input import planning_store
+            # A plan never uses the mutating root-binding/scratch constructor.
+            # Enforce read-only for all native metadata connections as well as
+            # the catalog view, even if the caller omitted libpq PGOPTIONS.
+            engine=engine.execution_options(postgresql_readonly=True)
+            context=planning_store(engine,args.root)
+        else:
+            context=CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize)
+        with context as store:
             if args.command=='configure-resources':
                 output.update(store.configure_resources(scratch_bytes=args.scratch_bytes,
                     pipeline_spill_bytes=args.pipeline_spill_bytes,issue_count=args.issue_count))
@@ -151,7 +160,8 @@ def main(argv=None):
                      cancelled=lambda:cancelled[0])) if args.rescue else native)
             if args.command=='plan-active':
                 from .active_input import active_input_plan
-                output['entries']=[active_input_plan(store,selected[0],native).plan]
+                output['entries']=[active_input_plan(store,selected[0],native,
+                    cancelled=lambda:cancelled[0]).plan]
                 output['plan_ready']=True
             elif args.command in ('rebuild','update','retry'):
                 output['entries']=run_local(store,sources,entries=selected,options=options,

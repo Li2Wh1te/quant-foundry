@@ -5,6 +5,7 @@ or a successful-row ledger. Admission holds the ordinary entry pipeline lock
 and locks these range rows in one repeatable-read transaction. Producers may
 append later pending work after that transaction; it remains outside this batch.
 """
+from contextlib import contextmanager
 from dataclasses import dataclass
 import math
 import time
@@ -13,6 +14,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
 from .adapters.contracts import digest
+from .catalog import Catalog
+from .errors import DataStoreError
+from .filesystem import LocalFiles
 from .incremental import FundBatchSources, available, next_observation
 from .local_sources import NativeSources
 from .pipeline import PipelineOptions, continuation_refused, input_identity, read_entry_status
@@ -20,6 +24,40 @@ from .pipeline import PipelineOptions, continuation_refused, input_identity, rea
 
 MAX_SCOPES = 64
 MAX_METADATA_SECONDS = 30
+
+
+@dataclass(frozen=True)
+class PlanningStore:
+    """Read-only catalog view of the same existing CurrentStore root."""
+    catalog: Catalog
+
+
+@contextmanager
+def planning_store(engine, root):
+    """Validate the existing root with neither binding nor scratch admission.
+
+    CurrentStore's normal constructor intentionally initializes coordination
+    directories and performs a catalog INSERT ON CONFLICT. Planning cannot use
+    it: enforce PostgreSQL read-only transactions and only read the existing
+    filesystem marker. LocalFiles retains the production mount/path guards.
+    This view has no writer, budget, cleanup or alternative storage operations.
+    """
+    engine = engine.execution_options(postgresql_readonly=True)
+    files = LocalFiles(root)
+    try:
+        root_token = files.existing_root_token()
+        limits = Catalog.existing_limits(engine)
+        catalog = Catalog(engine, limits)
+        with catalog.transaction() as connection:
+            row = connection.execute(text(
+                'SELECT root_token,policy_json FROM data_store_runtime WHERE singleton=1')).mappings().first()
+        if row is None:
+            raise DataStoreError('DATA_STORE_NOT_INITIALIZED')
+        if row['root_token'] != root_token or Catalog.policy_limits(row['policy_json']) != limits:
+            raise DataStoreError('CATALOG_MISMATCH')
+        yield PlanningStore(catalog)
+    finally:
+        files.close()
 
 
 @dataclass(frozen=True)

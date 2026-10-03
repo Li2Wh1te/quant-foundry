@@ -92,6 +92,26 @@ class LocalFiles:
         finally:
             os.close(fd)
 
+    def existing_root_token(self) -> UUID:
+        """Read the existing identity without creating a marker or lock file.
+
+        Operator planning must also work on a read-only mount. A missing or
+        malformed identity is a refusal, never permission to initialize a root.
+        The ordinary descriptor, regular-file and no-symlink guards still apply.
+        """
+        self.check()
+        try:
+            fd = os.open('.store-id', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=self.fd)
+        except FileNotFoundError:
+            raise DataStoreError('DATA_STORE_NOT_INITIALIZED') from None
+        try:
+            self._regular(fd)
+            return UUID(os.read(fd, 37).decode('ascii'))
+        except (ValueError, UnicodeError):
+            raise DataStoreError('CATALOG_MISMATCH') from None
+        finally:
+            os.close(fd)
+
     def root_token(self, locks) -> UUID:
         with locks.writer('store.root'):
             try:

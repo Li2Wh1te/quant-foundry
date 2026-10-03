@@ -4,6 +4,7 @@ from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 import hashlib
+import json
 import os
 import threading
 
@@ -20,6 +21,8 @@ from app.data_store.adapters.registry import BY_ID
 from app.data_store.errors import DataStoreError
 from app.data_store.local_sources import NativeSources
 from app.data_store.pipeline import PipelineOptions, read_entry_status, run_local
+from app.data_store.filesystem import LocalFiles
+from app.data_store.storage import CurrentStore
 
 
 pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1', reason='isolated PostgreSQL required')
@@ -55,6 +58,49 @@ def queue(st):
 
 def forbidden(*args, **kwargs):
     raise AssertionError('approved admission must not claim, reseed or expand its batch')
+
+
+@pytest.mark.parametrize('entry', ['E23', 'E44'])
+def test_official_plan_uses_readonly_catalog_and_no_mutating_constructor(ready, monkeypatch, capsys, entry):
+    from app.data_store.__main__ import main
+    from app.db import session
+    plan = captured(ready, entry)
+    before = queue(ready)
+    status = read_entry_status(ready, entry)
+    paths = sorted(str(p) for p in ready.files.root.rglob('*'))
+    monkeypatch.setattr(session, 'get_engine', lambda: ready.catalog.engine)
+    monkeypatch.setenv('QF_CURSOR_SIGNING_KEY', 'isolated-readonly-plan-cursor-key-32-characters')
+    monkeypatch.setattr(CurrentStore, '__init__', forbidden)
+    monkeypatch.setattr(LocalFiles, 'root_token', forbidden)
+    monkeypatch.setattr(LocalFiles, 'initialize', forbidden)
+    original = active_input.active_input_plan
+    def inspect_readonly(store, entry, sources, **kwargs):
+        with store.catalog.transaction() as connection:
+            assert connection.execute(text('SHOW transaction_read_only')).scalar_one() == 'on'
+        with sources.engine.begin() as connection:
+            assert connection.execute(text('SHOW transaction_read_only')).scalar_one() == 'on'
+        return original(store, entry, sources, **kwargs)
+    monkeypatch.setattr(active_input, 'active_input_plan', inspect_readonly)
+    assert main(['plan-active', '--entry', entry, '--root', str(ready.files.root)]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert result['plan_ready'] and result['entries'] == [plan]
+    assert queue(ready) == before and read_entry_status(ready, entry) == status
+    assert sorted(str(p) for p in ready.files.root.rglob('*')) == paths
+
+
+@pytest.mark.parametrize('marker', [None, 'invalid', '00000000-0000-0000-0000-000000000000'])
+def test_readonly_plan_refuses_missing_malformed_or_mismatched_root_without_initializing(ready, marker):
+    path = ready.files.root / '.store-id'
+    if marker is None:
+        path.unlink()
+    else:
+        path.write_text(marker)
+    before = path.read_bytes() if path.exists() else None
+    with pytest.raises(DataStoreError) as error:
+        with active_input.planning_store(ready.catalog.engine, ready.files.root):
+            pytest.fail('Unbound root must not yield a planning view')
+    assert error.value.code == ('DATA_STORE_NOT_INITIALIZED' if marker is None else 'CATALOG_MISMATCH')
+    assert (path.read_bytes() if path.exists() else None) == before
 
 
 @pytest.mark.parametrize('entry', ['E23', 'E44'])
