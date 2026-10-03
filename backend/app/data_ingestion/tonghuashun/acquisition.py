@@ -249,7 +249,25 @@ class Acquisition:
 
     def financials(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)
-        start = parameters.start_date or years_before(end, 10 if not previous or parameters.mode == "reconcile" else 2)
+        full_start = parameters.start_date or years_before(end, 10)
+        if parameters.start_date is None and previous:
+            # The ordinary two-year refresh merges older reports into its head.
+            # Preserve their historical boundary even if old collector metadata
+            # already drifted forward. Reconciliation must actually request the
+            # oldest retained report, rather than silently keeping it forever
+            # outside the moving ten-year window without a new source receipt.
+            starts = [full_start]
+            if previous.get("requested_start"):
+                starts.append(date.fromisoformat(previous["requested_start"]))
+            if previous.get("item"):
+                starts.append(min(provider_date(row["period_end_ms"]) for row in previous["item"]))
+            full_start = min(starts)
+        start = full_start
+        if previous and parameters.mode == "incremental" and parameters.start_date is None:
+            # Keep the small recent request scope separate from the historical
+            # head boundary. Actual returned-key receipts alone reconfirm rows;
+            # neither this metadata nor a requested range invents confirmation.
+            start = years_before(end, 2)
         rows = []
         for a, b in windows(start, end, 10):
             data = self.read(spec.interface, {"thscode": subject, "period": "quarterly", "start": date_ms(a), "end": date_ms(b)})
@@ -266,7 +284,7 @@ class Acquisition:
             raise CollectionError("财务报表包含重复报告期。")
         return {"item": self.merge_rows(previous, rows, "period_end_ms"),
                 "period": "quarterly", "historical_revision_evidence": False,
-                "requested_start": start.isoformat(), "requested_end": end.isoformat()}
+                "requested_start": full_start.isoformat(), "requested_end": end.isoformat()}
 
     def indicators(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)
