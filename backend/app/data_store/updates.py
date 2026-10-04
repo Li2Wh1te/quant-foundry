@@ -109,11 +109,17 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             result=execute(store,entry,sources,options=options,cancelled=cancelled,**extra)
         except BaseException as caught:
             error=caught
-            try:
-                status=_read(store,entry)
-            except Exception:
-                # Database failure must not replace a process exit/cancel signal.
-                status=_skipped(old,'failed',_code(caught))
+            if getattr(caught,'preserve_current_status',False):
+                # The failed invocation has zero admitted work. Its returned
+                # counters describe this attempt, while the stored receipt and
+                # pre-existing restrictions continue to describe current data.
+                status=caught.entry_result
+            else:
+                try:
+                    status=_read(store,entry)
+                except Exception:
+                    # Database failure must not replace a process exit/cancel signal.
+                    status=_skipped(old,'failed',_code(caught))
             result=dict(status,state='incomplete',complete=False,qualified=False,reason=_code(caught))
         success=bool(result.get('complete') and result.get('qualified',not entry.business))
         continued=(error is None and not result.get('complete') or
@@ -140,6 +146,7 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         # only its idle scratch. Current files and committed checkpoints survive.
         if (_policy is not None and stalls>=policy.abandon_after and
                 result.get('reason') not in FATAL and error is not None and
+                not getattr(error,'preserve_current_status',False) and
                 not getattr(error,'preserve_continuation',False) and
                 isinstance(error,(DataStoreError,NativeInputError))):
             owner='pipeline.'+entry.id+('.selected' if options.partitions else '')
@@ -149,7 +156,8 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 patch['continuation_aborted']='REPEATED_ENTRY_FAILURE'
         try:
             state=_refresh(store,entry,patch,operation=(
-                {'state':'incomplete','complete':False,'qualified':False,'reason':_code(error)} if error else None))
+                {'state':'incomplete','complete':False,'qualified':False,'reason':_code(error)}
+                if error and not getattr(error,'preserve_current_status',False) else None))
         except Exception:
             if error is not None:
                 error.entry_result=dict(result,outcome=outcome,attempted=True,refresh=patch)

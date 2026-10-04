@@ -343,7 +343,6 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
             judgment=check_coverage(c,entry,candidate)
             maintain_coverage=judgment['satisfied'] or judgment['reason']=='CURRENT_QUALITY_UNRESOLVED'
     if old_status.get('overflow_restriction'):summary['overflow_restriction']=old_status['overflow_restriction']
-    _status(store,entry,summary)
     try:
         source_selection=sources.selection_key() if hasattr(sources,'selection_key') else None
         source_kind=digest([type(sources).__module__,type(sources).__qualname__])
@@ -357,6 +356,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                            summary['full_coverage'].get('source_kind')==source_kind)
         if not entry.business:
             summary['work_admitted']=True
+            _status(store,entry,summary)
             for _ in _source_rows(sources,entry): pass
             summary.update(sources.summary)
             summary['source_scanned']=bool(sources.summary.get('complete'))
@@ -372,6 +372,11 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                                   pending='pipeline.'+entry.id+('.selected' if options.partitions else ''),
                                   quota_bytes=options.pipeline_spill_bytes) as space:
             summary['work_admitted']=True
+            # A rejected reservation has not read a source or changed current
+            # data. Publish the running/pending operation only after admission,
+            # so another bounded process cannot invalidate an accepted domain
+            # merely by exhausting the shared scratch allowance.
+            _status(store,entry,summary)
             space.deadline=time.monotonic()+options.pass_seconds
             spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
                              partition_count=None)
@@ -622,9 +627,22 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
     except (NativeInputError,DataStoreError,sqlite3.Error) as error:
         summary.update(state='incomplete',complete=False,qualified=False,
                        reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else ('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL or 'database or disk is full' in str(error) else 'FILE_INVALID'))
-        # Previously committed independent partitions remain authoritative.
-        # Never mark a truncated pass as an empty or completed source range.
-        _status(store,entry,summary)
+        if (isinstance(error,DataStoreError) and error.code=='SCRATCH_BUDGET_EXCEEDED'
+                and not summary.get('work_admitted') and options.mode in ('update','retry')
+                and not options.allow_incompatible_rebuild
+                and not getattr(sources,'incremental_slice',False)):
+            # Preserve only a real pre-admission refusal. Once a reservation,
+            # source claim or incompatible rebuild has begun, failures must
+            # still invalidate their exact unfinished input scope. The caller
+            # records this failed attempt without copying its operation flags
+            # over the preceding current-data receipt or quality restrictions.
+            summary['work_admitted']=False
+            error.preserve_current_status=True
+            error.entry_result=dict(summary)
+        else:
+            # Previously committed independent partitions remain authoritative.
+            # Never mark a truncated pass as an empty or completed source range.
+            _status(store,entry,summary)
         if isinstance(error, sqlite3.Error):
             # SQLite's bounded working file reports SQLITE_FULL as a native
             # exception. Keep the same safe public reason as the persisted
