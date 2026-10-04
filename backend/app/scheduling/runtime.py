@@ -125,8 +125,12 @@ class SchedulerRuntime:
     def stop(self) -> None:
         if self.running:
             self.scheduler.shutdown(wait=False)
-        self.executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("scheduler_stopped", message="本实例调度器已停止，待执行任务已取消。")
+        # Lifespan must retain database/logging resources until accepted
+        # handlers publish their final checkpoint and terminal run status.
+        # Uvicorn can re-raise SIGTERM immediately after lifespan returns;
+        # relying on Python's later thread-pool exit hook loses those workers.
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        logger.info("scheduler_stopped", message="本实例调度器已停止，已接受运行完成退出，待执行任务已取消。")
 
     def sync_task(self, task_id: UUID) -> None:
         if not self.settings.scheduler_enabled:

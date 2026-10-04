@@ -468,6 +468,31 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
         session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
         runtime.stop()
 
+    def test_stop_waits_for_accepted_handler_publication(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        from threading import Event
+        started, release, published = Event(), Event(), Event()
+        settings = Settings(api_token=API_TOKEN, database_password='test-secret',
+                            scheduler_enabled=False, _env_file=None)
+        runtime = SchedulerRuntime(settings)
+        def accepted_handler():
+            started.set()
+            assert release.wait(5)
+            published.set()
+        accepted = runtime.executor.submit(accepted_handler)
+        assert started.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            stopping = pool.submit(runtime.stop)
+            try:
+                with self.assertRaises(TimeoutError):
+                    stopping.result(timeout=.2)
+                self.assertFalse(published.is_set())
+            finally:
+                release.set()
+            stopping.result(timeout=5)
+        accepted.result(timeout=5)
+        self.assertTrue(published.is_set())
+
     def test_worker_crash_finalizes_lingering_running_run(self) -> None:
         settings = Settings(
             api_token=API_TOKEN,

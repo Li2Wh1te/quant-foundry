@@ -173,3 +173,84 @@ def test_dispatch_keeps_healthy_queue_claims_after_real_maintenance_lock_timeout
                 assert session.get(TaskRun, runs[TEST_TASK_TYPE]).status == 'running'
     finally:
         runtime.stop()
+
+
+def test_process_gate_blocks_new_claims_without_blocking_accepted_checkpoint(database, monkeypatch):
+    from concurrent.futures import Future, ThreadPoolExecutor, TimeoutError
+    from threading import Event
+    from app.data_sources.models import DataSourceConfig
+    from app.data_sources.service import require_config
+    from app.scheduling.process_drain import process_gate, idle_state, task_fingerprint
+    from app.scheduling.registry import TaskDefinition
+    from app.scheduling.repository import SchedulerRepository
+    from app.scheduling.schemas import TaskCreate, RunStatus
+    from tests.test_scheduling import TEST_TASK_TYPE, TestTaskParameters, noop_task_handler
+
+    engine, _ = database
+    ScheduledTask.__table__.create(engine)
+    TaskRun.__table__.create(engine)
+    DataSourceConfig.__table__.create(engine)
+    with engine.begin() as connection:
+        connection.execute(text('CREATE TABLE backtest_runs (id uuid PRIMARY KEY,finished_at timestamptz)'))
+    with Session(engine) as session:
+        session.add(DataSourceConfig(key='tonghuashun', initialized=True,
+            enabled=True, encrypted_secrets='isolated-no-network', version=7))
+        session.commit()
+    registry = TaskRegistry()
+    registry.register(TaskDefinition(key=TEST_TASK_TYPE, name='隔离采集',
+        english_name='Isolated collection', source_key='tonghuashun',
+        parameters_model=TestTaskParameters, handler=noop_task_handler))
+    with Session(engine) as session:
+        service = SchedulerService(session, registry)
+        runs = []
+        for name in ('accepted', 'queued'):
+            task = service.create_task(TaskCreate.model_validate({
+                'name': name, 'task_type': TEST_TASK_TYPE, 'parameters': {},
+                'schedule': {'type': 'cron', 'expression': '0 * * * *'},
+            }))
+            runs.append(service.enqueue_run(task.id,
+                trigger_type=TriggerType.MANUAL, max_queued_runs=10).id)
+        assert SchedulerRepository(session).claim_queued_runs(1) == [runs[0]]
+        session.commit()
+        fingerprint, _ = task_fingerprint(session)
+    monkeypatch.setattr('app.scheduling.runtime.get_engine', lambda: engine)
+    settings = Settings(api_token=TOKEN, cursor_signing_key='b' * 64,
+        database_password='isolated-test', environment='test', _env_file=None)
+    runtime = SchedulerRuntime(settings, registry=registry)
+    submitted = []
+    def submit(callback, run_id):
+        submitted.append(run_id)
+        return Future()
+    monkeypatch.setattr(runtime.executor, 'submit', submit)
+    entered = Event()
+    def dispatch():
+        entered.set()
+        runtime.dispatch_queued_runs()
+    try:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            with process_gate(engine, registry, fingerprint) as gate:
+                assert idle_state(gate) == {'accepted_runs': 1, 'backtests': 0}
+                claiming = pool.submit(dispatch)
+                assert entered.wait(5)
+                with pytest.raises(TimeoutError):
+                    claiming.result(timeout=.2)
+                # An already accepted collector reads credentials without
+                # locking their row, then publishes through its usual run API.
+                with Session(engine) as worker:
+                    assert require_config(worker, 'tonghuashun').version == 7
+                    assert SchedulerRepository(worker).finish_run(runs[0],
+                        status=RunStatus.SUCCEEDED, result={'checkpoint': 'published'})
+                    worker.commit()
+                assert idle_state(gate) == {'accepted_runs': 0, 'backtests': 0}
+                assert task_fingerprint(gate)[0] == fingerprint
+                assert not submitted
+            claiming.result(timeout=5)
+        assert submitted == [runs[1]]
+        with Session(engine) as session:
+            assert session.get(TaskRun, runs[0]).status == 'succeeded'
+            assert session.get(TaskRun, runs[1]).status == 'running'
+            assert task_fingerprint(session)[0] == fingerprint
+            source = require_config(session, 'tonghuashun')
+            assert source.enabled and source.version == 7
+    finally:
+        runtime.stop()
