@@ -11,7 +11,7 @@ from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
 from .adapters.registry import ENTRIES
 from .adapters.canonical import NativeInputError
-from .availability import require_ready
+from .availability import require_operable
 from .errors import DataStoreError
 from .local_sources import NativeSources, SourceLimits
 from .pipeline import PipelineOptions, run_local
@@ -35,6 +35,8 @@ class LocalUpdateParameters(BaseModel):
 
     datasets: list[str] = Field(default_factory=list, max_length=60)
     maximum_passes: int = Field(default=256, ge=1, le=4096)
+    maximum_claim_batches: int | None = Field(default=None, ge=1, le=4096)
+    maximum_partition_passes: int | None = Field(default=None, ge=1, le=4096)
     pass_seconds: int = Field(default=300, ge=1, le=3600)
     pipeline_spill_bytes: int | None = Field(default=None, ge=1, le=64*1024**3)
 
@@ -49,11 +51,17 @@ class LocalUpdateParameters(BaseModel):
 
 def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dict:
     engine = get_engine()
-    with Session(engine) as session:
-        availability = require_ready(session)
     settings = get_settings()
     entries = ([BUSINESS[dataset] for dataset in parameters.datasets]
                if parameters.datasets else list(BUSINESS.values()))
+    # Keep the maintenance fence until the actual local pass exits. Dataset
+    # locks and the existing shared quota still serialize current writes.
+    with Session(engine) as session:
+        availability = require_operable(session)
+        return _update_admitted(context, parameters, engine, settings, entries, availability)
+
+
+def _update_admitted(context, parameters, engine, settings, entries, availability):
     with CurrentStore(
         engine, settings.data_store_root,
         cursor_key=settings.cursor_signing_key.get_secret_value().encode(),
@@ -67,6 +75,8 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
                 store, sources, entries=entries,
                 options=PipelineOptions(
                     mode="update", maximum_passes=parameters.maximum_passes,
+                    maximum_claim_batches=parameters.maximum_claim_batches,
+                    maximum_partition_passes=parameters.maximum_partition_passes,
                     pass_seconds=parameters.pass_seconds,
                     pipeline_spill_bytes=parameters.pipeline_spill_bytes,
                 ),

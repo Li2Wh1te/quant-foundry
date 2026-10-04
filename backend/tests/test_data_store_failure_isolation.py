@@ -66,7 +66,12 @@ def calendar_rows(ready,entry):
 def scheduler(ready,monkeypatch):
     with ready.catalog.engine.begin() as c:
         c.exec_driver_sql(DDL[0])
-        c.exec_driver_sql("INSERT INTO data_store_legacy_maintenance(singleton,phase) VALUES (1,'ready')")
+        c.exec_driver_sql(DDL[3])
+        c.exec_driver_sql(DDL[4])
+        c.execute(text("""INSERT INTO data_store_legacy_maintenance
+            (singleton,phase,plan_hash,completed_json,files_started) VALUES
+            (1,'reset_done',:hash,'["hooks","derived","originals","functions","files"]',true)"""),
+            {'hash': 'a' * 64})
     monkeypatch.setattr(tasks,'get_engine',lambda:ready.catalog.engine)
     monkeypatch.setattr(tasks,'get_settings',lambda:SimpleNamespace(data_store_root=ready.files.root,
         cursor_signing_key=SecretStr(KEY.decode())))

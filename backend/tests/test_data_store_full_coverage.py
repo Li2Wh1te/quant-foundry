@@ -41,6 +41,54 @@ def empty_sources(store):
             c.exec_driver_sql('DELETE FROM '+name)
 
 
+def test_nested_ladder_native_comparison_preserves_files_and_blocks_new_values(ready):
+    from copy import deepcopy
+    from datetime import timedelta
+    from uuid import uuid4
+    from app.data_store.adapters.contracts import digest, native_json
+    from app.data_store.verify_coverage import verify_existing
+    from tests.test_data_store_domain_samples import sample
+
+    entry = BY_ID['E35']
+    source = sample('E35')
+    content = deepcopy(source.content)
+    boards = content['item'][0]['boards']
+    boards['two_board'] = [dict(thscode='000001.SZ', board_num=2)]
+    boards['four_board'] = [dict(thscode='000002.SZ', board_num=4)]
+    with ready.catalog.engine.begin() as connection:
+        connection.execute(text(
+            'UPDATE tonghuashun_observations SET data_json=:data,content_hash=:hash '
+            'WHERE dataset=:dataset'),
+            dict(data=native_json(content), hash=digest(content), dataset=entry.native))
+    native = NativeSources(ready.catalog.engine)
+    assert run_entry(ready, entry, native)['qualified']
+    before = all_files(ready, entry)
+
+    # Publishing physically sorts the member rows. Verification must compare
+    # the complete nested business object without requiring traversal order.
+    matched = verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)
+    assert matched['complete'] and matched['mismatched_objects'] == 0
+    assert all_files(ready, entry) == before
+    assert judgment(ready, entry)['satisfied']
+
+    changed = deepcopy(content)
+    changed['item'][0]['boards']['four_board'][0]['board_num'] = 5
+    with ready.catalog.engine.begin() as connection:
+        connection.execute(text(
+            'INSERT INTO tonghuashun_observations '
+            '(id,dataset,subject,variant,observed_at,content_hash,data_json,request_json) '
+            "VALUES (:id,:dataset,:subject,:variant,:observed,:hash,:data,'[]')"),
+            dict(id=uuid4(), dataset=entry.native, subject=source.subject,
+                 variant=source.variant, observed=source.observed_at + timedelta(seconds=1),
+                 hash=digest(changed), data=native_json(changed)))
+    mismatch = verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)
+    assert not mismatch['complete'] and mismatch['mismatched_objects'] == 1
+    assert not judgment(ready, entry)['satisfied']
+    assert all_files(ready, entry) == before
+    assert run_entry(ready, entry, NativeSources(ready.catalog.engine))['qualified']
+    assert verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)['complete']
+
+
 def prepare_finish(store):
     with store.catalog.engine.begin() as c:
         for ddl in DDL[:3]:
@@ -96,6 +144,57 @@ def all_files(store,entry):
     with store.catalog.transaction() as c:
         return c.execute(text('SELECT * FROM data_store_files WHERE dataset=:d'),
                          {'d':entry.spec.name}).mappings().all()
+
+
+def test_ordered_native_encoding_matches_original_json_order_and_budget(store,monkeypatch):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from uuid import UUID
+    from app.data_store import local_sources
+    from app.data_store.adapters.contracts import digest, native_json
+    from app.data_ingestion.models.tonghuashun import TonghuashunObservation
+    entry=BY_ID['E14']
+    when=datetime(2026,1,1,tzinfo=timezone.utc)
+    body={'item':[], 'nullable':None, 'label':'原生准确值',
+          'number':Decimal('-0.0001234567890123456789')}
+    # Equal native times are deliberately inserted in reverse UUID order.
+    # The UUID only fixes iteration; it must not replace source-time authority.
+    rows=[dict(id=UUID(int=index),dataset=entry.native,subject='same.SZ',variant='default',
+               observed_at=when,request_json='[]',data_json=native_json(body),content_hash=digest(body),
+               row_count=0,base_observation_id=None,chain_depth=0) for index in (4,2,3,1)]
+    with store.catalog.engine.begin() as connection:
+        TonghuashunObservation.__table__.create(connection)
+        connection.execute(TonghuashunObservation.__table__.insert(),rows)
+    order='ORDER BY t.subject,t.variant,t.observed_at,t.id'
+    baseline=text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:payload_budget '
+                  'THEN row_to_json(t)::text ELSE NULL END FROM tonghuashun_observations t '
+                  'WHERE t.dataset=:d '+order)
+    native=NativeSources(store.catalog.engine)
+    encoded=[];original_json=local_sources._json
+    def captured(value,limit):
+        encoded.append(value)
+        return original_json(value,limit)
+    with native._snapshot() as (connection,_):
+        original=connection.execute(baseline,{'d':entry.native,'payload_budget':33554432}).scalars().all()
+        assert len(original)<=16  # This assertion bounds the entire test input.
+        monkeypatch.setattr(local_sources,'_json',captured)
+        actual=list(native._rows(connection,'tonghuashun_observations','WHERE t.dataset=:d',
+                                 {'d':entry.native},order))
+        assert encoded==original  # Exact UTF-8 JSON, including native NULLs and column order.
+        assert [digest(row) for row in actual]==[digest(original_json(row,33554432)) for row in original]
+        selected=[row for row in actual if row['subject']=='same.SZ']
+        assert [row['id'] for row in selected]==[str(UUID(int=index)) for index in (1,2,3,4)]
+        assert all(row['base_observation_id'] is None for row in selected)
+        assert all(row['data_json']==native_json(body) for row in selected)
+        # Both projections return NULL for an over-budget payload. The formal
+        # reader must preserve its existing SOURCE_BUDGET_EXCEEDED rejection,
+        # never report that rejected native row as an empty successful source.
+        assert all(row is None for row in connection.execute(baseline,
+            {'d':entry.native,'payload_budget':1}).scalars())
+        with pytest.raises(NativeInputError) as failed:
+            list(native._rows(connection,'tonghuashun_observations','WHERE t.dataset=:d',
+                              {'d':entry.native},order,payload_bytes=1))
+        assert failed.value.code=='SOURCE_BUDGET_EXCEEDED'
 
 
 def test_F02_last_entry_only_selected_never_qualifies(ready):
@@ -223,6 +322,37 @@ def test_F08_finish_fences_concurrent_status_writes(ready,monkeypatch):
         assert finishing.result(timeout=5)['phase']=='ready'
         update.result(timeout=5)
     assert judgment(ready,BY_ID['E68'])['reason']=='FULL_RANGE_UNPROVEN'
+
+
+def test_finish_drains_current_admission_before_locking_its_checkpoint_tables(ready):
+    from concurrent.futures import TimeoutError
+    from sqlalchemy.orm import Session
+    from app.data_store.availability import require_operable
+    empty_sources(ready)
+    run_entry(ready, BY_ID['E68'], NativeSources(ready.catalog.engine))
+    prepare_finish(ready)
+    with ready.catalog.engine.begin() as connection:
+        connection.exec_driver_sql(DDL[3])
+        connection.exec_driver_sql(DDL[4])
+        connection.execute(text("""UPDATE data_store_legacy_maintenance SET
+            plan_hash=:hash, completed_json='["hooks","derived","originals","functions","files"]',
+            files_started=true"""), {'hash': 'a' * 64})
+    with Session(ready.catalog.engine) as session, ThreadPoolExecutor(max_workers=1) as pool:
+        require_operable(session)
+        pending_finish = pool.submit(finish, ready)
+        with pytest.raises(TimeoutError):
+            pending_finish.result(timeout=0.2)
+        # An admitted updater must still be able to persist its checkpoint
+        # while finish waits. Locking status first would deadlock this write.
+        with ready.catalog.engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout='500ms'"))
+            connection.execute(text("UPDATE data_store_entry_status SET updated_at=clock_timestamp() WHERE entry_id='E68'"))
+        session.rollback()
+        with pytest.raises(ResetRefused):
+            pending_finish.result(timeout=5)
+    # Neither safe admission nor finish waiting bypasses the other 59 domains.
+    with ready.catalog.transaction() as connection:
+        assert connection.execute(text('SELECT phase FROM data_store_legacy_maintenance')).scalar_one() == 'reset_done'
 
 
 def test_F07_changed_input_selection_rejected_and_old_proof_not_borrowed(ready):

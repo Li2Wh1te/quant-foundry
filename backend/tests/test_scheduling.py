@@ -208,6 +208,21 @@ class SchedulerServiceTestCase(unittest.TestCase):
         self.service = SchedulerService(self.session, make_test_registry())
         self.service.repository = Mock()
 
+    def test_creation_stages_paused_atomically_and_preserves_active_default(self) -> None:
+        payload = dict(name="Handoff", task_type=TEST_TASK_TYPE,
+                       schedule={"type": "cron", "expression": "0 * * * *", "timezone": "UTC"})
+        for initial_state in (None, "paused"):
+            with self.subTest(initial_state=initial_state):
+                request = dict(payload)
+                if initial_state is not None:
+                    request["initial_state"] = initial_state
+                task = self.service.create_task(TaskCreate.model_validate(request))
+                self.assertEqual(task.state, initial_state or "active")
+        for invalid in ("completed", "archived", "unknown", None):
+            with self.subTest(invalid=invalid):
+                with self.assertRaises(ValidationError):
+                    TaskCreate.model_validate({**payload, "initial_state": invalid})
+
     def test_creates_skipped_run_when_skip_policy_is_at_capacity(self) -> None:
         task = make_task()
         expected_run = object()
@@ -277,7 +292,7 @@ class SchedulerServiceTestCase(unittest.TestCase):
         task = make_task(task_type="data_store.update_local")
         service.repository.get_task.return_value = task
 
-        with patch("app.scheduling.service.require_ready",
+        with patch("app.scheduling.service.require_operable",
                    side_effect=DataStoreError("DATA_STORE_REBUILDING")):
             with self.assertRaisesRegex(TaskConflictError, "维护"):
                 service.enqueue_run(task.id, trigger_type=TriggerType.MANUAL,
@@ -452,6 +467,31 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
         ])
         session_class.return_value.__enter__.return_value.commit.assert_called_once_with()
         runtime.stop()
+
+    def test_stop_waits_for_accepted_handler_publication(self) -> None:
+        from concurrent.futures import ThreadPoolExecutor, TimeoutError
+        from threading import Event
+        started, release, published = Event(), Event(), Event()
+        settings = Settings(api_token=API_TOKEN, database_password='test-secret',
+                            scheduler_enabled=False, _env_file=None)
+        runtime = SchedulerRuntime(settings)
+        def accepted_handler():
+            started.set()
+            assert release.wait(5)
+            published.set()
+        accepted = runtime.executor.submit(accepted_handler)
+        assert started.wait(5)
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            stopping = pool.submit(runtime.stop)
+            try:
+                with self.assertRaises(TimeoutError):
+                    stopping.result(timeout=.2)
+                self.assertFalse(published.is_set())
+            finally:
+                release.set()
+            stopping.result(timeout=5)
+        accepted.result(timeout=5)
+        self.assertTrue(published.is_set())
 
     def test_worker_crash_finalizes_lingering_running_run(self) -> None:
         settings = Settings(

@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass
 import errno
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from uuid import uuid4
@@ -39,6 +40,24 @@ class PipelineOptions:
     pass_seconds: int = 300
     allow_incompatible_rebuild: bool = False
     pipeline_spill_bytes: int | None = None
+    maximum_claim_batches: int | None = None
+    maximum_partition_passes: int | None = None
+    resume_sealed_only: bool = False
+    admit_active_only: bool = False
+    expected_input_identity: str | None = None
+    expected_source_selection: str | None = None
+
+    @property
+    def claim_batches(self):
+        # An operator-fenced continuation can consume only its existing batch.
+        # Legacy callers retain the original shared maximum_passes behavior.
+        return 1 if self.resume_sealed_only or self.admit_active_only else (
+            self.maximum_claim_batches if self.maximum_claim_batches is not None else self.maximum_passes)
+
+    @property
+    def partition_passes(self):
+        return (self.maximum_partition_passes if self.maximum_partition_passes is not None
+                else self.maximum_passes)
 
     def __post_init__(self):
         if (self.mode not in ('rebuild','update','retry') or
@@ -52,8 +71,72 @@ class PipelineOptions:
                 (type(self.pipeline_spill_bytes) is not int or
                  not 1 <= self.pipeline_spill_bytes <= 64*1024**3)):
             raise ValueError('Invalid bounded pipeline options')
+        for limit in (self.maximum_claim_batches,self.maximum_partition_passes):
+            if limit is not None and (type(limit) is not int or not 1<=limit<=4096):
+                raise ValueError('Invalid independent pipeline limit')
+        fences=(self.expected_input_identity,self.expected_source_selection)
+        if type(self.resume_sealed_only) is not bool or type(self.admit_active_only) is not bool:
+            raise ValueError('Invalid sealed continuation mode')
+        if self.resume_sealed_only and self.admit_active_only:
+            raise ValueError('Choose one input admission mode')
+        if self.resume_sealed_only or self.admit_active_only:
+            if (self.mode!='update' or self.partitions or self.allow_incompatible_rebuild or
+                    self.maximum_claim_batches not in (None,1) or
+                    any(not isinstance(fence,str) or not re.fullmatch(r'[0-9a-f]{64}',fence)
+                        for fence in fences)):
+                raise ValueError('Sealed continuation requires one update batch and both exact fences')
+        elif any(fence is not None for fence in fences):
+            raise ValueError('Input fences require sealed continuation mode')
         from .schema import identifier
         for p in self.partitions: identifier(p)
+
+
+def input_identity(entry,sources,options,*,mode=None):
+    """Keep input identity independent of execution budgets and operator fences.
+
+    Existing sealed files must remain usable after introducing separate claim
+    and partition limits. These controls constrain work, not the source contract.
+    """
+    identity = [entry.spec.descriptor(),type(sources).__module__,type(sources).__qualname__,
+                mode or options.mode,options.partitions,options.allow_incompatible_rebuild]
+    if entry.id == 'E44':
+        # A changed confirmation rule must reacquire actual local input. An old
+        # charged spool contains normalized failures and cannot borrow this fix.
+        identity.append('native-nav-direct-fyear@1')
+    if entry.id == 'E40':
+        # A seal acquired before native catalog membership proof existed must
+        # not borrow a later complete directory to resolve its old reduction.
+        # Retain the original seal under the ordinary SOURCE_CONFLICT guard.
+        identity.append('native-catalog-membership@1')
+    return digest(identity)
+
+
+def continuation_refused(code):
+    """A rejected fence never permits automatic abandonment of retained input."""
+    error=DataStoreError(code)
+    error.preserve_continuation=True
+    return error
+
+
+def validate_sealed_continuation(store,entry,sources,options,*,cancelled=None):
+    """Check the existing charged spool without acquiring or decoding new input.
+
+    The caller holds the entry pipeline lock. Reusing its normal quota lock also
+    excludes another process from changing this SQLite checkpoint during the
+    read. The real merger repeats the fence before its first partition commit.
+    """
+    owner='pipeline.'+entry.id
+    if owner not in store.budget.pending_keys():
+        raise continuation_refused('SEALED_CONTINUATION_REQUIRED')
+    with store.budget.reserve('read',pending=owner,cancelled=cancelled,
+                              quota_bytes=options.pipeline_spill_bytes) as space:
+        progress=MergeSpool.read_sealed_progress(space)
+    if (progress.get('identity')!=options.expected_input_identity or
+            input_identity(entry,sources,options)!=options.expected_input_identity or
+            progress.get('source_selection')!=options.expected_source_selection or
+            sources.selection_key()!=options.expected_source_selection):
+        raise continuation_refused('SOURCE_CONFLICT')
+    return progress
 
 
 def _scope(partition):
@@ -172,6 +255,9 @@ def _partition_issues(store,entry,partition,spool):
                     winner=spool.db.execute('SELECT * FROM objects WHERE k=?',(entry.spec.key_bytes(tuple(prefix)),)).fetchone()
                     fixed=bool(winner and winner['validated'] and winner['state']!='invalid' and
                                winner['g']==target.get('group') and winner['n']>=int(target['order']))
+                    if old['reason'] == 'SOURCE_ORDER_UNCOMPARABLE':
+                        fixed |= spool.membership_resolved(entry.spec.key_bytes(tuple(prefix)),
+                                                           target.get('group'), int(target['order']), winner)
                 elif len(prefix)==2:
                     winner=spool.db.execute('SELECT * FROM scopes WHERE r=? AND s=?',tuple(prefix)).fetchone()
                     fixed=bool(winner and winner['g']==target.get('group') and winner['n']>=int(target['order']))
@@ -241,6 +327,8 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
     Retry uses the same normalizer/order rules, optionally a bounded partition
     selector. No campaign/execution/runtime ID or supplier access is needed.
     """
+    if options.resume_sealed_only:
+        validate_sealed_continuation(store,entry,sources,options,cancelled=cancelled)
     full_scan=not options.partitions and not getattr(sources,'incremental_slice',False)
     summary={'entry_id':entry.id,'mode':options.mode,'state':'running','complete':False,
              'partitions':list(options.partitions),
@@ -263,7 +351,6 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
             judgment=check_coverage(c,entry,candidate)
             maintain_coverage=judgment['satisfied'] or judgment['reason']=='CURRENT_QUALITY_UNRESOLVED'
     if old_status.get('overflow_restriction'):summary['overflow_restriction']=old_status['overflow_restriction']
-    _status(store,entry,summary)
     try:
         source_selection=sources.selection_key() if hasattr(sources,'selection_key') else None
         source_kind=digest([type(sources).__module__,type(sources).__qualname__])
@@ -277,6 +364,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                            summary['full_coverage'].get('source_kind')==source_kind)
         if not entry.business:
             summary['work_admitted']=True
+            _status(store,entry,summary)
             for _ in _source_rows(sources,entry): pass
             summary.update(sources.summary)
             summary['source_scanned']=bool(sources.summary.get('complete'))
@@ -292,20 +380,34 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                                   pending='pipeline.'+entry.id+('.selected' if options.partitions else ''),
                                   quota_bytes=options.pipeline_spill_bytes) as space:
             summary['work_admitted']=True
+            # A rejected reservation has not read a source or changed current
+            # data. Publish the running/pending operation only after admission,
+            # so another bounded process cannot invalidate an accepted domain
+            # merely by exhausting the shared scratch allowance.
+            _status(store,entry,summary)
             space.deadline=time.monotonic()+options.pass_seconds
             spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
                              partition_count=None)
             try:
-                identity=digest([entry.spec.descriptor(),type(sources).__module__,
-                                 type(sources).__qualname__,options.mode,options.partitions,
-                                 options.allow_incompatible_rebuild])
+                identity=input_identity(entry,sources,options)
                 record=spool.db.execute('SELECT body FROM progress WHERE id=1').fetchone()
                 progress=json.loads(record[0]) if record else {}
+                if options.admit_active_only and progress.get('scan_complete') and (
+                        progress.get('active_input_fence')!=options.expected_source_selection):
+                    # A newly planned acquisition cannot reuse a different
+                    # protected seal, including one made before this admission
+                    # protocol. Its original sealed-only route remains intact.
+                    raise continuation_refused('SOURCE_CONFLICT')
+                if options.resume_sealed_only and (
+                        not progress.get('scan_complete') or
+                        progress.get('identity')!=options.expected_input_identity or
+                        progress.get('source_selection')!=options.expected_source_selection or
+                        source_selection!=options.expected_source_selection):
+                    raise continuation_refused('SOURCE_CONFLICT')
                 compatible_identity=identity
                 if options.mode in ('update','retry'):
-                    compatible_identity=digest([entry.spec.descriptor(),type(sources).__module__,
-                        type(sources).__qualname__,'retry' if options.mode=='update' else 'update',
-                        options.partitions,options.allow_incompatible_rebuild])
+                    compatible_identity=input_identity(entry,sources,options,
+                        mode='retry' if options.mode=='update' else 'update')
                 if (progress.get('scan_complete') and progress.get('identity') not in (identity,compatible_identity)):
                     # A different selector/mode must never erase the only
                     # sealed input boundary of an unfinished invocation.
@@ -316,10 +418,17 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     conflict=DataStoreError('SOURCE_CONFLICT');conflict.preserve_continuation=True
                     raise conflict
                 if progress.get('identity') not in (identity,compatible_identity) or not progress.get('scan_complete'):
+                    source_members=None
+                    from .incremental import FundBatchSources
+                    if entry.id in ('E23','E44') and isinstance(sources,FundBatchSources):
+                        from .sealed_funds import checkpoint_members
+                        source_members=checkpoint_members(sources.native,entry,sources.pairs,
+                            expected_active_fence=options.expected_source_selection if options.admit_active_only else None,
+                            cancelled=cancelled)
                     # A failed/incomplete scan provides no deletion evidence.
                     # It is safe to restart acquisition because none of it was
                     # published. A sealed scan instead resumes without IO.
-                    for table in ('objects','problems','scopes','partitions','progress'):
+                    for table in ('objects','problems','scopes','membership_proofs','partitions','progress'):
                         spool.db.execute('DELETE FROM '+table)
                     input_hash=hashlib.sha256()
                     invalid_snapshot_scopes=set()
@@ -369,11 +478,23 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                               'normalized_units':summary['normalized_units'],
                               'input_failures':summary['input_failures'],
                               'boundary':input_hash.hexdigest(),'source_selection':source_selection}
+                    if options.admit_active_only:
+                        progress['active_input_fence']=options.expected_source_selection
+                    if source_members is not None:
+                        # The same disposable seal owns these at most64 source
+                        # descriptors. No payloads or completed source history
+                        # are retained outside the ordinary working checkpoint.
+                        progress['source_members']=source_members
                     spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
                                      (json.dumps(progress),))
                     spool.db.commit();spool.check()
                 else:
                     summary['resumed']=True
+                if options.admit_active_only:
+                    # Distinguish this attempt's zero new decodes from the
+                    # original sealed batch's unresolved input failures.
+                    summary['active_input_disposition']={key:progress.get(key,0) for key in
+                        ('source_rows','normalized_units','input_failures')}
                 if full_scan:
                     # Upgrade a legacy sealed continuation from its actual
                     # ordered range and cursor, never from old booleans.
@@ -421,7 +542,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     summary['overflow_restriction']=write_overflow(
                         store,entry,overflow['partition'],spool)
                     _status(store,entry,summary)
-                for number in range(options.maximum_passes):
+                for number in range(options.partition_passes):
                     summary['passes']=number+1
                     space.deadline=time.monotonic()+options.pass_seconds
                     selected=[r[0] for r in spool.db.execute(
@@ -461,6 +582,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                         # partitions leave no duplicate per-row success log.
                         spool.db.execute('DELETE FROM objects WHERE p=?',(partition,))
                         spool.db.execute('DELETE FROM problems WHERE p=?',(partition,))
+                        spool.db.execute('DELETE FROM membership_proofs WHERE k NOT IN (SELECT k FROM objects)')
                         spool.db.commit()
                         if full_scan:
                             summary['full_coverage'].update(after=partition,remaining=spool.db.execute(
@@ -514,9 +636,22 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
     except (NativeInputError,DataStoreError,sqlite3.Error) as error:
         summary.update(state='incomplete',complete=False,qualified=False,
                        reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else ('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL or 'database or disk is full' in str(error) else 'FILE_INVALID'))
-        # Previously committed independent partitions remain authoritative.
-        # Never mark a truncated pass as an empty or completed source range.
-        _status(store,entry,summary)
+        if (isinstance(error,DataStoreError) and error.code=='SCRATCH_BUDGET_EXCEEDED'
+                and not summary.get('work_admitted') and options.mode in ('update','retry')
+                and not options.allow_incompatible_rebuild
+                and not getattr(sources,'incremental_slice',False)):
+            # Preserve only a real pre-admission refusal. Once a reservation,
+            # source claim or incompatible rebuild has begun, failures must
+            # still invalidate their exact unfinished input scope. The caller
+            # records this failed attempt without copying its operation flags
+            # over the preceding current-data receipt or quality restrictions.
+            summary['work_admitted']=False
+            error.preserve_current_status=True
+            error.entry_result=dict(summary)
+        else:
+            # Previously committed independent partitions remain authoritative.
+            # Never mark a truncated pass as an empty or completed source range.
+            _status(store,entry,summary)
         if isinstance(error, sqlite3.Error):
             # SQLite's bounded working file reports SQLITE_FULL as a native
             # exception. Keep the same safe public reason as the persisted

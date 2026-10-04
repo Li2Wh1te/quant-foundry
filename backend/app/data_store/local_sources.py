@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import gzip
+import hashlib
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -134,9 +135,16 @@ def _confirmed(key, rawkey, requests):
 def _receipt_excludes(field, key, requests):
     # Every relevant successfully returned raw page carries explicit keys. The
     # absence of a key preserves its previous confirmation; it never withdraws it.
-    receipts=[r.get('returned_keys',{}).get(field) for r in requests
+    receipts=[(r,r.get('returned_keys',{}).get(field)) for r in requests
               if r.get('key_receipt')=='actual_returned_keys_v1']
-    return bool(receipts) and len(receipts)==len(requests) and all(isinstance(v,list) for v in receipts) and all(key not in v for v in receipts)
+    # Reuse each validated receipt's ephemeral membership index. A historical
+    # window can contain thousands of inherited, unreturned keys; scanning its
+    # returned-key list for every such key is quadratic. Mixed/missing receipts
+    # still prove no exclusion, and structured malformed keys retain ordinary
+    # list comparison through _Receipt.contains rather than gaining authority.
+    return (bool(receipts) and len(receipts)==len(requests) and
+            all(isinstance(values,list) for _,values in receipts) and
+            all(not _contains(request,field,values,key) for request,values in receipts))
 
 
 def _proof_order(field, key, requests, observed):
@@ -149,6 +157,45 @@ def _proof_order(field, key, requests, observed):
                 raise NativeInputError('SOURCE_ORDER_UNPROVEN','来源确认时间晚于保存观察。')
             applicable.append(value)
     return max(applicable) if applicable else observed
+
+
+def direct_nav_response(row, data, requests, *, native=False):
+    """Recognize the reviewed native producer's direct five-year NAV response.
+
+    Acquisition.nav passes the complete fyear response to the immutable native
+    repository; only month responses merge prior rows. Repository delta storage
+    is compression of that response, not the supplier's returned-key set. The
+    caller must first reconstruct and hash-check the closed dependency chain.
+    Rescue/import input never gains this equivalence merely by copying request
+    parameters. This function does not create or amend a returned-key receipt.
+    """
+    if (not native or row.get('dataset') != 'fund_nav' or row.get('variant') != 'default' or
+            len(requests) != 1 or not isinstance(data, dict) or
+            data.get('coverage') != 'provider_rolling_window' or data.get('failed_requests')):
+        return False
+    request = requests[0]
+    parameters = request.get('parameters')
+    if (request.get('interface') != 'fund.performance.nav' or request.get('artifact_sha256') or
+            not isinstance(parameters, dict) or parameters != {
+                'thscode': row.get('subject'), 'range': 'fyear', 'nav_type': 'unit,adj'}):
+        return False
+    rows = data.get('item')
+    if (not isinstance(rows, list) or not rows or row.get('row_count') != len(rows) or
+            any(not isinstance(point, dict) or point.get('thscode') not in (None, row['subject'])
+                for point in rows)):
+        return False
+    from app.data_ingestion.tonghuashun.contracts import (
+        CollectionError, SHANGHAI, provider_date, validate_bars, years_before,
+    )
+    try:
+        today = datetime.fromisoformat(str(row['observed_at'])).astimezone(SHANGHAI).date()
+        from datetime import timedelta
+        validate_bars(rows, years_before(today, 5) - timedelta(days=7), today, 'nav_date')
+        days = [provider_date(point['nav_date']) for point in rows]
+        return (data.get('observed_start') == min(days).isoformat() and
+                data.get('observed_end') == max(days).isoformat())
+    except (CollectionError, KeyError, TypeError, ValueError, OverflowError):
+        return False
 
 
 def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None):
@@ -215,10 +262,16 @@ def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None)
                 data = {**body['metadata'], 'item': [records[k] for k in sorted(records)]}
             except TypeError:
                 raise NativeInputError('SOURCE_DEPENDENCY_INVALID', '增量业务键类型不一致。') from None
-        if digest(data) != current['content_hash']:
+        # Hash and byte-budget validation refer to exactly the same canonical
+        # UTF-8 payload. Encoding a complete restored financial/history window
+        # twice adds no evidence and amplifies every closed delta dependency.
+        # Keep the full encoding/precision validation; only reuse these bytes.
+        encoded = native_json(data).encode()
+        if hashlib.sha256(encoded).hexdigest() != current['content_hash']:
             raise NativeInputError('SOURCE_HASH_MISMATCH', '原生观察内容校验失败。')
-        if len(native_json(data).encode()) > limits.payload_bytes:
+        if len(encoded) > limits.payload_bytes:
             raise NativeInputError('SOURCE_BUDGET_EXCEEDED', '重建窗口超过解析预算。')
+        del encoded  # Release this canonical buffer before the next dependency.
     return data, basis, field
 
 
@@ -255,15 +308,23 @@ class EffectiveBasis:
     """
     def __init__(self):
         self.scope=None;self.position=None;self.rows={};self.basis={}
+        self.unproven={}
 
-    def apply(self,row,data,basis,field,requests):
+    def apply(self,row,data,basis,field,requests,*,native=False):
         scope=_scope(row);ns=instant_ns(row['observed_at'])
         position=(*scope,ns,str(row['id']))
         if self.position is not None and position<self.position:
             raise NativeInputError('RESCUE_ORDER_INVALID','原生观察需按范围和观察时间排序；不能用文件顺序作为来源先后。')
         self.position=position
         token=digest([scope,row['content_hash'],row['observed_at'],requests])
+        direct_nav = direct_nav_response(row, data, requests, native=native)
         current={};uncertain=[]
+        # An imported merged anchor may lack the original observation for an
+        # inherited row. Keep that *basis* unproven within this temporary scope;
+        # a later empty/excluding receipt cannot validate the identical input.
+        # Retain absent keys too: omission and reappearance are not confirmation.
+        # This map contains only unresolved bases, never a persisted success log.
+        unproven=dict(self.unproven) if scope==self.scope else {}
         if field:
             grouped={}
             for item in _row_keys(data,field):
@@ -273,23 +334,38 @@ class EffectiveBasis:
                 # Multiple legitimate corporate actions share one ex-date. Hash
                 # the whole group; never let the last event erase its siblings.
                 hashed=digest(sorted(digest(v) for v in items));current[key]=hashed
-                confirmed=_confirmed(field,rawkey,requests)
+                confirmed=direct_nav or _confirmed(field,rawkey,requests)
                 merged=(row['dataset'] in _MERGED and (row['dataset']!='stock_actions' or
                         any(r.get('artifact_sha256') for r in requests)))
                 proof_order=_proof_order(field,rawkey,requests,ns)
-                if scope==self.scope and self.rows.get(key)==hashed and merged:
-                    if confirmed:basis[key]=(proof_order,token)
+                missing_basis=unproven.get(key)
+                still_unproven=bool(missing_basis and missing_basis[0]==hashed)
+                if merged and (scope==self.scope and self.rows.get(key)==hashed or still_unproven):
+                    if confirmed:
+                        basis[key]=(proof_order,token)
+                        unproven.pop(key,None)
                     else:
-                        basis[key]=self.basis.get(key,basis.get(key,(ns,token)))
-                        if not (_excluded(field,rawkey,requests) or _receipt_excludes(field,rawkey,requests)):
+                        basis[key]=(missing_basis[1] if still_unproven else
+                                    self.basis.get(key,basis.get(key,(ns,token))))
+                        if still_unproven or not (_excluded(field,rawkey,requests) or _receipt_excludes(field,rawkey,requests)):
                             uncertain.append(key)
                 elif not merged or confirmed:
                     basis[key]=(proof_order,token)
+                    unproven.pop(key,None)
                 elif any(r.get('artifact_sha256') for r in requests):
                     # A rescued already-merged import without its old originals
                     # cannot turn inherited rows into freshly acquired evidence.
                     uncertain.append(key)
+                    unproven[key]=(hashed,basis.get(key,(ns,token)))
+                else:
+                    # A genuinely different directly acquired row follows the
+                    # original native-input contract; it does not inherit the
+                    # missing proof of an equal rescued row.
+                    unproven.pop(key,None)
+                if len(unproven)>1000000:
+                    raise NativeInputError('SOURCE_BUDGET_EXCEEDED','单个来源的未确认基准数量超过有界预算。')
         self.scope,self.rows,self.basis=scope,current,dict(basis)
+        self.unproven=unproven
         return basis,tuple(uncertain)
 
 
@@ -334,8 +410,17 @@ class NativeSources:
 
     def _rows(self, c, table, where='', params=None, order='', *, fetch_rows=1, payload_bytes=None):
         # Caller table and clauses originate exclusively in this module.
-        sql = (f'SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:payload_budget '
-               f'THEN row_to_json(t)::text ELSE NULL END FROM {table} t {where} {order}')
+        # The finite native scan must sort its typed native rows BEFORE expanding
+        # their potentially large TOASTed JSON windows. OFFSET 0 prevents the
+        # planner from flattening the subquery and sorting encoded payloads.
+        # The lateral expression also retains one encoding for both byte-budget
+        # and returned-payload checks. Outer ordering states the same exact
+        # contract; PostgreSQL reuses the inner ordered path rather than sorting
+        # encoded windows again. No row/filter/key/provenance column is removed.
+        sql = (f'SELECT CASE WHEN octet_length(payload.encoded)<=:payload_budget '
+               f'THEN payload.encoded ELSE NULL END FROM '
+               f'(SELECT t.* FROM {table} t {where} {order} OFFSET 0) t '
+               f'CROSS JOIN LATERAL (SELECT row_to_json(t)::text AS encoded OFFSET 0) payload {order}')
         result = c.execution_options(stream_results=True, yield_per=fetch_rows, max_row_buffer=fetch_rows).execute(
             text(sql),{**(params or {}),'payload_budget':payload_bytes or self.limits.payload_bytes})
         try:
@@ -411,6 +496,35 @@ class NativeSources:
                                    'FROM tonghuashun_observations t WHERE id=:id'),
                               {'id':UUID(identity),'n':self.limits.payload_bytes}).scalar_one_or_none()
             return _json(value, self.limits.payload_bytes) if value is not None else None
+        memberships = None
+        if entry.native == 'tickers':
+            from .catalog_membership import CatalogMemberships
+            # Read the native heads in the SAME repeatable-read transaction as
+            # the complete pass. Tied heads remain tied; UUID iteration order
+            # cannot manufacture an exclusive classification. No failed state
+            # is converted into a successful empty directory.
+            where = ('WHERE t.dataset=:d AND NOT EXISTS (SELECT 1 FROM '
+                     'tonghuashun_observations later WHERE later.dataset=t.dataset '
+                     'AND later.subject=t.subject AND later.variant=t.variant '
+                     'AND later.observed_at>t.observed_at)')
+            def heads():
+                for row in self._rows(c, 'tonghuashun_observations', where, {'d': entry.native},
+                                      'ORDER BY t.subject,t.variant,t.observed_at,t.id LIMIT 65'):
+                    try:
+                        content, _, _ = materialize_observation(row, lookup, self.limits)
+                        requests = _requests(row, self.limits)
+                        token = digest([_scope(row), row['content_hash'], row['observed_at'], requests])
+                        raw = LocalInput('tonghuashun', entry.native, row['subject'], row['variant'],
+                                         row['observed_at'], content, token)
+                    except (NativeInputError, ValueError, TypeError, KeyError, RecursionError):
+                        # Keep an unusable latest head in its scope so an
+                        # equal-time sibling cannot provide negative proof.
+                        raw = LocalInput('tonghuashun', entry.native, row['subject'], row['variant'],
+                                         row['observed_at'], {}, digest([row['id'], row['content_hash']]),
+                                         failure='SOURCE_SCHEMA_INVALID')
+                        requests = []
+                    yield raw, requests
+            memberships = CatalogMemberships(heads())
         tracker = EffectiveBasis()
         order = 'ORDER BY t.subject, t.variant, t.observed_at, t.id'
         # Equal timestamp conflicts are retained for the merger. The UUID is only
@@ -422,10 +536,10 @@ class NativeSources:
                 scope = _scope(row)
                 token = digest([scope,row['content_hash'],row['observed_at'],_requests(row,self.limits)])
                 ns = instant_ns(row['observed_at'])
-                basis, uncertain = tracker.apply(row,content,basis,field,_requests(row,self.limits))
+                basis, uncertain = tracker.apply(row,content,basis,field,_requests(row,self.limits),native=True)
                 value = LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],
                                    row['observed_at'], content, token, row_basis=basis, basis_field=field,
-                                   unconfirmed_keys=uncertain)
+                                   unconfirmed_keys=uncertain, catalog_memberships=memberships)
             except (NativeInputError, ValueError, TypeError, KeyError, RecursionError) as exc:
                 code = exc.code if isinstance(exc,NativeInputError) else 'SOURCE_SCHEMA_INVALID'
                 # Scope/time come from typed native columns, not the broken payload.

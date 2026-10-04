@@ -81,6 +81,17 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
     dataset=entry.spec.name if entry.business else 'local.entry.'+entry.id.lower()
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old=_read(store,entry);previous=old.get('refresh',{});now=int(clock())
+        admitted=None;restored=None
+        if options.admit_active_only:
+            from .active_input import active_input_plan
+            # Rejection must leave the existing status, queue and scratch
+            # untouched, including pending/qualified and refresh counters.
+            admitted=active_input_plan(store,entry,sources,options=options,cancelled=cancelled)
+        if options.resume_sealed_only and entry.id in ('E23','E44'):
+            from .sealed_funds import restore_fund_batch
+            # A stale original member cannot mutate refresh/quality counters;
+            # unrelated newly eligible claims remain outside this old batch.
+            restored=restore_fund_batch(store,entry,sources,options,old,cancelled=cancelled)
         if (_policy is not None and options.mode!='retry' and previous.get('next_retry_at',0)>now):
             state=_refresh(store,entry,{'outcome':'backoff','attempted':False})
             return dict(_skipped(old,'backoff','RETRY_BACKOFF'),refresh=state)
@@ -93,14 +104,22 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             legacy_pending=('pipeline.'+entry.id in store.budget.pending_keys() and
                             not old.get('incremental') and old.get('scope')!='native_incremental')
             execute=incremental_run if enabled(sources,entry,options) and not legacy_pending else _run_entry_locked
-            result=execute(store,entry,sources,options=options,cancelled=cancelled)
+            extra={'admitted':admitted} if options.admit_active_only else {}
+            if restored is not None:extra['restored']=restored
+            result=execute(store,entry,sources,options=options,cancelled=cancelled,**extra)
         except BaseException as caught:
             error=caught
-            try:
-                status=_read(store,entry)
-            except Exception:
-                # Database failure must not replace a process exit/cancel signal.
-                status=_skipped(old,'failed',_code(caught))
+            if getattr(caught,'preserve_current_status',False):
+                # The failed invocation has zero admitted work. Its returned
+                # counters describe this attempt, while the stored receipt and
+                # pre-existing restrictions continue to describe current data.
+                status=caught.entry_result
+            else:
+                try:
+                    status=_read(store,entry)
+                except Exception:
+                    # Database failure must not replace a process exit/cancel signal.
+                    status=_skipped(old,'failed',_code(caught))
             result=dict(status,state='incomplete',complete=False,qualified=False,reason=_code(caught))
         success=bool(result.get('complete') and result.get('qualified',not entry.business))
         continued=(error is None and not result.get('complete') or
@@ -127,6 +146,7 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         # only its idle scratch. Current files and committed checkpoints survive.
         if (_policy is not None and stalls>=policy.abandon_after and
                 result.get('reason') not in FATAL and error is not None and
+                not getattr(error,'preserve_current_status',False) and
                 not getattr(error,'preserve_continuation',False) and
                 isinstance(error,(DataStoreError,NativeInputError))):
             owner='pipeline.'+entry.id+('.selected' if options.partitions else '')
@@ -136,7 +156,8 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 patch['continuation_aborted']='REPEATED_ENTRY_FAILURE'
         try:
             state=_refresh(store,entry,patch,operation=(
-                {'state':'incomplete','complete':False,'qualified':False,'reason':_code(error)} if error else None))
+                {'state':'incomplete','complete':False,'qualified':False,'reason':_code(error)}
+                if error and not getattr(error,'preserve_current_status',False) else None))
         except Exception:
             if error is not None:
                 error.entry_result=dict(result,outcome=outcome,attempted=True,refresh=patch)
@@ -154,6 +175,10 @@ def run_local(store,sources,*,entries,options,cancelled=None,policy=None,clock=N
     policy=policy or RetryPolicy();clock=clock or time.time;monotonic=monotonic or time.monotonic
     deadline=monotonic()+policy.call_seconds
     selected=list(ENTRIES if entries is None else entries)
+    if (options.resume_sealed_only or options.admit_active_only) and (len(selected)!=1 or not selected[0].business):
+        # A single input fence belongs to one business entry. In particular,
+        # ingestion-channel expansion must not admit an unapproved target.
+        raise DataStoreError('INVALID_CONFIGURATION')
     if len(selected)>len(ENTRIES):raise ValueError('Too many source entries')
     selected=list({e.id:e for e in selected}.values())
     for entry in list(selected):
