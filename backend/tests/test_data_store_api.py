@@ -90,7 +90,8 @@ class ASGIClient:
 def api(ready, monkeypatch):
     engine = ready.catalog.engine
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE scheduled_tasks (id uuid PRIMARY KEY, task_type text)"))
+        connection.execute(text("CREATE TABLE scheduled_tasks (id uuid PRIMARY KEY, task_type text, state text)"))
+        connection.execute(text("CREATE TABLE task_runs (id uuid PRIMARY KEY, task_type text, status text)"))
         connection.execute(text("""CREATE TABLE data_store_legacy_maintenance (
             singleton integer PRIMARY KEY, phase text NOT NULL, plan_hash text,
             completed_json jsonb NOT NULL DEFAULT '[]', files_started boolean NOT NULL DEFAULT false)"""))
@@ -247,6 +248,44 @@ def test_current_admission_fences_concurrent_destructive_phase_change(api):
         assert require_operable(session).operable
         with pytest.raises(OperationalError):
             pool.submit(change_phase).result(timeout=3)
+
+
+@pytest.mark.parametrize('state', ['paused', 'completed', 'archived'])
+def test_inert_retired_task_history_preserved_while_real_writer_admission_stays_blocked(api, state):
+    from uuid import uuid4
+    client, store = api
+    headers = {'Authorization': f'Bearer {TOKEN}'}
+    reset_complete(store)
+    entry = BY_ID['E69']
+    assert run_entry(store, entry, NativeSources(store.catalog.engine))['qualified']
+    task_id, run_id = uuid4(), uuid4()
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text("INSERT INTO scheduled_tasks VALUES (:id,'foundation.formalize_local_updates',:state)"),
+            {'id': task_id, 'state': state})
+    detail = client.get('/api/admin/data-store/datasets/' + entry.spec.name, headers=headers).json()
+    body = query_body(entry, detail['preview_key'], frequency=store_router._frequency(entry))
+    def query():
+        return client.post('/api/admin/data-store/query', headers=headers, json=body)
+    # Actual current rows remain usable without deleting the inert legacy task
+    # or changing the reset_done receipt into full R01 readiness.
+    response = query()
+    assert response.status_code == 200 and response.json()['rows']
+    with store.catalog.engine.begin() as connection:
+        assert connection.execute(text('SELECT state FROM scheduled_tasks WHERE id=:id'), {'id': task_id}).scalar_one() == state
+        connection.execute(text("UPDATE scheduled_tasks SET state='active' WHERE id=:id"), {'id': task_id})
+    assert query().status_code == 503
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text('UPDATE scheduled_tasks SET state=:state WHERE id=:id'), {'id': task_id, 'state': state})
+        connection.execute(text("INSERT INTO task_runs VALUES (:id,'foundation.formalize_local_updates','queued')"), {'id': run_id})
+    assert query().status_code == 503
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text("UPDATE task_runs SET status='running' WHERE id=:id"), {'id': run_id})
+    assert query().status_code == 503
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text("UPDATE task_runs SET status='interrupted' WHERE id=:id"), {'id': run_id})
+    assert query().status_code == 200
+    status = client.get('/api/admin/data-store/status', headers=headers).json()
+    assert status['phase'] == 'reset_done' and status['system_safe'] and not status['r01_complete']
 
 
 def test_empty_current_scope_reports_schema_and_does_not_hide_issues(api):

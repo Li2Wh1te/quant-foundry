@@ -234,6 +234,7 @@ def test_finish_drains_current_admission_before_locking_its_checkpoint_tables(re
     prepare_finish(ready)
     with ready.catalog.engine.begin() as connection:
         connection.exec_driver_sql(DDL[3])
+        connection.exec_driver_sql(DDL[4])
         connection.execute(text("""UPDATE data_store_legacy_maintenance SET
             plan_hash=:hash, completed_json='["hooks","derived","originals","functions","files"]',
             files_started=true"""), {'hash': 'a' * 64})

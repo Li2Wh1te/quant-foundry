@@ -75,8 +75,14 @@ def read_availability(session: Session) -> Availability:
                     JOIN pg_namespace n ON n.oid=c.relnamespace JOIN pg_proc p ON p.oid=t.tgfoid
                     WHERE n.nspname=current_schema() AND NOT t.tgisinternal
                     AND (left(t.tgname,11)='foundation_' OR left(p.proname,11)='foundation_')) OR
-                EXISTS (SELECT 1 FROM scheduled_tasks WHERE task_type=ANY(:types))
+                EXISTS (SELECT 1 FROM scheduled_tasks
+                    WHERE task_type=ANY(:types) AND state='active') OR
+                EXISTS (SELECT 1 FROM task_runs
+                    WHERE task_type=ANY(:types) AND status IN ('queued','running'))
                 """), {'types': list(RETIRED_TASK_TYPES)}).scalar_one()
+            # Paused/completed/archived task definitions are preserved history,
+            # not executing writers. Reject an active definition or unfinished
+            # retired run without deleting or changing those original records.
             safe = not unsafe
         return Availability(phase, False, not safe, safe)
 

@@ -67,6 +67,7 @@ def scheduler(ready,monkeypatch):
     with ready.catalog.engine.begin() as c:
         c.exec_driver_sql(DDL[0])
         c.exec_driver_sql(DDL[3])
+        c.exec_driver_sql(DDL[4])
         c.execute(text("""INSERT INTO data_store_legacy_maintenance
             (singleton,phase,plan_hash,completed_json,files_started) VALUES
             (1,'reset_done',:hash,'["hooks","derived","originals","functions","files"]',true)"""),
