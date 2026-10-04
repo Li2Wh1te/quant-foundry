@@ -112,3 +112,44 @@ def test_bounded_buffer_and_cancel_before_comparison_leave_unseen_index(index):
         batch.flush()
     assert caught.value.code == 'OPERATION_CANCELLED'
     assert index.execute('SELECT seen FROM expected WHERE k=?', (b'128',)).fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('changed_member', [False, True])
+def test_nested_ladder_matches_key_sorted_parquet_and_detects_value_change(index, tmp_path, changed_member):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+    from app.data_store.adapters.normalize import normalize
+    from app.data_store.adapters.registry import BY_ID
+    from tests.test_data_store_domain_samples import sample
+
+    entry = BY_ID['E35']
+    source = sample('E35')
+    boards = source.content['item'][0]['boards']
+    boards['two_board'] = [dict(thscode='000001.SZ', board_num=2)]
+    boards['four_board'] = [dict(thscode='000002.SZ', board_num=4)]
+    unit, = normalize(entry, source)
+    assert not unit.failure
+    expected(index, b'ladder', unit.rows, order=unit.order)
+    index.execute('UPDATE expected SET g=? WHERE k=?', (unit.group, b'ladder'))
+
+    # The real layout visits declared child fields, whereas the formal file
+    # sorts the member key. Both encodings describe the same complete object;
+    # list positions remain part of each member key and retain their meaning.
+    rows = sorted(unit.rows, key=lambda row: row['member_key'])
+    assert rows != list(unit.rows)
+    physical = [dict(row, representation=unit.representation, subject=unit.subject,
+                     object_key=unit.object_key, basis_group=unit.group,
+                     basis_ns=unit.order, basis_token=unit.token, basis_state='valid')
+                for row in rows]
+    if changed_member:
+        member = next(row for row in physical if '/four_board/' in row['member_key'])
+        column = next(name for name in member if name.endswith('_reported_board_num'))
+        member[column] += 1
+    path = tmp_path / 'ladder.parquet'
+    pq.write_table(pa.Table.from_pylist(physical, schema=entry.spec.schema), path)
+    stored = pq.ParquetFile(path).read().to_pylist()
+    batch, counts = comparison(index)
+    batch.offer(b'ladder', stored)
+    batch.flush()
+    assert counts['current_objects'] == 1
+    assert counts['mismatched_objects'] == int(changed_member)

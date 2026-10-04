@@ -43,12 +43,20 @@ def value_hash(rows):
     # Canonical model fields, excluding provenance/confirmation and null columns
     # from unrelated node types in the declared scalar union schema.
     from .adapters.canonical import normalized, _CANONICAL_ENCODER
+    # Layout traversal follows declared child fields; Parquet uses the formal
+    # member-key order. Hash the same member order on both paths so an unchanged
+    # nested report does not become a false value/order conflict after storage.
+    # List positions are encoded in member_key and are never reordered within
+    # a business list. Already sorted files and single-row points avoid a copy.
+    ordered = (sorted(rows, key=lambda row: row['member_key'])
+               if len(rows) > 1 and any(rows[index]['member_key'] > rows[index + 1]['member_key']
+                                       for index in range(len(rows) - 1)) else rows)
     # Projection and exact-value normalization can share one pass. The selected
     # names are declared scalar-union field strings; nested values still use the
     # same recursive validator, including float/nonfinite rejection. Reuse the
     # canonical-v1 encoder so persisted fingerprints keep identical bytes.
     clean=[{k:normalized(v,_sort=False) for k,v in row.items() if (k in ('member_key','row_kind','quality_json') or k.startswith('f')) and v is not None}
-           for row in rows]
+           for row in ordered]
     return hashlib.sha256(_CANONICAL_ENCODER.encode(clean).encode()).hexdigest()
 
 

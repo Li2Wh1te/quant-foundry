@@ -41,6 +41,54 @@ def empty_sources(store):
             c.exec_driver_sql('DELETE FROM '+name)
 
 
+def test_nested_ladder_native_comparison_preserves_files_and_blocks_new_values(ready):
+    from copy import deepcopy
+    from datetime import timedelta
+    from uuid import uuid4
+    from app.data_store.adapters.contracts import digest, native_json
+    from app.data_store.verify_coverage import verify_existing
+    from tests.test_data_store_domain_samples import sample
+
+    entry = BY_ID['E35']
+    source = sample('E35')
+    content = deepcopy(source.content)
+    boards = content['item'][0]['boards']
+    boards['two_board'] = [dict(thscode='000001.SZ', board_num=2)]
+    boards['four_board'] = [dict(thscode='000002.SZ', board_num=4)]
+    with ready.catalog.engine.begin() as connection:
+        connection.execute(text(
+            'UPDATE tonghuashun_observations SET data_json=:data,content_hash=:hash '
+            'WHERE dataset=:dataset'),
+            dict(data=native_json(content), hash=digest(content), dataset=entry.native))
+    native = NativeSources(ready.catalog.engine)
+    assert run_entry(ready, entry, native)['qualified']
+    before = all_files(ready, entry)
+
+    # Publishing physically sorts the member rows. Verification must compare
+    # the complete nested business object without requiring traversal order.
+    matched = verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)
+    assert matched['complete'] and matched['mismatched_objects'] == 0
+    assert all_files(ready, entry) == before
+    assert judgment(ready, entry)['satisfied']
+
+    changed = deepcopy(content)
+    changed['item'][0]['boards']['four_board'][0]['board_num'] = 5
+    with ready.catalog.engine.begin() as connection:
+        connection.execute(text(
+            'INSERT INTO tonghuashun_observations '
+            '(id,dataset,subject,variant,observed_at,content_hash,data_json,request_json) '
+            "VALUES (:id,:dataset,:subject,:variant,:observed,:hash,:data,'[]')"),
+            dict(id=uuid4(), dataset=entry.native, subject=source.subject,
+                 variant=source.variant, observed=source.observed_at + timedelta(seconds=1),
+                 hash=digest(changed), data=native_json(changed)))
+    mismatch = verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)
+    assert not mismatch['complete'] and mismatch['mismatched_objects'] == 1
+    assert not judgment(ready, entry)['satisfied']
+    assert all_files(ready, entry) == before
+    assert run_entry(ready, entry, NativeSources(ready.catalog.engine))['qualified']
+    assert verify_existing(ready, entry, NativeSources(ready.catalog.engine), seconds=30)['complete']
+
+
 def prepare_finish(store):
     with store.catalog.engine.begin() as c:
         for ddl in DDL[:3]:
