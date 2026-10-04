@@ -46,8 +46,9 @@ class _CurrentComparison:
     so no extra decoded business rows survive into the next batch. Only lookup
     and seen-marking are batched; all provenance, value and issue checks remain.
     """
-    def __init__(self,db,counts,failure_disposed,check):
+    def __init__(self,db,counts,failure_disposed,conflict_disposed,check):
         self.db=db;self.counts=counts;self.failure_disposed=failure_disposed;self.check=check
+        self.conflict_disposed=conflict_disposed
         self.pending=[];self.physical_rows=0
 
     def offer(self,key,rows):
@@ -63,7 +64,7 @@ class _CurrentComparison:
         # Omit only metadata unused by comparison. The complete expected index
         # retains partition/object/token fields for source reduction and receipt
         # construction; no input, value, key or disposition is omitted.
-        selected=self.db.execute('SELECT k,r,s,g,n,h,state,stable_order,seen FROM expected '
+        selected=self.db.execute('SELECT k,r,s,g,n,t,h,state,stable_order,seen,conflicted FROM expected '
             'WHERE k IN ('+placeholders+')',[key for key,_ in self.pending]).fetchall()
         expected_by_key={row['k']:row for row in selected}
         marked=set()
@@ -88,13 +89,22 @@ class _CurrentComparison:
             if expected['seen'] or key in marked:raise DataStoreError('KEY_ORDER_INVALID')
             marked.add(key)
             if expected['state']=='invalid':
-                if self.failure_disposed(expected):self.counts['disposed_failures']+=1
+                if (self.failure_disposed(expected) and
+                        (not expected['conflicted'] or self.conflict_disposed(expected))):
+                    self.counts['disposed_failures']+=1
                 else:self.counts['mismatched_objects']+=1
             elif (first['basis_group']!=expected['g'] or
                     (first['basis_ns']!=expected['n'] if expected['stable_order'] else not 0<first['basis_ns']<=expected['n']) or
                     first['basis_state']!=expected['state'] or
-                    expected['state']=='valid' and value_hash(rows)!=expected['h']):
+                    expected['state']=='valid' and value_hash(rows)!=expected['h'] or
+                    expected['conflicted'] and first['basis_token']!=expected['t']):
                 self.counts['mismatched_objects']+=1
+            elif expected['conflicted']:
+                # A retained row is still checked against its own original
+                # fingerprint. The competing category is disposed separately,
+                # never substituted as the expected current identity.
+                if self.conflict_disposed(expected):self.counts['disposed_failures']+=1
+                else:self.counts['mismatched_objects']+=1
         if marked:
             self.db.execute('UPDATE expected SET seen=1 WHERE k IN ('+
                             ','.join('?' for _ in marked)+')',list(marked))
@@ -143,7 +153,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                 db.execute('PRAGMA journal_mode=OFF');db.execute('PRAGMA synchronous=OFF')
                 db.execute('PRAGMA page_size=8192');db.execute('PRAGMA cache_size=-8192')
                 db.execute('PRAGMA max_page_count='+str(space.quota//8192))
-                db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,PRIMARY KEY(k,g));')
+                db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0,conflicted INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,t TEXT,reason TEXT,PRIMARY KEY(k,g));CREATE TABLE conflicts(k BLOB PRIMARY KEY,g TEXT,n INTEGER,t TEXT,proof TEXT);')
                 resource_due=started;resource_steps=0
                 def check(*,sample=False):
                     nonlocal resource_due,resource_steps
@@ -169,8 +179,10 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             for issue in members(physical):
                                 target=json.loads(issue['target_json']);prefix=target.get('prefix',[])
                                 if target.get('scope_version')!='object-key-v1' or len(prefix) not in (2,3):continue
-                                db.execute('INSERT INTO issues VALUES (?,?,?) ON CONFLICT(k,g) DO UPDATE SET n=max(n,excluded.n)',
-                                    (entry.spec.key_bytes(tuple(prefix)),target.get('group'),int(target['order'])))
+                                db.execute('INSERT INTO issues VALUES (?,?,?,?,?) ON CONFLICT(k,g) DO UPDATE '
+                                    'SET n=excluded.n,t=excluded.t,reason=excluded.reason WHERE excluded.n>=issues.n',
+                                    (entry.spec.key_bytes(tuple(prefix)),target.get('group'),int(target['order']),
+                                     issue['evidence_token'],issue['reason']))
                             check()
                         if len(page)<500:break
                         after=page[-1]['issue_key']
@@ -188,9 +200,10 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                     check();db.executemany('INSERT INTO queued VALUES (?,?,?,?)',[tuple(row) for row in rows])
                                     counts['queued_ranges']+=len(rows)
                                 db.commit()
-                    enter_phase('native_snapshot');boundary=hashlib.sha256()
+                    enter_phase('native_snapshot');boundary=hashlib.sha256();memberships=None
                     for raw in sources.iter_entry(entry):
                         check(sample=True);counts['source_rows']+=1
+                        if raw.catalog_memberships is not None:memberships=raw.catalog_memberships
                         boundary.update(digest([raw.source,raw.dataset,raw.subject,raw.variant,raw.token,raw.order_ns]).encode())
                         for unit in normalize(entry,raw):
                             check(sample=True)
@@ -207,18 +220,61 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                              if unit.catalog_memberships is not None and
                                              state == 'valid' and old['state'] == 'valid' else None)
                                     if proof is not None and proof['winner']['group'] == old['g']:
+                                        if old['conflicted']:
+                                            db.execute('UPDATE conflicts SET proof=? WHERE k=?',(json.dumps(proof),key))
                                         continue
                                     if proof is None:
+                                        if entry.id == 'E40':
+                                            # Match MergeSpool: retain the first
+                                            # original category winner and the
+                                            # current per-object problem. Only
+                                            # claims within the SAME competing
+                                            # group have an order comparison.
+                                            # Another group or a later valid
+                                            # input cannot erase the conflict.
+                                            conflict=db.execute('SELECT g,n FROM conflicts WHERE k=?',(key,)).fetchone()
+                                            if conflict is None or conflict['g']!=unit.group or conflict['n']<=unit.order:
+                                                db.execute('INSERT OR REPLACE INTO conflicts VALUES (?,?,?,?,NULL)',
+                                                    (key,unit.group,unit.order,unit.token))
+                                            db.execute('UPDATE expected SET conflicted=1 WHERE k=?',(key,))
+                                            continue
                                         state='invalid';h=digest(state)
+                                    elif old['conflicted']:
+                                        db.execute('UPDATE conflicts SET proof=? WHERE k=?',(json.dumps(proof),key))
                                 elif old['n']>unit.order:continue
                                 elif old['n']==unit.order:
                                     if old['h']!=h:state='invalid';h=digest(state)
                                     elif old['t']>=unit.token:continue
-                            db.execute('INSERT OR REPLACE INTO expected(k,p,r,s,o,g,n,t,h,state,stable_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)',
-                                (key,part,*unit.key,unit.group,unit.order,unit.token,h,state,int(raw.order_kind!='current_table_snapshot')))
+                            db.execute('INSERT OR REPLACE INTO expected(k,p,r,s,o,g,n,t,h,state,stable_order,conflicted) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                                (key,part,*unit.key,unit.group,unit.order,unit.token,h,state,
+                                 int(raw.order_kind!='current_table_snapshot'),old['conflicted'] if old else 0))
                         if counts['source_rows']%128==0:db.commit()
                     db.commit();check()
                     if not sources.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','完整覆盖核验的本地读取未完成。')
+                    # Only blocked objects have an additional fingerprint here;
+                    # this table shares the existing charged temporary index and
+                    # is discarded with it. There is no success ledger or second
+                    # store. Resolve after the complete native scan reaches the
+                    # real positive head, preserving its original group/order/
+                    # token. Both-category absence cannot supply this proof.
+                    for pending in db.execute('SELECT e.*,c.g AS cg,c.n AS cn,c.t AS ct,c.proof '
+                                              'FROM expected e JOIN conflicts c ON c.k=e.k'):
+                        check(sample=True)
+                        if pending['state']!='valid':continue
+                        proof=json.loads(pending['proof']) if pending['proof'] else (
+                            memberships.relation((pending['r'],pending['s'],pending['o']),
+                                (pending['g'],pending['n'],pending['t']),
+                                (pending['cg'],pending['cn'],pending['ct'])) if memberships is not None else None)
+                        if proof is None:continue
+                        winner,former=proof['winner'],proof['former']
+                        if (pending['g'],pending['n'],pending['t'])!=(winner['group'],winner['order'],winner['token']):continue
+                        covered=(pending['cg']==former['group'] and pending['cn']<former['before'] or
+                            pending['cg']==winner['group'] and (pending['cn']<winner['order'] or
+                                pending['cn']==winner['order'] and pending['ct']==winner['token']))
+                        if covered:
+                            db.execute('UPDATE expected SET conflicted=0 WHERE k=?',(pending['k'],))
+                            db.execute('DELETE FROM conflicts WHERE k=?',(pending['k'],))
+                    db.commit()
                     counts['expected_objects']=db.execute('SELECT count(*) FROM expected').fetchone()[0]
                     with store.catalog.transaction() as c:
                         parts=c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d ORDER BY partition_key'),{'d':entry.spec.name}).scalars().all()
@@ -231,7 +287,17 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         scope=entry.spec.key_bytes((expected['r'],expected['s']))
                         return db.execute('SELECT 1 FROM issues WHERE k IN (?,?) AND g=? AND n>=? LIMIT 1',
                             (expected['k'],scope,expected['g'],expected['n'])).fetchone() is not None
-                    comparison=_CurrentComparison(db,counts,failure_disposed,check)
+                    def conflict_disposed(expected):
+                        # An unrelated scope refresh failure cannot stand in for
+                        # this exact competing identity. Equal-order evidence
+                        # must name the actual token; a newer issue is ordered
+                        # only inside that same original competing group.
+                        return db.execute('SELECT 1 FROM conflicts c JOIN issues i '
+                            'ON i.k=c.k AND i.g=c.g WHERE c.k=? '
+                            "AND i.reason='SOURCE_ORDER_UNCOMPARABLE' "
+                            'AND (i.n>c.n OR i.n=c.n AND i.t=c.t) LIMIT 1',
+                            (expected['k'],)).fetchone() is not None
+                    comparison=_CurrentComparison(db,counts,failure_disposed,conflict_disposed,check)
                     suffix_fields=entry.spec.key[3:]
                     suffix_types=entry.spec._key_types[3:]
                     string_member=(len(entry.spec.key)==4 and
@@ -283,7 +349,8 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         comparison.offer(key,rows);comparison.flush();db.commit()
                     enter_phase('missing_objects')
                     for row in db.execute('SELECT * FROM expected WHERE seen=0'):
-                        if row['state']=='invalid' and failure_disposed(row):
+                        if (row['state']=='invalid' and failure_disposed(row) and
+                                (not row['conflicted'] or conflict_disposed(row))):
                             counts['disposed_failures']+=1;continue
                         counts['missing_objects']+=1
                     check()
