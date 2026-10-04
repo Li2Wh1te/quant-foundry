@@ -37,6 +37,70 @@ def _checks(directory):
     return [json.loads(line) for line in (directory / "checks.jsonl").read_text().splitlines()]
 
 
+def test_four_confirmed_empty_domains_count_actual_api_without_fake_rows(api, tmp_path):
+    client, current = api
+    identities = ('E05', 'E06', 'E61', 'E64')
+    entries = tuple(BY_ID[identity] for identity in identities)
+    with current.catalog.engine.begin() as connection:
+        connection.execute(text('DELETE FROM tonghuashun_observations WHERE dataset=ANY(:datasets)'),
+                           {'datasets': [entry.native for entry in entries if entry.source == 'tonghuashun']})
+        connection.execute(text('DELETE FROM corporate_action_facts'))
+        connection.execute(text('DELETE FROM trading_status_facts'))
+    for entry in entries:
+        result = run_entry(current, entry, NativeSources(current.catalog.engine))
+        assert result['complete'] and result['qualified'] and result['state'] == 'empty'
+    before = {entry.spec.name: current.catalog.dataset(entry.spec.name) for entry in entries}
+    requests = []
+    request = _request(client)
+
+    def record(method, path, payload=None):
+        requests.append((method, path, payload))
+        return request(method, path, payload)
+
+    output = tmp_path / 'four-empty-api'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=entries, api_entries=identities, api_request=record,
+                          limits=AuditLimits(api_samples=4))
+
+    assert result['complete'] and not result['global_acceptance'], _checks(output)
+    assert result['checked_files'] == result['checked_rows'] == 0
+    assert result['api_attempted_entries'] == result['api_passed_entries'] == list(identities)
+    assert len(requests) == 4 and all(method == 'GET' and payload is None for method, _, payload in requests)
+    assert {entry.spec.name: current.catalog.dataset(entry.spec.name) for entry in entries} == before
+    assert all(check['actual']['status'] == 'empty' for check in _checks(output)
+               if check['check'] == 'api_sample')
+
+
+@pytest.mark.parametrize('restriction', ['maintenance', 'quality'])
+def test_empty_api_sample_cannot_hide_a_late_real_restriction(api, tmp_path, restriction):
+    client, current = api
+    entry = BY_ID['E05']
+    with current.catalog.engine.begin() as connection:
+        connection.execute(text('DELETE FROM tonghuashun_observations WHERE dataset=:dataset'),
+                           {'dataset': entry.native})
+    assert run_entry(current, entry, NativeSources(current.catalog.engine))['qualified']
+    request = _request(client)
+
+    def restrict_before_descriptor(method, path, payload=None):
+        with current.catalog.engine.begin() as connection:
+            if restriction == 'maintenance':
+                connection.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'rebuilding')"))
+            else:
+                connection.execute(text("""INSERT INTO data_store_issues
+                    (dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json)
+                    VALUES (:dataset,'late','scope','SOURCE_CONFIRMATION_UNPROVEN','test','{}','{}')"""),
+                    {'dataset': entry.spec.name})
+        return request(method, path, payload)
+
+    output = tmp_path / 'restricted-empty-api'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=(entry,), api_entries=(entry.id,), api_request=restrict_before_descriptor)
+
+    assert not result['complete'] and result['api_passed_entries'] == []
+    expected = 'DATA_STORE_REBUILDING' if restriction == 'maintenance' else 'API_EMPTY_DOMAIN_UNPROVEN'
+    assert any(check.get('code') == expected for check in _checks(output)), _checks(output)
+
+
 def test_current_audit_is_read_only_and_asserts_real_api(api, tmp_path):
     client, current = api
     entry = BY_ID["E41"]
@@ -307,6 +371,11 @@ def test_missing_api_member_cannot_be_replaced_or_reduce_sample_count(api, tmp_p
         connection.execute(text("DELETE FROM tonghuashun_observations WHERE dataset=:dataset"),
                            {"dataset": entries[1].native})
     for entry in entries:
+        if entry.id == 'E08':
+            # Registered zero-row metadata without a completed source scan is
+            # a missing acceptance member, not a confirmed empty business domain.
+            current.register(entry.spec)
+            continue
         assert run_entry(current, entry, native)["complete"]
     output = tmp_path / "missing-api-member"
     result = export_audit(current.catalog.engine, current.files.root, output,
@@ -322,9 +391,11 @@ def test_missing_api_member_cannot_be_replaced_or_reduce_sample_count(api, tmp_p
                    for check in _checks(output))
     else:
         # The legacy first-available mode may sample another selected domain,
-        # but must still obtain the configured number of actual API passes.
-        assert result["complete"], _checks(output)
+        # but two API passes cannot complete the unscanned selected domain.
+        assert not result["complete"], _checks(output)
         assert result["api_passed_entries"] == ["E07", "E09"]
+        assert any(check['scope'] == 'E08' and check.get('code') == 'INPUT_STATUS_INCOMPLETE'
+                   for check in _checks(output))
 
 
 def test_default_api_count_cannot_pass_with_fewer_available_members(api, tmp_path):
@@ -334,6 +405,9 @@ def test_default_api_count_cannot_pass_with_fewer_available_members(api, tmp_pat
         connection.execute(text("DELETE FROM tonghuashun_observations WHERE dataset=:dataset"),
                            {"dataset": entries[1].native})
     for entry in entries:
+        if entry.id == 'E08':
+            current.register(entry.spec)
+            continue
         run_entry(current, entry, NativeSources(current.catalog.engine))
     output = tmp_path / "short-api-count"
 

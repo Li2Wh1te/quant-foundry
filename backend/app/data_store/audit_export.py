@@ -504,6 +504,13 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                                actual={"rows": verified_rows, "files": file_stats["files"]})
                         if first_sample and len(first_sample) >= 3:
                             samples.append((entry, first_sample[:3], row["generation"], row["row_count"]))
+                        elif verified_rows == 0 and judgment['satisfied']:
+                            # A completed source scan can prove a domain empty.
+                            # It has no physical business key to sample; retain
+                            # this exact acceptance member and verify the real
+                            # descriptor's explicit empty state below. Zero
+                            # files without coverage never establish emptiness.
+                            samples.append((entry, None, row["generation"], 0))
                     except (DataStoreError, OSError, ValueError, RuntimeError,
                             pa.ArrowException, AuditIncomplete) as exc:
                         code = str(exc) if isinstance(exc, AuditIncomplete) else getattr(exc, "code", "FILE_INVALID")
@@ -566,6 +573,21 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                 if (status != 200 or detail.get("generation") != generation
                         or detail.get("row_count") != expected_rows):
                     raise AuditIncomplete("API_DESCRIPTOR_MISMATCH")
+                if sample is None:
+                    # Do not invent a row/subject/date in a genuinely empty
+                    # domain. The actual guarded API must confirm emptiness at
+                    # the same generation, with no unresolved read restriction.
+                    if (detail.get('status') != 'empty' or detail.get('issues') != 0
+                            or detail.get('preview_key') is not None
+                            or detail.get('read_restriction') is not None):
+                        raise AuditIncomplete('API_EMPTY_DOMAIN_UNPROVEN')
+                    _check(checks, 'api_sample', 'pass', scope=entry.id,
+                           expected={'generation': generation, 'status': 'empty', 'row_count': 0},
+                           actual={'generation': detail['generation'], 'status': detail['status'],
+                                   'row_count': detail['row_count']})
+                    api_passed.append(entry.id)
+                    next(domain for domain in domains if domain['entry_id'] == entry.id)['api_sampled'] = True
+                    continue
                 from .router import _frequency
                 payload = {"dataset": entry.spec.name, "frequency": _frequency(entry),
                            "representation": sample[0], "subject": sample[1],
@@ -688,7 +710,9 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
     runtime["attempted_rows"] = attempted_rows
     runtime["official_active_bytes_checked"] = used_bytes
     runtime["duration_seconds"] = round(time.monotonic() - started, 3)
-    runtime["api_scope"] = "sampled_current_keys_only"
+    runtime["api_scope"] = ("current_keys_and_confirmed_empty_domains"
+                            if any(sample_by_id[identity][1] is None for identity in api_passed)
+                            else "sampled_current_keys_only")
     runtime["api_selection_mode"] = "explicit_entries" if required_api_ids is not None else "first_available"
     runtime["api_required_entries"] = targets
     runtime["api_required_count"] = required_api_count
