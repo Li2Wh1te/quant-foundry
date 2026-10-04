@@ -6,13 +6,16 @@ leaves the head unchanged and lets another scheduler run reuse completed reads.
 """
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 import hashlib
 import json
 import math
+import re
+import threading
 import time
 from typing import Callable
+from uuid import UUID
 
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
@@ -25,6 +28,190 @@ from app.data_ingestion.tonghuashun.contracts import exact_json
 
 active_control = ContextVar('tonghuashun_control', default=None)
 execution_deadline = ContextVar('tonghuashun_execution_deadline', default=None)
+default_repair = ContextVar('tonghuashun_default_repair', default=None)
+
+
+@dataclass(frozen=True)
+class DefaultRepair:
+    """An exact original-default selection, never an arbitrary variant override.
+
+    A plan pins the existing head and a typed target. Financial dates additionally
+    require an immutable original containing that exact pair: a caller's dates
+    alone cannot manufacture a provider period. This process-local instruction
+    uses the existing observations and work units, not a repair ledger.
+    """
+    dataset: str
+    subject: str
+    asset_type: str
+    revision: int
+    observation_id: UUID
+    content_sha256: str
+    day: date | None = None
+    end_date: date | None = None
+    report_type: str | None = None
+    start_date: date | None = None
+    selector_observation_id: UUID | None = None
+    selector_content_sha256: str | None = None
+
+    @property
+    def request_limit(self):
+        return 2 if self.dataset in ('fund_stock_history', 'fund_bond_history') else 1
+
+    def allowed_requests(self):
+        """Locally generated parameters bound every transport call in this mode."""
+        from app.data_ingestion.tonghuashun.contracts import DATASETS, date_ms
+        self.validate()
+        interface = DATASETS[self.dataset].interface
+        if self.day is not None:
+            return [(interface, {'thscode': self.subject, 'interval': '1d', 'start': date_ms(self.day),
+                                 'end': date_ms(self.day), 'adjust': 'none'})]
+        if self.report_type is not None:
+            return [(interface.replace('-history', '-report-dates'), {'thscode': self.subject}),
+                    (interface, {'thscode': self.subject, 'end_date': self.end_date.isoformat(),
+                                 'report_type': self.report_type})]
+        return [(interface, {'thscode': self.subject})]
+
+    def validate(self):
+        from datetime import date
+        from app.data_ingestion.tonghuashun.contracts import CODE, DATASETS, SHANGHAI
+        allowed = ('stock_daily', 'fund_stock_history', 'fund_bond_history',
+                   'fund_financial_indicators', 'fund_income', 'fund_balance')
+        if (self.dataset not in allowed or type(self.subject) is not str or CODE.fullmatch(self.subject) is None
+                or self.asset_type not in DATASETS[self.dataset].assets
+                or type(self.revision) is not int or self.revision < 1
+                or not isinstance(self.observation_id, UUID)
+                or type(self.content_sha256) is not str or re.fullmatch(r'[0-9a-f]{64}', self.content_sha256) is None):
+            raise ValueError('invalid_repair_baseline')
+        today = datetime.now(SHANGHAI).date()
+        def valid_day(value):
+            return type(value) is date and date(1900, 1, 1) <= value < today
+        if self.dataset == 'stock_daily':
+            valid = valid_day(self.day) and all(value is None for value in (
+                self.start_date, self.end_date, self.report_type, self.selector_observation_id,
+                self.selector_content_sha256))
+        elif self.dataset in ('fund_stock_history', 'fund_bond_history'):
+            valid = valid_day(self.end_date) and self.report_type in ('quarter', 'semiannual', 'annual') and all(
+                value is None for value in (self.day, self.start_date, self.selector_observation_id,
+                                           self.selector_content_sha256))
+        else:
+            valid = (valid_day(self.start_date) and valid_day(self.end_date) and self.start_date <= self.end_date
+                     and self.day is None and self.report_type is None
+                     and isinstance(self.selector_observation_id, UUID)
+                     and type(self.selector_content_sha256) is str
+                     and re.fullmatch(r'[0-9a-f]{64}', self.selector_content_sha256) is not None)
+        if not valid:
+            raise ValueError('invalid_or_unknown_repair_selector')
+        return self
+
+    def as_dict(self):
+        self.validate()
+        if self.day is not None:
+            selector = {'day': self.day.isoformat()}
+        elif self.report_type is not None:
+            selector = {'end_date': self.end_date.isoformat(), 'report_type': self.report_type}
+        else:
+            selector = {'start_date': self.start_date.isoformat(), 'end_date': self.end_date.isoformat(),
+                        'observation_id': str(self.selector_observation_id),
+                        'content_sha256': self.selector_content_sha256}
+        return {'dataset': self.dataset, 'subject': self.subject, 'asset_type': self.asset_type,
+                'baseline': {'revision': self.revision, 'observation_id': str(self.observation_id),
+                             'content_sha256': self.content_sha256}, 'selector': selector}
+
+    @classmethod
+    def from_dict(cls, value):
+        from datetime import date
+        if not isinstance(value, dict) or set(value) != {'dataset', 'subject', 'asset_type', 'baseline', 'selector'}:
+            raise ValueError('invalid_repair_plan')
+        baseline, selector = value['baseline'], value['selector']
+        if (not isinstance(baseline, dict) or set(baseline) != {'revision', 'observation_id', 'content_sha256'}
+                or not isinstance(selector, dict)):
+            raise ValueError('invalid_repair_plan')
+        kwargs = {}
+        if set(selector) == {'day'}:
+            kwargs['day'] = date.fromisoformat(selector['day'])
+        elif set(selector) == {'end_date', 'report_type'}:
+            kwargs.update(end_date=date.fromisoformat(selector['end_date']), report_type=selector['report_type'])
+        elif set(selector) == {'start_date', 'end_date', 'observation_id', 'content_sha256'}:
+            kwargs.update(start_date=date.fromisoformat(selector['start_date']),
+                          end_date=date.fromisoformat(selector['end_date']),
+                          selector_observation_id=UUID(selector['observation_id']),
+                          selector_content_sha256=selector['content_sha256'])
+        else:
+            raise ValueError('invalid_or_unknown_repair_selector')
+        return cls(value['dataset'], value['subject'], value['asset_type'], baseline['revision'],
+                   UUID(baseline['observation_id']), baseline['content_sha256'], **kwargs).validate()
+
+    def baseline(self, session, *, with_keys=False):
+        """Verify pinned native inputs before any HTTP and without locking them.
+
+        Publication still uses the ordinary head CAS. A later competing writer
+        cannot be defeated by rebasing this plan or by retrying its source read.
+        """
+        from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState, TonghuashunObservation
+        from app.data_ingestion.tonghuashun.contracts import CollectionConflict, CollectionError, provider_date
+        from app.data_ingestion.tonghuashun.repository import materialize
+        from app.data_store.adapters.record_adapters import source_date
+        self.validate()
+        state = session.get(TonghuashunCollectionState, (self.dataset, self.subject, 'default'), populate_existing=True)
+        if state is None or state.revision != self.revision or state.observation_id != self.observation_id:
+            raise CollectionConflict('修复计划的原默认版本已经变化，本次未重新选择来源。')
+        observation = session.get(TonghuashunObservation, self.observation_id)
+        def same_source(row, digest):
+            return row is not None and (row.dataset, row.subject, row.variant) == (
+                self.dataset, self.subject, 'default') and row.content_hash == digest
+        if not same_source(observation, self.content_sha256):
+            raise CollectionError('修复计划的原默认版本凭据不一致。')
+        data = materialize(session, observation)
+        native_keys = ()
+        if self.day is not None:
+            # Query timestamps follow the existing Shanghai request contract.
+            # Provider identity comes from the pinned raw body instead. A UTC
+            # midnight key could share the business day but remains unsupported
+            # by the existing canonical source-date contract. Reject that key
+            # and ambiguous duplicates before any source request.
+            matches = [row['date_ms'] for row in data.get('item', [])
+                       if isinstance(row, dict) and type(row.get('date_ms')) is int
+                       and provider_date(row['date_ms']) == self.day]
+            if len(matches) != 1:
+                raise CollectionError('股票修复缺少唯一可核对的原始日期键。')
+            try:
+                source_date(matches[0])
+            except (ValueError, OverflowError, OSError):
+                raise CollectionError('股票修复缺少唯一可核对的原始日期键。') from None
+            native_keys = (matches[0],)
+        if self.selector_observation_id is not None:
+            original = session.get(TonghuashunObservation, self.selector_observation_id)
+            if not same_source(original, self.selector_content_sha256):
+                raise CollectionError('财报修复缺少可核对的原始期间。')
+            original_data = materialize(session, original)
+            matches = [(row['start_date_ms'], row['end_date_ms']) for row in original_data.get('item', [])
+                       if isinstance(row, dict) and type(row.get('start_date_ms')) is int
+                       and type(row.get('end_date_ms')) is int
+                       and (provider_date(row['start_date_ms']), provider_date(row['end_date_ms'])) == (
+                           self.start_date, self.end_date)]
+            if len(matches) != 1 or matches[0][0] > matches[0][1]:
+                raise CollectionError('财报修复缺少可核对的原始期间。')
+            try:
+                for key in matches[0]:
+                    source_date(key)
+            except (ValueError, OverflowError, OSError):
+                raise CollectionError('财报修复缺少可核对的原始期间。') from None
+            # This pair is resolved from the specified immutable original, not
+            # reconstructed by date_ms or accepted from caller-supplied raw IDs.
+            native_keys = matches[0]
+        return (data, native_keys) if with_keys else data
+
+
+def collection_scope_hash(dataset, subject, variant, revision, parameters):
+    """Share journal identity between admission and the registered handler."""
+    scope_params = parameters.model_dump(mode='json')
+    for key in ('batch_size', 'max_requests', 'max_seconds'):
+        scope_params.pop(key, None)
+    identity = [dataset, subject, variant, revision, scope_params]
+    repair = default_repair.get()
+    if repair is not None:
+        identity.append(repair.as_dict())
+    return hashlib.sha256(exact_json(identity).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -41,10 +228,14 @@ class ExecutionDeadline:
     counts: dict = field(default_factory=lambda: {'logical_requests': 0, 'http_attempts': 0, 'reused': 0})
     detail: dict = field(default_factory=dict)
     response_evidence: dict = field(default_factory=dict)
+    max_http_attempts: int | None = None
+    counter_lock: object = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def __post_init__(self):
         if not math.isfinite(self.deadline) or not callable(self.cancelled):
             raise ValueError('A finite deadline and cancellation callback are required')
+        if self.max_http_attempts is not None and (type(self.max_http_attempts) is not int or not 0 <= self.max_http_attempts <= 8):
+            raise ValueError('The actual HTTP allowance must be between zero and eight')
 
 
 def check_execution():
@@ -63,7 +254,15 @@ def note_execution(name):
     if limit is not None:
         if name not in limit.counts:
             raise ValueError('Unknown bounded collector counter')
-        limit.counts[name] += 1
+        with limit.counter_lock:
+            if name == 'http_attempts':
+                check_execution()
+                if limit.max_http_attempts is not None and limit.counts[name] >= limit.max_http_attempts:
+                    # This boundary runs immediately before requests.get. The
+                    # exhausted attempt is neither counted nor sent, including
+                    # transport retries and a mistakenly expanded acquisition.
+                    raise CollectionYield('budget')
+            limit.counts[name] += 1
 
 
 def note_response(data, parameters=None):
@@ -172,10 +371,7 @@ class CollectionControl:
 
     def begin(self, dataset, subject, variant, revision, parameters, *, cache=False):
         # Operational batch settings do not alter the identity of source work.
-        scope_params = parameters.model_dump(mode='json')
-        for key in ('batch_size', 'max_requests', 'max_seconds'):
-            scope_params.pop(key, None)
-        self.scope = hashlib.sha256(exact_json([dataset, subject, variant, revision, scope_params]).encode()).hexdigest()
+        self.scope = collection_scope_hash(dataset, subject, variant, revision, parameters)
         self.cache = cache
         self.emit(subject=subject, stage='采集数据', unit_saved=0, reports_total=None, reports_saved=None, report_period=None, current_request=None)
 
@@ -188,7 +384,10 @@ class CollectionControl:
                 run = session.get(TaskRun, self.run_id)
                 if run is None or run.status != 'running' or run.cancellation_requested_at:
                     raise CollectionYield('stopped')
-        if self.cache and self.scope:
+        # A repair requires a fresh provider confirmation. Existing work units
+        # still journal successful responses below, but cannot silently replay
+        # an older catalogue or body as a new confirmation in this mode.
+        if self.cache and self.scope and default_repair.get() is None:
             with Session(self.engine) as session:
                 row = session.get(TonghuashunWorkUnit, (self.scope, key))
                 if row:
@@ -199,6 +398,7 @@ class CollectionControl:
         self.check()
         note_execution('logical_requests')
         self.emit(stage='等待接口限速或响应', current_request=parameters,
+                  current_interface=interface, request_stage='request',
                   requests=self.detail['requests']+1)
         response = request()
         note_response(response.data, parameters)

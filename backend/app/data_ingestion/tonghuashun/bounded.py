@@ -34,7 +34,8 @@ OUTCOMES = {"succeeded", "failed", "blocked", "cancelled", "budget", "worker_err
 PROBLEMS = {"diagnosis_in_flight", "source_unavailable", "native_identity_unavailable",
             "native_identity_unverifiable", "variant_exists", "checkpoint_exists",
             "active_scope_unverifiable", "collector_in_flight", "no_completed_scope",
-            "request_budget_violation", "worker_boundary_error", "active_run_limit"}
+            "request_budget_violation", "worker_boundary_error", "active_run_limit",
+            "baseline_changed", "baseline_unverifiable"}
 LOCAL_REASONS = {
     "响应包含非有限数值。", "响应日期须为毫秒整数。", "响应日期超出支持范围。",
     "同花顺响应缺少合法记录列表。", "同花顺返回空记录，尚不能确认数据已就绪。",
@@ -43,6 +44,16 @@ LOCAL_REASONS = {
     "历史行情为空，尚不能确认该范围覆盖。",
     "前复权历史重采缺少已有日期，未发布不完整或混合基准版本。",
     "行情最高价、最低价与开收盘价不一致。",
+    '股票单日修复不能混合复权基准。',
+    '股票修复响应未实际返回确切日期键。',
+    '本次真实目录未确认目标报告，未使用旧目录回退。',
+    '本次目录出现未批准且未采集的其他报告。',
+    '本次目录改变了未尝试历史报告的期间。',
+    '持仓修复目录期间校验失败。', '持仓修复响应未通过整组完整校验。',
+    '持仓修复目录主体或完整范围不一致。', '持仓修复响应主体与目标不一致。',
+    '财报修复响应主体或完整窗口不一致。', '财报修复响应未命中原始确切期间。',
+    '财报修复响应完整窗口校验失败。', '财报修复响应缺少完整且一致的实际期间。',
+    '原默认版本的失败请求结构无法核对。', '原默认报告与声明目录无法核对。',
 }
 
 
@@ -83,17 +94,91 @@ class Scope:
                     start_date=self.start_date.isoformat(), end_date=self.end_date.isoformat(),
                     variant=self.variant)
 
+    max_requests = 1
+    max_http_attempts = 3
+
+
+@dataclass(frozen=True)
+class RepairScope:
+    """A typed selection of an existing default head, with no variant knob."""
+    selection: Any
+
+    @classmethod
+    def from_dict(cls, value):
+        from app.data_ingestion.tonghuashun.control import DefaultRepair
+        return cls(DefaultRepair.from_dict(value))
+
+    @property
+    def dataset(self):
+        return self.selection.dataset
+
+    @property
+    def subject(self):
+        return self.selection.subject
+
+    @property
+    def asset_type(self):
+        return self.selection.asset_type
+
+    @property
+    def start_date(self):
+        return self.selection.day or self.selection.start_date or self.selection.end_date
+
+    @property
+    def end_date(self):
+        return self.selection.day or self.selection.end_date
+
+    @property
+    def task_type(self):
+        return f'data.ths.{self.dataset}'
+
+    @property
+    def variant(self):
+        return 'default'
+
+    @property
+    def max_requests(self):
+        return self.selection.request_limit
+
+    @property
+    def max_http_attempts(self):
+        return self.selection.request_limit
+
+    def parameters(self):
+        from app.data_ingestion.tonghuashun.control import DefaultRepair
+        from app.scheduling.registry import task_registry
+        if not isinstance(self.selection, DefaultRepair):
+            raise ValueError('invalid_repair_selection')
+        self.selection.validate()
+        model = task_registry.require(self.task_type).parameters_model
+        values = {'subjects': [self.subject], 'asset_types': [self.asset_type],
+                  'refresh_today': False, 'batch_size': 1,
+                  'max_requests': self.max_requests, 'max_seconds': 180}
+        # Snapshot handlers do not advertise dates or mode. Their common
+        # incremental default remains intact; the typed selector is not a new
+        # provider filter or a new public scheduler parameter.
+        if 'mode' in model.model_fields:
+            values['mode'] = 'incremental'
+        return model.model_validate(values)
+
+    def as_dict(self):
+        return {**self.selection.as_dict(), 'variant': 'default', 'mode': 'default_repair'}
+
 
 class AdmissionRejected(Exception):
     """Fixed local codes, never provider or database exception messages."""
 
 
 def _scope_hash(scope: Scope) -> str:
-    from app.data_ingestion.tonghuashun.contracts import CollectionParameters, exact_json
-    parameters = CollectionParameters.model_validate(scope.parameters().model_dump()).model_dump(mode="json")
-    for key in ("batch_size", "max_requests", "max_seconds"):
-        parameters.pop(key)
-    return hashlib.sha256(exact_json([scope.dataset, scope.subject, scope.variant, 0, parameters]).encode()).hexdigest()
+    from app.data_ingestion.tonghuashun.contracts import CollectionParameters
+    from app.data_ingestion.tonghuashun.control import collection_scope_hash, default_repair
+    parameters = CollectionParameters.model_validate(scope.parameters().model_dump())
+    token = default_repair.set(scope.selection if isinstance(scope, RepairScope) else None)
+    try:
+        revision = scope.selection.revision if isinstance(scope, RepairScope) else 0
+        return collection_scope_hash(scope.dataset, scope.subject, scope.variant, revision, parameters)
+    finally:
+        default_repair.reset(token)
 
 
 @contextmanager
@@ -139,9 +224,18 @@ def admission(engine, scope: Scope):
                 if not isinstance(raw, dict) or raw.get("thscode") != scope.subject or raw.get("asset_type") != scope.asset_type:
                     raise AdmissionRejected("native_identity_unverifiable")
                 identity = (scope.dataset, scope.subject, scope.variant)
-                if session.get(TonghuashunCollectionState, identity) is not None:
+                repair = isinstance(scope, RepairScope)
+                if repair:
+                    from app.data_ingestion.tonghuashun.contracts import CollectionConflict, CollectionError
+                    try:
+                        scope.selection.baseline(session)
+                    except CollectionConflict:
+                        raise AdmissionRejected('baseline_changed') from None
+                    except CollectionError:
+                        raise AdmissionRejected('baseline_unverifiable') from None
+                elif session.get(TonghuashunCollectionState, identity) is not None:
                     raise AdmissionRejected("variant_exists")
-                if session.scalar(select(TonghuashunObservation.id).where(
+                if not repair and session.scalar(select(TonghuashunObservation.id).where(
                     TonghuashunObservation.dataset == scope.dataset,
                     TonghuashunObservation.subject == scope.subject,
                     TonghuashunObservation.variant == scope.variant).limit(1)) is not None:
@@ -154,21 +248,33 @@ def admission(engine, scope: Scope):
                 if len(active) > 200:
                     raise AdmissionRejected("active_run_limit")
                 for parameters in active:
-                    # Only the same explicit variant is our duplicate scope.
-                    # Default rolling tasks retain their independent semantics.
                     if not isinstance(parameters, dict):
                         raise AdmissionRejected("active_scope_unverifiable")
                     start, end = parameters.get("start_date"), parameters.get("end_date")
-                    if start is None and end is None:
-                        continue
-                    if (start, end) != (scope.start_date.isoformat(), scope.end_date.isoformat()):
-                        continue
+                    if repair:
+                        # Ordinary default work overlaps this repair, unlike a
+                        # new dated diagnosis. The advisory is still only ours;
+                        # publication CAS handles collectors queued after here.
+                        if start is not None or end is not None:
+                            continue
+                        assets = parameters.get('asset_types')
+                        if assets is not None:
+                            if not isinstance(assets, list) or not assets or any(type(a) is not str for a in assets):
+                                raise AdmissionRejected('active_scope_unverifiable')
+                            if scope.asset_type not in assets:
+                                continue
+                    else:
+                        if start is None and end is None:
+                            continue
+                        if (start, end) != (scope.start_date.isoformat(), scope.end_date.isoformat()):
+                            continue
                     subjects = parameters.get("subjects")
                     if subjects is None or not isinstance(subjects, list) or not subjects or any(type(s) is not str for s in subjects) or scope.subject in subjects:
                         raise AdmissionRejected("collector_in_flight")
                 proof = dict(source_version=source.version, native_asset_type=ticker.asset_type,
                              native_identity_sha256=hashlib.sha256(ticker.raw_json.encode()).hexdigest(),
-                             new_explicit_variant=True, scope_lease="postgresql" if postgres else "fixture")
+                             new_explicit_variant=not repair, original_default_variant=repair,
+                             scope_lease="postgresql" if postgres else "fixture")
                 check_execution()
                 session.commit()
             yield proof
@@ -233,7 +339,7 @@ def _response_evidence(limit):
     return safe or None
 
 
-def _publication(engine, scope: Scope):
+def _publication(engine, scope: Scope, owned_observation_id=None):
     from sqlalchemy.orm import Session
     from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState, TonghuashunObservation
     with Session(engine) as session:
@@ -244,6 +350,14 @@ def _publication(engine, scope: Scope):
             return {"status": "unknown"}
         result = dict(status="none", state_revision=state.revision, state_status=state.status)
         if state.observation_id:
+            if isinstance(scope, RepairScope):
+                if owned_observation_id is None:
+                    # An unchanged old head is not a new repair. A different
+                    # head without our committed ID remains attribution-unknown.
+                    return result if state.observation_id == scope.selection.observation_id else {'status': 'unknown'}
+                if (str(state.observation_id) != owned_observation_id
+                        or state.revision != scope.selection.revision + 1):
+                    return {'status': 'unknown'}
             observation = session.get(TonghuashunObservation, state.observation_id)
             if observation is None or (observation.dataset, observation.subject, observation.variant) != (scope.dataset, scope.subject, scope.variant):
                 return {"status": "unknown"}
@@ -268,11 +382,17 @@ def _write(path: Path, value: dict):
 
 def _base(scope: Scope, operation_id: str):
     return dict(protocol="ths-bounded@1", operation_id=operation_id, scope=scope.as_dict(),
-                provenance=dict(handler=scope.task_type, max_requests=1, max_http_attempts=3,
+                provenance=dict(handler=scope.task_type, max_requests=scope.max_requests,
+                                max_http_attempts=scope.max_http_attempts,
                                 max_seconds=180, storage="existing_source_local"))
 
 
 def _failure_request(scope: Scope, context):
+    if isinstance(scope, RepairScope):
+        if (not isinstance(context, dict) or context.get('stage') not in ('request', 'response_validation', 'history_validation')
+                or (context.get('interface'), context.get('parameters')) not in scope.selection.allowed_requests()):
+            return None
+        return {key: context[key] for key in ('interface', 'parameters', 'stage')}
     from app.data_ingestion.tonghuashun.contracts import DATASETS as specs
     from app.data_ingestion.tonghuashun.service import bounded_bar_failure
     return bounded_bar_failure(specs[scope.dataset], scope.subject, context)
@@ -304,11 +424,15 @@ def _message(scope: Scope, record: dict):
     def number(key):
         return str(rows[key]) if type(rows.get(key)) is int else "未确认"
     publication = record.get("publication", {}).get("status")
-    checkpoint = "已观察到该显式范围源版本" if publication == "verified" else "未完整确认" if publication == "unknown" else "未推进源版本"
-    label = "ETF日线" if scope.dataset == "etf_daily" else "指数日线"
-    return (f"同花顺{label}单范围诊断：标的 {scope.subject}，日期 {scope.start_date} 至 {scope.end_date}，"
+    repair = isinstance(scope, RepairScope)
+    checkpoint = ("已观察到本次原默认源版本" if repair else "已观察到该显式范围源版本") if publication == "verified" else "未完整确认" if publication == "unknown" else "未推进源版本"
+    from app.data_ingestion.tonghuashun.contracts import DATASETS as specs
+    label = specs[scope.dataset].name
+    action = '原默认目标修复' if repair else '单范围诊断'
+    return (f"{label}{action}：标的 {scope.subject}，日期 {scope.start_date} 至 {scope.end_date}，"
             f"{names.get(record.get('outcome'), '未完整确认')}；拉取 {number('fetched_rows')} 条，"
-            f"变更 {number('changed')} 条，失败 {number('failed')} 个；checkpoint {checkpoint}。")
+            f"变更 {number('changed')} 条，失败 {number('failed')} 个；checkpoint {checkpoint}；"
+            "未推进全量核对完成标记或底座检查点。")
 
 
 def _tag_engine(engine, operation_id: str):
@@ -335,12 +459,15 @@ def run_worker(scope: Scope, output: Path, operation_id: str, deadline: float) -
     """Internal child protocol: credentials remain inside the formal handler."""
     import structlog
     from app.db.session import get_engine
-    from app.data_ingestion.tonghuashun.control import CollectionYield, ExecutionDeadline, execution_deadline
+    from app.data_ingestion.tonghuashun.control import CollectionYield, ExecutionDeadline, execution_deadline, default_repair
     from app.scheduling.registry import TaskContext, task_registry
+    scope.parameters()  # Reject malformed selectors before installing signals or opening a DB session.
     cancelled = threading.Event()
     old_signal = signal.signal(signal.SIGTERM, lambda *_: cancelled.set())
-    limit = ExecutionDeadline(deadline=min(deadline, time.monotonic() + MAX_SECONDS), cancelled=cancelled.is_set)
+    limit = ExecutionDeadline(deadline=min(deadline, time.monotonic() + MAX_SECONDS), cancelled=cancelled.is_set,
+                              max_http_attempts=scope.max_http_attempts)
     token = execution_deadline.set(limit)
+    repair_token = default_repair.set(scope.selection if isinstance(scope, RepairScope) else None)
     record = _base(scope, operation_id)
     record.update(phase="starting", outcome="worker_error", publication={"status": "not_attempted"},
                   counts=_counts(limit), counts_complete=True)
@@ -366,6 +493,7 @@ def run_worker(scope: Scope, output: Path, operation_id: str, deadline: float) -
     structlog.configure(processors=[capture], cache_logger_on_first_use=False)
     engine = None
     entered = False
+    owned_observation_id = None
     try:
         _write(output / "worker.json", record)
         parameters = scope.parameters()
@@ -381,6 +509,8 @@ def run_worker(scope: Scope, output: Path, operation_id: str, deadline: float) -
             try:
                 result = task_registry.require(scope.task_type).handler(
                     TaskContext(task_id=None, run_id=None, task_type=scope.task_type), parameters)
+                if isinstance(scope, RepairScope) and isinstance(result, dict):
+                    owned_observation_id = result.get('repair_publication_id')
                 reason = result.get("yield_reason") if isinstance(result, dict) else None
                 record["outcome"] = "cancelled" if reason == "stopped" else "budget" if reason == "budget" else "succeeded"
                 if reason is None and (not isinstance(result, dict) or result.get("succeeded") != 1 or result.get("failed") != 0):
@@ -397,16 +527,25 @@ def run_worker(scope: Scope, output: Path, operation_id: str, deadline: float) -
             current = getattr(limit, "detail", {}).get("current_request")
             if isinstance(current, dict):
                 from app.data_ingestion.tonghuashun.contracts import DATASETS as specs
-                generated = _failure_request(scope, {"interface": specs[scope.dataset].interface,
-                    "parameters": current, "stage": "request"})
+                interface = limit.detail.get('current_interface') if isinstance(scope, RepairScope) else specs[scope.dataset].interface
+                stage = limit.detail.get('request_stage', 'request') if isinstance(scope, RepairScope) else 'request'
+                generated = _failure_request(scope, {"interface": interface,
+                    "parameters": current, "stage": stage})
                 if generated is not None:
                     record["provenance"]["last_generated_request"] = generated
-            if (record["counts"]["logical_requests"] or 0) > 1 or (record["counts"]["http_attempts"] or 0) > 3:
+                    if diagnostic and isinstance(scope, RepairScope):
+                        diagnostic.update(failure_stage=stage, failure_request=generated)
+            if (record["counts"]["logical_requests"] or 0) > scope.max_requests or (record["counts"]["http_attempts"] or 0) > scope.max_http_attempts:
                 record.update(outcome="worker_error", problem="request_budget_violation")
             try:
-                record["publication"] = _publication(engine, scope)
+                record["publication"] = _publication(engine, scope, owned_observation_id) if isinstance(scope, RepairScope) else _publication(engine, scope)
             except Exception:
                 record["publication"] = {"status": "unknown"}
+            if isinstance(scope, RepairScope) and record['outcome'] == 'worker_error' and owned_observation_id is None:
+                # Unexpected handler/database errors can interrupt commit
+                # acknowledgement. A read of the old head does not justify
+                # assuming that an in-flight server transaction never committed.
+                record['publication'] = {'status': 'unknown'}
             if record["outcome"] == "succeeded" and record["publication"]["status"] != "verified":
                 record["outcome"] = "worker_error"
     except AdmissionRejected as exc:
@@ -422,6 +561,7 @@ def run_worker(scope: Scope, output: Path, operation_id: str, deadline: float) -
         record["message"] = _message(scope, record)
         _write(output / "worker.json", record)
         execution_deadline.reset(token)
+        default_repair.reset(repair_token)
         structlog.configure(**old_logging)
         signal.signal(signal.SIGTERM, old_signal)
         if engine is not None:
@@ -490,6 +630,8 @@ def _read_worker(path: Path, scope: Scope, operation_id: str):
         safe["provenance"]["native_identity_sha256"] = digest
     if proof.get("new_explicit_variant") is True:
         safe["provenance"]["new_explicit_variant"] = True
+    if isinstance(scope, RepairScope) and proof.get('original_default_variant') is True:
+        safe['provenance']['original_default_variant'] = True
     if proof.get("scope_lease") in ("postgresql", "fixture"):
         safe["provenance"]["scope_lease"] = proof["scope_lease"]
     if proof.get("db_application_name") == "ths-bounded:" + operation_id:
@@ -546,6 +688,10 @@ def supervise(scope: Scope, output: Path, *, _budget=MAX_SECONDS, _popen=None,
                "--start-date", scope.start_date.isoformat(), "--end-date", scope.end_date.isoformat(),
                "--output", str(output.resolve()), "--_worker", "--_operation-id", operation_id,
                "--_deadline", str(deadline)]
+    if isinstance(scope, RepairScope):
+        command = [sys.executable, '-m', MODULE, '--_repair-json', json.dumps(scope.selection.as_dict()),
+                   '--output', str(output.resolve()), '--_worker', '--_operation-id', operation_id,
+                   '--_deadline', str(deadline)]
     process = None
     old_handlers = {}
     interrupted = threading.Event()
@@ -616,17 +762,34 @@ def supervise(scope: Scope, output: Path, *, _budget=MAX_SECONDS, _popen=None,
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="单次同花顺ETF/指数正式scope诊断（硬上限180秒）")
-    parser.add_argument("--dataset", required=True, choices=DATASETS)
-    parser.add_argument("--subject", required=True)
-    parser.add_argument("--start-date", required=True, type=date.fromisoformat)
-    parser.add_argument("--end-date", required=True, type=date.fromisoformat)
+    parser.add_argument("--dataset", choices=DATASETS)
+    parser.add_argument("--subject")
+    parser.add_argument("--start-date", type=date.fromisoformat)
+    parser.add_argument("--end-date", type=date.fromisoformat)
+    parser.add_argument('--repair-plan', type=Path, help='One exact original-default selection with pinned native evidence')
+    parser.add_argument('--_repair-json', help=argparse.SUPPRESS)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--_worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--_operation-id", help=argparse.SUPPRESS)
     parser.add_argument("--_deadline", type=float, help=argparse.SUPPRESS)
     args = parser.parse_args(argv)
-    scope = Scope(args.dataset, args.subject, args.start_date, args.end_date)
     try:
+        if args.repair_plan is not None or args._repair_json is not None:
+            if any(value is not None for value in (args.dataset, args.subject, args.start_date, args.end_date)):
+                raise ValueError('mixed_scope_modes')
+            if args._repair_json is not None:
+                if not args._worker or args.repair_plan is not None or len(args._repair_json.encode()) > 4096:
+                    raise ValueError('invalid_worker_protocol')
+                value = json.loads(args._repair_json)
+            else:
+                if args._worker or args.repair_plan.is_symlink() or args.repair_plan.stat().st_size > 4096:
+                    raise ValueError('invalid_repair_plan')
+                value = json.loads(args.repair_plan.read_text())
+            scope = RepairScope.from_dict(value)
+        else:
+            if any(value is None for value in (args.dataset, args.subject, args.start_date, args.end_date)):
+                raise ValueError('incomplete_scope')
+            scope = Scope(args.dataset, args.subject, args.start_date, args.end_date)
         if args._worker:
             UUID(args._operation_id)
             if not math.isfinite(args._deadline) or args._deadline > time.monotonic() + MAX_SECONDS:
