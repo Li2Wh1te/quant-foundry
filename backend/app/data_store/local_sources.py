@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import gzip
+import hashlib
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -134,9 +135,16 @@ def _confirmed(key, rawkey, requests):
 def _receipt_excludes(field, key, requests):
     # Every relevant successfully returned raw page carries explicit keys. The
     # absence of a key preserves its previous confirmation; it never withdraws it.
-    receipts=[r.get('returned_keys',{}).get(field) for r in requests
+    receipts=[(r,r.get('returned_keys',{}).get(field)) for r in requests
               if r.get('key_receipt')=='actual_returned_keys_v1']
-    return bool(receipts) and len(receipts)==len(requests) and all(isinstance(v,list) for v in receipts) and all(key not in v for v in receipts)
+    # Reuse each validated receipt's ephemeral membership index. A historical
+    # window can contain thousands of inherited, unreturned keys; scanning its
+    # returned-key list for every such key is quadratic. Mixed/missing receipts
+    # still prove no exclusion, and structured malformed keys retain ordinary
+    # list comparison through _Receipt.contains rather than gaining authority.
+    return (bool(receipts) and len(receipts)==len(requests) and
+            all(isinstance(values,list) for _,values in receipts) and
+            all(not _contains(request,field,values,key) for request,values in receipts))
 
 
 def _proof_order(field, key, requests, observed):
@@ -254,10 +262,16 @@ def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None)
                 data = {**body['metadata'], 'item': [records[k] for k in sorted(records)]}
             except TypeError:
                 raise NativeInputError('SOURCE_DEPENDENCY_INVALID', '增量业务键类型不一致。') from None
-        if digest(data) != current['content_hash']:
+        # Hash and byte-budget validation refer to exactly the same canonical
+        # UTF-8 payload. Encoding a complete restored financial/history window
+        # twice adds no evidence and amplifies every closed delta dependency.
+        # Keep the full encoding/precision validation; only reuse these bytes.
+        encoded = native_json(data).encode()
+        if hashlib.sha256(encoded).hexdigest() != current['content_hash']:
             raise NativeInputError('SOURCE_HASH_MISMATCH', '原生观察内容校验失败。')
-        if len(native_json(data).encode()) > limits.payload_bytes:
+        if len(encoded) > limits.payload_bytes:
             raise NativeInputError('SOURCE_BUDGET_EXCEEDED', '重建窗口超过解析预算。')
+        del encoded  # Release this canonical buffer before the next dependency.
     return data, basis, field
 
 
@@ -396,8 +410,17 @@ class NativeSources:
 
     def _rows(self, c, table, where='', params=None, order='', *, fetch_rows=1, payload_bytes=None):
         # Caller table and clauses originate exclusively in this module.
-        sql = (f'SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:payload_budget '
-               f'THEN row_to_json(t)::text ELSE NULL END FROM {table} t {where} {order}')
+        # The finite native scan must sort its typed native rows BEFORE expanding
+        # their potentially large TOASTed JSON windows. OFFSET 0 prevents the
+        # planner from flattening the subquery and sorting encoded payloads.
+        # The lateral expression also retains one encoding for both byte-budget
+        # and returned-payload checks. Outer ordering states the same exact
+        # contract; PostgreSQL reuses the inner ordered path rather than sorting
+        # encoded windows again. No row/filter/key/provenance column is removed.
+        sql = (f'SELECT CASE WHEN octet_length(payload.encoded)<=:payload_budget '
+               f'THEN payload.encoded ELSE NULL END FROM '
+               f'(SELECT t.* FROM {table} t {where} {order} OFFSET 0) t '
+               f'CROSS JOIN LATERAL (SELECT row_to_json(t)::text AS encoded OFFSET 0) payload {order}')
         result = c.execution_options(stream_results=True, yield_per=fetch_rows, max_row_buffer=fetch_rows).execute(
             text(sql),{**(params or {}),'payload_budget':payload_bytes or self.limits.payload_bytes})
         try:

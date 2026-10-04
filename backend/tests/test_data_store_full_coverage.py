@@ -146,6 +146,57 @@ def all_files(store,entry):
                          {'d':entry.spec.name}).mappings().all()
 
 
+def test_ordered_native_encoding_matches_original_json_order_and_budget(store,monkeypatch):
+    from datetime import datetime, timezone
+    from decimal import Decimal
+    from uuid import UUID
+    from app.data_store import local_sources
+    from app.data_store.adapters.contracts import digest, native_json
+    from app.data_ingestion.models.tonghuashun import TonghuashunObservation
+    entry=BY_ID['E14']
+    when=datetime(2026,1,1,tzinfo=timezone.utc)
+    body={'item':[], 'nullable':None, 'label':'原生准确值',
+          'number':Decimal('-0.0001234567890123456789')}
+    # Equal native times are deliberately inserted in reverse UUID order.
+    # The UUID only fixes iteration; it must not replace source-time authority.
+    rows=[dict(id=UUID(int=index),dataset=entry.native,subject='same.SZ',variant='default',
+               observed_at=when,request_json='[]',data_json=native_json(body),content_hash=digest(body),
+               row_count=0,base_observation_id=None,chain_depth=0) for index in (4,2,3,1)]
+    with store.catalog.engine.begin() as connection:
+        TonghuashunObservation.__table__.create(connection)
+        connection.execute(TonghuashunObservation.__table__.insert(),rows)
+    order='ORDER BY t.subject,t.variant,t.observed_at,t.id'
+    baseline=text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:payload_budget '
+                  'THEN row_to_json(t)::text ELSE NULL END FROM tonghuashun_observations t '
+                  'WHERE t.dataset=:d '+order)
+    native=NativeSources(store.catalog.engine)
+    encoded=[];original_json=local_sources._json
+    def captured(value,limit):
+        encoded.append(value)
+        return original_json(value,limit)
+    with native._snapshot() as (connection,_):
+        original=connection.execute(baseline,{'d':entry.native,'payload_budget':33554432}).scalars().all()
+        assert len(original)<=16  # This assertion bounds the entire test input.
+        monkeypatch.setattr(local_sources,'_json',captured)
+        actual=list(native._rows(connection,'tonghuashun_observations','WHERE t.dataset=:d',
+                                 {'d':entry.native},order))
+        assert encoded==original  # Exact UTF-8 JSON, including native NULLs and column order.
+        assert [digest(row) for row in actual]==[digest(original_json(row,33554432)) for row in original]
+        selected=[row for row in actual if row['subject']=='same.SZ']
+        assert [row['id'] for row in selected]==[str(UUID(int=index)) for index in (1,2,3,4)]
+        assert all(row['base_observation_id'] is None for row in selected)
+        assert all(row['data_json']==native_json(body) for row in selected)
+        # Both projections return NULL for an over-budget payload. The formal
+        # reader must preserve its existing SOURCE_BUDGET_EXCEEDED rejection,
+        # never report that rejected native row as an empty successful source.
+        assert all(row is None for row in connection.execute(baseline,
+            {'d':entry.native,'payload_budget':1}).scalars())
+        with pytest.raises(NativeInputError) as failed:
+            list(native._rows(connection,'tonghuashun_observations','WHERE t.dataset=:d',
+                              {'d':entry.native},order,payload_bytes=1))
+        assert failed.value.code=='SOURCE_BUDGET_EXCEEDED'
+
+
 def test_F02_last_entry_only_selected_never_qualifies(ready):
     empty_sources(ready)
     entry=BY_ID['E68'];native=NativeSources(ready.catalog.engine)

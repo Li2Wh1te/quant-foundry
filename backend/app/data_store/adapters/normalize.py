@@ -58,8 +58,12 @@ def _slices(entry, value):
         if not isinstance(directory,list):
             yield value,None,None; return
         from .periods import report_key
+        directory_by_key=defaultdict(list)
         for r in directory:
-            try: groups.setdefault(report_key(r)[0],[])
+            try:
+                declared=report_key(r)[0]
+                groups.setdefault(declared,[])
+                directory_by_key[declared].append(r)
             except (ValueError,TypeError,AttributeError):
                 yield value,None,None; return
     if not groups:
@@ -69,8 +73,12 @@ def _slices(entry, value):
     for rawkey,rows in groups.items():
         data={**content,'item':rows}
         if entry.native in ('fund_stock_history','fund_bond_history'):
-            from .periods import report_key
-            data['report_directory']={'item':[d for d in directory if report_key(d)[0]==rawkey]}
+            # Parse the complete directory once, retaining every descriptor and
+            # duplicate. Each isolated report still passes the original period,
+            # duplicate, member and completeness validators. Re-parsing every
+            # descriptor for every report creates quadratic work without adding
+            # an independent check or granting a missing report any evidence.
+            data['report_directory']={'item':directory_by_key[rawkey]}
             failures=content.get('failed_requests',[])
             if not isinstance(failures,list):
                 yield replace(value,content=data),rawkey,key; continue

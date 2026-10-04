@@ -23,11 +23,12 @@ from pathlib import Path
 import pstats
 import time
 from zoneinfo import ZoneInfo
+from uuid import uuid4
 
 from sqlalchemy import URL, text
 
 from benchmark_current_store import isolated
-from app.data_store.adapters.contracts import LocalInput, digest
+from app.data_store.adapters.contracts import LocalInput, digest, native_json
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.limits import StoreLimits
 from app.data_store.local_sources import NativeSources, SourceLimits
@@ -35,10 +36,84 @@ from app.data_store.errors import DataStoreError
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.models.etf_daily import EtfDailyBar
+from app.data_ingestion.models.tonghuashun import TonghuashunObservation, TonghuashunCollectionState
 from app.data_store.tables import entry_status
 from app.data_store.pipeline import PipelineOptions, run_entry
 from app.data_store.source_range_tables import metadata as capture_metadata
 from app.data_store.verify_coverage import verify_existing
+
+
+OBSERVATION_ENTRIES = ('E07', 'E08', 'E09', 'E11', 'E12', 'E13', 'E14',
+                       'E15', 'E16', 'E22', 'E27')
+
+
+def native_observation_fixture(entry, rows):
+    """Yield finite full anchors and sparse deltas, with genuine synthetic keys.
+
+    A first response confirms every generated key. The following delta carries
+    an explicit returned-key receipt for only the latter half of the window.
+    Earlier equal rows must retain their first confirmation. Both observations
+    are read and normalized by the unmodified native reader during profiling;
+    a delta is not a shortcut around dependency reconstruction or validation.
+    """
+    from app.data_store.adapters.financial_windows import NUMBERS
+    from app.data_store.adapters.normalize import POINT_KEYS, REPORT_KEYS, GROUP_KEYS
+    window = 2500 if entry.id == 'E27' else 128 if entry.id in ('E08', 'E09') else 40
+    field = POINT_KEYS.get(entry.native) or REPORT_KEYS.get(entry.native) or GROUP_KEYS[entry.native]
+    origin = datetime(2010, 1, 1, tzinfo=ZoneInfo('Asia/Shanghai'))
+    observed = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for offset in range(0, rows, window):
+        subject = f'{offset // window:06}.SZ'
+        items, directory = [], []
+        for index in range(min(window, rows-offset)):
+            day = origin + timedelta(days=index if entry.id == 'E27' else 31*index)
+            millis = int(day.timestamp()*1000)
+            if entry.id in ('E08', 'E09'):
+                period = {'start_date_ms':millis, 'end_date_ms':millis,
+                          'report_type':'quarter', 'report_type_name':'季度'}
+                directory.append(period)
+                items.append({'report_key':f'{day.date()}:quarter', 'report':period,
+                    'data':{'item':[{'thscode':'000001.SZ', 'name':'synthetic member',
+                                    'asset_type':'stock' if entry.id == 'E08' else 'bond',
+                                    'report_type':'季度', 'end_date_ms':millis,
+                                    'hold_ratio':Decimal('1.0001')}]}})
+            elif entry.id == 'E07':
+                items.append({'thscode':'000001.SZ', 'stock_name':'synthetic member',
+                              'end_date_ms':millis, 'hold_ratio':Decimal('1.0001')})
+            elif entry.id == 'E22':
+                items.append({'thscode':subject, 'ticker':subject.split('.')[0],
+                              'ex_date_ms':millis, 'dividend_per_share':Decimal('0.2')})
+            elif entry.id == 'E27':
+                items.append({'date_ms':millis, 'rsi_pct':Decimal('50.123456')})
+            else:
+                item = {name:Decimal('1.234567') for name in NUMBERS[entry.native]}
+                if entry.native.startswith('fund_'):
+                    item.update(start_date_ms=millis, end_date_ms=millis,
+                                publish_date_ms=millis)
+                else:
+                    item.update(thscode=subject, period_end_ms=millis, report_date_ms=millis,
+                                currency='CNY', fiscal_period='Q1', period='Q1', fiscal_year=day.year)
+                items.append(item)
+        body = {'item':items}
+        if directory:body.update(report_directory={'item':directory}, failed_requests=[])
+        if entry.id in ('E14', 'E15', 'E16'):body['period']='Q1'
+        if entry.id == 'E22':body['ticker']=subject.split('.')[0]
+        if entry.id == 'E27':body.update(collection_scope={'thscode':subject}, coverage='observed_rows_only')
+        parent = None
+        content_hash = digest(body)
+        for revision in range(2):
+            identity = uuid4()
+            returned = items if revision == 0 else items[len(items)//2:]
+            request = {'interface':'synthetic.offline', 'parameters':{},
+                       'key_receipt':'actual_returned_keys_v1',
+                       'returned_keys':{field:[item[field] for item in returned]}}
+            encoded = (body if revision == 0 else {'key_field':field, 'removed':[], 'upserts':[],
+                                                    'metadata':{k:v for k,v in body.items() if k != 'item'}})
+            yield {'id':identity, 'dataset':entry.native, 'subject':subject, 'variant':'default',
+                   'observed_at':observed+timedelta(seconds=revision), 'data_json':native_json(encoded),
+                   'content_hash':content_hash, 'request_json':native_json([request]),
+                   'row_count':len(items), 'base_observation_id':parent, 'chain_depth':revision}
+            parent = identity
 
 
 class SyntheticSources:
@@ -108,10 +183,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--entry', choices=('E50', 'E69', 'E70'), required=True)
+    parser.add_argument('--entry', choices=(*OBSERVATION_ENTRIES, 'E50', 'E69', 'E70'), required=True)
     parser.add_argument('--rows', type=int, default=20000)
-    parser.add_argument('--input', choices=('generated', 'postgres'), default='generated',
-                        help='postgres exercises the real E69/E70 server cursor and native row decoding')
+    parser.add_argument('--input', choices=('generated', 'postgres', 'observations'), default='generated',
+                        help='postgres profiles E69/E70; observations profiles real THS full/delta decoding')
     parser.add_argument('--no-profile', action='store_true',
                         help='Measure wall time with the same complete scan and no profiler overhead')
     parser.add_argument('--current', choices=('empty','matched'), default='empty',
@@ -130,11 +205,15 @@ def main():
     maximum = 4000000 if args.input == 'postgres' else 250000
     if args.input == 'postgres' and args.entry not in ('E69','E70'):
         parser.error('The bounded physical-table fixture supports E69/E70 only')
+    if args.input == 'observations' and args.entry not in OBSERVATION_ENTRIES:
+        parser.error('Use a reviewed THS observation entry for the observations fixture')
+    if args.entry in OBSERVATION_ENTRIES and args.input != 'observations':
+        parser.error('THS report diagnostics require the physical observations fixture')
     if args.entry == 'E70' and args.input != 'postgres':
         parser.error('E70 calibration requires the reviewed physical daily-bar table')
     if not (1 <= args.verification_seconds <= 3600 and 1 <= args.fixture_seconds <= 3600):
         parser.error('Fixture and diagnostic deadlines must stay within 1–3600 seconds')
-    if args.current == 'matched' and args.input != 'postgres':
+    if args.current == 'matched' and args.input not in ('postgres', 'observations'):
         parser.error('Matched-current fixtures require the reviewed physical PostgreSQL input')
     if not 1 <= args.rows <= maximum or not args.root.is_dir() or args.output.exists():
         parser.error(f'Use 1–{maximum} synthetic objects, an existing root and a new output')
@@ -143,6 +222,7 @@ def main():
                      username=os.getenv('QF_DATABASE_USER', 'postgres'),
                      password=os.getenv('QF_DATABASE_PASSWORD', ''))
     entry = BY_ID[args.entry]
+    physical_rows = args.rows*(2 if args.entry in ('E07','E08','E09','E22') else 1)
     profile = cProfile.Profile()
     # Match the deployed finite disk policy, never increase its memory bound.
     # These reservations belong only to the disposable local test store.
@@ -156,6 +236,20 @@ def main():
             # its ordinary pre-snapshot revision fence, with no fabricated queue.
             capture_metadata.create_all(connection)
             connection.execute(text('INSERT INTO data_store_capture_version VALUES (1,3)'))
+            if args.input == 'observations':
+                TonghuashunObservation.__table__.create(connection)
+                TonghuashunCollectionState.__table__.create(connection)
+                connection.execute(text("SET LOCAL statement_timeout='120s'"))
+                # Keep at most eight encoded observations in each INSERT. One
+                # generated window is finite (40/128/2500 complete objects),
+                # never the whole requested dataset in a Python container.
+                batch=[]
+                for observation in native_observation_fixture(entry,args.rows):
+                    batch.append(observation)
+                    if len(batch)==8:
+                        connection.execute(TonghuashunObservation.__table__.insert(),batch)
+                        batch=[]
+                if batch:connection.execute(TonghuashunObservation.__table__.insert(),batch)
             if args.input == 'postgres':
                 model=EtfAdjustmentFactor if entry.id=='E69' else EtfDailyBar
                 model.__table__.create(connection)
@@ -202,6 +296,7 @@ def main():
         seed_seconds = time.monotonic()-fixture_started
         fixture = {'seed_seconds':seed_seconds,'current_mode':args.current,
                    'schema_columns':len(entry.spec.schema),
+                   'declared_current_physical_rows':physical_rows,
                    'construction_budget_seconds':args.fixture_seconds}
         if args.current == 'matched':
             build_started = time.monotonic()
@@ -221,13 +316,14 @@ def main():
             fixture['build_seconds'] = time.monotonic()-build_started
         fixture['before'] = current_manifest(store,entry)
         sources = (NativeSources(store.catalog.engine, limits=SourceLimits(pass_seconds=args.verification_seconds))
-                   if args.input == 'postgres' else SyntheticSources(args.rows))
+                   if args.input in ('postgres', 'observations') else SyntheticSources(args.rows))
         started = time.monotonic()
+        cpu_started = time.process_time()
         if args.current == 'matched' and not fixture['build_result'].get('complete'):
             result = {'entry_id':entry.id,'complete':False,'phase':'fixture_build',
                       'reason':fixture['build_result'].get('reason','FIXTURE_BUILD_INCOMPLETE')}
         else:
-            if args.current == 'matched' and fixture['before']['rows'] != args.rows:
+            if args.current == 'matched' and fixture['before']['rows'] != physical_rows:
                 raise AssertionError('Fixture construction did not commit every declared current row')
             try:
                 call = verify_existing if args.no_profile else lambda *a, **kw: profile.runcall(verify_existing, *a, **kw)
@@ -238,6 +334,7 @@ def main():
                 result = {'entry_id': entry.id, 'complete': False, 'reason': error.code,
                           **getattr(error, 'verification', {})}
         elapsed = time.monotonic() - started
+        cpu_elapsed = time.process_time() - cpu_started
         fixture['after'] = current_manifest(store,entry)
         if fixture['before'] != fixture['after']:
             raise AssertionError('Verification rewrote the disposable current fixture')
@@ -247,7 +344,8 @@ def main():
         if result.get('complete') and (result['current_objects'] != args.rows
                 or any(result[k] for k in ('missing_objects','mismatched_objects','unexpected_objects'))):
             raise AssertionError('Matched synthetic scope was not exactly compared')
-        if not 0 <= result.get('scanned_objects', 0) <= args.rows:
+        scanned_limit = args.rows*2 if args.input == 'observations' else args.rows
+        if not 0 <= result.get('scanned_objects', 0) <= scanned_limit:
             raise AssertionError('Synthetic scope exceeded its declared row cap')
         report = io.StringIO()
         self_report = io.StringIO()
@@ -264,6 +362,7 @@ def main():
         output = {'input_kind': 'synthetic', 'production_acceptance': False,
                   'source_path': args.input, 'profile_enabled': not args.no_profile,
                   'entry_id': entry.id, 'objects': args.rows, 'seconds': elapsed,
+                  'process_cpu_seconds':cpu_elapsed,
                   'verification_budget_seconds':args.verification_seconds,
                   'fixture':fixture,
                   'snapshot_complete': snapshot_complete, 'source_summary': sources.summary,

@@ -2,6 +2,8 @@
 from datetime import datetime,timezone,timedelta
 from decimal import Decimal
 from pathlib import Path
+from dataclasses import replace
+from copy import deepcopy
 import ast
 import json
 from types import SimpleNamespace
@@ -11,6 +13,7 @@ from app.data_store.adapters.contracts import LocalInput,digest,native_json
 from app.data_store.adapters.registry import ENTRIES,BY_ID,BY_NATIVE,SYNTHETIC
 from app.data_store.adapters.normalize import normalize
 from app.data_store.local_sources import materialize_observation,EffectiveBasis,SourceLimits,RescueSources
+from app.data_store.local_sources import _requests, _receipt_excludes
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.tonghuashun.confirmation import returned_keys
 from app.data_store.merge import MergeSpool
@@ -240,3 +243,49 @@ def test_unproven_import_basis_is_scoped_to_the_native_subject_and_variant(chang
         content={**data,'thscode':other['subject']}
         other.update(content_hash=digest(content),data_json=native_json(content))
     assert _tracked_units(tracker,other)[0].failure is None
+
+
+@pytest.mark.parametrize('entry_id', ['E08', 'E09'])
+def test_indexed_report_directory_retains_missing_duplicate_and_failed_reports(entry_id):
+    from tests.test_data_store_domain_samples import sample
+    source=sample(entry_id)
+    body=deepcopy(source.content)
+    first=body['report_directory']['item'][0]
+    later={**first, 'start_date_ms':first['start_date_ms']+91*86400000,
+           'end_date_ms':first['end_date_ms']+91*86400000}
+    from app.data_store.adapters.periods import report_key
+    first_key=report_key(first)[0];later_key=report_key(later)[0]
+    body['report_directory']['item'].append(later)
+    # A listed report with no wrapper remains a real missing report. Indexing
+    # the directory must not invent a successful empty source object for it.
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert not units[first_key].failure and units[later_key].failure
+    body['item'].append({'report_key':later_key,'report':later,'data':{'item':[]}})
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert all(not unit.failure for unit in units.values())
+    # Duplicate descriptors stay visible to the complete report validator;
+    # only the affected scope is invalid, even though its dictionary key agrees.
+    body['report_directory']['item'].append(deepcopy(first))
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert units[first_key].failure and not units[later_key].failure
+    body['report_directory']['item'].pop()
+    body['failed_requests']=[{'parameters':{'end_date':later_key.split(':')[0],
+                                          'report_type':'quarter'}}]
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert not units[first_key].failure and units[later_key].failure
+
+
+@pytest.mark.parametrize('keys', [[1, '1', True, None], [['nested'], {'key':1}, 2]])
+def test_indexed_exclusion_keeps_exact_membership_and_requires_every_receipt(keys):
+    receipt={'parameters':{},'key_receipt':'actual_returned_keys_v1',
+             'returned_keys':{'date_ms':keys}}
+    requests=_requests({'request_json':native_json([receipt])},SourceLimits())
+    # Scalar and malformed structured keys keep Python's original membership
+    # equality. Missing, mixed or legacy receipts cannot prove non-membership.
+    for key in [*keys, 'absent', 7, ['absent'], {'key':2}]:
+        assert _receipt_excludes('date_ms',key,requests)==(key not in keys)
+    assert not _receipt_excludes('date_ms','absent',[])
+    for unproven in [{'parameters':{}}, {**receipt,'returned_keys':{}},
+                     {**receipt,'returned_keys':{'date_ms':None}}]:
+        assert not _receipt_excludes('date_ms','absent',
+                                    _requests({'request_json':native_json([receipt,unproven])},SourceLimits()))
