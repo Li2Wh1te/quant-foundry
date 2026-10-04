@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import pytest
 import requests
+import structlog
 from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
@@ -185,6 +186,39 @@ def test_stock_empty_or_other_adjustment_cannot_replace_old_head(native_engine, 
     code, record, get = worker(native_engine, scope, tmp_path, monkeypatch, [http_response(data)])
     assert code == 2 and record['outcome'] == 'failed' and get.call_count == 1
     assert current(native_engine, scope)[0] == scope.selection.observation_id
+
+
+def test_worker_captures_failure_after_application_logger_was_already_cached(native_engine, tmp_path, monkeypatch):
+    from app.data_ingestion.tonghuashun import service
+    original_logging = structlog.get_config()
+    outside_events = []
+    def old_processor(_logger, _method, event):
+        outside_events.append(dict(event))
+        return event
+    try:
+        # Application startup enables caching. Binding a module logger before
+        # run_worker reproduces the full-suite failure independently of test
+        # order; configure(processors=...) cannot replace a bound old chain.
+        structlog.configure(processors=[old_processor], wrapper_class=structlog.BoundLogger,
+                            logger_factory=structlog.ReturnLoggerFactory(), cache_logger_on_first_use=True)
+        cached = structlog.get_logger(service.__name__)
+        cached.info('invented_prebound_application_event')
+        assert len(outside_events) == 1
+        outside_events.clear()
+        monkeypatch.setattr(service, 'logger', cached)
+        scope = selection(native_engine, 'stock_daily', {'item': [bar(DAY)], 'adjust': 'none'}, day=DAY)
+        code, record, get = worker(native_engine, scope, tmp_path, monkeypatch,
+                                   [http_response({'item': []})])
+        assert code == 2 and record['outcome'] == 'failed'
+        assert record['diagnostic']['error_kind'] == 'invalid_data'
+        assert record['diagnostic']['reason'] == '历史行情为空，尚不能确认该范围覆盖。'
+        assert record['publication']['status'] == 'none' and not record['unknown_publication']
+        assert get.call_count == 1 and current(native_engine, scope)[0] == scope.selection.observation_id
+        # The independent worker boundary must also prevent the old logger's
+        # processors from emitting a raw event/exception outside its whitelist.
+        assert outside_events == []
+    finally:
+        structlog.configure(**original_logging)
 
 
 @pytest.mark.parametrize('old_utc,fresh_same_key', [(True, True), (True, False), (False, True), (False, False)])

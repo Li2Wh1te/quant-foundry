@@ -335,7 +335,7 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
     details = {}
-    from app.data_ingestion.tonghuashun.control import default_repair
+    from app.data_ingestion.tonghuashun.control import default_repair, execution_deadline
     repair = default_repair.get()
     if repair is not None:
         # The operator sees the selected repair period, not an inherited full
@@ -381,7 +381,14 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
     checkpoint_message = ("已推进至版本 " + result["version_id"] if succeeded else
         "完整范围未推进，已保存成功报告，失败报告待补采" if kind == "partial_reports" else
         "未推进，保留已有成功版本")
-    write = logger.info if succeeded else logger.warning
+    # A supervised worker installs a sanitized processor boundary. Application
+    # startup may already have cached this module's logger with an older chain;
+    # structlog.configure cannot replace that bound chain. Resolve a fresh
+    # proxy inside the supervised context so failures reach the current capture
+    # processor and cannot escape through stale raw-event/exception processors.
+    # Ordinary collectors retain their existing module logger and logging policy.
+    event_logger = structlog.get_logger(__name__) if execution_deadline.get() is not None else logger
+    write = event_logger.info if succeeded else event_logger.warning
     write("tonghuashun_collection_completed" if succeeded else "tonghuashun_collection_failed",
         title=f"{spec.name}{'采集完成' if succeeded else '采集失败'}",
         message=(f"{spec.name}采集{'完成' if succeeded else '失败'}：标的 {subject}，日期范围 {date_label}，"
