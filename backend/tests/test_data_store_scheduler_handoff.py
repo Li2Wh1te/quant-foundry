@@ -29,8 +29,10 @@ def test_paused_task_survives_http_creation_and_restart_without_early_enqueue(da
     ScheduledTask.__table__.create(engine)
     TaskRun.__table__.create(engine)
     with engine.begin() as connection:
-        connection.execute(text("CREATE TABLE data_store_legacy_maintenance (singleton integer PRIMARY KEY, phase text)"))
-        connection.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        connection.execute(text("""CREATE TABLE data_store_legacy_maintenance (
+            singleton integer PRIMARY KEY, phase text, plan_hash text,
+            completed_json jsonb DEFAULT '[]', files_started boolean DEFAULT false)"""))
+        connection.execute(text("INSERT INTO data_store_legacy_maintenance(singleton,phase) VALUES (1,'reset_done')"))
     settings = Settings(api_token=TOKEN, cursor_signing_key="b" * 64,
                         database_password="isolated-test", environment="test",
                         scheduler_enabled=False, _env_file=None)
@@ -65,7 +67,8 @@ def test_paused_task_survives_http_creation_and_restart_without_early_enqueue(da
     register_tasks(registry)
     with Session(engine) as session:
         # Paused tasks allow manual execution in the ordinary scheduler, but
-        # local updates must still reject it while maintenance is reset_done.
+        # local updates reject an incomplete reset receipt regardless of its
+        # phase label. Final R01 readiness is a separate guard.
         with pytest.raises(TaskConflictError, match="维护"):
             SchedulerService(session, registry).enqueue_run(
                 task_id, trigger_type=TriggerType.MANUAL, max_queued_runs=10)
@@ -89,9 +92,11 @@ def test_paused_task_survives_http_creation_and_restart_without_early_enqueue(da
     assert task_jobs_after_restart() == []
     with engine.begin() as connection:
         assert connection.execute(text("SELECT phase FROM data_store_legacy_maintenance")).scalar_one() == "reset_done"
-        # Only this isolated fixture advances readiness to test the explicit
-        # versioned resume. Production readiness belongs to the all-60 guard.
-        connection.execute(text("UPDATE data_store_legacy_maintenance SET phase='ready'"))
+        # Complete only the synthetic reset safety receipt. Pending business
+        # input can now be consumed without falsely completing all-60 finish.
+        connection.execute(text("""UPDATE data_store_legacy_maintenance SET
+            plan_hash=:hash, completed_json='["hooks","derived","originals","functions","files"]',
+            files_started=true"""), {'hash': 'a' * 64})
     with Session(engine) as session:
         resumed = SchedulerService(session, registry).change_state(
             task_id, expected_version=1, target=TaskState.ACTIVE)
@@ -102,3 +107,8 @@ def test_paused_task_survives_http_creation_and_restart_without_early_enqueue(da
     with Session(engine) as session:
         assert session.scalar(select(func.count()).select_from(ScheduledTask)) == 1
         assert session.scalar(select(func.count()).select_from(TaskRun)) == 0
+        assert session.execute(text('SELECT phase FROM data_store_legacy_maintenance')).scalar_one() == 'reset_done'
+        queued = SchedulerService(session, registry).enqueue_run(
+            task_id, trigger_type=TriggerType.MANUAL, max_queued_runs=10)
+        assert queued.status == 'queued'
+        session.rollback()

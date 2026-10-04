@@ -13,7 +13,7 @@ import sys
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
     parser.add_argument('command',choices=('describe','status','plan-active','rebuild','update','retry',
-                                           'cleanup','verify-coverage','compact-issues','audit-export','configure-resources'))
+                                           'cleanup','cancel-sealed','verify-coverage','compact-issues','audit-export','configure-resources'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
@@ -59,6 +59,12 @@ def main(argv=None):
                 any(not fence or not re.fullmatch(r'[0-9a-f]{64}',fence) for fence in
                     (args.expect_input_identity,args.expect_source_selection))):
             parser.error('--resume-sealed-only requires one existing update entry and both exact fences')
+    elif args.command == 'cancel-sealed':
+        if (not args.entry or len(args.entry) != 1 or args.initialize or args.rescue or
+                args.partition or args.allow_incompatible_rebuild or
+                any(not fence or not re.fullmatch(r'[0-9a-f]{64}', fence) for fence in
+                    (args.expect_input_identity, args.expect_source_selection))):
+            parser.error('cancel-sealed requires one existing business entry and both original fences')
     elif args.expect_input_identity is not None or args.expect_source_selection is not None:
         parser.error('Input fences require an explicit admission mode')
     if args.command=='plan-active' or args.admit_active_only:
@@ -163,6 +169,13 @@ def main(argv=None):
                 output['entries']=[active_input_plan(store,selected[0],native,
                     cancelled=lambda:cancelled[0]).plan]
                 output['plan_ready']=True
+            elif args.command == 'cancel-sealed':
+                from .cancel_sealed import cancel_sealed
+                output['entries'] = [cancel_sealed(store, selected[0],
+                    expected_identity=args.expect_input_identity,
+                    expected_selection=args.expect_source_selection,
+                    cancelled=lambda: cancelled[0])]
+                output['complete'] = output['entries'][0]['scratch_released']
             elif args.command in ('rebuild','update','retry'):
                 output['entries']=run_local(store,sources,entries=selected,options=options,
                                             cancelled=lambda:cancelled[0])

@@ -29,7 +29,8 @@ from app.scheduling.schemas import (
 )
 from app.scheduling.service import SchedulerService, TaskConflictError
 from app.scheduling.models import TaskRun
-from app.data_store.availability import RETIRED_TASK_TYPES, read_availability
+from app.data_store.availability import RETIRED_TASK_TYPES, require_operable
+from app.data_store.errors import DataStoreError
 from app.data_store.scheduler_tasks import TASK_KEY as LOCAL_UPDATE_TASK_KEY
 from app.scheduling.triggers import build_trigger
 
@@ -212,8 +213,11 @@ class SchedulerRuntime:
                         TaskRun.status == RunStatus.QUEUED.value,
                     ).limit(1)
                 )
-                if queued_local and not read_availability(session).ready:
-                    allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
+                if queued_local:
+                    try:
+                        require_operable(session)
+                    except DataStoreError:
+                        allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
                 run_ids = repository.claim_queued_runs(slots, task_types=allowed_types)
                 run_context = {
                     run.id: (run.task_id, run.task_type)

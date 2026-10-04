@@ -151,6 +151,45 @@ def _proof_order(field, key, requests, observed):
     return max(applicable) if applicable else observed
 
 
+def direct_nav_response(row, data, requests, *, native=False):
+    """Recognize the reviewed native producer's direct five-year NAV response.
+
+    Acquisition.nav passes the complete fyear response to the immutable native
+    repository; only month responses merge prior rows. Repository delta storage
+    is compression of that response, not the supplier's returned-key set. The
+    caller must first reconstruct and hash-check the closed dependency chain.
+    Rescue/import input never gains this equivalence merely by copying request
+    parameters. This function does not create or amend a returned-key receipt.
+    """
+    if (not native or row.get('dataset') != 'fund_nav' or row.get('variant') != 'default' or
+            len(requests) != 1 or not isinstance(data, dict) or
+            data.get('coverage') != 'provider_rolling_window' or data.get('failed_requests')):
+        return False
+    request = requests[0]
+    parameters = request.get('parameters')
+    if (request.get('interface') != 'fund.performance.nav' or request.get('artifact_sha256') or
+            not isinstance(parameters, dict) or parameters != {
+                'thscode': row.get('subject'), 'range': 'fyear', 'nav_type': 'unit,adj'}):
+        return False
+    rows = data.get('item')
+    if (not isinstance(rows, list) or not rows or row.get('row_count') != len(rows) or
+            any(not isinstance(point, dict) or point.get('thscode') not in (None, row['subject'])
+                for point in rows)):
+        return False
+    from app.data_ingestion.tonghuashun.contracts import (
+        CollectionError, SHANGHAI, provider_date, validate_bars, years_before,
+    )
+    try:
+        today = datetime.fromisoformat(str(row['observed_at'])).astimezone(SHANGHAI).date()
+        from datetime import timedelta
+        validate_bars(rows, years_before(today, 5) - timedelta(days=7), today, 'nav_date')
+        days = [provider_date(point['nav_date']) for point in rows]
+        return (data.get('observed_start') == min(days).isoformat() and
+                data.get('observed_end') == max(days).isoformat())
+    except (CollectionError, KeyError, TypeError, ValueError, OverflowError):
+        return False
+
+
 def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None):
     """Reconstruct and validate every dependency; never consult a mutable head."""
     chain, seen, cursor, size = [], set(), row, 0
@@ -257,13 +296,14 @@ class EffectiveBasis:
         self.scope=None;self.position=None;self.rows={};self.basis={}
         self.unproven={}
 
-    def apply(self,row,data,basis,field,requests):
+    def apply(self,row,data,basis,field,requests,*,native=False):
         scope=_scope(row);ns=instant_ns(row['observed_at'])
         position=(*scope,ns,str(row['id']))
         if self.position is not None and position<self.position:
             raise NativeInputError('RESCUE_ORDER_INVALID','原生观察需按范围和观察时间排序；不能用文件顺序作为来源先后。')
         self.position=position
         token=digest([scope,row['content_hash'],row['observed_at'],requests])
+        direct_nav = direct_nav_response(row, data, requests, native=native)
         current={};uncertain=[]
         # An imported merged anchor may lack the original observation for an
         # inherited row. Keep that *basis* unproven within this temporary scope;
@@ -280,7 +320,7 @@ class EffectiveBasis:
                 # Multiple legitimate corporate actions share one ex-date. Hash
                 # the whole group; never let the last event erase its siblings.
                 hashed=digest(sorted(digest(v) for v in items));current[key]=hashed
-                confirmed=_confirmed(field,rawkey,requests)
+                confirmed=direct_nav or _confirmed(field,rawkey,requests)
                 merged=(row['dataset'] in _MERGED and (row['dataset']!='stock_actions' or
                         any(r.get('artifact_sha256') for r in requests)))
                 proof_order=_proof_order(field,rawkey,requests,ns)
@@ -444,7 +484,7 @@ class NativeSources:
                 scope = _scope(row)
                 token = digest([scope,row['content_hash'],row['observed_at'],_requests(row,self.limits)])
                 ns = instant_ns(row['observed_at'])
-                basis, uncertain = tracker.apply(row,content,basis,field,_requests(row,self.limits))
+                basis, uncertain = tracker.apply(row,content,basis,field,_requests(row,self.limits),native=True)
                 value = LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],
                                    row['observed_at'], content, token, row_basis=basis, basis_field=field,
                                    unconfirmed_keys=uncertain)

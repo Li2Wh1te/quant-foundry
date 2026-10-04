@@ -11,7 +11,7 @@ from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
 from .adapters.registry import ENTRIES
 from .adapters.canonical import NativeInputError
-from .availability import require_ready
+from .availability import require_operable
 from .errors import DataStoreError
 from .local_sources import NativeSources, SourceLimits
 from .pipeline import PipelineOptions, run_local
@@ -51,11 +51,17 @@ class LocalUpdateParameters(BaseModel):
 
 def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dict:
     engine = get_engine()
-    with Session(engine) as session:
-        availability = require_ready(session)
     settings = get_settings()
     entries = ([BUSINESS[dataset] for dataset in parameters.datasets]
                if parameters.datasets else list(BUSINESS.values()))
+    # Keep the maintenance fence until the actual local pass exits. Dataset
+    # locks and the existing shared quota still serialize current writes.
+    with Session(engine) as session:
+        availability = require_operable(session)
+        return _update_admitted(context, parameters, engine, settings, entries, availability)
+
+
+def _update_admitted(context, parameters, engine, settings, entries, availability):
     with CurrentStore(
         engine, settings.data_store_root,
         cursor_key=settings.cursor_signing_key.get_secret_value().encode(),

@@ -51,6 +51,34 @@ def seal(st,months=6,*,invalid=False):
     return progress
 
 
+def test_cancel_obsolete_seal_preserves_files_issues_and_unacknowledged_source_cursor(ready):
+    from app.data_store.cancel_sealed import cancel_sealed
+    progress = seal(ready, invalid=True)
+    entry = BY_ID['E44']
+    before_ranges = ranges(ready)
+    with ready.catalog.transaction() as connection:
+        before_files = connection.execute(text('SELECT * FROM data_store_files')).mappings().all()
+        before_issues = connection.execute(text('SELECT * FROM data_store_issues')).mappings().all()
+    path = pending_path(ready)
+    before_bytes = path.read_bytes()
+    with pytest.raises(DataStoreError):
+        cancel_sealed(ready, entry, expected_identity='0' * 64,
+                      expected_selection=progress['source_selection'])
+    assert path.read_bytes() == before_bytes and ranges(ready) == before_ranges
+    result = cancel_sealed(ready, entry, expected_identity=progress['identity'],
+                           expected_selection=progress['source_selection'])
+    assert result['cancelled'] and result['scratch_released'] and not result['input_acknowledged']
+    assert not path.exists() and not ready.budget.pending_keys()
+    assert ranges(ready) == before_ranges
+    with ready.catalog.transaction() as connection:
+        assert connection.execute(text('SELECT * FROM data_store_files')).mappings().all() == before_files
+        assert connection.execute(text('SELECT * FROM data_store_issues')).mappings().all() == before_issues
+    status = read_entry_status(ready, 'E44')
+    assert not status['complete'] and not status['qualified'] and status['coverage_pending']
+    assert cancel_sealed(ready, entry, expected_identity=progress['identity'],
+                         expected_selection=progress['source_selection'])['idempotent']
+
+
 def continuation(progress,*,partitions=4096):
     return PipelineOptions(resume_sealed_only=True,maximum_claim_batches=1,
         maximum_partition_passes=partitions,pass_seconds=840,

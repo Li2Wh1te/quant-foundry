@@ -17,7 +17,7 @@ from sqlalchemy import text
 from .adapters.canonical import NativeInputError
 from .adapters.contracts import LocalInput, digest, native_json, instant_ns
 from .local_sources import (NativeSources, TABLES, _json, _requests, _scope,
-                            materialize_observation, EffectiveBasis, _confirmed, _MERGED)
+                            materialize_observation, EffectiveBasis, _confirmed, _MERGED, direct_nav_response)
 from .errors import DataStoreError
 
 IDS = frozenset(('E23','E44','E50','E51','E52','E69','E70'))
@@ -214,10 +214,11 @@ class RangeSources:
                 # confirmation across full re-anchors. Necessary delta ancestors
                 # are fetched by primary key and hash checked, never a scope replay.
                 requests=_requests(row,self.native.limits)
+                direct_nav = direct_nav_response(row, body, requests, native=True)
                 previous=None
                 # Complete returned-key evidence grants its own confirmation;
                 # an unrelated preceding full anchor is not a dependency.
-                if not all(_confirmed(field,r.get(field),requests) for r in body.get('item',[])):
+                if not direct_nav and not all(_confirmed(field,r.get(field),requests) for r in body.get('item',[])):
                     previous=c.execute(text('SELECT id::text FROM tonghuashun_observations '
                         'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
                         'AND (observed_at,id)<(CAST(:at AS timestamptz),CAST(:id AS uuid)) '
@@ -226,14 +227,14 @@ class RangeSources:
                 old_items={}
                 if previous:
                     old=lookup(previous);oldbody,oldbasis,oldfield=materialize_observation(old,lookup,self.native.limits,metrics=self.metrics)
-                    tracker.apply(old,oldbody,oldbasis,oldfield,_requests(old,self.native.limits))
+                    tracker.apply(old,oldbody,oldbasis,oldfield,_requests(old,self.native.limits),native=True)
                     old_items={str(r.get(field)):r for r in oldbody.get('item',[])}
                 requests=_requests(row,self.native.limits)
-                basis,uncertain=tracker.apply(row,body,basis,field,requests)
+                basis,uncertain=tracker.apply(row,body,basis,field,requests,native=True)
                 # Inherited equal values that were not returned need no new
                 # normalization. Ambiguous legacy confirmation stays restricted.
                 items=[r for r in body.get('item',[]) if entry.native not in _MERGED or str(r.get(field)) in uncertain or
-                       old_items.get(str(r.get(field)))!=r or _confirmed(field,r.get(field),requests)]
+                       old_items.get(str(r.get(field)))!=r or direct_nav or _confirmed(field,r.get(field),requests)]
                 body=dict(body,item=items)
                 self.summary['source_rows']=1
                 yield LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],row['observed_at'],body,

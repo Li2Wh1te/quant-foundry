@@ -91,14 +91,19 @@ class PipelineOptions:
         for p in self.partitions: identifier(p)
 
 
-def input_identity(entry,sources,options):
+def input_identity(entry,sources,options,*,mode=None):
     """Keep input identity independent of execution budgets and operator fences.
 
     Existing sealed files must remain usable after introducing separate claim
     and partition limits. These controls constrain work, not the source contract.
     """
-    return digest([entry.spec.descriptor(),type(sources).__module__,type(sources).__qualname__,
-                   options.mode,options.partitions,options.allow_incompatible_rebuild])
+    identity = [entry.spec.descriptor(),type(sources).__module__,type(sources).__qualname__,
+                mode or options.mode,options.partitions,options.allow_incompatible_rebuild]
+    if entry.id == 'E44':
+        # A changed confirmation rule must reacquire actual local input. An old
+        # charged spool contains normalized failures and cannot borrow this fix.
+        identity.append('native-nav-direct-fyear@1')
+    return digest(identity)
 
 
 def continuation_refused(code):
@@ -388,9 +393,8 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     raise continuation_refused('SOURCE_CONFLICT')
                 compatible_identity=identity
                 if options.mode in ('update','retry'):
-                    compatible_identity=digest([entry.spec.descriptor(),type(sources).__module__,
-                        type(sources).__qualname__,'retry' if options.mode=='update' else 'update',
-                        options.partitions,options.allow_incompatible_rebuild])
+                    compatible_identity=input_identity(entry,sources,options,
+                        mode='retry' if options.mode=='update' else 'update')
                 if (progress.get('scan_complete') and progress.get('identity') not in (identity,compatible_identity)):
                     # A different selector/mode must never erase the only
                     # sealed input boundary of an unfinished invocation.

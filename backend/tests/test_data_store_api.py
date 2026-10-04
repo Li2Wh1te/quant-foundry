@@ -92,7 +92,8 @@ def api(ready, monkeypatch):
     with engine.begin() as connection:
         connection.execute(text("CREATE TABLE scheduled_tasks (id uuid PRIMARY KEY, task_type text)"))
         connection.execute(text("""CREATE TABLE data_store_legacy_maintenance (
-            singleton integer PRIMARY KEY, phase text NOT NULL)"""))
+            singleton integer PRIMARY KEY, phase text NOT NULL, plan_hash text,
+            completed_json jsonb NOT NULL DEFAULT '[]', files_started boolean NOT NULL DEFAULT false)"""))
         connection.execute(text("""CREATE TABLE data_store_legacy_restrictions (
             origin_key text PRIMARY KEY, dataset text, scope_key text,
             captured_at timestamptz DEFAULT clock_timestamp())"""))
@@ -156,11 +157,96 @@ def test_existing_legacy_rows_and_reset_receipt_hold_queries(api):
     assert blocked.json()["detail"]["code"] == "DATA_STORE_REBUILDING"
     with store.catalog.engine.begin() as connection:
         connection.execute(text("DROP TABLE foundation_artifacts"))
-        connection.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        connection.execute(text("INSERT INTO data_store_legacy_maintenance(singleton,phase) VALUES (1,'reset_done')"))
     assert client.post("/api/admin/data-store/query", headers=headers, json=body).status_code == 503
     with store.catalog.engine.begin() as connection:
         connection.execute(text("UPDATE data_store_legacy_maintenance SET phase='ready' WHERE singleton=1"))
     assert client.get("/api/admin/data-store/status", headers=headers).json()["phase"] == "ready"
+
+
+def reset_complete(store):
+    """A disposable fixture models the real completed reset receipt only."""
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text("""INSERT INTO data_store_legacy_maintenance
+            (singleton,phase,plan_hash,completed_json,files_started)
+            VALUES (1,'reset_done',:hash,'["hooks","derived","originals","functions","files"]',true)"""),
+            {'hash': 'a' * 64})
+
+
+def test_verified_independent_domains_read_while_other_domain_and_finish_remain_blocked(api):
+    from app.data_store.availability import require_ready
+    from app.data_store.errors import DataStoreError
+    client, store = api
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    reset_complete(store)
+    for eid in ('E69', 'E70'):
+        entry = BY_ID[eid]
+        result = run_entry(store, entry, NativeSources(store.catalog.engine))
+        assert result['complete'] and result['qualified']
+        detail = client.get(f'/api/admin/data-store/datasets/{entry.spec.name}', headers=headers).json()
+        assert detail['status'] == 'available'
+        response = client.post('/api/admin/data-store/query', headers=headers,
+            json=query_body(entry, detail['preview_key'], frequency=store_router._frequency(entry)))
+        assert response.status_code == 200, response.text
+        assert response.json()['rows']
+        assert response.json()['generation'] == detail['generation']
+
+    missing = BY_ID['E44']
+    body = query_body(missing, {'representation': 'r', 'subject': 's', 'object_key': 'k'}, frequency='object')
+    blocked = client.post('/api/admin/data-store/query', headers=headers, json=body)
+    assert blocked.status_code == 409
+    assert blocked.json()['detail']['reason'] == 'FULL_RANGE_UNPROVEN'
+    assert client.post('/api/admin/data-store/query', headers=headers,
+                       json={**body, 'allow_partial': True}).status_code == 409
+    status = client.get('/api/admin/data-store/status', headers=headers).json()
+    assert status['phase'] == 'reset_done' and status['system_safe']
+    assert status['r01_complete'] is False
+    with Session(store.catalog.engine) as session, pytest.raises(DataStoreError):
+        require_ready(session)
+
+    # A real global safety fault blocks both previously readable capabilities.
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text("UPDATE data_store_legacy_maintenance SET phase='resetting'"))
+    for eid in ('E69', 'E70'):
+        entry = BY_ID[eid]
+        response = client.post('/api/admin/data-store/query', headers=headers,
+            json=query_body(entry, {'representation': 'r', 'subject': 's', 'object_key': 'k'},
+                            frequency=store_router._frequency(entry)))
+        assert response.status_code == 503
+        assert response.json()['detail']['code'] == 'DATA_STORE_REBUILDING'
+
+
+def test_zero_files_require_a_completed_empty_source_scan(api):
+    client, store = api
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    reset_complete(store)
+    entry = BY_ID['E05']
+    store.register(entry.spec)
+    body = query_body(entry, {'representation': 'r', 'subject': 's', 'object_key': 'k'}, frequency='object')
+    assert client.post('/api/admin/data-store/query', headers=headers, json=body).status_code == 409
+    with store.catalog.engine.begin() as connection:
+        connection.execute(text('DELETE FROM tonghuashun_observations WHERE dataset=:d'), {'d': entry.native})
+    result = run_entry(store, entry, NativeSources(store.catalog.engine))
+    assert result['complete'] and result['qualified'] and result['source_rows'] == 0
+    response = client.post('/api/admin/data-store/query', headers=headers, json=body)
+    assert response.status_code == 200, response.text
+    assert response.json()['status'] == 'empty' and response.json()['rows'] == []
+
+
+def test_current_admission_fences_concurrent_destructive_phase_change(api):
+    from concurrent.futures import ThreadPoolExecutor
+    from sqlalchemy.exc import OperationalError
+    from app.data_store.availability import require_operable
+    _, store = api
+    reset_complete(store)
+    def change_phase():
+        with store.catalog.engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout='100ms'"))
+            connection.execute(text("UPDATE data_store_legacy_maintenance SET phase='resetting'"))
+    with Session(store.catalog.engine) as session, ThreadPoolExecutor(max_workers=1) as pool:
+        assert require_operable(session).operable
+        with pytest.raises(OperationalError):
+            pool.submit(change_phase).result(timeout=3)
 
 
 def test_empty_current_scope_reports_schema_and_does_not_hide_issues(api):
@@ -169,6 +255,14 @@ def test_empty_current_scope_reports_schema_and_does_not_hide_issues(api):
     entry = BY_ID["E07"]
     store.register(entry.spec)
     body = query_body(entry, {"representation": "r", "subject": "s", "object_key": "k"})
+
+    # Registration is not a source scan. An unbuilt scope must not impersonate
+    # an authoritative empty local domain, even on a fresh installation.
+    unbuilt = client.post("/api/admin/data-store/query", headers=headers, json=body)
+    assert unbuilt.status_code == 409
+    assert unbuilt.json()['detail']['reason'] == 'FULL_RANGE_UNPROVEN'
+    from tests.test_data_store_local_pipeline import Inputs
+    run_entry(store, entry, Inputs())
 
     empty = client.post("/api/admin/data-store/query", headers=headers, json=body)
     assert empty.status_code == 200
@@ -186,9 +280,7 @@ def test_empty_current_scope_reports_schema_and_does_not_hide_issues(api):
     assert blocked.json()["detail"]["code"] == "DATA_RESTRICTED"
     partial = client.post("/api/admin/data-store/query", headers=headers,
                           json={**body, "allow_partial": True})
-    assert partial.status_code == 200
-    assert partial.json()["status"] == "restricted"
-    assert partial.json()["unresolved_issues"] == 1
+    assert partial.status_code == 409
 
 
 def test_current_preview_and_generation_change_rejects_continuation(api):
