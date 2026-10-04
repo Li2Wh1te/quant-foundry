@@ -21,3 +21,8 @@ __pycache__/
 
 # Immutable runtime evidence is local deployment data, never source code.
 /data/foundation-runtime-archives/
+
+# Generated experiments and test output stay outside the maintained code.
+/ops/lf01/evidence/
+/ops/lf01/*-tests.txt
+/ops/lf01/ar03-growth.json
