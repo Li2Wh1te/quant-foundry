@@ -103,6 +103,11 @@ def input_identity(entry,sources,options,*,mode=None):
         # A changed confirmation rule must reacquire actual local input. An old
         # charged spool contains normalized failures and cannot borrow this fix.
         identity.append('native-nav-direct-fyear@1')
+    if entry.id == 'E40':
+        # A seal acquired before native catalog membership proof existed must
+        # not borrow a later complete directory to resolve its old reduction.
+        # Retain the original seal under the ordinary SOURCE_CONFLICT guard.
+        identity.append('native-catalog-membership@1')
     return digest(identity)
 
 
@@ -250,6 +255,9 @@ def _partition_issues(store,entry,partition,spool):
                     winner=spool.db.execute('SELECT * FROM objects WHERE k=?',(entry.spec.key_bytes(tuple(prefix)),)).fetchone()
                     fixed=bool(winner and winner['validated'] and winner['state']!='invalid' and
                                winner['g']==target.get('group') and winner['n']>=int(target['order']))
+                    if old['reason'] == 'SOURCE_ORDER_UNCOMPARABLE':
+                        fixed |= spool.membership_resolved(entry.spec.key_bytes(tuple(prefix)),
+                                                           target.get('group'), int(target['order']), winner)
                 elif len(prefix)==2:
                     winner=spool.db.execute('SELECT * FROM scopes WHERE r=? AND s=?',tuple(prefix)).fetchone()
                     fixed=bool(winner and winner['g']==target.get('group') and winner['n']>=int(target['order']))
@@ -420,7 +428,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                     # A failed/incomplete scan provides no deletion evidence.
                     # It is safe to restart acquisition because none of it was
                     # published. A sealed scan instead resumes without IO.
-                    for table in ('objects','problems','scopes','partitions','progress'):
+                    for table in ('objects','problems','scopes','membership_proofs','partitions','progress'):
                         spool.db.execute('DELETE FROM '+table)
                     input_hash=hashlib.sha256()
                     invalid_snapshot_scopes=set()
@@ -574,6 +582,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                         # partitions leave no duplicate per-row success log.
                         spool.db.execute('DELETE FROM objects WHERE p=?',(partition,))
                         spool.db.execute('DELETE FROM problems WHERE p=?',(partition,))
+                        spool.db.execute('DELETE FROM membership_proofs WHERE k NOT IN (SELECT k FROM objects)')
                         spool.db.commit()
                         if full_scan:
                             summary['full_coverage'].update(after=partition,remaining=spool.db.execute(

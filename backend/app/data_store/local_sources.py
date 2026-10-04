@@ -496,6 +496,35 @@ class NativeSources:
                                    'FROM tonghuashun_observations t WHERE id=:id'),
                               {'id':UUID(identity),'n':self.limits.payload_bytes}).scalar_one_or_none()
             return _json(value, self.limits.payload_bytes) if value is not None else None
+        memberships = None
+        if entry.native == 'tickers':
+            from .catalog_membership import CatalogMemberships
+            # Read the native heads in the SAME repeatable-read transaction as
+            # the complete pass. Tied heads remain tied; UUID iteration order
+            # cannot manufacture an exclusive classification. No failed state
+            # is converted into a successful empty directory.
+            where = ('WHERE t.dataset=:d AND NOT EXISTS (SELECT 1 FROM '
+                     'tonghuashun_observations later WHERE later.dataset=t.dataset '
+                     'AND later.subject=t.subject AND later.variant=t.variant '
+                     'AND later.observed_at>t.observed_at)')
+            def heads():
+                for row in self._rows(c, 'tonghuashun_observations', where, {'d': entry.native},
+                                      'ORDER BY t.subject,t.variant,t.observed_at,t.id LIMIT 65'):
+                    try:
+                        content, _, _ = materialize_observation(row, lookup, self.limits)
+                        requests = _requests(row, self.limits)
+                        token = digest([_scope(row), row['content_hash'], row['observed_at'], requests])
+                        raw = LocalInput('tonghuashun', entry.native, row['subject'], row['variant'],
+                                         row['observed_at'], content, token)
+                    except (NativeInputError, ValueError, TypeError, KeyError, RecursionError):
+                        # Keep an unusable latest head in its scope so an
+                        # equal-time sibling cannot provide negative proof.
+                        raw = LocalInput('tonghuashun', entry.native, row['subject'], row['variant'],
+                                         row['observed_at'], {}, digest([row['id'], row['content_hash']]),
+                                         failure='SOURCE_SCHEMA_INVALID')
+                        requests = []
+                    yield raw, requests
+            memberships = CatalogMemberships(heads())
         tracker = EffectiveBasis()
         order = 'ORDER BY t.subject, t.variant, t.observed_at, t.id'
         # Equal timestamp conflicts are retained for the merger. The UUID is only
@@ -510,7 +539,7 @@ class NativeSources:
                 basis, uncertain = tracker.apply(row,content,basis,field,_requests(row,self.limits),native=True)
                 value = LocalInput('tonghuashun',entry.native,row['subject'],row['variant'],
                                    row['observed_at'], content, token, row_basis=basis, basis_field=field,
-                                   unconfirmed_keys=uncertain)
+                                   unconfirmed_keys=uncertain, catalog_memberships=memberships)
             except (NativeInputError, ValueError, TypeError, KeyError, RecursionError) as exc:
                 code = exc.code if isinstance(exc,NativeInputError) else 'SOURCE_SCHEMA_INVALID'
                 # Scope/time come from typed native columns, not the broken payload.

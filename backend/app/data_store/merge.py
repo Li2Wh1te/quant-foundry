@@ -99,6 +99,7 @@ class MergeSpool:
         self.snapshot_representation = None
         self.snapshot_scope = None
         self.cycle = None
+        self.catalog_memberships = None
         self.parts=set(); self.discarded=False; self.offered=0; self.old_invalid=0
         path=space.spill/'lfd02-merge.sqlite'
         # Continuations are reused after a restart. Reject links or writable
@@ -137,6 +138,8 @@ class MergeSpool:
           CREATE INDEX IF NOT EXISTS problems_partition ON problems(p,k);
           CREATE TABLE IF NOT EXISTS scopes(r TEXT NOT NULL,s TEXT NOT NULL,g TEXT NOT NULL,n INTEGER NOT NULL,t TEXT NOT NULL,
             PRIMARY KEY(r,s)) WITHOUT ROWID;
+          CREATE TABLE IF NOT EXISTS membership_proofs(k BLOB NOT NULL,g TEXT NOT NULL,body TEXT NOT NULL,
+            PRIMARY KEY(k,g)) WITHOUT ROWID;
         ''')
         self.db.set_progress_handler(self._progress,10000)
         self._interrupt=None
@@ -193,6 +196,8 @@ class MergeSpool:
         partition=self.spec.partitioner((*unit.key,'root'))
         if not self._select(partition): return
         self.offered+=1
+        if self.spec.semantics.get('entry_id') == 'E40' and unit.catalog_memberships is not None:
+            self.catalog_memberships = unit.catalog_memberships
         old=self.db.execute('SELECT * FROM objects WHERE k=?',(k,)).fetchone()
         if unit.failure:
             if not current: self.note_problem(unit,partition)
@@ -215,15 +220,30 @@ class MergeSpool:
                 self.db.execute('UPDATE objects SET n=?,t=? WHERE k=?', (unit.order,unit.token,k))
                 return
         if old and old['g']!=unit.group:
-            self.note_problem(replace(unit,failure='SOURCE_ORDER_UNCOMPARABLE'),partition)
-            return
-        if old and old['n']>unit.order:
+            proof = None
+            if self.catalog_memberships is not None and not unit.failure and old['state'] == 'valid':
+                proof = self.catalog_memberships.relation(unit.key, (old['g'], old['n'], old['t']),
+                                                          (unit.group, unit.order, unit.token))
+            if proof is not None:
+                # Only conflicting directory members get an execution-local
+                # proof in the already charged spool. It disappears with this
+                # seal, is bounded by scratch quota, and is never a success log.
+                self.db.execute('INSERT OR REPLACE INTO membership_proofs VALUES (?,?,?)',
+                                (k, proof['former']['group'], native_json(proof)))
+                if proof['winner']['group'] == old['g']:
+                    return
+            elif current and self.membership_resolved(k, unit.group, unit.order, old):
+                return
+            else:
+                self.note_problem(replace(unit,failure='SOURCE_ORDER_UNCOMPARABLE'),partition)
+                return
+        if old and old['g']==unit.group and old['n']>unit.order:
             self.old_invalid+=bool(unit.failure)
             return
         state='invalid' if unit.failure else 'withdrawn' if unit.withdrawn else 'valid'
         rows=unit.rows
         hashed=value_hash(rows) if state=='valid' else digest(state)
-        if old and old['n']==unit.order:
+        if old and old['g']==unit.group and old['n']==unit.order:
             if old['t']==unit.token:
                 if current:
                     # A fresh successful rule re-evaluation of this very input
@@ -309,4 +329,15 @@ class MergeSpool:
             # error. A new, different input fixes only this complete object.
             resolved=bool(winner and winner['g']==r['g'] and winner['state']!='invalid' and
                           winner['n']>=r['n'] and winner['validated'])
+            if r['reason'] == 'SOURCE_ORDER_UNCOMPARABLE':
+                resolved |= self.membership_resolved(r['k'], r['g'], r['n'], winner)
             yield dict(r),blocking,resolved
+
+    def membership_resolved(self, key, group, order, winner):
+        from .catalog_membership import proof_covers
+        saved = self.db.execute('SELECT body FROM membership_proofs WHERE k=? AND g=?',
+                                (key, group)).fetchone()
+        if saved is None:
+            return False
+        return proof_covers(loads(saved['body']), (winner['r'], winner['s'], winner['o']) if winner else (),
+                            group, order, winner)

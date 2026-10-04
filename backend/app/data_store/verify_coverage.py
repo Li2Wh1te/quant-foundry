@@ -201,7 +201,15 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             old=db.execute('SELECT * FROM expected WHERE k=?',(key,)).fetchone()
                             if old:
                                 if old['g']!=unit.group:
-                                    state='invalid';h=digest(state)
+                                    proof = (unit.catalog_memberships.relation(unit.key,
+                                             (old['g'], old['n'], old['t']),
+                                             (unit.group, unit.order, unit.token))
+                                             if unit.catalog_memberships is not None and
+                                             state == 'valid' and old['state'] == 'valid' else None)
+                                    if proof is not None and proof['winner']['group'] == old['g']:
+                                        continue
+                                    if proof is None:
+                                        state='invalid';h=digest(state)
                                 elif old['n']>unit.order:continue
                                 elif old['n']==unit.order:
                                     if old['h']!=h:state='invalid';h=digest(state)

@@ -131,7 +131,7 @@ def _unit(entry, source, key, body, *, subject=None, rawkey=None, failure=None, 
             raise NativeInputError('SOURCE_BUDGET_EXCEEDED','当前字段限制超过有界说明预算。')
         rows=tuple({**r,'quality_json':encoded if r['member_key']=='root' else None} for r in rows)
     return Unit(subject or _subject(entry,source),source.representation_key,key,source.group,order,token,
-                rows,True,failure,source.limitations)
+                rows,True,failure,source.limitations,catalog_memberships=source.catalog_memberships)
 
 
 def _failure_key(source, rawkey, rawfield):

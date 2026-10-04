@@ -8,10 +8,13 @@ from decimal import Decimal
 import hashlib
 import json
 import re
-from typing import Mapping
+from typing import Mapping, TYPE_CHECKING
 from uuid import UUID
 
 from .canonical import NativeInputError
+
+if TYPE_CHECKING:
+    from ..catalog_membership import CatalogMemberships
 
 # The encoder holds only immutable formatting options, never a source payload.
 # Reusing it avoids constructing a JSONEncoder for every scalar/key while
@@ -122,6 +125,9 @@ class LocalInput:
     # archive-delta removal is NOT such proof. Keys use the declared business codec.
     withdrawals: tuple[str, ...] = ()
     unconfirmed_keys: tuple[str, ...] = ()
+    # A bounded native directory-head context is shared ephemerally by this
+    # scan's inputs. It is neither business content nor a persisted source row.
+    catalog_memberships: CatalogMemberships | None = field(default=None, compare=False, repr=False)
 
     @cached_property
     def order_ns(self) -> int:
@@ -164,6 +170,7 @@ class Unit:
     failure: str | None = None
     limitations: tuple[str, ...] = ()
     withdrawn: bool = False
+    catalog_memberships: CatalogMemberships | None = field(default=None, compare=False, repr=False)
 
     @property
     def key(self):
