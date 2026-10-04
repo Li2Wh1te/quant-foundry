@@ -225,6 +225,36 @@ def test_F08_finish_fences_concurrent_status_writes(ready,monkeypatch):
     assert judgment(ready,BY_ID['E68'])['reason']=='FULL_RANGE_UNPROVEN'
 
 
+def test_finish_drains_current_admission_before_locking_its_checkpoint_tables(ready):
+    from concurrent.futures import TimeoutError
+    from sqlalchemy.orm import Session
+    from app.data_store.availability import require_operable
+    empty_sources(ready)
+    run_entry(ready, BY_ID['E68'], NativeSources(ready.catalog.engine))
+    prepare_finish(ready)
+    with ready.catalog.engine.begin() as connection:
+        connection.exec_driver_sql(DDL[3])
+        connection.execute(text("""UPDATE data_store_legacy_maintenance SET
+            plan_hash=:hash, completed_json='["hooks","derived","originals","functions","files"]',
+            files_started=true"""), {'hash': 'a' * 64})
+    with Session(ready.catalog.engine) as session, ThreadPoolExecutor(max_workers=1) as pool:
+        require_operable(session)
+        pending_finish = pool.submit(finish, ready)
+        with pytest.raises(TimeoutError):
+            pending_finish.result(timeout=0.2)
+        # An admitted updater must still be able to persist its checkpoint
+        # while finish waits. Locking status first would deadlock this write.
+        with ready.catalog.engine.begin() as connection:
+            connection.execute(text("SET LOCAL lock_timeout='500ms'"))
+            connection.execute(text("UPDATE data_store_entry_status SET updated_at=clock_timestamp() WHERE entry_id='E68'"))
+        session.rollback()
+        with pytest.raises(ResetRefused):
+            pending_finish.result(timeout=5)
+    # Neither safe admission nor finish waiting bypasses the other 59 domains.
+    with ready.catalog.transaction() as connection:
+        assert connection.execute(text('SELECT phase FROM data_store_legacy_maintenance')).scalar_one() == 'reset_done'
+
+
 def test_F07_changed_input_selection_rejected_and_old_proof_not_borrowed(ready):
     entry=BY_ID['E68']
     class Selection(NativeSources):
