@@ -140,12 +140,18 @@ def main(argv=None):
     for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,cancel)
     output={'command':args.command,'entries':[],'complete':True,'supplier_network_used':False}
     try:
+        # Cancellation validates the original seal directly and admits no
+        # acquisition. Its two fences must reach cancel_sealed unchanged,
+        # without activating the update-only PipelineOptions fence contract.
+        input_admission = args.resume_sealed_only or args.admit_active_only
         options=PipelineOptions(mode=args.command if args.command in ('rebuild','update','retry') else 'update',
             partitions=tuple(args.partition),maximum_passes=args.max_passes,pass_seconds=args.pass_seconds,
             allow_incompatible_rebuild=args.allow_incompatible_rebuild,
             maximum_claim_batches=args.max_claim_batches,maximum_partition_passes=args.max_partition_passes,
-            resume_sealed_only=args.resume_sealed_only,expected_input_identity=args.expect_input_identity,
-            expected_source_selection=args.expect_source_selection,admit_active_only=args.admit_active_only)
+            resume_sealed_only=args.resume_sealed_only,
+            expected_input_identity=args.expect_input_identity if input_admission else None,
+            expected_source_selection=args.expect_source_selection if input_admission else None,
+            admit_active_only=args.admit_active_only)
         engine=get_engine()
         if args.command=='plan-active':
             from .active_input import planning_store

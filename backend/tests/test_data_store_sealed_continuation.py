@@ -284,3 +284,50 @@ def test_cli_runs_the_fenced_existing_batch(ready,monkeypatch,tmp_path,capsys):
     assert result['entries'][0]['sealed_continuation']['complete']
     assert not result['complete'] and code==2
     assert result['supplier_network_used'] is False
+
+
+def test_cli_cancels_only_the_exact_obsolete_seal_without_acknowledging_input(
+        ready, monkeypatch, tmp_path):
+    """Exercise real CLI routing, PostgreSQL fences and charged Parquet scratch.
+
+    Direct cancellation tests cannot detect an unrelated update-options guard
+    rejecting valid cancellation before its original fences reach the handler.
+    A wrong identity must still preserve the only seal and unconsumed input.
+    """
+    from app.data_store.__main__ import main
+    from app.db import session
+
+    progress = seal(ready, invalid=True)
+    path = pending_path(ready)
+    before_bytes = path.read_bytes()
+    before_ranges = ranges(ready)
+    with ready.catalog.transaction() as connection:
+        before_files = connection.execute(text('SELECT * FROM data_store_files')).mappings().all()
+        before_issues = connection.execute(text('SELECT * FROM data_store_issues')).mappings().all()
+    monkeypatch.setattr(session, 'get_engine', lambda: ready.catalog.engine)
+    monkeypatch.setenv('QF_CURSOR_SIGNING_KEY', KEY.decode())
+
+    def invoke(identity, output):
+        return main(['cancel-sealed', '--entry', 'E44', '--root', str(ready.files.root),
+            '--expect-input-identity', identity,
+            '--expect-source-selection', progress['source_selection'], '--output', str(output)])
+
+    rejected = tmp_path / 'cancel-rejected.json'
+    assert invoke('0' * 64, rejected) == 2
+    assert json.loads(rejected.read_text())['reason'] == 'SOURCE_CONFLICT'
+    assert path.read_bytes() == before_bytes and ranges(ready) == before_ranges
+
+    output = tmp_path / 'cancel-result.json'
+    assert invoke(progress['identity'], output) == 0
+    result = json.loads(output.read_text())
+    assert result['complete'] and result['supplier_network_used'] is False
+    assert result['entries'][0]['scratch_released']
+    assert result['entries'][0]['input_acknowledged'] is False
+    assert not path.exists() and not ready.budget.pending_keys()
+    assert ranges(ready) == before_ranges
+    with ready.catalog.transaction() as connection:
+        assert connection.execute(text('SELECT * FROM data_store_files')).mappings().all() == before_files
+        assert connection.execute(text('SELECT * FROM data_store_issues')).mappings().all() == before_issues
+    status = read_entry_status(ready, 'E44')
+    assert status['cancelled_seal']['identity'] == progress['identity']
+    assert not status['complete'] and not status['qualified'] and status['coverage_pending']
