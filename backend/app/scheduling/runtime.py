@@ -215,7 +215,11 @@ class SchedulerRuntime:
                 )
                 if queued_local:
                     try:
-                        require_operable(session)
+                        # A PostgreSQL lock timeout aborts its transaction. Keep
+                        # this optional local-update probe inside a savepoint so
+                        # refusing it cannot poison healthy shared queue claims.
+                        with session.begin_nested():
+                            require_operable(session)
                     except DataStoreError:
                         allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
                 run_ids = repository.claim_queued_runs(slots, task_types=allowed_types)

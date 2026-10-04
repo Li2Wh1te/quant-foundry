@@ -112,3 +112,64 @@ def test_paused_task_survives_http_creation_and_restart_without_early_enqueue(da
             task_id, trigger_type=TriggerType.MANUAL, max_queued_runs=10)
         assert queued.status == 'queued'
         session.rollback()
+
+
+def test_dispatch_keeps_healthy_queue_claims_after_real_maintenance_lock_timeout(database, monkeypatch):
+    from concurrent.futures import Future
+    from app.data_store.availability import require_operable
+    from app.data_store.errors import DataStoreError
+    from app.scheduling.schemas import TaskCreate
+    from tests.test_scheduling import make_test_registry, TEST_TASK_TYPE
+
+    engine, _ = database
+    ScheduledTask.__table__.create(engine)
+    TaskRun.__table__.create(engine)
+    with engine.begin() as connection:
+        connection.execute(text("""CREATE TABLE data_store_legacy_maintenance (
+            singleton integer PRIMARY KEY, phase text, plan_hash text,
+            completed_json jsonb DEFAULT '[]', files_started boolean DEFAULT false)"""))
+        connection.execute(text("""INSERT INTO data_store_legacy_maintenance VALUES
+            (1,'reset_done',:hash,'["hooks","derived","originals","functions","files"]',true)"""),
+            {'hash': 'a' * 64})
+    registry = make_test_registry()
+    register_tasks(registry)
+    with Session(engine) as session:
+        service = SchedulerService(session, registry)
+        runs = {}
+        for task_type in (TASK_KEY, TEST_TASK_TYPE):
+            task = service.create_task(TaskCreate.model_validate({
+                'name': task_type, 'task_type': task_type, 'parameters': {},
+                'schedule': {'type': 'cron', 'expression': '0 * * * *'},
+            }))
+            runs[task_type] = service.enqueue_run(task.id,
+                trigger_type=TriggerType.MANUAL, max_queued_runs=10).id
+        session.commit()
+    monkeypatch.setattr('app.scheduling.runtime.get_engine', lambda: engine)
+    errors = []
+    def gate(session):
+        try:
+            return require_operable(session)
+        except DataStoreError as error:
+            errors.append(error.code)
+            raise
+    monkeypatch.setattr('app.scheduling.runtime.require_operable', gate)
+    settings = Settings(api_token=TOKEN, cursor_signing_key='b' * 64,
+        database_password='isolated-test', environment='test', _env_file=None)
+    runtime = SchedulerRuntime(settings, registry=registry)
+    submitted = []
+    def submit(callback, run_id):
+        # Observe dispatch without starting either synthetic handler or a writer.
+        submitted.append(run_id)
+        return Future()
+    monkeypatch.setattr(runtime.executor, 'submit', submit)
+    try:
+        with engine.begin() as maintenance:
+            maintenance.execute(text('LOCK TABLE data_store_legacy_maintenance IN EXCLUSIVE MODE'))
+            runtime.dispatch_queued_runs()
+            assert errors == ['LOCK_TIMEOUT']
+            assert submitted == [runs[TEST_TASK_TYPE]]
+            with Session(engine) as session:
+                assert session.get(TaskRun, runs[TASK_KEY]).status == 'queued'
+                assert session.get(TaskRun, runs[TEST_TASK_TYPE]).status == 'running'
+    finally:
+        runtime.stop()
