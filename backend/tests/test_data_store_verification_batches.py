@@ -14,7 +14,8 @@ def index():
     db = sqlite3.connect(':memory:')
     db.row_factory = sqlite3.Row
     db.execute('CREATE TABLE expected(k BLOB PRIMARY KEY,r TEXT,s TEXT,g TEXT,n INTEGER,'
-               'h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0)')
+               't TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0,'
+               'conflicted INTEGER DEFAULT 0)')
     yield db
     db.close()
 
@@ -25,15 +26,18 @@ def current(**changes):
                 **changes)
 
 
-def expected(db, key, rows, *, state='valid', stable=True, order=10):
-    db.execute('INSERT INTO expected(k,r,s,g,n,h,state,stable_order) VALUES (?,?,?,?,?,?,?,?)',
-               (key, 'source', 'subject', 'group', order, value_hash(rows), state, int(stable)))
+def expected(db, key, rows, *, state='valid', stable=True, order=10, token='token'):
+    db.execute('INSERT INTO expected(k,r,s,g,n,t,h,state,stable_order) VALUES (?,?,?,?,?,?,?,?,?)',
+               (key, 'source', 'subject', 'group', order, token, value_hash(rows), state, int(stable)))
 
 
-def comparison(db, *, disposed=lambda row: False, check=lambda **kwargs: None):
+def comparison(db, *, disposed=lambda row: False, conflict_disposed=lambda row: False,
+               check=lambda **kwargs: None):
     counts = dict(current_objects=0, unexpected_objects=0, mismatched_objects=0,
                   disposed_failures=0)
-    return _CurrentComparison(db, counts, disposed, check), counts
+    # These fixtures contain no competing category claims. The separate conflict
+    # callback refuses disposition by default; it never grants a false success.
+    return _CurrentComparison(db, counts, disposed, conflict_disposed, check), counts
 
 
 def test_batch_keeps_valid_mismatch_unexpected_and_disposed_failure_distinct(index):
@@ -129,7 +133,7 @@ def test_nested_ladder_matches_key_sorted_parquet_and_detects_value_change(index
     boards['four_board'] = [dict(thscode='000002.SZ', board_num=4)]
     unit, = normalize(entry, source)
     assert not unit.failure
-    expected(index, b'ladder', unit.rows, order=unit.order)
+    expected(index, b'ladder', unit.rows, order=unit.order, token=unit.token)
     index.execute('UPDATE expected SET g=? WHERE k=?', (unit.group, b'ladder'))
 
     # The real layout visits declared child fields, whereas the formal file
