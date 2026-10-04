@@ -110,8 +110,19 @@ def due(spec, previous, parameters, now):
 
 def collect(dataset: str, parameters: CollectionParameters, client, engine,
             *, now: datetime | None = None) -> dict:
-    from app.data_ingestion.tonghuashun.control import control
+    from app.data_ingestion.tonghuashun.control import control, default_repair, execution_deadline
     monitor = control()
+    repair = default_repair.get()
+    if repair is not None:
+        repair.validate()
+        limit = execution_deadline.get()
+        if (dataset != repair.dataset or parameters.subjects != [repair.subject]
+                or parameters.asset_types != [repair.asset_type] or parameters.start_date is not None
+                or parameters.end_date is not None or parameters.mode != 'incremental'
+                or parameters.batch_size != 1 or parameters.max_requests > repair.request_limit
+                or limit is None or limit.max_http_attempts is None
+                or limit.max_http_attempts > repair.request_limit):
+            raise CollectionError('原默认修复需要正式单目标监督预算及一致参数。')
     spec = DATASETS[dataset]
     if spec.kind.startswith("m3_"):
         from app.data_ingestion.tonghuashun.research_service import collect_research
@@ -180,7 +191,13 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         monitor.emit(batch_total=min(len(eligible), parameters.batch_size), coverage_total=len(subjects),
                      coverage_pending=len(eligible), skipped=summary["skipped"])
     for subject in eligible[:parameters.batch_size]:
+        repair_native_keys = None
         with Session(engine) as session:
+            if repair is not None:
+                # Admission releases its source row transaction before network
+                # I/O. Recheck the exact head and genuine period here; later
+                # races are still handled by ordinary publication CAS.
+                _, repair_native_keys = repair.baseline(session, with_keys=True)
             previous = CollectionRepository(session).read(dataset, subject, variant)
         if not due(spec, previous, parameters, now):
             summary["skipped"] += 1
@@ -188,7 +205,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         if monitor:
             monitor.begin(dataset, subject, variant, previous.revision, parameters,
                           cache=spec.kind in ("reports", "bars", "financials", "indicators"))
-        acquisition = Acquisition(client)
+        acquisition = Acquisition(client, repair_native_keys=repair_native_keys)
         try:
             data = acquisition.fetch(spec, subject, parameters, previous.data, now)
             if acquisition.failures:
@@ -206,13 +223,19 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                 check_execution()
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
+            if repair is not None:
+                # This identifies our committed version, not whichever head a
+                # competing collector happens to leave visible afterwards.
+                summary['repair_publication_id'] = result['version_id']
+                summary['repair_retained_failures'] = len(data.get('failed_requests', []))
             result["fetched_count"] = acquisition.fetched_count
             for field in ("received", "changed", "unchanged", "removed"):
                 summary[field] += result[field]
             if monitor:
                 monitor.completed(summary)
-            log_result(spec, subject, parameters, data, result, not acquisition.failures,
-                       "partial_reports" if acquisition.failures else None)
+            incomplete = bool(acquisition.failures or (repair is not None and data.get('failed_requests')))
+            log_result(spec, subject, parameters, data, result, not incomplete,
+                       "partial_reports" if incomplete else None)
         except CollectionConflict:
             # Preserve the newer publication and recheck this scope next run.
             summary["skipped"] += 1
@@ -248,6 +271,14 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         f"已跳过 {summary['skipped']} 个，读取版本记录 {summary['received']} 条，变更 {summary['changed']} 条，"
         f"未变更 {summary['unchanged']} 条，失败 0 个，待后续采集 {summary['pending']} 个；"
         + ("本次成功标的完成标记已推进。" if summary["succeeded"] else "本次未推进完成标记；待续采范围将在后续运行重新检查。"))
+    if repair is not None:
+        first = repair.day or repair.start_date or repair.end_date
+        last = repair.day or repair.end_date
+        summary['message'] = (f"{spec.name}原默认目标修复：标的 {repair.subject}，日期 {first} 至 {last}，"
+            f"已确认目标 {summary['succeeded']} 个，失败 {summary['failed']} 个，变更 {summary['changed']} 条，"
+            f"保留未尝试失败 {summary.get('repair_retained_failures', 0)} 个；"
+            + ("已推进源版本，未推进全量核对完成标记或底座检查点。" if summary['succeeded'] else
+               "未推进源版本、全量完成标记或底座检查点。"))
     return summary
 
 
@@ -304,6 +335,15 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
     details = {}
+    from app.data_ingestion.tonghuashun.control import default_repair
+    repair = default_repair.get()
+    if repair is not None:
+        # The operator sees the selected repair period, not an inherited full
+        # merged range. This does not add unsupported vendor date parameters.
+        start = (repair.day or repair.start_date or repair.end_date).isoformat()
+        end = (repair.day or repair.end_date).isoformat()
+        details['default_repair_target'] = repair.as_dict()['selector']
+        details['retained_failures'] = len((data or {}).get('failed_requests', []))
     exc_info = error_message is not None
     if not succeeded and spec.key in ("etf_daily", "index_daily"):
         # Source errors use fixed transport text or locally authored validation

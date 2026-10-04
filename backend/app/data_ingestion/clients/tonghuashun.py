@@ -150,24 +150,34 @@ class TonghuashunClient:
 
         with Session(get_engine()) as session:
             values, secrets = runtime_credentials(session, settings, "tonghuashun")
+        from app.data_ingestion.tonghuashun.control import default_repair
         return cls(values["api_url"], secrets["api_key"],
-                   interval_ms=settings.ingestion_request_interval_ms)
+                   interval_ms=settings.ingestion_request_interval_ms,
+                   max_attempts=1 if default_repair.get() is not None else 3)
 
     def request(self, interface_key: str, params: Mapping[str, Any] | None = None) -> TonghuashunResponse:
         interface = INTERFACES.get(interface_key)
         if interface is None:
             raise SourceError("同花顺接口尚未登记，无法发起请求。")
+        from app.data_ingestion.tonghuashun.control import default_repair
+        # A supervised default repair has zero retries, even if its caller
+        # supplied a normally configured client. The formal HTTP counter also
+        # rejects an exhausted operation allowance before sending anything.
+        repair = default_repair.get()
+        if repair is not None and (interface_key, dict(params or {})) not in repair.allowed_requests():
+            raise SourceError('原默认修复不能发送未批准的接口或参数。')
+        max_attempts = 1 if repair is not None else self.max_attempts
         deadline = time.monotonic() + self.deadline_seconds
-        for attempt in range(self.max_attempts):
+        for attempt in range(max_attempts):
             # A bounded collector may be cancelled between transport retries.
             # This does not alter the client defaults, response validation or
             # three-attempt logical deadline for ordinary scheduler work.
             from app.data_ingestion.tonghuashun.control import check_execution
             check_execution()
             _gate.enter(deadline, self.interval_ms / 1000)
-            check_execution()
             failure = None
             try:
+                check_execution()
                 return self._get(interface.path, dict(params or {}), deadline)
             except TonghuashunError as exc:
                 failure = exc
@@ -176,7 +186,7 @@ class TonghuashunClient:
                         time.monotonic() + max(1, exc.retry_after, 2 ** attempt))
             finally:
                 _gate.lock.release()
-            if failure.kind not in RETRYABLE or attempt + 1 >= self.max_attempts:
+            if failure.kind not in RETRYABLE or attempt + 1 >= max_attempts:
                 raise failure from None
             delay = max(2 ** attempt, failure.retry_after)
             if time.monotonic() + delay >= deadline:
