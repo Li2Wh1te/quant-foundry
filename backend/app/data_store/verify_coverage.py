@@ -153,7 +153,7 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                 db.execute('PRAGMA journal_mode=OFF');db.execute('PRAGMA synchronous=OFF')
                 db.execute('PRAGMA page_size=8192');db.execute('PRAGMA cache_size=-8192')
                 db.execute('PRAGMA max_page_count='+str(space.quota//8192))
-                db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0,conflicted INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,t TEXT,reason TEXT,PRIMARY KEY(k,g));CREATE TABLE conflicts(k BLOB PRIMARY KEY,g TEXT,n INTEGER,t TEXT,proof TEXT);')
+                db.executescript('CREATE TABLE queued(s TEXT,v TEXT,r TEXT,n INTEGER,PRIMARY KEY(s,v,r));CREATE TABLE expected(k BLOB PRIMARY KEY,p TEXT,r TEXT,s TEXT,o TEXT,g TEXT,n INTEGER,t TEXT,h TEXT,state TEXT,stable_order INTEGER,seen INTEGER DEFAULT 0,conflicted INTEGER DEFAULT 0);CREATE TABLE issues(k BLOB,g TEXT,n INTEGER,t TEXT,reason TEXT,PRIMARY KEY(k,g));CREATE TABLE conflicts(k BLOB,g TEXT,n INTEGER,t TEXT,proof TEXT,PRIMARY KEY(k,g));')
                 resource_due=started;resource_steps=0
                 def check(*,sample=False):
                     nonlocal resource_due,resource_steps
@@ -170,6 +170,16 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                     # phase boundaries retain their unconditional measurements.
                     if not sample or resource_steps>=128 or now>=resource_due:
                         space.check();resource_due=now+.05;resource_steps=0
+                def remember_membership_proof(key,proof):
+                    # One complete two-category proof cannot erase a third
+                    # competing category. Store it only beside the claims it
+                    # actually covers; the final positive-head fence below
+                    # still checks the retained winner's original full basis.
+                    winner,former=proof['winner'],proof['former']
+                    db.execute('UPDATE conflicts SET proof=? WHERE k=? AND '
+                        '(g=? AND n<? OR g=? AND (n<? OR n=? AND t=?))',
+                        (json.dumps(proof),key,former['group'],former['before'],
+                         winner['group'],winner['order'],winner['order'],winner['token']))
                 enter_phase('issues')
                 try:
                     after=''
@@ -221,26 +231,27 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                                              state == 'valid' and old['state'] == 'valid' else None)
                                     if proof is not None and proof['winner']['group'] == old['g']:
                                         if old['conflicted']:
-                                            db.execute('UPDATE conflicts SET proof=? WHERE k=?',(json.dumps(proof),key))
+                                            remember_membership_proof(key,proof)
                                         continue
                                     if proof is None:
                                         if entry.id == 'E40':
-                                            # Match MergeSpool: retain the first
-                                            # original category winner and the
-                                            # current per-object problem. Only
+                                            # Retain the original single current
+                                            # winner, but account for EVERY
+                                            # competing group's own claim. Only
                                             # claims within the SAME competing
                                             # group have an order comparison.
                                             # Another group or a later valid
                                             # input cannot erase the conflict.
-                                            conflict=db.execute('SELECT g,n FROM conflicts WHERE k=?',(key,)).fetchone()
-                                            if conflict is None or conflict['g']!=unit.group or conflict['n']<=unit.order:
+                                            conflict=db.execute('SELECT n FROM conflicts WHERE k=? AND g=?',
+                                                (key,unit.group)).fetchone()
+                                            if conflict is None or conflict['n']<=unit.order:
                                                 db.execute('INSERT OR REPLACE INTO conflicts VALUES (?,?,?,?,NULL)',
                                                     (key,unit.group,unit.order,unit.token))
                                             db.execute('UPDATE expected SET conflicted=1 WHERE k=?',(key,))
                                             continue
                                         state='invalid';h=digest(state)
                                     elif old['conflicted']:
-                                        db.execute('UPDATE conflicts SET proof=? WHERE k=?',(json.dumps(proof),key))
+                                        remember_membership_proof(key,proof)
                                 elif old['n']>unit.order:continue
                                 elif old['n']==unit.order:
                                     if old['h']!=h:state='invalid';h=digest(state)
@@ -272,8 +283,14 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                             pending['cg']==winner['group'] and (pending['cn']<winner['order'] or
                                 pending['cn']==winner['order'] and pending['ct']==winner['token']))
                         if covered:
-                            db.execute('UPDATE expected SET conflicted=0 WHERE k=?',(pending['k'],))
-                            db.execute('DELETE FROM conflicts WHERE k=?',(pending['k'],))
+                            # Only this original group's covered claim is
+                            # removed. A surviving third category still needs
+                            # its own exact issue or complete membership proof.
+                            db.execute('DELETE FROM conflicts WHERE k=? AND g=?',
+                                (pending['k'],pending['cg']))
+                            db.execute('UPDATE expected SET conflicted=0 WHERE k=? '
+                                'AND NOT EXISTS(SELECT 1 FROM conflicts WHERE k=?)',
+                                (pending['k'],pending['k']))
                     db.commit()
                     counts['expected_objects']=db.execute('SELECT count(*) FROM expected').fetchone()[0]
                     with store.catalog.transaction() as c:
@@ -288,15 +305,17 @@ def verify_existing(store,entry,sources,*,seconds=3600,cancelled=None):
                         return db.execute('SELECT 1 FROM issues WHERE k IN (?,?) AND g=? AND n>=? LIMIT 1',
                             (expected['k'],scope,expected['g'],expected['n'])).fetchone() is not None
                     def conflict_disposed(expected):
-                        # An unrelated scope refresh failure cannot stand in for
-                        # this exact competing identity. Equal-order evidence
-                        # must name the actual token; a newer issue is ordered
-                        # only inside that same original competing group.
-                        return db.execute('SELECT 1 FROM conflicts c JOIN issues i '
-                            'ON i.k=c.k AND i.g=c.g WHERE c.k=? '
+                        # Every competing identity must have an actual exact
+                        # object/group disposition. An issue for REIT cannot
+                        # hide an unprocessed ETF assertion of the same key.
+                        # Equal-order evidence must name the actual token; a
+                        # newer issue is ordered only inside its own group.
+                        return bool(db.execute('SELECT EXISTS(SELECT 1 FROM conflicts WHERE k=?) '
+                            'AND NOT EXISTS(SELECT 1 FROM conflicts c WHERE c.k=? '
+                            'AND NOT EXISTS(SELECT 1 FROM issues i WHERE i.k=c.k AND i.g=c.g '
                             "AND i.reason='SOURCE_ORDER_UNCOMPARABLE' "
-                            'AND (i.n>c.n OR i.n=c.n AND i.t=c.t) LIMIT 1',
-                            (expected['k'],)).fetchone() is not None
+                            'AND (i.n>c.n OR i.n=c.n AND i.t=c.t)))',
+                            (expected['k'],expected['k'])).fetchone()[0])
                     comparison=_CurrentComparison(db,counts,failure_disposed,conflict_disposed,check)
                     suffix_fields=entry.spec.key[3:]
                     suffix_types=entry.spec._key_types[3:]

@@ -117,6 +117,103 @@ def test_unprocessed_new_competing_claim_cannot_borrow_an_older_issue(ready):
     assert not ready.budget.pending_keys()
 
 
+@pytest.mark.parametrize('unprocessed_first', [True, False])
+def test_each_competing_group_requires_its_own_actual_disposition(ready, unprocessed_first):
+    old = directory('fund-otc', [UNKNOWN], 1, version=90)[0]
+    unprocessed = directory('fund-etf', [UNKNOWN], 2, version=94)[0]
+    disposed = directory('fund-reits', [UNKNOWN], 3, version=95)[0]
+    # Only OTC and REIT have actually passed through MergeSpool. The ETF
+    # assertion is new native input, so a genuine REIT issue cannot account
+    # for it regardless of the order of the complete verification scan.
+    built = run_entry(ready, ENTRY, Inputs(old, disposed))
+    assert built['complete'] and not built['qualified']
+    before_files = files(ready, ENTRY)
+    before_dataset = ready.catalog.dataset(ENTRY.spec.name)
+    before_issues = ready.catalog.issues(ENTRY.spec.name)
+    assert len(before_issues) == 1
+    assert before_issues[0]['evidence_token'] == disposed.token
+    candidates = (unprocessed, disposed) if unprocessed_first else (disposed, unprocessed)
+
+    verified = verify_existing(ready, ENTRY, Inputs(old, *candidates))
+
+    assert not verified['complete'] and verified['mismatched_objects'] == 1
+    assert verified['disposed_failures'] == 0
+    current = target_rows(ready, old, UNKNOWN)
+    assert len(current) == 1
+    assert (current[0]['basis_group'], int(current[0]['basis_ns']), current[0]['basis_token']) == (
+        old.group, old.order_ns, old.token)
+    assert files(ready, ENTRY) == before_files
+    assert ready.catalog.dataset(ENTRY.spec.name) == before_dataset
+    assert ready.catalog.issues(ENTRY.spec.name) == before_issues
+    assert read_entry_status(ready, ENTRY.id)['coverage_pending']
+    assert not ready.budget.pending_keys()
+    with ready.catalog.transaction() as connection:
+        judgment = check_coverage(connection, ENTRY, read_entry_status(ready, ENTRY.id))
+    assert not judgment['satisfied'] and judgment['reason'] == 'CURRENT_INPUT_PENDING'
+
+
+def test_membership_proof_for_two_groups_does_not_clear_a_third_group(ready):
+    old = directory('fund-otc', [UNKNOWN], 1, version=90)[0]
+    unprocessed = directory('fund-etf', [UNKNOWN], 2, version=94)[0]
+    prior = directory('fund-reits', [UNKNOWN], 3, version=95)[0]
+    positive = directory('fund-reits', [UNKNOWN], 4)
+    negative = directory('fund-otc', ['OTHER.SH'], 5)
+    context = CatalogMemberships([positive, negative])
+    positive_raw = replace(positive[0], catalog_memberships=context)
+    negative_raw = replace(negative[0], catalog_memberships=context)
+    # The actual current row has a complete OTC-to-REIT transition. The same
+    # provider snapshot supplies no ETF directory and therefore no authority
+    # to erase an unrelated competing ETF assertion from the native scan.
+    built = run_entry(ready, ENTRY, Inputs(old, prior, positive_raw, negative_raw))
+    assert built['complete'] and built['qualified']
+    before_files = files(ready, ENTRY)
+    before_dataset = ready.catalog.dataset(ENTRY.spec.name)
+    assert not ready.catalog.issues(ENTRY.spec.name)
+
+    verified = verify_existing(ready, ENTRY,
+        Inputs(old, unprocessed, prior, positive_raw, negative_raw))
+
+    assert not verified['complete'] and verified['mismatched_objects'] == 1
+    assert verified['disposed_failures'] == 0
+    current = target_rows(ready, old, UNKNOWN)
+    assert len(current) == 1 and current[0]['basis_group'] == positive_raw.group
+    assert files(ready, ENTRY) == before_files
+    assert ready.catalog.dataset(ENTRY.spec.name) == before_dataset
+    assert not ready.catalog.issues(ENTRY.spec.name)
+    assert read_entry_status(ready, ENTRY.id)['coverage_pending']
+    assert not ready.budget.pending_keys()
+
+
+def test_complete_memberships_cover_each_of_three_competing_groups(ready):
+    old = directory('fund-otc', [UNKNOWN], 1, version=90)[0]
+    etf = directory('fund-etf', [UNKNOWN], 2, version=94)[0]
+    reit = directory('fund-reits', [UNKNOWN], 3, version=95)[0]
+    positive = directory('fund-reits', [UNKNOWN], 4)
+    negative_otc = directory('fund-otc', ['OTHER.SH'], 5)
+    negative_etf = directory('fund-etf', ['OTHER-ETF.SH'], 6)
+    context = CatalogMemberships([positive, negative_otc, negative_etf])
+    # Each original competing category has its own complete absence at the
+    # same provider snapshot as the real positive REIT head. This is genuine
+    # per-group authority, rather than borrowing another category's issue.
+    inputs = Inputs(old, etf, reit, *[
+        replace(pair[0], catalog_memberships=context)
+        for pair in (positive, negative_otc, negative_etf)])
+    built = run_entry(ready, ENTRY, inputs)
+    assert built['complete'] and built['qualified']
+    assert not ready.catalog.issues(ENTRY.spec.name)
+    before_files = files(ready, ENTRY)
+    before_dataset = ready.catalog.dataset(ENTRY.spec.name)
+    verified = verify_existing(ready, ENTRY, inputs)
+    assert verified['complete'] and verified['disposed_failures'] == 0
+    assert verified['missing_objects'] == verified['mismatched_objects'] == verified['unexpected_objects'] == 0
+    current = target_rows(ready, old, UNKNOWN)
+    assert len(current) == 1 and current[0]['basis_group'] == positive[0].group
+    assert files(ready, ENTRY) == before_files
+    assert ready.catalog.dataset(ENTRY.spec.name) == before_dataset
+    assert not ready.catalog.issues(ENTRY.spec.name)
+    assert not ready.budget.pending_keys()
+
+
 @pytest.mark.parametrize('defect', ['newer_value', 'other_basis_token'])
 def test_an_issue_does_not_hide_a_changed_retained_winner(ready, defect):
     expected = unresolved_inputs()
