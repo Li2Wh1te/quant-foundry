@@ -569,6 +569,13 @@ def test_real_postgresql_paused_task_still_claims_accepted_queue(monkeypatch):
             TaskRun.__table__.create(c)
             DataSourceConfig.__table__.create(c)
         with Session(engine) as s:
+            # Chinese operational messages must retain the existing service
+            # switch fingerprint. An empty config table cannot expose a
+            # mistaken UTF-8/ASCII serialization contract.
+            s.add(DataSourceConfig(key='synthetic-config', initialized=True,
+                enabled=True, values={'label': '合成配置'}, version=1,
+                encrypted_secrets='synthetic-encrypted-placeholder',
+                check_status='success', check_message='合成检查'))
             task = ScheduledTask(name='Synthetic accepted collector', task_type='test.noop',
                 parameters={}, parameter_version=1, schedule={'type':'cron','expression':'*/10 * * * *',
                 'timezone':'Asia/Shanghai'}, state='active', version=1, concurrency_limit=1,
@@ -586,6 +593,11 @@ def test_real_postgresql_paused_task_still_claims_accepted_queue(monkeypatch):
             assert accepted.status == 'running' and accepted.task_version == 1
             assert accepted.parameters == {}
             s.commit()
+            configs = s.execute(text('SELECT row_to_json(t) FROM '
+                '(SELECT * FROM data_source_configs ORDER BY key) t')).scalars().all()
+            from tests.test_r01_service_switch import switcher
+            legacy_config_sha = switcher.digest(configs)
+            assert legacy_config_sha != w.digest(configs)
         # Run the shipped metadata worker against this isolated schema. This
         # checks real SQL, serialization and the read-only transaction boundary.
         monkeypatch.setattr('app.db.session.get_engine', lambda: engine)
@@ -595,7 +607,7 @@ def test_real_postgresql_paused_task_still_claims_accepted_queue(monkeypatch):
         with redirect_stdout(output): exec(compile(w.CONTAINER_CODE, '<window-worker>', 'exec'), {})
         response = json.loads(output.getvalue())
         assert response['ok'] and response['value']['tasks'][0]['state'] == 'paused'
-        assert response['value']['source_configs_sha256'] == w.digest([])
+        assert response['value']['source_configs_sha256'] == legacy_config_sha
     finally:
         engine.dispose()
         with admin.begin() as c: c.execute(text('DROP SCHEMA ' + schema + ' CASCADE'))

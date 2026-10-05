@@ -344,7 +344,11 @@ try:
     saved=rows(run_sql+' WHERE id=ANY(CAST(:ids AS uuid[])) ORDER BY id',{'ids':ids}) if ids else []
     configs=s.execute(text('SELECT row_to_json(t) FROM (SELECT * FROM data_source_configs ORDER BY key LIMIT 65) t')).scalars().all()
     assert len(configs)<=64
-    value={'tasks':tasks,'runs':active,'saved':saved,'source_configs_sha256':digest(configs),'attempt_exists':(root/'attempt1').exists(),'utc':s.scalar(text('SELECT now()'))}
+    # The preserved configuration fingerprint comes from r01_service_switch's
+    # ASCII-escaped JSON contract. Native/task definitions use the adapter's
+    # UTF-8 contract instead; mixing these rejects unchanged Chinese messages.
+    config_sha=hashlib.sha256(json.dumps(configs,sort_keys=True,separators=(',',':'),ensure_ascii=True,allow_nan=False).encode()).hexdigest()
+    value={'tasks':tasks,'runs':active,'saved':saved,'source_configs_sha256':config_sha,'attempt_exists':(root/'attempt1').exists(),'utc':s.scalar(text('SELECT now()'))}
     if request.get('pins'):
      from app.data_ingestion.tonghuashun.bounded import RepairScope
      from app.data_sources.models import DataSourceConfig
