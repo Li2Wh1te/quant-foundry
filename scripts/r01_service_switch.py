@@ -110,7 +110,7 @@ class Plan:
             require(type(getattr(self, name)) is int and
                     low <= getattr(self, name) <= high, 'FINITE_BOUNDS_REQUIRED')
         require(self.hold_seconds >= 2 * self.stop_seconds +
-                2 * self.probe_seconds + self.release_seconds + 5,
+                3 * self.probe_seconds + self.release_seconds + 5,
                 'HOLD_CANNOT_COVER_SWITCH')
 
 
@@ -186,7 +186,7 @@ def switch(plan, host, event):
                 ready['task_fingerprint'] == plan.task_fingerprint and
                 ready['accepted_runs'] == 0 and ready['backtests'] == 0,
                 'DRAIN_PROOF_MISMATCH')
-        gate.check(2 * plan.stop_seconds + 2 * plan.probe_seconds +
+        gate.check(2 * plan.stop_seconds + 3 * plan.probe_seconds +
                    plan.release_seconds + 5)
         drained = host.probe(captured, resources=True)
         check_snapshot(plan, drained, before)
@@ -197,7 +197,20 @@ def switch(plan, host, event):
         for index, service in enumerate(SERVICES):
             host.require_services(plan.old_image, running=SERVICES[index:])
             gate.check((2 - index) * plan.stop_seconds +
-                       plan.probe_seconds + plan.release_seconds + 5)
+                       2 * plan.probe_seconds + plan.release_seconds + 5)
+            if service == 'runner':
+                # The source-row gate does not fence backtest admission or
+                # claiming. Backend exit therefore does not prove that the
+                # surviving runner stayed idle. Re-read real activity and
+                # fenced records/resources before its signal, then recheck
+                # the same deadline after SQL and evidence writes return.
+                runner_ready = host.probe(captured, resources=True)
+                check_snapshot(plan, runner_ready, drained, fenced=True)
+                captured = [r['id'] for r in runner_ready['records']]
+                event('runner_idle', 'P01 backend 已退出，runner 停止前再次核验已接受运行、回测及本地处理为空闲。',
+                      activity=runner_ready['activity'],
+                      release_deadline_monotonic=ready['release_deadline_monotonic'])
+                gate.check(plan.stop_seconds + plan.probe_seconds + plan.release_seconds + 5)
             # Set before issuing SIGTERM: even a CLI error may have delivered
             # the signal, so the failure path must synchronously inspect/recover.
             stop_attempted = True
@@ -251,15 +264,28 @@ def recover(plan, host, captured, event, before):
         if any(s['running'] and s['image'] == plan.candidate_image for s in states.values()):
             gate = host.gate()
             ready = gate.drained()
-            gate.check(2 * plan.stop_seconds + plan.probe_seconds + plan.release_seconds + 5)
+            gate.check(2 * plan.stop_seconds + 2 * plan.probe_seconds + plan.release_seconds + 5)
             proof = host.probe(captured, resources=True)
             check_snapshot(plan, proof, before)
             event('recovery_drained', 'P01 候选服务恢复前已通过唯一一次有界排空，实际截止和资源证据已记录。',
                   release_deadline_monotonic=ready['release_deadline_monotonic'], resources=proof['resources'])
-            for service in SERVICES:
+            for index, service in enumerate(SERVICES):
                 state = host.states()[service]
                 if state['running'] and state['image'] == plan.candidate_image:
-                    gate.check(plan.stop_seconds + plan.release_seconds + 5)
+                    gate.check((2 - index) * plan.stop_seconds + plan.probe_seconds +
+                               plan.release_seconds + 5)
+                    if service == 'runner':
+                        # Recovery has the same unfenced backtest race as the
+                        # normal path. A busy or over-deadline probe refuses
+                        # this runner stop; the finally path releases the gate
+                        # and only actually exited services may restart once.
+                        runner_ready = host.probe(captured, resources=True)
+                        check_snapshot(plan, runner_ready, proof, fenced=True)
+                        captured = [r['id'] for r in runner_ready['records']]
+                        event('recovery_runner_idle', 'P01 恢复路径在 backend 退出后再次核验 runner 空闲，现有运行记录和封存断点均保留。',
+                              activity=runner_ready['activity'],
+                              release_deadline_monotonic=ready['release_deadline_monotonic'])
+                        gate.check(plan.stop_seconds + plan.release_seconds + 5)
                     host.stop(service)
                     event('recovery_stopped', 'P01 已空闲候选服务通过 SIGTERM 自然退出，未替换活跃处理进程。', service=service)
             gate.check(plan.release_seconds + 2)

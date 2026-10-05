@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -175,8 +176,8 @@ def test_expired_gate_before_stop_leaves_both_old_services_running(plan, expiry)
     assert all(s['running'] and s['image'] == plan.old_image for s in host.states().values())
 
 
-@pytest.mark.parametrize('expiry,missing', [(3, ('backend',)), (4, ('backend', 'runner')),
-                                         (5, ('backend', 'runner'))])
+@pytest.mark.parametrize('expiry,missing', [(3, ('backend',)), (4, ('backend',)),
+                                         (5, ('backend', 'runner')), (6, ('backend', 'runner'))])
 def test_expiry_after_stop_recovers_once_without_claiming_switch_success(plan, expiry, missing):
     host = FakeHost(plan)
     host.expire_at = expiry
@@ -277,10 +278,11 @@ def test_each_real_activity_guard_refuses_before_stop(plan, activity):
 
 
 @pytest.mark.parametrize('change', ['record_delete', 'record_change', 'seal_change'])
-def test_fenced_record_or_seal_change_after_stop_causes_one_old_restart(plan, change):
+@pytest.mark.parametrize('probe_number', [3, 4])
+def test_fenced_record_or_seal_change_after_stop_causes_one_old_restart(plan, change, probe_number):
     host = FakeHost(plan)
     def mutate(n, s):
-        if n == 3:
+        if n == probe_number:
             if change == 'record_delete':
                 s['records'] = []
             elif change == 'record_change':
@@ -290,17 +292,68 @@ def test_fenced_record_or_seal_change_after_stop_causes_one_old_restart(plan, ch
     host.change = mutate
     code, events = execute(plan, host)
     assert code == 2 and events[-1]['restored_old'] is True
-    assert [c for c in host.calls if c[0] == 'start'] == [('start', plan.old_image, switcher.SERVICES)]
+    missing = ('backend',) if probe_number == 3 else switcher.SERVICES
+    assert [c for c in host.calls if c[0] == 'start'] == [('start', plan.old_image, missing)]
 
 
 def test_captured_queue_can_become_running_after_release_without_losing_identity(plan):
     host = FakeHost(plan)
     def accepted_after_release(n, s):
-        if n == 4:
+        if n == 5:
             s['activity']['accepted_runs'] = 1
             s['records'][0]['record_hash'] = 'f' * 64
     host.change = accepted_after_release
     assert execute(plan, host)[0] == 0
+
+
+@pytest.mark.parametrize('phase', ['normal', 'recovery'])
+def test_post_backend_idle_probe_cannot_renew_original_runner_stop_deadline(plan, phase, monkeypatch):
+    """Use the real Gate.check after a slow, otherwise idle SQL probe."""
+    clock = [0.0]
+    monkeypatch.setattr(switcher.time, 'monotonic', lambda: clock[0])
+    gates = []
+
+    class DeadlineGate(FakeGate):
+        def __init__(self, host, number):
+            super().__init__(host, number)
+            self.deadline = clock[0] + plan.hold_seconds
+            gates.append(self)
+
+        def check(self, seconds):
+            super().check(seconds)
+            # Only child liveness/output are synthetic. The actual original-
+            # deadline comparison is the committed Gate.check implementation.
+            gate = object.__new__(switcher.Gate)
+            gate.deadline = self.deadline
+            gate.collect = lambda: None
+            gate.child = SimpleNamespace(process=SimpleNamespace(poll=lambda: None))
+            switcher.Gate.check(gate, seconds)
+
+    class SlowProbeHost(FakeHost):
+        def gate(self):
+            super().gate()
+            return DeadlineGate(self, self.gates)
+
+        def probe(self, captured, resources):
+            value = super().probe(captured, resources)
+            target_gate = 1 if phase == 'normal' else 2
+            if self.gates == target_gate and self.current['backend']['stopped'] and self.current['runner']['running']:
+                self.preserved_runner = copy.deepcopy(self.current['runner'])
+                clock[0] = gates[-1].deadline + 1
+            return value
+
+    host = SlowProbeHost(plan)
+    host.fail_health = phase == 'recovery'
+    code, events = execute(plan, host)
+    assert code == 2 and not any(e['stage'] == 'completed' for e in events)
+    expected_stops = [('stop', 'backend')] if phase == 'normal' else [
+        ('stop', 'backend'), ('stop', 'runner'), ('stop', 'backend')]
+    assert [c for c in host.calls if c[0] == 'stop'] == expected_stops
+    assert host.states()['runner'] == host.preserved_runner
+    assert gates[-1].deadline == plan.hold_seconds
+    assert [c for c in host.calls if c[0] == 'start' and c[1] == plan.old_image] == [
+        ('start', plan.old_image, ('backend',))]
+    assert host.gates == (1 if phase == 'normal' else 2)
 
 
 def compose_config():
@@ -575,6 +628,62 @@ def scheduler_tables(engine):
         session.add(queued)
         session.commit()
         return str(queued.id)
+
+
+@PG
+@pytest.mark.parametrize('phase', ['normal', 'recovery'])
+def test_new_pg_backtest_after_backend_exit_preserves_runner(database, plan, phase, monkeypatch):
+    """A source-row drain does not fence a newly claimed backtest.
+
+    Insert the unfinished backtest into real PostgreSQL after the relevant
+    backend has exited. The production database probe, rather than a mocked
+    activity count, must stop the runner SIGTERM and preserve its work.
+    """
+    engine, _ = database
+    queued = scheduler_tables(engine)
+    before = switcher.database_snapshot(engine, switcher.OWNED_TASK, [queued])
+    # Match the private fixture's real 177-task baseline without bypassing
+    # the production scope guard or changing any production task definition.
+    monkeypatch.setattr(switcher, 'ORIGINAL_177', before['original_fingerprint'])
+    actual_plan = replace(plan, task_fingerprint=before['task_fingerprint'],
+        original_fingerprint=before['original_fingerprint'],
+        owned_definition_hash=before['owned_definition_hash'],
+        definitions_hash=before['definitions_hash'])
+    backtest = str(uuid4())
+
+    class BacktestHost(FakeHost):
+        def probe(self, captured, resources):
+            value = super().probe(captured, resources)
+            value.update(switcher.database_snapshot(engine, switcher.OWNED_TASK, captured))
+            return value
+
+        def stop(self, service):
+            super().stop(service)
+            target_gate = 1 if phase == 'normal' else 2
+            if service == 'backend' and self.gates == target_gate:
+                self.preserved_runner = copy.deepcopy(self.current['runner'])
+                with engine.begin() as connection:
+                    connection.execute(text('INSERT INTO backtest_runs (id) VALUES (:id)'),
+                                       {'id': backtest})
+
+    host = BacktestHost(actual_plan)
+    host.fail_health = phase == 'recovery'
+    code, events = execute(actual_plan, host)
+    assert code == 2 and not any(e['stage'] == 'completed' for e in events)
+    expected_stops = [('stop', 'backend')] if phase == 'normal' else [
+        ('stop', 'backend'), ('stop', 'runner'), ('stop', 'backend')]
+    assert [c for c in host.calls if c[0] == 'stop'] == expected_stops
+    assert host.states()['runner'] == host.preserved_runner
+    assert [c for c in host.calls if c[0] == 'start' and c[1] == actual_plan.old_image] == [
+        ('start', actual_plan.old_image, ('backend',))]
+    assert host.gates == (1 if phase == 'normal' else 2)
+    assert events[-1]['guarded'] == (phase == 'normal')
+    after = switcher.database_snapshot(engine, switcher.OWNED_TASK, [queued])
+    assert after['activity']['backtests'] == 1
+    assert after['definitions_hash'] == before['definitions_hash']
+    assert after['records'] == before['records']
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT id::text FROM backtest_runs WHERE finished_at IS NULL')).scalar_one() == backtest
 
 
 @PG
