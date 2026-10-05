@@ -563,6 +563,7 @@ class DockerHost:
         self.image_revisions = {}
         self.service_ids = {}
         self.replacement_proofs = {}
+        self.created_predecessors = {}
         self.stopped_ids = set()
 
     def compose(self, candidate=False):
@@ -601,17 +602,23 @@ class DockerHost:
                 'CONTAINER_REPLACEMENT_MISMATCH')
         if identity not in self.replacement_proofs:
             if service in self.service_ids:
-                # Real Compose replacement adds this one label pointing to the
-                # just-replaced service ID. Validate that observed predecessor,
-                # including a possible bounded old-image restoration. Arbitrary
-                # application labels or invented predecessor IDs stay refused.
-                require(replacement == self.service_ids[service] and
-                        replacement in self.stopped_ids, 'CONTAINER_REPLACEMENT_MISMATCH')
+                # Older Compose versions name the actual predecessor ID; 5.4
+                # writes a logical service/replica reference instead. That name
+                # is never independent provenance. Accept it only for the exact
+                # new ID observed after our own bounded start, tied to its
+                # actually observed/stopped predecessor and requested image.
+                predecessor = self.service_ids[service]
+                created = self.created_predecessors.get(identity)
+                require(predecessor in self.stopped_ids and
+                        (replacement == predecessor or
+                         replacement == service + '-1' and
+                         created == (service, predecessor, container['Image'])),
+                        'CONTAINER_REPLACEMENT_MISMATCH')
             else:
                 # Older Compose may have left a literal backend-1/runner-1.
                 # Pin that exact initial value only to this original old-image
                 # container ID. New replacements must name an actually stopped
-                # predecessor; legacy text is never inherited as new proof.
+                # predecessor; a logical name alone is never new proof.
                 require(container['Image'] == self.plan.old_image, 'INITIAL_SERVICE_IMAGE_CHANGED')
             self.replacement_proofs[identity] = replacement
         require(replacement == self.replacement_proofs[identity], 'CONTAINER_REPLACEMENT_MISMATCH')
@@ -772,9 +779,27 @@ class DockerHost:
                 # targets cannot gain this proof through a failed stop call.
                 self.verified_spec(containers[service], service)
                 self.stopped_ids.add(containers[service]['Id'])
-        self.run(self.compose(candidate) + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never',
-            '--timeout', '-1', '--wait', '--wait-timeout', str(self.plan.start_seconds), *services],
-            self.plan.start_seconds + 15)
+        predecessors = {s: self.service_ids.get(s) for s in services}
+        started_deadline = time.monotonic() + self.plan.start_seconds + 15
+        try:
+            self.run(self.compose(candidate) + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never',
+                '--timeout', '-1', '--wait', '--wait-timeout', str(self.plan.start_seconds), *services],
+                self.plan.start_seconds + 15)
+        finally:
+            # A partial up can create a real candidate before health refuses.
+            # Capture that exact observed ID even on failure so one bounded
+            # recovery can inspect it. This read grants no stop permission;
+            # all image/revision, runtime, idle and deadline guards still apply.
+            # Never mint this receipt from arbitrary later verified_spec calls.
+            after = self.containers(deadline=started_deadline)
+            for service, predecessor in predecessors.items():
+                current = after.get(service)
+                if current is None or current['Id'] == predecessor:
+                    continue
+                require(predecessor in self.stopped_ids and
+                        SHA.fullmatch(current['Id']) and current['Image'] == image,
+                        'CONTAINER_REPLACEMENT_MISMATCH')
+                self.created_predecessors[current['Id']] = (service, predecessor, image)
 
     def verify_candidate(self):
         self.require_services(self.plan.candidate_image, running=SERVICES)

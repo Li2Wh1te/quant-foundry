@@ -679,6 +679,126 @@ def test_original_legacy_replace_value_is_pinned_to_original_container_id(plan, 
         host.verified_spec(changed, 'backend')
 
 
+def logical_replacement_start(plan, monkeypatch, *, fail_health=False, partial=False):
+    """Only start's owned before/after observations establish the new ID receipt."""
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    before = {s: revision_container(plan, s, legacy=s + '-1') for s in switcher.SERVICES}
+    for container in before.values():
+        container['State'].update(Running=False, Status='exited')
+    after = {s: revision_container(plan, s, candidate=True) for s in switcher.SERVICES}
+    for service, container in after.items():
+        container['Config']['Labels'][switcher.COMPOSE_REPLACE] = service + '-1'
+    if partial:
+        after['runner'] = before['runner']
+    current = [before]
+    host.containers = lambda deadline=None: copy.deepcopy(current[0])
+    def up(args, seconds=10):
+        assert 'up' in args
+        current[0] = after
+        if fail_health:
+            raise switcher.Refused('COMMAND_FAILED')
+        return ''
+    host.run = up
+    return host, before, after
+
+
+def test_owned_start_binds_real_logical_labels_to_each_exact_stopped_predecessor(plan, monkeypatch):
+    host, before, after = logical_replacement_start(plan, monkeypatch)
+    host.start(plan.candidate_image, switcher.SERVICES)
+    for service in switcher.SERVICES:
+        assert host.created_predecessors[after[service]['Id']] == (
+            service, before[service]['Id'], plan.candidate_image)
+    host.verify_candidate()
+    assert host.service_ids == {s: c['Id'] for s, c in after.items()}
+
+
+@pytest.mark.parametrize('partial', [False, True])
+def test_failed_health_start_keeps_only_the_observed_new_ID_receipts_for_recovery(plan, monkeypatch, partial):
+    host, before, after = logical_replacement_start(plan, monkeypatch, fail_health=True, partial=partial)
+    with pytest.raises(switcher.Refused, match='COMMAND_FAILED'):
+        host.start(plan.candidate_image, switcher.SERVICES)
+    assert host.created_predecessors[after['backend']['Id']] == (
+        'backend', before['backend']['Id'], plan.candidate_image)
+    assert host.verified_spec(after['backend'], 'backend') == host.baseline['backend']
+    if partial:
+        assert before['runner']['Id'] not in host.created_predecessors
+
+
+def test_owned_restoration_logical_label_binds_to_stopped_candidate_not_original_ID(plan, monkeypatch):
+    host, _, after = logical_replacement_start(plan, monkeypatch)
+    host.start(plan.candidate_image, switcher.SERVICES)
+    host.verify_candidate()
+    candidate = copy.deepcopy(after)
+    for c in candidate.values():
+        c['State'].update(Running=False, Status='exited')
+    restored = {s: revision_container(plan, s, legacy=s + '-1') for s in switcher.SERVICES}
+    for service, c in restored.items():
+        c['Id'] = ('e' if service == 'backend' else 'f') * 64
+        c['Config']['Hostname'] = c['Id'][:12]
+    current = [candidate]
+    host.containers = lambda deadline=None: copy.deepcopy(current[0])
+    host.run = lambda args, seconds=10: current.__setitem__(0, restored) or ''
+    host.start(plan.old_image, switcher.SERVICES)
+    for service in switcher.SERVICES:
+        assert host.created_predecessors[restored[service]['Id']] == (
+            service, candidate[service]['Id'], plan.old_image)
+        assert host.verified_spec(restored[service], service) == host.baseline[service]
+
+
+@pytest.mark.parametrize('defect', ['missing', 'wrong_service', 'wrong_predecessor', 'wrong_image',
+                                 'predecessor_not_stopped', 'different_new_ID', 'other_alias', 'other_app_label'])
+def test_logical_label_without_exact_owned_creation_receipt_stays_refused(plan, monkeypatch, defect):
+    host, before, after = logical_replacement_start(plan, monkeypatch)
+    host.start(plan.candidate_image, switcher.SERVICES)
+    new = copy.deepcopy(after)
+    identity = new['backend']['Id']
+    receipt = ('backend', before['backend']['Id'], plan.candidate_image)
+    if defect == 'missing':
+        del host.created_predecessors[identity]
+    elif defect == 'wrong_service':
+        host.created_predecessors[identity] = ('runner', receipt[1], receipt[2])
+    elif defect == 'wrong_predecessor':
+        host.created_predecessors[identity] = ('backend', 'f' * 64, receipt[2])
+    elif defect == 'wrong_image':
+        host.created_predecessors[identity] = ('backend', receipt[1], plan.old_image)
+    elif defect == 'predecessor_not_stopped':
+        host.stopped_ids.clear()
+    elif defect == 'different_new_ID':
+        new['backend']['Id'] = 'e' * 64
+        new['backend']['Config']['Hostname'] = 'e' * 12
+    elif defect == 'other_alias':
+        new['backend']['Config']['Labels'][switcher.COMPOSE_REPLACE] = 'backend-2'
+    else:
+        new['backend']['Config']['Labels']['qf_application'] = 'changed'
+    host.containers = lambda deadline=None: copy.deepcopy(new)
+    with pytest.raises(switcher.Refused):
+        host.verify_candidate()
+
+
+def test_post_start_observation_cannot_renew_its_original_finite_budget(plan, monkeypatch):
+    host, _, after = logical_replacement_start(plan, monkeypatch)
+    clock = [0.0]
+    monkeypatch.setattr(switcher.time, 'monotonic', lambda: clock[0])
+    containers = host.containers
+    def observe(deadline=None):
+        if deadline is not None and clock[0] >= deadline:
+            raise switcher.Refused('COMMAND_TIMEOUT')
+        return containers(deadline)
+    host.containers = observe
+    up = host.run
+    def delayed_up(args, seconds=10):
+        result = up(args, seconds)
+        clock[0] = seconds + 1
+        return result
+    host.run = delayed_up
+    with pytest.raises(switcher.Refused, match='COMMAND_TIMEOUT'):
+        host.start(plan.candidate_image, switcher.SERVICES)
+    assert not host.created_predecessors
+    with pytest.raises(switcher.Refused, match='CONTAINER_REPLACEMENT_MISMATCH'):
+        host.verified_spec(after['backend'], 'backend')
+
+
 @pytest.mark.parametrize('exit_kind', ['self_exit', 'late_SIGTERM_exit'])
 def test_recovery_start_observes_actual_stopped_candidate_predecessor(plan, monkeypatch, exit_kind):
     host, _ = revision_preflight_host(plan, monkeypatch)
