@@ -315,6 +315,28 @@ def test_unsupported_pidfd_refuses_before_arming_or_pausing(sample, monkeypatch)
     assert not journal.path.with_name(journal.path.name + '.watchdog.jsonl').exists()
 
 
+def test_source_fence_inspect_stop_and_exit_share_one_ten_second_budget(sample, monkeypatch):
+    from types import SimpleNamespace
+    clock = Clock()
+    monkeypatch.setattr(w, 'time', SimpleNamespace(monotonic=clock.now))
+    client = w.DockerClient(sample[0]['manifest'])
+    budgets = []
+    def inspect(value, *, seconds):
+        budgets.append(seconds)
+        clock.sleep(2)
+        return {'id': 'a' * 64, 'status': 'running' if len(budgets) == 1 else 'exited',
+                'running': len(budgets) == 1, 'exit_code': 0}
+    def command(argv, *, seconds):
+        budgets.append(seconds)
+        assert argv == ['docker', 'stop', '--time', '5', 'a' * 64]
+        clock.sleep(5)
+        return 'a' * 64
+    monkeypatch.setattr(client, 'source_state', inspect)
+    monkeypatch.setattr(client, 'command', command)
+    assert client.stop_source({})['status'] == 'exited'
+    assert budgets == [10, 8, 3] and clock.now() == 109
+
+
 def test_watchdog_uses_first_recovery_deadline_without_waiting_for_55minutes(sample, monkeypatch):
     journal, client, clock = unit_window(sample, monkeypatch)
     task_id = sorted(w.TARGETS)[0]

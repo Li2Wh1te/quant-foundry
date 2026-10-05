@@ -5,6 +5,7 @@ import signal
 import subprocess
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,7 +25,12 @@ def complete(scope, output, *, _deadline):
         elapsed_seconds=0, exit_code=2)
 
 
-def test_every_scope_receives_the_same_absolute_batch_deadline(tmp_path):
+@pytest.mark.parametrize('clock_origin', [None, 575.613700261])
+def test_every_scope_receives_the_same_absolute_batch_deadline(tmp_path, monkeypatch, clock_origin):
+    if clock_origin is not None:
+        # This real CI origin crosses a floating-point precision boundary when
+        # adding the wall allowance. Keep the clock local to the batch module.
+        monkeypatch.setattr(bounded_batch, 'time', SimpleNamespace(monotonic=lambda: clock_origin))
     received = []
     def attempt(*args, **kwargs):
         received.append(kwargs['_deadline'])
@@ -32,8 +38,10 @@ def test_every_scope_receives_the_same_absolute_batch_deadline(tmp_path):
     result = bounded_batch.run(scopes(), tmp_path / 'batch', _supervise=attempt)
     assert len(received) == 3 and len(set(received)) == 1
     assert received[0] == result['deadline_monotonic']
-    assert result['wall_deadline_monotonic'] - result['started_monotonic'] == 540
-    assert result['wall_deadline_monotonic'] - result['deadline_monotonic'] == 5
+    # Compare absolute deadlines; subtracting rounded floats can differ by an
+    # ULP even when the fixed allowance and cleanup reserve are both correct.
+    assert result['wall_deadline_monotonic'] == result['started_monotonic'] + 540
+    assert result['deadline_monotonic'] == result['wall_deadline_monotonic'] - 5
     assert result['outcome'] == 'completed' and result['unattempted_scopes'] == 0
     assert not result['resources_verified']
     assert result['process_wall_budget_met']

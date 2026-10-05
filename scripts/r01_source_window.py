@@ -573,17 +573,22 @@ class DockerClient:
                 'exit_code': item['State']['ExitCode'], 'status': item['State']['Status']}
 
     def stop_source(self, value, *, seconds=10):
-        item = self.source_state(value, seconds=seconds)
+        # Inspection, stop and exit verification share one allowance. Each
+        # Docker step must consume the remainder, never renew the fence budget.
+        until = time.monotonic() + min(10, seconds)
+        def remaining():
+            return until - time.monotonic()
+        item = self.source_state(value, seconds=remaining())
         if item and item['status'] == 'created':
             # An unstarted, positively episode-labelled one-off must not remain
             # available for a delayed Docker start after recovery. This removes
             # only that temporary container, without force or volume deletion.
-            removed = self.command(['docker', 'rm', item['id']], seconds=seconds).strip()
+            removed = self.command(['docker', 'rm', item['id']], seconds=remaining()).strip()
             require(removed == item['id'], 'UNSTARTED_SOURCE_REMOVAL_UNVERIFIED')
             return {**item, 'status': 'removed_unstarted'}
         if item and item['running']:
-            self.command(['docker', 'stop', '--time', '5', item['id']], seconds=seconds)
-            item = self.source_state(value, seconds=seconds)
+            self.command(['docker', 'stop', '--time', '5', item['id']], seconds=remaining())
+            item = self.source_state(value, seconds=remaining())
             require(not item['running'], 'SOURCE_EXIT_UNVERIFIED')
         return item
 
