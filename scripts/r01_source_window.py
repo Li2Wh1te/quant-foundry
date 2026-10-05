@@ -55,6 +55,11 @@ SCOPE_ASSETS = {'stock_daily': 'a-share', 'fund_stock_history': 'fund-otc',
                 'fund_bond_history': 'fund-lof'}
 TOTAL, DRAIN, LAUNCH, BATCH, RECOVERY = 3600, 2400, 60, 840, 300
 TERMINAL = ('restored', 'recovery_required')
+# This private one-off override never updates the existing runner service. Both
+# Compose restart-policy forms are explicit so the bounded CLI cannot inherit
+# the ordinary runner's unless-stopped policy and start another process attempt.
+SOURCE_OVERRIDE = {'services': {'runner': {'restart': 'no', 'pull_policy': 'never',
+    'deploy': {'restart_policy': {'condition': 'none'}}}}}
 
 
 class Refused(RuntimeError):
@@ -532,22 +537,28 @@ class DockerClient:
                 'network_mode': runner['HostConfig']['NetworkMode'],
                 'mounts_sha256': digest(sorted(runner['Mounts'], key=lambda m: m['Destination']))}
 
-    def source(self, episode, plan_sha, *, seconds=10):
+    def source(self, episode, plan_sha, *, control_directory, seconds=10):
         # Detached source ownership is explicit in random, private episode
         # labels. The watchdog can fence only this one-off after lost stdout;
         # it never stops an original scheduler worker or retries creation.
-        argv = self.compose_prefix() + ['run', '-d', '--no-deps', '--pull', 'never', '-T',
+        until = time.monotonic() + min(10, seconds)
+        require(isinstance(episode, str) and len(episode) == 32
+                and all(c in '0123456789abcdef' for c in episode), 'SOURCE_EPISODE_INVALID')
+        override = Path(control_directory) / ('source-' + episode + '.compose.json')
+        write_private(override, SOURCE_OVERRIDE, exclusive=True)
+        argv = self.compose_prefix() + ['-f', str(override),
+            'run', '-d', '--no-deps', '-T',
             '--name', SOURCE_CONTAINER, '--label', 'qf.r01.window=' + episode,
             '--label', 'qf.r01.plan=' + plan_sha, 'runner', 'python', '-m',
             'app.data_ingestion.tonghuashun.bounded_batch', '--repair-plan',
             SOURCE_ROOT + '/plan.json', '--output', SOURCE_ROOT + '/attempt1',
             '--gap-seconds', '0', '--wall-seconds', '840']
-        output = self.command(argv, seconds=seconds).strip()
+        output = self.command(argv, seconds=until - time.monotonic()).strip()
         require(len(output) == 64 and all(c in '0123456789abcdef' for c in output),
                 'SOURCE_CREATION_UNVERIFIED')
         return output
 
-    def source_state(self, value, *, seconds=10):
+    def source_state(self, value, *, seconds=10, fencing=False):
         if not value.get('source_launch_intent'):
             return None
         try:
@@ -569,6 +580,9 @@ class DockerClient:
                 and item['HostConfig']['NetworkMode'] == runtime['network_mode']
                 and digest(sorted(item['Mounts'], key=lambda m: m['Destination']))
                 == runtime['mounts_sha256'], 'SOURCE_BINDINGS_UNVERIFIED')
+        if not fencing:
+            require(item['HostConfig']['RestartPolicy']['Name'] in ('no', '')
+                    and item['RestartCount'] == 0, 'SOURCE_RESTART_POLICY_UNVERIFIED')
         return {'id': item['Id'], 'running': item['State']['Running'],
                 'exit_code': item['State']['ExitCode'], 'status': item['State']['Status']}
 
@@ -578,7 +592,7 @@ class DockerClient:
         until = time.monotonic() + min(10, seconds)
         def remaining():
             return until - time.monotonic()
-        item = self.source_state(value, seconds=remaining())
+        item = self.source_state(value, seconds=remaining(), fencing=True)
         if item and item['status'] == 'created':
             # An unstarted, positively episode-labelled one-off must not remain
             # available for a delayed Docker start after recovery. This removes
@@ -586,10 +600,10 @@ class DockerClient:
             removed = self.command(['docker', 'rm', item['id']], seconds=remaining()).strip()
             require(removed == item['id'], 'UNSTARTED_SOURCE_REMOVAL_UNVERIFIED')
             return {**item, 'status': 'removed_unstarted'}
-        if item and item['running']:
+        if item and (item['running'] or item['status'] == 'restarting'):
             self.command(['docker', 'stop', '--time', '5', item['id']], seconds=remaining())
-            item = self.source_state(value, seconds=remaining())
-            require(not item['running'], 'SOURCE_EXIT_UNVERIFIED')
+            item = self.source_state(value, seconds=remaining(), fencing=True)
+            require(not item['running'] and item['status'] != 'restarting', 'SOURCE_EXIT_UNVERIFIED')
         return item
 
     def receipt(self, *, seconds=10):
@@ -883,6 +897,7 @@ def run_window(journal, client, *, clock=time.monotonic, sleep=time.sleep, liven
         value = forward_guard(journal, deadline=value['source_start_deadline'], clock=clock, liveness=liveness)
         journal.update(lambda v: v.update(phase='source', source_launch_intent=True))
         source_id = client.source(value['episode'], value['plan_sha256'],
+                                  control_directory=journal.path.parent,
                                   seconds=min(10, value['source_start_deadline'] - clock()))
         journal.update(lambda v: v.update(source_id=source_id))
         while True:

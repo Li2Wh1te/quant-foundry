@@ -321,7 +321,8 @@ def test_source_fence_inspect_stop_and_exit_share_one_ten_second_budget(sample, 
     monkeypatch.setattr(w, 'time', SimpleNamespace(monotonic=clock.now))
     client = w.DockerClient(sample[0]['manifest'])
     budgets = []
-    def inspect(value, *, seconds):
+    def inspect(value, *, seconds, fencing):
+        assert fencing is True
         budgets.append(seconds)
         clock.sleep(2)
         return {'id': 'a' * 64, 'status': 'running' if len(budgets) == 1 else 'exited',
@@ -335,6 +336,75 @@ def test_source_fence_inspect_stop_and_exit_share_one_ten_second_budget(sample, 
     monkeypatch.setattr(client, 'command', command)
     assert client.stop_source({})['status'] == 'exited'
     assert budgets == [10, 8, 3] and clock.now() == 109
+
+
+def test_source_creation_overrides_only_oneoff_restart_and_never_replays(sample, monkeypatch):
+    plan, root = sample
+    client = w.DockerClient(plan['manifest'])
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        return 'a' * 64
+    monkeypatch.setattr(client, 'command', command)
+    episode = 'e' * 32
+    assert client.source(episode, w.digest(plan), control_directory=root) == 'a' * 64
+    path = root / ('source-' + episode + '.compose.json')
+    assert w.read_private(path) == w.SOURCE_OVERRIDE
+    assert set(w.SOURCE_OVERRIDE['services']) == {'runner'}
+    assert w.SOURCE_OVERRIDE['services']['runner'] == {
+        'restart': 'no', 'pull_policy': 'never',
+        'deploy': {'restart_policy': {'condition': 'none'}}}
+    assert calls[0][:len(client.compose_prefix())+2] == client.compose_prefix() + ['-f', str(path)]
+    assert '--rm' not in calls[0]  # Keep the positive exit-code receipt available.
+    with pytest.raises(FileExistsError):
+        client.source(episode, w.digest(plan), control_directory=root)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('policy,restarts', [('always', 0), ('no', 1), ('no', 0)])
+def test_actual_source_restart_policy_is_verified_but_owned_fencing_remains_possible(sample, monkeypatch, policy, restarts):
+    client = w.DockerClient(sample[0]['manifest'])
+    episode, token = 'e' * 32, 'b' * 64
+    item = {'Id': 'a' * 64, 'Image': w.APP_IMAGE, 'RestartCount': restarts,
+        'Config': {'Labels': {'com.docker.compose.project': w.PROJECT,
+            'qf.r01.window': episode, 'qf.r01.plan': token}, 'Env': [], 'User': '999'},
+        'HostConfig': {'NetworkMode': 'synthetic-net', 'RestartPolicy': {'Name': policy}},
+        'Mounts': [], 'State': {'Running': True, 'ExitCode': 0, 'Status': 'running'}}
+    state = {'episode': episode, 'plan_sha256': token, 'source_launch_intent': True,
+        'source_id': 'a' * 64, 'plan': {'runtime': {'network_mode': 'synthetic-net',
+            'env_sha256': w.digest({}), 'mounts_sha256': w.digest([])}}}
+    monkeypatch.setattr(client, 'inspect', lambda *a, **kw: copy.deepcopy(item))
+    if policy != 'no' or restarts:
+        with pytest.raises(w.Refused, match='SOURCE_RESTART_POLICY_UNVERIFIED'):
+            client.source_state(state)
+    else:
+        assert client.source_state(state)['running']
+    assert client.source_state(state, fencing=True)['id'] == 'a' * 64
+
+
+@pytest.mark.parametrize('stopped_status', ['exited', 'restarting'])
+def test_restarting_source_is_fenced_once_and_requires_a_terminal_exit(sample, monkeypatch, stopped_status):
+    client = w.DockerClient(sample[0]['manifest'])
+    observed, commands = [], []
+    def inspect(value, *, seconds, fencing):
+        assert fencing is True
+        observed.append(seconds)
+        return {'id': 'a' * 64, 'running': False, 'exit_code': 2,
+            'status': 'restarting' if len(observed) == 1 else stopped_status}
+    def command(argv, *, seconds):
+        commands.append(argv)
+        return 'a' * 64
+    monkeypatch.setattr(client, 'source_state', inspect)
+    monkeypatch.setattr(client, 'command', command)
+    # Docker can report Running=False during an automatic restart. Recovery
+    # must stop the owned source once and cannot treat that state as released.
+    if stopped_status == 'restarting':
+        with pytest.raises(w.Refused, match='SOURCE_EXIT_UNVERIFIED'):
+            client.stop_source({})
+    else:
+        assert client.stop_source({})['status'] == 'exited'
+    assert commands == [['docker', 'stop', '--time', '5', 'a' * 64]]
+    assert len(observed) == 2
 
 
 def test_watchdog_uses_first_recovery_deadline_without_waiting_for_55minutes(sample, monkeypatch):

@@ -7,12 +7,14 @@ project and network with no published ports; removes only its own test volumes.
 No production connection.
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from uuid import uuid4
 
@@ -97,6 +99,69 @@ def main():
             raise RuntimeError('container probe failed; inspect the isolated probe logs')
         result['steps'].append({'mode':name.split(project+'-')[-1], 'passed':True})
 
+    def source_restart_probe(image):
+        """Exercise the committed one-off launcher with an ordinary restart policy.
+
+        The disposable runner only sleeps. The source CLI has no repair plan,
+        mounts or external network, so it exits before opening a provider or DB.
+        This verifies daemon behavior using the CI host's actual Compose version.
+        """
+        # Compose lives under ops/lf01/compose, four levels below the repo root.
+        module_path=compose.parents[3]/'scripts/r01_source_window.py'
+        spec=importlib.util.spec_from_file_location('r01_source_restart_probe',module_path)
+        operator=importlib.util.module_from_spec(spec);spec.loader.exec_module(operator)
+        original=project+'-restart-original';backend=project+'-restart-backend'
+        source=project+'-restart-source'
+        created.extend((original,backend,source))
+        with tempfile.TemporaryDirectory(prefix='r01-restart-probe-') as directory:
+            root=Path(directory).resolve();root.chmod(0o700)
+            fixture={'services':{'runner':{'image':image,'restart':'unless-stopped',
+                'container_name':original,
+                'user':f'{os.getuid()}:{os.getgid()}',
+                'environment':{'QF_ENVIRONMENT':'test'},'mem_limit':'512m','cpus':1,
+                'command':['python','-c','import time;time.sleep(60)']},
+                'backend':{'image':image,'restart':'always','container_name':backend,
+                    'user':f'{os.getuid()}:{os.getgid()}',
+                    'mem_limit':'512m','cpus':1,
+                    'command':['python','-c','import time;time.sleep(60)']}},
+                'networks':{'default':{'internal':True}}}
+            path=root/'fixture.json';operator.write_private(path,fixture,exclusive=True)
+            operator.PROJECT=project;operator.PROJECT_DIRECTORY=str(root)
+            operator.SOURCE_CONTAINER=source
+            client=operator.DockerClient({'compose_files':[str(path)]})
+            # An exact name prevents this fixture from addressing any ordinary
+            # kernel/PG container or any external Compose project.
+            cmd(client.compose_prefix()+['up','-d','--no-deps','--no-build',
+                '--pull','never','runner','backend'])
+            before=json.loads(cmd(['docker','inspect',original]))[0]
+            backend_before=json.loads(cmd(['docker','inspect',backend]))[0]
+            assert before['State']['Running'] and before['HostConfig']['RestartPolicy']['Name']=='unless-stopped'
+            assert backend_before['State']['Running'] and backend_before['HostConfig']['RestartPolicy']['Name']=='always'
+            assert subprocess.run(['docker','exec',original,'test','-e',
+                operator.SOURCE_ROOT+'/plan.json'],env=env,capture_output=True).returncode==1
+            source_id=client.source(uuid4().hex,'a'*64,control_directory=root)
+            until=time.monotonic()+20
+            while True:
+                item=json.loads(cmd(['docker','inspect',source_id]))[0]
+                if item['State']['Status']=='exited':break
+                if time.monotonic()>=until:raise RuntimeError('source policy fixture did not exit')
+                time.sleep(.1)
+            after=json.loads(cmd(['docker','inspect',original]))[0]
+            backend_after=json.loads(cmd(['docker','inspect',backend]))[0]
+            assert item['HostConfig']['RestartPolicy']['Name']=='no' and item['RestartCount']==0
+            assert item['State']['ExitCode']==2 and after['Id']==before['Id']
+            assert after['State']['Running'] and after['HostConfig']['RestartPolicy']==before['HostConfig']['RestartPolicy']
+            assert backend_after['Id']==backend_before['Id'] and backend_after['State']['Running']
+            assert backend_after['HostConfig']['RestartPolicy']==backend_before['HostConfig']['RestartPolicy']
+            result['source_restart_policy']={'passed':True,'oneoff_policy':'no',
+                'oneoff_restarts':0,'oneoff_exit_code':2,'original_policy_preserved':True,
+                'backend_policy_preserved':True,'original_runner_id_preserved':True,
+                'original_backend_id_preserved':True,
+                'source_plan_absent':True,'provider_http':0,'synthetic':True}
+            cmd(['docker','rm',source_id])
+            cmd(['docker','stop','--time','1',original]);cmd(['docker','rm',original])
+            cmd(['docker','stop','--time','1',backend]);cmd(['docker','rm',backend])
+
     try:
         cmd(base+['build','kernel'],timeout=900)
         if args.docker_volume:
@@ -107,6 +172,7 @@ def main():
         cmd(base+['up','-d','--wait','postgres'],timeout=120)
         run('init')
         writer=start('hold_writer'); wait_ready(writer,'writer'); run('contend')
+        source_restart_probe(cmd(['docker','inspect','--format','{{.Image}}',writer]))
         cmd(['docker','kill','--signal','KILL',writer]); cmd(['docker','wait',writer])
         run('after_kill')
         reader=start('hold_reader'); wait_ready(reader,'reader')
