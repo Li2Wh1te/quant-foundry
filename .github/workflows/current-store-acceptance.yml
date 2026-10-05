@@ -5,11 +5,14 @@ on:
     paths:
       - backend/app/data_store/**
       - backend/app/db/migrations/**
+      - backend/app/scheduling/process_drain.py
       - backend/tests/test_data_store_*.py
+      - backend/tests/test_r01_service_switch.py
       - backend/pyproject.toml
       - backend/uv.lock
       - scripts/benchmark_current_store.py
       - scripts/check_current_store_containers.py
+      - scripts/r01_service_switch.py
       - ops/lf01/**
       - .github/workflows/current-store-acceptance.yml
 permissions:

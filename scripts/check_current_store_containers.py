@@ -128,6 +128,14 @@ def main():
                             'tests/test_data_store_runtime_budget.py',
                             '--basetemp=/work/pytest','-q','--tb=short'],timeout=240)
             result['kernel_tests']={'passed':True,'summary':output.splitlines()[-1]}
+            # Exercise the actual admission gate and inactive sealed resources
+            # on this same supported filesystem. Failure recovery stays finite
+            # and synthetic; these tests never reach a deployment host.
+            output=cmd(base+['run','--rm','--no-deps','kernel','python','-m','pytest',
+                            'tests/test_r01_service_switch.py',
+                            'tests/test_data_store_scheduler_handoff.py',
+                            '--basetemp=/work/switch-pytest','-q','--tb=short'],timeout=120)
+            result['service_switch_tests']={'passed':True,'summary':output.splitlines()[-1]}
             if args.docker_volume:
                 cmd(base+['run','--rm','--no-deps','kernel','mkdir','-m','0700','/work/benchmark'])
             else:
