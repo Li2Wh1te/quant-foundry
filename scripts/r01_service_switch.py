@@ -550,6 +550,29 @@ def service_spec(container, *, verified_revision=None, verified_replacement=None
     # Container identifiers may change; the trusted mounts, limits and network
     # remain the same. The daemon log file path is not operator configuration.
     host.pop('ContainerIDFile', None)
+    # Compose can serialize the same disjoint volume bindings in either order.
+    # Normalize only unambiguous bindings whose source, destination and mode
+    # agree with the daemon's actual mounts. Duplicate/overlapping targets or
+    # unproven declarations retain their strict original ordering. Every bind
+    # value and observed mount field still contributes to the runtime hash.
+    bindings = host.get('Binds')
+    targets = []
+    if isinstance(bindings, list) and all(isinstance(b, str) for b in bindings):
+        for binding in bindings:
+            parts = binding.split(':')
+            if len(parts) != 3:
+                break
+            source, target, mode = parts
+            observed = [m for m in container['Mounts'] if m.get('Destination') == target
+                        and source == m.get('Name' if m.get('Type') == 'volume' else 'Source')
+                        and mode == m.get('Mode')]
+            if not target.startswith('/') or len(observed) != 1:
+                break
+            targets.append(target)
+        if (len(targets) == len(bindings) and len(set(targets)) == len(targets)
+                and not any(a.startswith(b.rstrip('/') + '/') for a in targets
+                            for b in targets if a != b)):
+            host['Binds'] = sorted(bindings)
     mounts = sorted([{k: m.get(k) for k in ('Type', 'Name', 'Source', 'Destination', 'Mode', 'RW', 'Propagation')}
               for m in container['Mounts']], key=lambda m: m['Destination'])
     return digest({'config': config, 'host': host, 'mounts': mounts})

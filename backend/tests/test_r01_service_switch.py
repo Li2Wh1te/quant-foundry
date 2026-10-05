@@ -562,6 +562,71 @@ def test_runtime_spec_retains_app_labels_environment_and_mounts_but_normalizes_g
         assert switcher.service_spec(old) != switcher.service_spec(altered)
 
 
+def mounted_runtime():
+    # These two declarations model the real P01 current-store/log volume pair.
+    # No application data, credentials or production volume is mounted by tests.
+    return {'Id': 'a' * 64, 'Config': {'Hostname': 'a' * 12, 'Labels': {}, 'Env': []},
+            'HostConfig': {'Binds': ['logs:/app/data/logs:rw', 'current:/app/data/current-store:rw'],
+                           'Init': True},
+            'Mounts': [{'Type': 'volume', 'Name': name, 'Source': '/volumes/' + name,
+                        'Destination': target, 'Mode': 'rw', 'RW': True, 'Propagation': ''}
+                       for name, target in [('logs', '/app/data/logs'),
+                                            ('current', '/app/data/current-store')]]}
+
+
+def test_runtime_disjoint_bind_reordering_preserves_exact_mount_configuration():
+    old = mounted_runtime()
+    new = copy.deepcopy(old)
+    new['HostConfig']['Binds'].reverse()
+    new['Mounts'].reverse()
+    assert switcher.service_spec(new) == switcher.service_spec(old)
+
+
+@pytest.mark.parametrize('defect', ['source', 'target', 'mode', 'observed_source',
+                                  'observed_permission', 'host_limit', 'application_label'])
+def test_runtime_bind_reordering_does_not_hide_a_configuration_change(defect):
+    old = mounted_runtime()
+    new = copy.deepcopy(old)
+    new['HostConfig']['Binds'].reverse()
+    if defect == 'source':
+        new['HostConfig']['Binds'][0] = 'other:/app/data/current-store:rw'
+    elif defect == 'target':
+        new['HostConfig']['Binds'][0] = 'current:/other:rw'
+    elif defect == 'mode':
+        new['HostConfig']['Binds'][0] = 'current:/app/data/current-store:ro'
+    elif defect == 'observed_source':
+        new['Mounts'][1]['Source'] = '/other/current'
+    elif defect == 'observed_permission':
+        new['Mounts'][1]['RW'] = False
+    elif defect == 'host_limit':
+        new['HostConfig']['Memory'] = 1024
+    else:
+        new['Config']['Labels']['application'] = 'changed'
+    assert switcher.service_spec(new) != switcher.service_spec(old)
+
+
+@pytest.mark.parametrize('unproven', ['duplicate_target', 'overlapping_target', 'ambiguous_source',
+                                    'missing_mount', 'mode_disagreement'])
+def test_runtime_unproven_bind_declarations_keep_strict_order(unproven):
+    old = mounted_runtime()
+    if unproven == 'duplicate_target':
+        old['HostConfig']['Binds'][1] = 'current:/app/data/logs:rw'
+        old['Mounts'][1]['Destination'] = '/app/data/logs'
+    elif unproven == 'overlapping_target':
+        old['HostConfig']['Binds'][1] = 'current:/app/data/logs/nested:rw'
+        old['Mounts'][1]['Destination'] = '/app/data/logs/nested'
+    elif unproven == 'ambiguous_source':
+        old['HostConfig']['Binds'][1] = 'current:ambiguous:/app/data/current-store:rw'
+        old['Mounts'][1]['Name'] = 'current:ambiguous'
+    elif unproven == 'missing_mount':
+        old['Mounts'].pop()
+    else:
+        old['Mounts'][1]['Mode'] = 'ro'
+    new = copy.deepcopy(old)
+    new['HostConfig']['Binds'].reverse()
+    assert switcher.service_spec(new) != switcher.service_spec(old)
+
+
 def revision_container(plan, service, *, candidate=False, legacy=None):
     identity = ('c' if service == 'backend' else 'd') * 64 if candidate else ('a' if service == 'backend' else 'b') * 64
     predecessor = ('a' if service == 'backend' else 'b') * 64
