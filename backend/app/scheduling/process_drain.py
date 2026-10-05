@@ -11,6 +11,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import select
 import sys
@@ -68,14 +69,25 @@ def emit(stage, message, **fields):
 
 
 def monotonic_namespace():
-    """Expose the real Linux clock domain, never a renewed deployment lease.
-
-    CLOCK_MONOTONIC is comparable between the host and a candidate only when
-    both use the same time namespace. The host controller refuses an unknown
-    or different namespace instead of granting a new window when stdout is
-    delayed. Tests exercise this on Linux; unsupported hosts fail closed.
-    """
+    """Expose the current Linux namespace as provenance, not a renewed lease."""
     return os.readlink('/proc/self/ns/time')
+
+
+def monotonic_clock_domain():
+    """Read kernel clock provenance before emitting the original deadline.
+
+    Docker can create a distinct time namespace with unchanged clock offsets.
+    Its namespace inode alone therefore does not establish a different clock.
+    The host must verify this boot ID and both raw kernel offsets against its
+    own zero-offset domain. Linux reads timens_offsets from time_for_children,
+    so its inode must also match this process's current time namespace.
+    Unknown or nonzero offsets remain unsupported;
+    neither this evidence nor delayed stdout grants a fresh hold window.
+    """
+    return {'namespace': monotonic_namespace(),
+            'offset_namespace': os.readlink('/proc/self/ns/time_for_children'),
+            'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            'offsets': Path('/proc/self/timens_offsets').read_text()}
 
 
 def main(argv=None):
@@ -106,11 +118,13 @@ def main(argv=None):
             fingerprint, count = task_fingerprint(session)
             if fingerprint != args.expect_task_fingerprint:
                 raise DrainRefused('TASK_DEFINITIONS_CHANGED')
+            clock_domain = monotonic_clock_domain()
             deadline = time.monotonic() + args.hold_seconds
             emit('drained', '已接受运行全部终态，原任务定义未变；部署可停止旧进程，准入锁等待显式释放。',
                  task_count=count, task_fingerprint=fingerprint,
                  release_deadline_monotonic=deadline,
-                 monotonic_namespace=monotonic_namespace(), **state)
+                 monotonic_namespace=clock_domain['namespace'],
+                 clock_domain=clock_domain, **state)
             while time.monotonic() < deadline:
                 if select.select([sys.stdin], [], [], .25)[0]:
                     line = sys.stdin.readline().strip()

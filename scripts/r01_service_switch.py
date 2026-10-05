@@ -57,6 +57,38 @@ def clock_namespace():
     return os.readlink('/proc/self/ns/time')
 
 
+def clock_domain():
+    """Read this process's Linux kernel clock identity without changing it."""
+    return {'namespace': clock_namespace(),
+            'offset_namespace': os.readlink('/proc/self/ns/time_for_children'),
+            'boot_id': Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+            'offsets': Path('/proc/self/timens_offsets').read_text()}
+
+
+def zero_offset_clock(domain):
+    """Require complete kernel evidence for the supported zero-offset clocks.
+
+    Linux exposes time_for_children offsets relative to the initial namespace.
+    First prove they describe this process's current namespace, where the
+    offsets are frozen by the existing member process. Distinct inodes with
+    the same boot ID and zero offsets can therefore compare the original
+    CLOCK_MONOTONIC deadline directly. No offset conversion, receive-time lease
+    or unsupported-kernel fallback is permitted by this deployment controller.
+    """
+    require(isinstance(domain, dict) and
+            set(domain) == {'namespace', 'offset_namespace', 'boot_id', 'offsets'} and
+            all(isinstance(value, str) for value in domain.values()) and
+            re.fullmatch(r'time:\[[0-9]+\]', domain['namespace']) and
+            domain['offset_namespace'] == domain['namespace'] and
+            re.fullmatch(r'[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}', domain['boot_id']) and
+            len(domain['offsets']) <= 512, 'GATE_CLOCK_OR_DEADLINE_INVALID')
+    rows = [line.split() for line in domain['offsets'].splitlines()]
+    require(len(rows) == 2 and all(len(row) == 3 and row[1:] == ['0', '0'] for row in rows) and
+            {row[0] for row in rows} == {'monotonic', 'boottime'},
+            'GATE_CLOCK_OR_DEADLINE_INVALID')
+    return domain
+
+
 @dataclass(frozen=True)
 class Plan:
     project_directory: str
@@ -193,6 +225,8 @@ def switch(plan, host, event):
         captured = [r['id'] for r in drained['records']]
         event('drained', 'P01 已接受运行、回测和本地处理均为空闲，合法 sealed checkpoint 已只读核验。',
               release_deadline_monotonic=ready['release_deadline_monotonic'],
+              clock_domain=ready.get('clock_domain'),
+              host_clock_domain=getattr(gate, 'host_clock_domain', None),
               resources=drained['resources'], captured_records=drained['records'])
         for index, service in enumerate(SERVICES):
             host.require_services(plan.old_image, running=SERVICES[index:])
@@ -268,7 +302,9 @@ def recover(plan, host, captured, event, before):
             proof = host.probe(captured, resources=True)
             check_snapshot(plan, proof, before)
             event('recovery_drained', 'P01 候选服务恢复前已通过唯一一次有界排空，实际截止和资源证据已记录。',
-                  release_deadline_monotonic=ready['release_deadline_monotonic'], resources=proof['resources'])
+                  release_deadline_monotonic=ready['release_deadline_monotonic'],
+                  clock_domain=ready.get('clock_domain'),
+                  host_clock_domain=getattr(gate, 'host_clock_domain', None), resources=proof['resources'])
             for index, service in enumerate(SERVICES):
                 state = host.states()[service]
                 if state['running'] and state['image'] == plan.candidate_image:
@@ -409,10 +445,15 @@ class Gate:
             for value in self.events:
                 if value.get('stage') == 'drained':
                     deadline = value.get('release_deadline_monotonic')
+                    remote_clock = zero_offset_clock(value.get('clock_domain'))
+                    host_clock = zero_offset_clock(clock_domain())
+                    now = time.monotonic()
                     require(type(deadline) in (int, float) and math.isfinite(deadline) and
-                        value.get('monotonic_namespace') == clock_namespace() and
-                        time.monotonic() < deadline <= time.monotonic() + self.plan.hold_seconds + 1,
+                        value.get('monotonic_namespace') == remote_clock['namespace'] and
+                        remote_clock['boot_id'] == host_clock['boot_id'] and
+                        now < deadline <= now + self.plan.hold_seconds + 1,
                         'GATE_CLOCK_OR_DEADLINE_INVALID')
+                    self.host_clock_domain = host_clock
                     self.deadline = deadline
                     self.check(0)
                     return value
@@ -580,7 +621,7 @@ class DockerHost:
 
     def preflight(self):
         require(sys.platform == 'linux', 'LINUX_HOST_REQUIRED')
-        clock_namespace()
+        zero_offset_clock(clock_domain())
         old, new = self.config(False), self.config(True)
         image_only_configs(old, new)
         for service in SERVICES:

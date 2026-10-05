@@ -54,6 +54,121 @@ def snapshot(plan):
                       'retained_seals': [{'owner': 'pipeline.E23', 'progress_hash': 'a' * 64}]}}
 
 
+def kernel_clock(namespace='time:[4026531834]'):
+    return {'namespace': namespace, 'offset_namespace': namespace,
+            'boot_id': '6f430381-ff78-4273-989b-73f1cac33934',
+            'offsets': 'monotonic           0         0\nboottime            0         0\n'}
+
+
+def protocol_gate(plan, monkeypatch, *, remote=None, host=None, deadline=250.0):
+    """Exercise real protocol/deadline checks with only the child pipe replaced."""
+    clock = [100.0]
+    remote = kernel_clock('time:[4026532836]') if remote is None else remote
+    host = kernel_clock() if host is None else host
+    monkeypatch.setattr(switcher.time, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(switcher, 'clock_domain', lambda: host)
+    ready = {'stage': 'drained', 'monotonic_namespace': remote.get('namespace'),
+             'clock_domain': remote, 'release_deadline_monotonic': deadline}
+    child = SimpleNamespace(buffer=b'', process=SimpleNamespace(poll=lambda: None))
+    lines = [json.dumps(ready).encode() + b'\n']
+    def read(wait):
+        if lines:
+            child.buffer += lines.pop()
+    child.read = read
+    return switcher.Gate(child, plan), ready, clock
+
+
+@pytest.mark.parametrize('namespace', ['time:[4026531834]', 'time:[4026532836]'])
+def test_same_boot_zero_offsets_accept_distinct_namespaces_without_renewing_deadline(plan, monkeypatch, namespace):
+    gate, ready, clock = protocol_gate(plan, monkeypatch, remote=kernel_clock(namespace))
+    # The emitted deadline is 250, and 60 seconds of transport latency have
+    # already elapsed. The controller must retain only its remaining 90 seconds.
+    clock[0] = 160.0
+    assert gate.drained() == ready
+    assert gate.deadline == 250.0 and gate.host_clock_domain == kernel_clock()
+    gate.check(89)
+    clock[0] = 250.0
+    with pytest.raises(switcher.Refused, match='RELEASE_WINDOW_INSUFFICIENT'):
+        gate.check(0)
+    assert gate.deadline == 250.0
+
+
+@pytest.mark.parametrize('side', ['host', 'remote'])
+@pytest.mark.parametrize('change', ['missing_boot', 'invalid_boot', 'missing_namespace', 'invalid_namespace',
+    'missing_offset_namespace', 'different_offset_namespace',
+    'missing_offsets', 'non_string_offsets', 'monotonic_seconds', 'monotonic_nanoseconds',
+    'boottime_seconds', 'duplicate_clock', 'missing_clock', 'extra_clock', 'extra_field'])
+def test_unknown_or_nonzero_clock_proof_is_refused_even_when_namespaces_match(plan, monkeypatch, side, change):
+    host, remote = kernel_clock(), kernel_clock()
+    altered = host if side == 'host' else remote
+    if change.startswith('missing_') and change != 'missing_clock':
+        del altered[{'missing_boot': 'boot_id', 'missing_namespace': 'namespace',
+                     'missing_offsets': 'offsets', 'missing_offset_namespace': 'offset_namespace'}[change]]
+    elif change == 'invalid_boot':
+        altered['boot_id'] = 'unknown'
+    elif change == 'invalid_namespace':
+        altered['namespace'] = 'time:[unknown]'
+    elif change == 'non_string_offsets':
+        altered['offsets'] = None
+    elif change == 'different_offset_namespace':
+        altered['offset_namespace'] = 'time:[4026531835]'
+    elif change == 'extra_field':
+        altered['unproved'] = '0'
+    else:
+        altered['offsets'] = {'monotonic_seconds': 'monotonic 1 0\nboottime 0 0\n',
+            'monotonic_nanoseconds': 'monotonic 0 1\nboottime 0 0\n',
+            'boottime_seconds': 'monotonic 0 0\nboottime 1 0\n',
+            'duplicate_clock': 'monotonic 0 0\nmonotonic 0 0\n',
+            'missing_clock': 'monotonic 0 0\n',
+            'extra_clock': 'monotonic 0 0\nboottime 0 0\nrealtime 0 0\n'}[change]
+    gate, _, _ = protocol_gate(plan, monkeypatch, host=host, remote=remote)
+    with pytest.raises(switcher.Refused, match='GATE_CLOCK_OR_DEADLINE_INVALID'):
+        gate.drained()
+    assert gate.deadline is None
+
+
+def test_same_namespace_and_offsets_cannot_hide_different_boot_id(plan, monkeypatch):
+    remote = kernel_clock()
+    remote['boot_id'] = '7f430381-ff78-4273-989b-73f1cac33934'
+    gate, _, _ = protocol_gate(plan, monkeypatch, remote=remote)
+    with pytest.raises(switcher.Refused, match='GATE_CLOCK_OR_DEADLINE_INVALID'):
+        gate.drained()
+    assert gate.deadline is None
+
+
+@pytest.mark.parametrize('change', ['missing_proof', 'namespace_disagrees'])
+def test_gate_protocol_requires_new_kernel_proof_and_consistent_namespace(plan, monkeypatch, change):
+    gate, ready, _ = protocol_gate(plan, monkeypatch)
+    if change == 'missing_proof':
+        del ready['clock_domain']
+    else:
+        ready['monotonic_namespace'] = 'time:[4026532837]'
+    gate.child.read = lambda wait: None
+    gate.child.buffer = json.dumps(ready).encode() + b'\n'
+    with pytest.raises(switcher.Refused, match='GATE_CLOCK_OR_DEADLINE_INVALID'):
+        gate.drained()
+    assert gate.deadline is None
+
+
+@pytest.mark.parametrize('deadline', [99.0, 100.0, 282.0, float('inf'), float('nan'), True, '250', None])
+def test_clock_equivalence_never_accepts_expired_nonfinite_or_extended_deadline(plan, monkeypatch, deadline):
+    gate, _, _ = protocol_gate(plan, monkeypatch, deadline=deadline)
+    with pytest.raises(switcher.Refused, match='GATE_CLOCK_OR_DEADLINE_INVALID'):
+        gate.drained()
+    assert gate.deadline is None
+
+
+def test_kernel_proof_read_cannot_cross_the_original_deadline(plan, monkeypatch):
+    gate, _, clock = protocol_gate(plan, monkeypatch)
+    def delayed_kernel_read():
+        clock[0] = 251.0
+        return kernel_clock()
+    monkeypatch.setattr(switcher, 'clock_domain', delayed_kernel_read)
+    with pytest.raises(switcher.Refused, match='GATE_CLOCK_OR_DEADLINE_INVALID'):
+        gate.drained()
+    assert gate.deadline is None
+
+
 class FakeGate:
     def __init__(self, host, number):
         self.host, self.number, self.checks = host, number, 0
@@ -467,7 +582,7 @@ def revision_container(plan, service, *, candidate=False, legacy=None):
 def revision_preflight_host(plan, monkeypatch, *, candidate_revision=None, candidate_identity=None):
     from types import SimpleNamespace
     monkeypatch.setattr(switcher, 'sys', SimpleNamespace(platform='linux'))
-    monkeypatch.setattr(switcher, 'clock_namespace', lambda: 'time:[isolated]')
+    monkeypatch.setattr(switcher, 'clock_domain', kernel_clock)
     files = [{'path': 'app/__init__.py', 'sha256': 'a' * 64}]
     Path(plan.manifest_file).write_text(json.dumps({'head': plan.candidate_head,
         'image': plan.candidate_image, 'files': files}))
@@ -744,6 +859,8 @@ def test_real_official_pg_gate_exposes_same_deadline_releases_and_exits_zero(dat
         ready = gate.drained()
         assert ready['task_count'] == 178 and ready['accepted_runs'] == ready['backtests'] == 0
         assert ready['monotonic_namespace'] == os.readlink('/proc/self/ns/time')
+        assert ready['clock_domain'] == switcher.clock_domain()
+        assert switcher.zero_offset_clock(ready['clock_domain']) == gate.host_clock_domain
         actual_deadline = ready['release_deadline_monotonic']
         assert 0 < actual_deadline - time.monotonic() <= 20
         gate.check(2)
