@@ -8,11 +8,13 @@ on:
       - backend/app/scheduling/process_drain.py
       - backend/tests/test_data_store_*.py
       - backend/tests/test_r01_service_switch.py
+      - backend/tests/test_r01_source_window.py
       - backend/pyproject.toml
       - backend/uv.lock
       - scripts/benchmark_current_store.py
       - scripts/check_current_store_containers.py
       - scripts/r01_service_switch.py
+      - scripts/r01_source_window.py
       - ops/lf01/**
       - .github/workflows/current-store-acceptance.yml
 permissions:

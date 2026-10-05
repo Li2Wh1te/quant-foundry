@@ -15,5 +15,6 @@ COPY scripts/profile_current_verification.py /app/profile_current_verification.p
 # Package the formal host controller for its isolated PostgreSQL/ext4 tests;
 # acceptance must not depend on an uncommitted script supplied by a bind mount.
 COPY scripts/r01_service_switch.py /app/scripts/r01_service_switch.py
+COPY scripts/r01_source_window.py /app/scripts/r01_source_window.py
 ENV PATH="/app/backend/.venv/bin:$PATH" PYTHONPATH="/app/backend"
 CMD ["python", "/app/container_probe.py", "inspect"]

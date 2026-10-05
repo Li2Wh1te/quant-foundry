@@ -133,6 +133,7 @@ def main():
             # and synthetic; these tests never reach a deployment host.
             output=cmd(base+['run','--rm','--no-deps','kernel','python','-m','pytest',
                             'tests/test_r01_service_switch.py',
+                            'tests/test_r01_source_window.py',
                             'tests/test_data_store_scheduler_handoff.py',
                             '--basetemp=/work/switch-pytest','-q','--tb=short'],timeout=120)
             result['service_switch_tests']={'passed':True,'summary':output.splitlines()[-1]}
