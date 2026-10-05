@@ -10,6 +10,7 @@ There is no forced stop, task pause window, persistent lease or supplier call.
 from contextlib import contextmanager
 import hashlib
 import json
+import os
 import re
 import select
 import sys
@@ -66,6 +67,17 @@ def emit(stage, message, **fields):
                      ensure_ascii=False), flush=True)
 
 
+def monotonic_namespace():
+    """Expose the real Linux clock domain, never a renewed deployment lease.
+
+    CLOCK_MONOTONIC is comparable between the host and a candidate only when
+    both use the same time namespace. The host controller refuses an unknown
+    or different namespace instead of granting a new window when stdout is
+    delayed. Tests exercise this on Linux; unsupported hosts fail closed.
+    """
+    return os.readlink('/proc/self/ns/time')
+
+
 def main(argv=None):
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
@@ -94,18 +106,27 @@ def main(argv=None):
             fingerprint, count = task_fingerprint(session)
             if fingerprint != args.expect_task_fingerprint:
                 raise DrainRefused('TASK_DEFINITIONS_CHANGED')
-            emit('drained', '已接受运行全部终态，原任务定义未变；部署可停止旧进程，准入锁等待显式释放。',
-                 task_count=count, task_fingerprint=fingerprint, **state)
             deadline = time.monotonic() + args.hold_seconds
+            emit('drained', '已接受运行全部终态，原任务定义未变；部署可停止旧进程，准入锁等待显式释放。',
+                 task_count=count, task_fingerprint=fingerprint,
+                 release_deadline_monotonic=deadline,
+                 monotonic_namespace=monotonic_namespace(), **state)
             while time.monotonic() < deadline:
                 if select.select([sys.stdin], [], [], .25)[0]:
                     line = sys.stdin.readline().strip()
+                    if time.monotonic() >= deadline:
+                        raise DrainRefused('RELEASE_WINDOW_EXPIRED')
                     if line != 'release ' + fingerprint:
                         raise DrainRefused('EXPLICIT_RELEASE_REQUIRED')
                     if any(idle_state(session).values()):
                         raise DrainRefused('IN_FLIGHT_AFTER_DRAIN')
                     if task_fingerprint(session)[0] != fingerprint:
                         raise DrainRefused('TASK_DEFINITIONS_CHANGED')
+                    # A read or SQL check may straddle the original deadline.
+                    # Neither receiving a line nor completing a query renews
+                    # the fence; an expired attempt must never report release.
+                    if time.monotonic() >= deadline:
+                        raise DrainRefused('RELEASE_WINDOW_EXPIRED')
                     break
             else:
                 raise DrainRefused('RELEASE_WINDOW_EXPIRED')
