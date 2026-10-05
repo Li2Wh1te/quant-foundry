@@ -341,11 +341,18 @@ def test_host_commands_explicitly_use_SIGTERM_and_scoped_no_pull_no_build_up(pla
     host.run = lambda args, seconds=10: calls.append(args) or ''
     host.config = lambda candidate: old
     host.states = lambda deadline=None: {s: {'stopped': True} for s in switcher.SERVICES}
-    host.containers = lambda deadline=None: {s: {'Id': s + '-id', 'State': {'Running': True},
-                                                  'Image': plan.old_image} for s in switcher.SERVICES}
+    host.image_revisions = {plan.old_image: '1' * 40}
+    inspections = [0]
+    def containers(deadline=None):
+        inspections[0] += 1
+        return {s: {'Id': ('a' if s == 'backend' else 'b') * 64,
+                    'State': {'Running': inspections[0] == 1, 'Status': 'running' if inspections[0] == 1 else 'exited'},
+                    'Config': {'Labels': {switcher.OCI_REVISION: '1' * 40}, 'Env': []},
+                    'HostConfig': {}, 'Mounts': [], 'Image': plan.old_image} for s in switcher.SERVICES}
+    host.containers = containers
     host.stop('backend')
     host.start(plan.candidate_image, ('backend', 'runner'))
-    assert calls[0][-4:] == ['kill', '--signal', 'SIGTERM', 'backend-id']
+    assert calls[0][-4:] == ['kill', '--signal', 'SIGTERM', 'a' * 64]
     assert 'stop' not in calls[0] and 'SIGKILL' not in str(calls)
     up = calls[-1]
     assert up[-2:] == ['backend', 'runner'] and 'frontend' not in up
@@ -385,6 +392,165 @@ def test_runtime_spec_retains_app_labels_environment_and_mounts_but_normalizes_g
         else:
             altered['Config']['Hostname'] = 'explicit-changed-hostname'
         assert switcher.service_spec(old) != switcher.service_spec(altered)
+
+
+def revision_container(plan, service, *, candidate=False, legacy=None):
+    identity = ('c' if service == 'backend' else 'd') * 64 if candidate else ('a' if service == 'backend' else 'b') * 64
+    predecessor = ('a' if service == 'backend' else 'b') * 64
+    labels = {switcher.OCI_REVISION: plan.candidate_head if candidate else '1' * 40,
+              'qf_application': 'preserved', 'com.docker.compose.project': plan.project,
+              'com.docker.compose.service': service, 'com.docker.compose.oneoff': 'False'}
+    if candidate:
+        labels[switcher.COMPOSE_REPLACE] = predecessor
+    elif legacy is not None:
+        labels[switcher.COMPOSE_REPLACE] = legacy
+    return {'Id': identity, 'Image': plan.candidate_image if candidate else plan.old_image,
+            'Config': {'Image': plan.candidate_image if candidate else plan.old_image,
+                       'Hostname': identity[:12], 'Labels': labels, 'Env': ['synthetic=preserved']},
+            'HostConfig': {'Init': True}, 'Mounts': [],
+            'State': {'Running': True, 'Status': 'running', 'Health': {'Status': 'healthy'}}}
+
+
+def revision_preflight_host(plan, monkeypatch, *, candidate_revision=None, candidate_identity=None):
+    from types import SimpleNamespace
+    monkeypatch.setattr(switcher, 'sys', SimpleNamespace(platform='linux'))
+    monkeypatch.setattr(switcher, 'clock_namespace', lambda: 'time:[isolated]')
+    files = [{'path': 'app/__init__.py', 'sha256': 'a' * 64}]
+    Path(plan.manifest_file).write_text(json.dumps({'head': plan.candidate_head,
+        'image': plan.candidate_image, 'files': files}))
+    host = switcher.DockerHost(plan)
+    old, new = compose_config(), compose_config()
+    for service in switcher.SERVICES:
+        new['services'][service]['image'] = plan.candidate_image
+    host.config = lambda candidate: new if candidate else old
+    calls = []
+    def run(args, seconds=10):
+        calls.append(args)
+        if args[:3] == ['docker', 'image', 'inspect']:
+            candidate = args[3] == plan.candidate_image
+            return json.dumps([{'Id': (candidate_identity or plan.candidate_image) if candidate else plan.old_image,
+                'Config': {'Labels': {switcher.OCI_REVISION: (candidate_revision or plan.candidate_head)
+                                     if candidate else '1' * 40}}}])
+        assert args[:2] == ['docker', 'run']
+        return json.dumps(files)
+    host.run = run
+    host.containers = lambda deadline=None: {s: revision_container(plan, s, legacy=s + '-1') for s in switcher.SERVICES}
+    return host, calls
+
+
+def test_preflight_pins_exact_candidate_image_revision_and_legacy_runtime_labels(plan, monkeypatch):
+    host, calls = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    assert host.image_revisions == {plan.old_image: '1' * 40, plan.candidate_image: plan.candidate_head}
+    assert host.replacement_proofs['a' * 64] == 'backend-1'
+    assert host.replacement_proofs['b' * 64] == 'runner-1'
+    assert any(c[:3] == ['docker', 'image', 'inspect'] and c[3] == plan.candidate_image for c in calls)
+
+
+@pytest.mark.parametrize('defect', ['image_identity', 'image_revision'])
+def test_preflight_refuses_forged_candidate_image_identity_or_revision(plan, monkeypatch, defect):
+    kwargs = {'candidate_identity': 'sha256:' + 'f' * 64} if defect == 'image_identity' else {'candidate_revision': 'f' * 40}
+    host, calls = revision_preflight_host(plan, monkeypatch, **kwargs)
+    with pytest.raises(switcher.Refused, match='IMAGE_IDENTITY_MISMATCH|CANDIDATE_IMAGE_REVISION_MISMATCH'):
+        host.preflight()
+    assert not any(c[:2] == ['docker', 'run'] for c in calls)
+
+
+def test_verified_legacy_old_revision_to_real_stopped_predecessor_replacement_is_allowed(plan, monkeypatch):
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    host.stopped_ids.update(host.service_ids.values())
+    new = {s: revision_container(plan, s, candidate=True) for s in switcher.SERVICES}
+    old = {s: revision_container(plan, s, legacy=s + '-1') for s in switcher.SERVICES}
+    # Without daemon image/predecessor proof, no revision label is omitted.
+    assert switcher.service_spec(old['backend']) != switcher.service_spec(new['backend'])
+    host.containers = lambda deadline=None: copy.deepcopy(new)
+    host.verify_candidate()
+    assert host.verified_spec(new['backend'], 'backend') == host.baseline['backend']
+    assert host.verified_spec(new['runner'], 'runner') == host.baseline['runner']
+    # The same bounded restoration may replace the actually stopped candidate;
+    # its predecessor proof follows that candidate ID, never an old alias.
+    host.stopped_ids.update(c['Id'] for c in new.values())
+    restored = revision_container(plan, 'backend')
+    restored['Id'] = 'e' * 64
+    restored['Config']['Hostname'] = 'e' * 12
+    restored['Config']['Labels'][switcher.COMPOSE_REPLACE] = new['backend']['Id']
+    assert host.verified_spec(restored, 'backend') == host.baseline['backend']
+
+
+@pytest.mark.parametrize('defect', ['runtime_revision', 'other_app_label', 'forged_predecessor',
+                                 'legacy_alias', 'not_stopped', 'unknown_image'])
+def test_candidate_runtime_provenance_and_all_other_labels_remain_strict(plan, monkeypatch, defect):
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    host.stopped_ids.update(host.service_ids.values())
+    new = {s: revision_container(plan, s, candidate=True) for s in switcher.SERVICES}
+    labels = new['backend']['Config']['Labels']
+    if defect == 'runtime_revision':
+        labels[switcher.OCI_REVISION] = 'f' * 40
+    elif defect == 'other_app_label':
+        labels['qf_application'] = 'changed'
+    elif defect == 'forged_predecessor':
+        labels[switcher.COMPOSE_REPLACE] = 'f' * 64
+    elif defect == 'legacy_alias':
+        labels[switcher.COMPOSE_REPLACE] = 'backend-1'
+    elif defect == 'not_stopped':
+        host.stopped_ids.clear()
+    else:
+        new['backend']['Image'] = 'sha256:' + 'f' * 64
+    host.containers = lambda deadline=None: copy.deepcopy(new)
+    with pytest.raises(switcher.Refused):
+        host.verify_candidate()
+
+
+def test_original_legacy_replace_value_is_pinned_to_original_container_id(plan, monkeypatch):
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    changed = revision_container(plan, 'backend', legacy='runner-1')
+    with pytest.raises(switcher.Refused, match='CONTAINER_REPLACEMENT_MISMATCH'):
+        host.verified_spec(changed, 'backend')
+
+
+@pytest.mark.parametrize('exit_kind', ['self_exit', 'late_SIGTERM_exit'])
+def test_recovery_start_observes_actual_stopped_candidate_predecessor(plan, monkeypatch, exit_kind):
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    host.stopped_ids.update(host.service_ids.values())
+    candidate = revision_container(plan, 'backend', candidate=True)
+    candidate['State'].update(Running=False, Status='exited')
+    if exit_kind == 'late_SIGTERM_exit':
+        # stop's earlier timeout did not register this candidate ID. The
+        # current inspection, not a successful stop return, supplies proof.
+        host.verified_spec(candidate, 'backend')
+    assert candidate['Id'] not in host.stopped_ids
+    host.containers = lambda deadline=None: {'backend': copy.deepcopy(candidate)}
+    calls = []
+    host.run = lambda args, seconds=10: calls.append(args) or ''
+    host.start(plan.old_image, ('backend',))
+    assert candidate['Id'] in host.stopped_ids
+    assert len(calls) == 1 and 'up' in calls[0] and calls[0][-1] == 'backend'
+    restored = revision_container(plan, 'backend')
+    restored['Id'] = 'e' * 64
+    restored['Config']['Hostname'] = 'e' * 12
+    restored['Config']['Labels'][switcher.COMPOSE_REPLACE] = candidate['Id']
+    assert host.verified_spec(restored, 'backend') == host.baseline['backend']
+
+
+@pytest.mark.parametrize('defect', ['running', 'forged_revision'])
+def test_recovery_start_never_proves_running_or_forged_predecessor(plan, monkeypatch, defect):
+    host, _ = revision_preflight_host(plan, monkeypatch)
+    host.preflight()
+    host.stopped_ids.update(host.service_ids.values())
+    candidate = revision_container(plan, 'backend', candidate=True)
+    candidate['State'].update(Running=defect == 'running', Status='running' if defect == 'running' else 'exited')
+    if defect == 'forged_revision':
+        candidate['Config']['Labels'][switcher.OCI_REVISION] = 'f' * 40
+    host.containers = lambda deadline=None: {'backend': copy.deepcopy(candidate)}
+    calls = []
+    host.run = lambda args, seconds=10: calls.append(args) or ''
+    with pytest.raises(switcher.Refused):
+        host.start(plan.old_image, ('backend',))
+    assert candidate['Id'] not in host.stopped_ids and not calls
 
 
 def scheduler_tables(engine):

@@ -35,6 +35,8 @@ SHA = re.compile(r'[0-9a-f]{64}\Z')
 IMAGE = re.compile(r'sha256:[0-9a-f]{64}\Z')
 ORIGINAL_177 = '5fce87469ef73b798d72a2e0cdc8c901a6c8a8e852083336fc72e49f710bf3ce'
 OWNED_TASK = '54af16b2-3f21-4650-9364-d01adbfefde7'
+OCI_REVISION = 'org.opencontainers.image.revision'
+COMPOSE_REPLACE = 'com.docker.compose.replace'
 
 
 class Refused(RuntimeError):
@@ -452,11 +454,25 @@ def image_only_configs(old, candidate):
     return digest(original)
 
 
-def service_spec(container):
+def service_spec(container, *, verified_revision=None, verified_replacement=None):
     # Compose derives these three metadata labels from image/config file input.
     # All application labels and the other runtime configuration stay equal.
     config = copy.deepcopy(container['Config'])
     config.pop('Image', None)
+    if verified_revision is not None:
+        # Image provenance is allowed to follow the exact reviewed image/head,
+        # not become an application-label exemption. The caller first proves
+        # immutable image identity and obtains its OCI revision from the daemon.
+        # Without that proof these labels remain in the ordinary strict hash.
+        labels = config.get('Labels', {})
+        require(re.fullmatch(r'[0-9a-f]{40}', verified_revision) and
+                labels.get(OCI_REVISION) == verified_revision, 'CONTAINER_REVISION_MISMATCH')
+        require(labels.get(COMPOSE_REPLACE) == verified_replacement and
+                (verified_replacement is None or
+                 isinstance(verified_replacement, str) and len(verified_replacement) <= 256),
+                'CONTAINER_REPLACEMENT_MISMATCH')
+        labels.pop(OCI_REVISION)
+        labels.pop(COMPOSE_REPLACE, None)
     if config.get('Hostname') == container.get('Id', '')[:12]:
         config.pop('Hostname')
     for key in ('com.docker.compose.config-hash', 'com.docker.compose.image',
@@ -477,6 +493,10 @@ class DockerHost:
         self.plan = plan
         self.baseline = {}
         self.compose_hashes = {}
+        self.image_revisions = {}
+        self.service_ids = {}
+        self.replacement_proofs = {}
+        self.stopped_ids = set()
 
     def compose(self, candidate=False):
         p = self.plan
@@ -490,6 +510,48 @@ class DockerHost:
     def config(self, candidate):
         return json.loads(self.run(self.compose(candidate) + ['config', '--format', 'json']))
 
+    def image_revision(self, image, expected_image, *, expected_revision=None):
+        info = json.loads(self.run(['docker', 'image', 'inspect', image]))[0]
+        require(info['Id'] == expected_image, 'IMAGE_IDENTITY_MISMATCH')
+        revision = (info.get('Config', {}).get('Labels') or {}).get(OCI_REVISION)
+        require(isinstance(revision, str) and re.fullmatch(r'[0-9a-f]{40}', revision),
+                'IMAGE_REVISION_REQUIRED')
+        require(expected_revision is None or revision == expected_revision,
+                'CANDIDATE_IMAGE_REVISION_MISMATCH')
+        require(self.image_revisions.get(expected_image, revision) == revision, 'IMAGE_REVISION_CHANGED')
+        self.image_revisions[expected_image] = revision
+        return revision
+
+    def verified_spec(self, container, service):
+        require(service in SERVICES, 'INVALID_SERVICE_SCOPE')
+        revision = self.image_revisions.get(container['Image'])
+        require(revision is not None, 'UNVERIFIED_SERVICE_IMAGE')
+        labels = container['Config'].get('Labels') or {}
+        require(labels.get(OCI_REVISION) == revision, 'CONTAINER_REVISION_MISMATCH')
+        identity, replacement = container['Id'], labels.get(COMPOSE_REPLACE)
+        require(SHA.fullmatch(identity) and
+                (replacement is None or isinstance(replacement, str) and len(replacement) <= 256),
+                'CONTAINER_REPLACEMENT_MISMATCH')
+        if identity not in self.replacement_proofs:
+            if service in self.service_ids:
+                # Real Compose replacement adds this one label pointing to the
+                # just-replaced service ID. Validate that observed predecessor,
+                # including a possible bounded old-image restoration. Arbitrary
+                # application labels or invented predecessor IDs stay refused.
+                require(replacement == self.service_ids[service] and
+                        replacement in self.stopped_ids, 'CONTAINER_REPLACEMENT_MISMATCH')
+            else:
+                # Older Compose may have left a literal backend-1/runner-1.
+                # Pin that exact initial value only to this original old-image
+                # container ID. New replacements must name an actually stopped
+                # predecessor; legacy text is never inherited as new proof.
+                require(container['Image'] == self.plan.old_image, 'INITIAL_SERVICE_IMAGE_CHANGED')
+            self.replacement_proofs[identity] = replacement
+        require(replacement == self.replacement_proofs[identity], 'CONTAINER_REPLACEMENT_MISMATCH')
+        self.service_ids[service] = identity
+        return service_spec(container, verified_revision=revision,
+                            verified_replacement=self.replacement_proofs[identity])
+
     def preflight(self):
         require(sys.platform == 'linux', 'LINUX_HOST_REQUIRED')
         clock_namespace()
@@ -497,12 +559,11 @@ class DockerHost:
         image_only_configs(old, new)
         for service in SERVICES:
             image = old['services'][service]['image']
-            require(json.loads(self.run(['docker', 'image', 'inspect', image]))[0]['Id'] ==
-                    self.plan.old_image, 'OLD_COMPOSE_IMAGE_CHANGED')
+            self.image_revision(image, self.plan.old_image)
             require(new['services'][service]['image'] == self.plan.candidate_image,
                     'CANDIDATE_COMPOSE_IMAGE_NOT_PINNED')
-        require(json.loads(self.run(['docker', 'image', 'inspect', self.plan.candidate_image]))[0]['Id'] ==
-                self.plan.candidate_image, 'CANDIDATE_IMAGE_UNAVAILABLE')
+        self.image_revision(self.plan.candidate_image, self.plan.candidate_image,
+                            expected_revision=self.plan.candidate_head)
         require(Path(self.plan.manifest_file).stat().st_size <= 2 * 1024**2, 'MANIFEST_TOO_LARGE')
         manifest = json.loads(Path(self.plan.manifest_file).read_text())
         require(manifest['head'] == self.plan.candidate_head and
@@ -531,7 +592,7 @@ class DockerHost:
         self.compose_hashes = {False: digest(old), True: digest(new)}
         containers = self.containers()
         self.require_services(self.plan.old_image, running=SERVICES)
-        self.baseline = {s: service_spec(containers[s]) for s in SERVICES}
+        self.baseline = {s: self.verified_spec(containers[s], s) for s in SERVICES}
 
     def containers(self, deadline=None):
         result = {}
@@ -578,8 +639,9 @@ class DockerHost:
                     (states[s]['running'] if s in running else states[s]['stopped'])
                     for s in SERVICES if s in running or not running), 'SERVICE_IMAGE_OR_STATE_CHANGED')
         for service, container in containers.items():
+            runtime_spec = self.verified_spec(container, service)
             if service in self.baseline:
-                require(service_spec(container) == self.baseline[service], 'RUNTIME_CONFIG_CHANGED')
+                require(runtime_spec == self.baseline[service], 'RUNTIME_CONFIG_CHANGED')
 
     def gate(self):
         p = self.plan
@@ -609,6 +671,7 @@ class DockerHost:
                 not container['State'].get('Paused') and not container['State'].get('Restarting') and
                 container['Image'] in (self.plan.old_image, self.plan.candidate_image),
                 'STOP_TARGET_CHANGED')
+        self.verified_spec(container, service)
         # Explicit SIGTERM only. Docker's kill-with-signal marks manual stop and
         # does not run stop's grace-timeout -> SIGKILL path. Never omit --signal.
         # Compose kill also includes backend one-offs, so use the exact already
@@ -616,7 +679,10 @@ class DockerHost:
         self.run(['docker', 'kill', '--signal', 'SIGTERM', container['Id']],
                  min(10, max(.01, end - time.monotonic())))
         while time.monotonic() < end:
-            if self.states(end)[service]['stopped']:
+            remaining = self.containers(end).get(service)
+            require(remaining is None or remaining['Id'] == container['Id'], 'STOP_TARGET_CHANGED')
+            if remaining is None or self.state_values({service: remaining})[service]['stopped']:
+                self.stopped_ids.add(container['Id'])
                 return
             time.sleep(.1)
         raise Refused('GRACEFUL_STOP_NOT_COMPLETE')
@@ -627,7 +693,18 @@ class DockerHost:
         require(digest(self.config(candidate)) == self.compose_hashes[candidate], 'COMPOSE_CHANGED_DURING_SWITCH')
         # Only stopped/absent targets may be recreated. A bounded recovery must
         # not let Compose implicitly stop a surviving candidate with new work.
-        require(all(self.states()[s]['stopped'] for s in services), 'START_TARGET_NOT_STOPPED')
+        containers = self.containers()
+        states = self.state_values(containers)
+        require(all(states[s]['stopped'] for s in services), 'START_TARGET_NOT_STOPPED')
+        for service in services:
+            if service in containers:
+                # A partial start can exit by itself, or SIGTERM can finish
+                # after stop's finite wait refused. Prove its actual stopped
+                # immutable image/revision/ID here before a restoration can
+                # use it as the replacement predecessor. Running or forged
+                # targets cannot gain this proof through a failed stop call.
+                self.verified_spec(containers[service], service)
+                self.stopped_ids.add(containers[service]['Id'])
         self.run(self.compose(candidate) + ['up', '-d', '--no-deps', '--no-build', '--pull', 'never',
             '--timeout', '-1', '--wait', '--wait-timeout', str(self.plan.start_seconds), *services],
             self.plan.start_seconds + 15)
@@ -635,7 +712,7 @@ class DockerHost:
     def verify_candidate(self):
         self.require_services(self.plan.candidate_image, running=SERVICES)
         for service, container in self.containers().items():
-            require(service_spec(container) == self.baseline[service], 'RUNTIME_CONFIG_CHANGED')
+            require(self.verified_spec(container, service) == self.baseline[service], 'RUNTIME_CONFIG_CHANGED')
             require(service != 'backend' or container['State'].get('Health', {}).get('Status') == 'healthy',
                     'BACKEND_NOT_HEALTHY')
 
