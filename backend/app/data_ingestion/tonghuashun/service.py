@@ -195,15 +195,23 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         with Session(engine) as session:
             if repair is not None:
                 # Admission releases its source row transaction before network
-                # I/O. Recheck the exact head and genuine period here; later
-                # races are still handled by ordinary publication CAS.
-                _, repair_native_keys = repair.baseline(session, with_keys=True)
-            previous = CollectionRepository(session).read(dataset, subject, variant)
+                # I/O. Recheck and retain the exact pinned body and state here.
+                # Never reread/adopt the visible head after this verification:
+                # a concurrent collector could otherwise supply revision r+1,
+                # causing an approved repair for r to overwrite it as r+2.
+                previous, repair_native_keys = repair.baseline(
+                    session, with_keys=True, with_previous=True)
+            else:
+                previous = CollectionRepository(session).read(dataset, subject, variant)
+        # Both successful publication and failure-state recording must compare
+        # against the user's original pin. A concurrent head is preserved even
+        # when it changes after admission or while the source request is open.
+        expected_revision = repair.revision if repair is not None else previous.revision
         if not due(spec, previous, parameters, now):
             summary["skipped"] += 1
             continue
         if monitor:
-            monitor.begin(dataset, subject, variant, previous.revision, parameters,
+            monitor.begin(dataset, subject, variant, expected_revision, parameters,
                           cache=spec.kind in ("reports", "bars", "financials", "indicators"))
         acquisition = Acquisition(client, repair_native_keys=repair_native_keys)
         try:
@@ -215,7 +223,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             check_execution()
             with Session(engine) as session:
                 result = CollectionRepository(session).publish(dataset, subject, variant,
-                    expected=previous.revision, data=data, requests=acquisition.requests,
+                    expected=expected_revision, data=data, requests=acquisition.requests,
                     now=published_at, ticker_rows=data["item"] if spec.kind == "directory" else None,
                     reconcile=parameters.mode == "reconcile")
                 if monitor:
@@ -247,7 +255,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             with Session(engine) as session:
                 try:
                     CollectionRepository(session).fail(dataset, subject, variant,
-                        expected=previous.revision, kind=kind, now=datetime.now(UTC))
+                        expected=expected_revision, kind=kind, now=datetime.now(UTC))
                     session.commit()
                 except CollectionError:
                     session.rollback()  # A newer run owns the visible state.

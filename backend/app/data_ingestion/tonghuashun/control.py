@@ -141,7 +141,7 @@ class DefaultRepair:
         return cls(value['dataset'], value['subject'], value['asset_type'], baseline['revision'],
                    UUID(baseline['observation_id']), baseline['content_sha256'], **kwargs).validate()
 
-    def baseline(self, session, *, with_keys=False):
+    def baseline(self, session, *, with_keys=False, with_previous=False):
         """Verify pinned native inputs before any HTTP and without locking them.
 
         Publication still uses the ordinary head CAS. A later competing writer
@@ -149,7 +149,7 @@ class DefaultRepair:
         """
         from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState, TonghuashunObservation
         from app.data_ingestion.tonghuashun.contracts import CollectionConflict, CollectionError, provider_date
-        from app.data_ingestion.tonghuashun.repository import materialize
+        from app.data_ingestion.tonghuashun.repository import Previous, materialize
         from app.data_store.adapters.record_adapters import source_date
         self.validate()
         state = session.get(TonghuashunCollectionState, (self.dataset, self.subject, 'default'), populate_existing=True)
@@ -199,7 +199,14 @@ class DefaultRepair:
             # This pair is resolved from the specified immutable original, not
             # reconstructed by date_ms or accepted from caller-supplied raw IDs.
             native_keys = matches[0]
-        return (data, native_keys) if with_keys else data
+        # Capture the ordinary Previous value from this verified state and the
+        # pinned immutable observation. A later CollectionRepository.read could
+        # see a competing revision under READ COMMITTED and silently rebase both
+        # the repair body and its publication CAS. Keep that newer head entirely
+        # outside this operation; the ordinary CAS must reject it at commit.
+        previous = Previous(self.revision, data, state.succeeded_at, state.status,
+                            state.reconciled_at, state.attempted_at) if with_previous else data
+        return (previous, native_keys) if with_keys else previous
 
 
 def collection_scope_hash(dataset, subject, variant, revision, parameters):

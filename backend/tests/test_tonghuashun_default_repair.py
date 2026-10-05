@@ -4,9 +4,11 @@ No test calls a supplier or installs a real sample repair. Immutable originals,
 request counts, source-head CAS and the normalizer's basis are exercised together.
 """
 from contextlib import contextmanager
+from copy import deepcopy
 from datetime import date, timedelta
 import json
 import os
+import threading
 import time
 from unittest.mock import Mock
 from uuid import uuid4
@@ -477,6 +479,87 @@ def test_cas_conflict_preserves_competing_head_and_never_claims_old_or_other_pub
     assert current(native_engine, scope)[2] == competing
     with Session(native_engine) as session:
         assert len(list(session.scalars(select(TonghuashunObservation)))) == 2
+
+
+@pytest.mark.parametrize('dataset', ['stock_daily', 'fund_stock_history', 'fund_bond_history'])
+def test_concurrent_commit_after_pinned_baseline_cannot_rebase_repair(native_engine, tmp_path, monkeypatch, dataset):
+    from app.data_ingestion.tonghuashun.acquisition import Acquisition
+
+    if dataset == 'stock_daily':
+        old = {'item': [bar(DAY - timedelta(days=1)), bar(DAY)], 'adjust': 'none',
+               'requested_start': '2010-01-01'}
+        scope = selection(native_engine, dataset, old, day=DAY)
+        responses = [http_response({'item': [bar(DAY, '2')], 'adjust': 'none'})]
+    else:
+        old = old_reports(dataset)
+        scope = selection(native_engine, dataset, old, end_date=END, report_type='quarter')
+        responses = [http_response({'item': old['report_directory']['item']}),
+                     http_response(report_data(END, asset='stock' if dataset == 'fund_stock_history' else 'bond',
+                                               code='000002.SZ'))]
+    competing = {**deepcopy(old), 'ordinary_collector_evidence': 'invented-concurrent-commit'}
+    if dataset != 'stock_daily':
+        # Ordinary report collection emits groups in report_key order. Preserve
+        # that real collector contract in this concurrent publication fixture.
+        competing['item'] = sorted(competing['item'], key=lambda row: row['report_key'])
+    committed = threading.Event()
+    writer_threads, writer_errors, writer_versions, fetched_baselines = [], [], [], []
+    baseline = DefaultRepair.baseline
+    fetch = Acquisition.fetch
+
+    def ordinary_collector():
+        # A real second connection commits while the repair's checked-baseline
+        # session remains open. In PostgreSQL READ COMMITTED, a subsequent head
+        # SELECT can see revision r+1. This targets the pre-fetch reread gap;
+        # the existing transport-side race test exercises a later CAS boundary.
+        try:
+            writer_versions.append(publish(native_engine, dataset, competing,
+                expected=scope.selection.revision, when=NOW + timedelta(seconds=1)))
+        except Exception as exc:
+            writer_errors.append(exc)
+        finally:
+            committed.set()
+
+    def checked_then_raced(selection, session, *, with_keys=False, **kwargs):
+        result = baseline(selection, session, with_keys=with_keys, **kwargs)
+        if with_keys:
+            assert not writer_threads
+            thread = threading.Thread(target=ordinary_collector, name='invented-r01-pinned-head-writer')
+            writer_threads.append(thread)
+            thread.start()
+            assert committed.wait(5), 'The independent ordinary collector did not finish its bounded commit'
+            thread.join(timeout=5)
+            assert not thread.is_alive() and not writer_errors
+        return result
+
+    def capture_pinned_body(self, spec, subject, parameters, previous, now):
+        fetched_baselines.append(deepcopy(previous))
+        return fetch(self, spec, subject, parameters, previous, now)
+
+    monkeypatch.setattr(DefaultRepair, 'baseline', checked_then_raced)
+    monkeypatch.setattr(Acquisition, 'fetch', capture_pinned_body)
+    try:
+        code, record, get = worker(native_engine, scope, tmp_path, monkeypatch, responses)
+    finally:
+        # Even an assertion or unexpected handler failure must not leave a test
+        # writer running while the fixture drops its private native schema.
+        for thread in writer_threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+    assert len(writer_versions) == 1 and not writer_errors
+    with Session(native_engine) as session:
+        state = session.get(TonghuashunCollectionState, (dataset, scope.subject, 'default'))
+        # Assert the actual database before inspecting the worker's attribution:
+        # reporting unknown after overwriting r+1 would still violate the pin.
+        assert state.revision == scope.selection.revision + 1
+        assert state.observation_id == writer_versions[0][0]
+        assert len(list(session.scalars(select(TonghuashunObservation)))) == 2
+        assert list(session.scalars(select(TonghuashunCollectionState.variant))) == ['default']
+    assert current(native_engine, scope)[2] == competing
+    assert fetched_baselines == [old]
+    assert code == 2 and record['outcome'] == 'blocked' and record['unknown_publication'] is True
+    assert get.call_count == scope.max_http_attempts
+    assert record['counts'] == {'logical_requests': scope.max_requests,
+                                'http_attempts': scope.max_http_attempts, 'reused': 0}
 
 
 def test_unexpected_handler_error_keeps_publication_unknown_even_if_old_head_is_visible(native_engine, tmp_path, monkeypatch):
