@@ -147,6 +147,28 @@ def switch(plan, host, event):
     gate = None
     stop_attempted = False
     captured = []
+    sink = event
+    evidence_errors = []
+    def safe_event(stage, message, **fields):
+        # Full disks, failed fsync and broken stdout are real deployment
+        # failures. Recovery cannot depend on writing another event to the
+        # same failed sink. Preserve its error state, attempt only a fixed
+        # secret-free stderr code, and never let logging bypass recovery.
+        try:
+            sink(stage, message, evidence_error_count=len(evidence_errors), **fields)
+            return True
+        except Exception:
+            evidence_errors.append(stage)
+            try:
+                os.write(2, b'R01_SWITCH_EVIDENCE_UNAVAILABLE\n')
+            except OSError:
+                pass
+            return False
+    def event(stage, message, **fields):
+        # Normal switching stops on the first missing evidence receipt. The
+        # exception/finally/recovery paths instead use safe_event directly and
+        # remain executable even when all subsequent sink writes also fail.
+        require(safe_event(stage, message, **fields), 'EVIDENCE_UNAVAILABLE')
     try:
         plan.validate()
         host.preflight()
@@ -197,18 +219,18 @@ def switch(plan, host, event):
         return 0
     except Exception as error:
         reason = str(error) if isinstance(error, Refused) else 'SWITCH_CHECK_FAILED'
-        event('refused', 'P01 本次切换未完成，正在核验服务状态并执行至多一次有界恢复。', reason=reason)
+        safe_event('refused', 'P01 本次切换未完成，正在核验服务状态并执行至多一次有界恢复。', reason=reason)
         if gate is not None:
-            close_gate(gate, event)
+            close_gate(gate, safe_event)
             gate = None
         if stop_attempted:
-            recover(plan, host, captured, event, before)
+            recover(plan, host, captured, safe_event, before)
         else:
-            event('unchanged', 'P01 在停服前拒绝切换，旧服务未收到停止命令。')
+            safe_event('unchanged', 'P01 在停服前拒绝切换，旧服务未收到停止命令。')
         return 2
     finally:
         if gate is not None:
-            close_gate(gate, event)
+            close_gate(gate, safe_event)
 
 
 def recover(plan, host, captured, event, before):

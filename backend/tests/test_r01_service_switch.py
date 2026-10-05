@@ -227,6 +227,38 @@ def test_busy_candidate_survives_refused_recovery_gate_and_only_missing_runner_r
     assert events[-1]['guarded'] is False and events[-1]['restored_old'] is False
 
 
+@pytest.mark.parametrize('failed_stage,missing', [('stopped', ('backend',)),
+    ('released', switcher.SERVICES), ('completed', switcher.SERVICES)])
+def test_persistently_failed_event_sink_cannot_bypass_real_switch_recovery(plan, capfd, failed_stage, missing):
+    host = FakeHost(plan)
+    broken, observed = [False], []
+    def failing_sink(stage, message, **fields):
+        if stage == failed_stage:
+            broken[0] = True
+        if broken[0]:
+            # Failure remains active for refused/close/recovery events. This
+            # exercises the actual exception path that previously skipped the
+            # restart when the evidence disk or operator stdout stayed broken.
+            raise OSError('synthetic sink failure containing a secret that must not be logged')
+        observed.append(stage)
+    assert switcher.switch(plan, host, failing_sink) == 2
+    assert all(s['running'] and s['image'] == plan.old_image for s in host.states().values())
+    assert [c for c in host.calls if c[0] == 'start' and c[1] == plan.old_image] == [
+        ('start', plan.old_image, missing)]
+    assert host.gates == (2 if failed_stage == 'completed' else 1)
+    error = capfd.readouterr().err
+    assert 'R01_SWITCH_EVIDENCE_UNAVAILABLE' in error and 'secret' not in error
+
+
+def test_failed_pre_stop_event_sink_returns_failure_without_any_stop_or_restart(plan, capfd):
+    host = FakeHost(plan)
+    def failed(*args, **kwargs):
+        raise OSError('synthetic full evidence disk')
+    assert switcher.switch(plan, host, failed) == 2
+    assert not any(c[0] in ('gate', 'stop', 'start') for c in host.calls)
+    assert 'R01_SWITCH_EVIDENCE_UNAVAILABLE' in capfd.readouterr().err
+
+
 @pytest.mark.parametrize('field', ['owned_definition_hash', 'original_fingerprint',
                                  'definitions_hash', 'source_configs_hash'])
 def test_changed_task_or_configuration_after_drain_refuses_before_stop(plan, field):
