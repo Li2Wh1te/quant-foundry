@@ -20,6 +20,8 @@ from uuid import UUID
 
 import pytest
 
+from tests.test_tonghuashun_default_repair import native_engine
+
 PATH = Path(__file__).resolve().parents[2] / 'scripts/r01_source_window.py'
 SPEC = importlib.util.spec_from_file_location('r01_source_window', PATH)
 w = importlib.util.module_from_spec(SPEC)
@@ -197,6 +199,86 @@ def test_one_full_batch_restores_exact_nine_and_keeps_frozen_queue(sample, monke
             assert current == old
     with pytest.raises(FileExistsError):
         journal.create(w.new_state(sample[0], result['worker']))
+
+
+@pytest.mark.parametrize('source_sha', [
+    'd630c0f94d15a16fa2fdfe006a9970bb6b2da1539faf703da3295a1f223d7549',
+    'f' * 64,
+], ids=['retained-r20-plan', 'unreviewed-replacement'])
+def test_previous_or_unreviewed_source_plan_is_refused_before_window_creation(
+        sample, monkeypatch, capsys, source_sha):
+    plan, root = sample
+    stale = copy.deepcopy(plan)
+    stale['source_plan_sha256'] = source_sha
+    path, state = root / 'retained-plan.json', root / 'window.json'
+    w.write_private(path, stale, exclusive=True)
+    preserved = path.read_bytes()
+    monkeypatch.setattr(w, 'process_identity', lambda *args: {
+        'pid': 101, 'start_ticks': '1234', 'boot_id': 'synthetic-test-boot'})
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('A rejected source pin must not create Docker work or a watchdog')
+
+    monkeypatch.setattr(w, 'DockerClient', forbidden)
+    monkeypatch.setattr(w, 'arm_watchdog', forbidden)
+    code = w.main(['run', '--plan', str(path), '--state', str(state),
+                   '--expect-plan-sha256', w.digest(stale)])
+    response = json.loads(capsys.readouterr().out)
+    assert code == 2 and response['reason'] == 'PLAN_SCOPE_CHANGED'
+    assert not state.exists() and not list(root.glob('window.json*'))
+    assert path.read_bytes() == preserved
+
+
+@pytest.mark.parametrize('live_revision,new_observation', [
+    (20, False), (21, False), (22, False), (22, True),
+], ids=['past-r20', 'fixed-r21', 'future-r22-same-body', 'future-r22-new-body'])
+def test_fixed_r21_worker_never_follows_another_default_revision(
+        native_engine, tmp_path, monkeypatch, live_revision, new_observation):
+    from dataclasses import replace
+    from sqlalchemy import select
+    from sqlalchemy.orm import Session
+    from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState, TonghuashunObservation
+    from app.data_ingestion.tonghuashun import bounded
+    from tests import test_tonghuashun_default_repair as repair
+
+    # All identities and HTTP are invented. A revision counter can advance
+    # without replacing its last-good observation; that case must still reject
+    # a different fixed revision even when the body and observation ID match.
+    body = {'item': [repair.bar(repair.DAY)], 'adjust': 'none'}
+    first = repair.selection(native_engine, 'stock_daily', body, day=repair.DAY)
+    scope = bounded.RepairScope(replace(first.selection, revision=21))
+    with Session(native_engine) as session:
+        state = session.get(TonghuashunCollectionState, ('stock_daily', repair.STOCK, 'default'))
+        state.revision = 21 if new_observation else live_revision
+        session.commit()
+    if new_observation:
+        repair.publish(native_engine, 'stock_daily',
+            {'item': [repair.bar(repair.DAY, '3')], 'adjust': 'none'}, expected=21)
+    selection_before = copy.deepcopy(scope.as_dict())
+    with Session(native_engine) as session:
+        state = session.get(TonghuashunCollectionState, ('stock_daily', repair.STOCK, 'default'))
+        before = (state.revision, state.observation_id,
+                  tuple(session.scalars(select(TonghuashunObservation.id).order_by(TonghuashunObservation.id))))
+    code, receipt, get = repair.worker(native_engine, scope, tmp_path, monkeypatch,
+        [repair.http_response({'item': [repair.bar(repair.DAY, '2')], 'adjust': 'none'})])
+    assert scope.as_dict() == selection_before
+    if live_revision == 21:
+        assert code == 0 and receipt['outcome'] == 'succeeded'
+        assert get.call_count == receipt['counts']['http_attempts'] == 1
+        assert receipt['publication']['status'] == 'verified'
+        with Session(native_engine) as session:
+            state = session.get(TonghuashunCollectionState, ('stock_daily', repair.STOCK, 'default'))
+            assert state.revision == 22 and state.observation_id != before[1]
+    else:
+        assert code == 2 and receipt['outcome'] == 'blocked' and receipt['problem'] == 'baseline_changed'
+        assert get.call_count == receipt['counts']['http_attempts'] == 0
+        assert receipt['publication']['status'] == 'not_attempted'
+        assert receipt['counts_complete'] is True and receipt['unknown_publication'] is False
+        with Session(native_engine) as session:
+            state = session.get(TonghuashunCollectionState, ('stock_daily', repair.STOCK, 'default'))
+            after = (state.revision, state.observation_id,
+                     tuple(session.scalars(select(TonghuashunObservation.id).order_by(TonghuashunObservation.id))))
+        assert after == before
 
 
 @pytest.mark.parametrize('change', ['version', 'mode', 'schedule', 'missing', 'protected', 'config', 'extra'])

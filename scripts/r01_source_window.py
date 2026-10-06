@@ -30,7 +30,10 @@ APP_IMAGE = 'sha256:0846f2340d53650c564430eb4e39699895d0d03e36632abc5d78ad14e0ba
 PROJECT = 'quant-foundry-p01'
 PROJECT_DIRECTORY = '/home/lemon/quant-foundry-p01-1da2116'
 SOURCE_ROOT = '/app/data/logs/lf-r01-c205736-source-three-five-http-review-20261005'
-SOURCE_SHA = 'd630c0f94d15a16fa2fdfe006a9970bb6b2da1539faf703da3295a1f223d7549'
+# Pin the reviewed replacement bytes to stock revision 21. The three business
+# targets and request budgets are unchanged; neither the retained r20 plan nor
+# a later default revision may be selected automatically by this controller.
+SOURCE_SHA = 'e6081dca2fcafa5b60ed27de5f7b508a6453ec97e0a7c138e621fb628ffac617'
 SOURCE_CONTAINER = 'qfr01-source-three-five-c205736-attempt1'
 ORIGINAL_SHA = 'da6574ddfcd8ef38cd5d37b41978de28e69613ed28eca8b4b17901b5247977e6'
 CONFIG_SHA = '53fa02fdab80678ad03c500351566b6477b41ceb0482bf60b46f6b15a8a50744'
@@ -373,7 +376,7 @@ try:
      from app.data_sources.service import configured
      from app.data_ingestion.models.tonghuashun import TonghuashunTicker
      raw=(root/'plan.json').read_bytes()
-     assert hashlib.sha256(raw).hexdigest()=='d630c0f94d15a16fa2fdfe006a9970bb6b2da1539faf703da3295a1f223d7549'
+     assert hashlib.sha256(raw).hexdigest()=='e6081dca2fcafa5b60ed27de5f7b508a6453ec97e0a7c138e621fb628ffac617'
      scopes=[RepairScope.from_dict(p) for p in json.loads(raw)]
      assert len(scopes)==3 and [x.max_http_attempts for x in scopes]==[1,2,2]
      source=s.get(DataSourceConfig,'tonghuashun');assert source.enabled and source.version==2 and configured(source)
