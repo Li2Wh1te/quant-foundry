@@ -361,17 +361,18 @@ def test_source_creation_overrides_only_oneoff_restart_and_never_replays(sample,
     assert len(calls) == 1
 
 
+@pytest.mark.parametrize('user', ['999', 'app'])
 @pytest.mark.parametrize('policy,restarts', [('always', 0), ('no', 1), ('no', 0)])
-def test_actual_source_restart_policy_is_verified_but_owned_fencing_remains_possible(sample, monkeypatch, policy, restarts):
+def test_actual_source_restart_policy_is_verified_but_owned_fencing_remains_possible(sample, monkeypatch, policy, restarts, user):
     client = w.DockerClient(sample[0]['manifest'])
     episode, token = 'e' * 32, 'b' * 64
     item = {'Id': 'a' * 64, 'Image': w.APP_IMAGE, 'RestartCount': restarts,
         'Config': {'Labels': {'com.docker.compose.project': w.PROJECT,
-            'qf.r01.window': episode, 'qf.r01.plan': token}, 'Env': [], 'User': '999'},
+            'qf.r01.window': episode, 'qf.r01.plan': token}, 'Env': [], 'User': user},
         'HostConfig': {'NetworkMode': 'synthetic-net', 'RestartPolicy': {'Name': policy}},
         'Mounts': [], 'State': {'Running': True, 'ExitCode': 0, 'Status': 'running'}}
     state = {'episode': episode, 'plan_sha256': token, 'source_launch_intent': True,
-        'source_id': 'a' * 64, 'plan': {'runtime': {'network_mode': 'synthetic-net',
+        'source_id': 'a' * 64, 'plan': {'runtime': {'configured_user': user, 'network_mode': 'synthetic-net',
             'env_sha256': w.digest({}), 'mounts_sha256': w.digest([])}}}
     monkeypatch.setattr(client, 'inspect', lambda *a, **kw: copy.deepcopy(item))
     if policy != 'no' or restarts:
@@ -380,6 +381,66 @@ def test_actual_source_restart_policy_is_verified_but_owned_fencing_remains_poss
     else:
         assert client.source_state(state)['running']
     assert client.source_state(state, fencing=True)['id'] == 'a' * 64
+
+
+@pytest.mark.parametrize('user', ['app', 'app:app', '999', '999:999'])
+def test_named_application_user_requires_actual_numeric_identity(user):
+    w.verify_application_user(user, user, dict(uid=999, euid=999, gid=999, egid=999))
+
+
+@pytest.mark.parametrize('uid', [999, 0])
+def test_preflight_resolves_image_user_app_and_checks_the_live_process(sample, monkeypatch, uid):
+    client = w.DockerClient(sample[0]['manifest'])
+    image = {'Id': w.APP_IMAGE, 'Config': {'User': 'app', 'Env': ['QF_ENVIRONMENT=test'],
+        'Labels': {'org.opencontainers.image.revision': w.APP_HEAD}}}
+    runner = {'Id': sample[0]['manifest']['runner_id'], 'Image': w.APP_IMAGE,
+        'State': {'Running': True}, 'Config': {'User': 'app', 'Env': ['QF_ENVIRONMENT=test'],
+            'Labels': {'com.docker.compose.project': w.PROJECT,
+                       'com.docker.compose.service': 'runner'}},
+        'HostConfig': {'NetworkMode': 'synthetic-net'}, 'Mounts': []}
+    config = {'services': {'runner': {'image': w.APP_IMAGE, 'volumes': []}}}
+    calls = []
+    def command(argv, **kwargs):
+        calls.append(argv)
+        if argv[:2] == ['docker', 'ps']: return ''
+        if argv[:3] == ['docker', 'image', 'inspect']: return json.dumps([image])
+        if argv[:2] == ['docker', 'compose']: return json.dumps(config)
+        assert argv[:3] == ['docker', 'exec', runner['Id']]
+        assert 'os.getuid()' in argv[-1] and 'os.getegid()' in argv[-1]
+        return json.dumps(dict(uid=uid, euid=uid, gid=999, egid=999))
+    monkeypatch.setattr(client, 'backend', lambda **kw: sample[0]['manifest']['backend_id'])
+    monkeypatch.setattr(client, 'inspect', lambda *a, **kw: runner)
+    monkeypatch.setattr(client, 'command', command)
+    if uid == 0:
+        with pytest.raises(w.Refused, match='APP_UID_CHANGED'): client.preflight()
+    else:
+        runtime = client.preflight()
+        assert runtime['configured_user'] == 'app' and runtime['application_identity']['uid'] == 999
+    assert len([a for a in calls if a[:2] == ['docker', 'exec']]) == 1
+    assert all('run' not in a and 'up' not in a for a in calls)
+
+
+@pytest.mark.parametrize('field,value', [(field, value)
+    for field in ('uid', 'euid', 'gid', 'egid') for value in (0, 1000, None, '999', True)])
+def test_named_application_user_never_accepts_wrong_or_unproved_rights(field, value):
+    identity = dict(uid=999, euid=999, gid=999, egid=999)
+    identity[field] = value
+    with pytest.raises(w.Refused, match='APP_UID_CHANGED'):
+        w.verify_application_user('app', 'app', identity)
+
+
+@pytest.mark.parametrize('expected,configured', [('root', 'root'), ('app', 'root'),
+    ('app', '999'), ('unexpected', 'unexpected'), (None, '')])
+def test_application_user_spelling_must_match_the_reviewed_compose_user(expected, configured):
+    with pytest.raises(w.Refused, match='APP_UID_CHANGED'):
+        w.verify_application_user(expected, configured,
+            dict(uid=999, euid=999, gid=999, egid=999))
+
+
+@pytest.mark.parametrize('proof', [None, [], '999'])
+def test_application_user_missing_identity_proof_is_refused(proof):
+    with pytest.raises(w.Refused, match='APP_UID_CHANGED'):
+        w.verify_application_user('app', 'app', proof)
 
 
 @pytest.mark.parametrize('stopped_status', ['exited', 'restarting'])

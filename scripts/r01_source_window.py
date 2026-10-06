@@ -55,6 +55,7 @@ SCOPE_ASSETS = {'stock_daily': 'a-share', 'fund_stock_history': 'fund-otc',
                 'fund_bond_history': 'fund-lof'}
 TOTAL, DRAIN, LAUNCH, BATCH, RECOVERY = 3600, 2400, 60, 840, 300
 TERMINAL = ('restored', 'recovery_required')
+APP_USERS = ('999', '999:999', 'app', 'app:app')
 # This private one-off override never updates the existing runner service. Both
 # Compose restart-policy forms are explicit so the bounded CLI cannot inherit
 # the ordinary runner's unless-stopped policy and start another process attempt.
@@ -202,6 +203,18 @@ def alive(identity):
 
 def definition(task):
     return {k: task[k] for k in DEFINITION}
+
+
+def verify_application_user(expected, configured, identity):
+    """Resolve the image's named app user without changing its numeric rights.
+
+    The production image declares USER app, which Docker resolves to 999:999.
+    Require the exact Compose/container user spelling and an actual process
+    proof of real/effective UID/GID; a permitted name alone is insufficient.
+    """
+    require(expected in APP_USERS and configured == expected and isinstance(identity, dict)
+            and all(type(identity.get(key)) is int and identity[key] == 999
+                    for key in ('uid', 'euid', 'gid', 'egid')), 'APP_UID_CHANGED')
 
 
 def matching(run):
@@ -516,8 +529,11 @@ class DockerClient:
         expected.update({k: str(v) for k, v in service.get('environment', {}).items()})
         require(environment(runner['Config'].get('Env') or []) == expected,
                 'COMPOSE_ENVIRONMENT_CHANGED')
-        require(service.get('user', image['Config'].get('User')) in ('999', '999:999')
-                and runner['Config']['User'] in ('999', '999:999'), 'APP_UID_CHANGED')
+        expected_user = service.get('user') or image['Config'].get('User')
+        identity = json.loads(self.command(['docker', 'exec', runner['Id'],
+            'python', '-B', '-c', 'import json,os;print(json.dumps(dict(uid=os.getuid(),'
+            'euid=os.geteuid(),gid=os.getgid(),egid=os.getegid())))'], seconds=remaining()))
+        verify_application_user(expected_user, runner['Config']['User'], identity)
         declared = service.get('volumes', [])
         require(len(declared) == len(runner['Mounts']), 'COMPOSE_MOUNTS_CHANGED')
         for volume in declared:
@@ -534,6 +550,7 @@ class DockerClient:
                         'COMPOSE_MOUNTS_CHANGED')
         return {'backend_id': backend, 'runner_id': runner['Id'], 'image': APP_IMAGE,
                 'app_head': APP_HEAD, 'env_sha256': digest(expected),
+                'configured_user': runner['Config']['User'], 'application_identity': identity,
                 'network_mode': runner['HostConfig']['NetworkMode'],
                 'mounts_sha256': digest(sorted(runner['Mounts'], key=lambda m: m['Destination']))}
 
@@ -576,7 +593,8 @@ class DockerClient:
                 'SOURCE_OWNERSHIP_UNVERIFIED')
         runtime = value['plan']['runtime']
         require(digest(dict(x.split('=', 1) for x in item['Config'].get('Env', [])))
-                == runtime['env_sha256'] and item['Config']['User'] in ('999', '999:999')
+                == runtime['env_sha256'] and runtime.get('configured_user') in APP_USERS
+                and item['Config']['User'] == runtime['configured_user']
                 and item['HostConfig']['NetworkMode'] == runtime['network_mode']
                 and digest(sorted(item['Mounts'], key=lambda m: m['Destination']))
                 == runtime['mounts_sha256'], 'SOURCE_BINDINGS_UNVERIFIED')
