@@ -192,6 +192,7 @@ def main():
                             'tests/test_data_store_kernel.py','tests/test_data_store_schema.py',
                             'tests/test_data_store_local_pipeline.py',
                             'tests/test_data_store_runtime_budget.py',
+                            'tests/test_data_store_e50_fixed_boundary.py',
                             '--basetemp=/work/pytest','-q','--tb=short'],timeout=240)
             result['kernel_tests']={'passed':True,'summary':output.splitlines()[-1]}
             # Exercise the actual admission gate and inactive sealed resources
