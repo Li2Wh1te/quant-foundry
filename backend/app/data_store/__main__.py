@@ -27,6 +27,8 @@ def main(argv=None):
                         help='Resume exactly one existing sealed batch; never claim new native work')
     parser.add_argument('--admit-active-only',action='store_true',
                         help='Atomically admit one existing E23/E44 batch using exact plan-active fences')
+    parser.add_argument('--e50-input-fence',type=Path,
+                        help='Exact finite E50 bootstrap manifest; preserve later inputs as ordinary pending work')
     parser.add_argument('--expect-input-identity',
                         help='Exact sealed input identity SHA256 for --resume-sealed-only')
     parser.add_argument('--expect-source-selection',
@@ -50,6 +52,21 @@ def main(argv=None):
     parser.add_argument('--audit-local-only',action='store_true',
                         help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
+    e50_fence=None
+    if args.e50_input_fence is not None:
+        if (args.command!='update' or args.entry!=['E50'] or args.initialize or args.rescue or
+                args.partition or args.allow_incompatible_rebuild or
+                args.resume_sealed_only or args.admit_active_only):
+            parser.error('--e50-input-fence requires one existing native E50 bootstrap update')
+        try:
+            with args.e50_input_fence.open('rb') as handle:
+                encoded=handle.read(262145)
+            if len(encoded)>262144:raise ValueError('Oversized E50 input fence')
+            e50_fence=encoded.decode('utf8')
+            from .incremental import parse_e50_fence
+            parse_e50_fence(e50_fence)
+        except (OSError,UnicodeError,ValueError):
+            parser.error('Invalid E50 input fence')
     if args.resume_sealed_only and args.admit_active_only:
         parser.error('Choose one input admission mode')
     if args.resume_sealed_only or args.admit_active_only:
@@ -151,7 +168,7 @@ def main(argv=None):
             resume_sealed_only=args.resume_sealed_only,
             expected_input_identity=args.expect_input_identity if input_admission else None,
             expected_source_selection=args.expect_source_selection if input_admission else None,
-            admit_active_only=args.admit_active_only)
+            admit_active_only=args.admit_active_only,e50_input_fence=e50_fence)
         engine=get_engine()
         if args.command=='plan-active':
             from .active_input import planning_store

@@ -82,6 +82,11 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old=_read(store,entry);previous=old.get('refresh',{});now=int(clock())
         admitted=None;restored=None
+        if options.e50_input_fence is not None:
+            from .incremental import validate_e50_fence
+            # Refuse a foreign contract, bootstrap or original before changing
+            # refresh status. Claim repeats these checks under its row lock.
+            validate_e50_fence(store,entry,sources,options.e50_input_fence)
         if options.admit_active_only:
             from .active_input import active_input_plan
             # Rejection must leave the existing status, queue and scratch
@@ -175,6 +180,8 @@ def run_local(store,sources,*,entries,options,cancelled=None,policy=None,clock=N
     policy=policy or RetryPolicy();clock=clock or time.time;monotonic=monotonic or time.monotonic
     deadline=monotonic()+policy.call_seconds
     selected=list(ENTRIES if entries is None else entries)
+    if options.e50_input_fence is not None and [e.id for e in selected]!=['E50']:
+        raise DataStoreError('INVALID_CONFIGURATION')
     if (options.resume_sealed_only or options.admit_active_only) and (len(selected)!=1 or not selected[0].business):
         # A single input fence belongs to one business entry. In particular,
         # ingestion-channel expansion must not admit an unapproved target.

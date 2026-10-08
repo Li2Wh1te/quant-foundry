@@ -46,6 +46,7 @@ class PipelineOptions:
     admit_active_only: bool = False
     expected_input_identity: str | None = None
     expected_source_selection: str | None = None
+    e50_input_fence: str | None = None
 
     @property
     def claim_batches(self):
@@ -87,6 +88,13 @@ class PipelineOptions:
                 raise ValueError('Sealed continuation requires one update batch and both exact fences')
         elif any(fence is not None for fence in fences):
             raise ValueError('Input fences require sealed continuation mode')
+        if self.e50_input_fence is not None:
+            if (not isinstance(self.e50_input_fence,str) or len(self.e50_input_fence.encode())>262144 or
+                    self.mode!='update' or self.partitions or self.allow_incompatible_rebuild or
+                    self.resume_sealed_only or self.admit_active_only):
+                raise ValueError('E50 input fence requires an ordinary bounded bootstrap update')
+            from .incremental import parse_e50_fence
+            parse_e50_fence(self.e50_input_fence)
         from .schema import identifier
         for p in self.partitions: identifier(p)
 

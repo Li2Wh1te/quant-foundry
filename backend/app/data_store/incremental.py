@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from datetime import date, datetime, timezone
 import hashlib
 import json
+import re
 from uuid import UUID, uuid4
 
 from sqlalchemy import text
@@ -23,6 +24,128 @@ from .errors import DataStoreError
 IDS = frozenset(('E23','E44','E50','E51','E52','E69','E70'))
 WHERE = 'source=:source AND dataset=:dataset AND subject=:subject AND variant=:variant AND range_key=:range_key'
 ZERO = '00000000-0000-0000-0000-000000000000'
+
+
+def parse_e50_fence(encoded):
+    """Accept only a small, exact bootstrap boundary, never source payloads.
+
+    The disposable operator manifest contains original metadata digests. It is
+    not a completed-observation ledger. A stable per-scope digest lets the same
+    claim resume under a shorter remaining manifest without changing its seal.
+    """
+    value=json.loads(encoded)
+    keys={'version','entry_id','source','dataset','contract','bootstrap_boundary','candidates'}
+    sha=lambda x:isinstance(x,str) and re.fullmatch(r'[0-9a-f]{64}',x)
+    if (not isinstance(value,dict) or set(value)!=keys or type(value['version']) is not int or
+            value['version']!=1 or value['entry_id']!='E50' or value['source']!='tonghuashun' or
+            value['dataset']!='stock_daily' or not sha(value['contract']) or
+            not isinstance(value['bootstrap_boundary'],str) or
+            not re.fullmatch(r'[0-9a-f]{32}',value['bootstrap_boundary']) or
+            not isinstance(value['candidates'],list) or not 1<=len(value['candidates'])<=32):
+        raise ValueError('Invalid E50 input fence')
+    seen=set()
+    for scope in value['candidates']:
+        if (not isinstance(scope,dict) or set(scope)!={'subject','variant','range_key','lower','stop',
+                'observation_count','metadata_sha256'} or
+                not isinstance(scope['subject'],str) or not re.fullmatch(r'[0-9]{6}\.(SZ|SH|BJ)',scope['subject']) or
+                scope['variant']!='default' or scope['range_key']!='*' or scope['lower']!='-infinity' or
+                type(scope['observation_count']) is not int or not 1<=scope['observation_count']<=32 or
+                not sha(scope['metadata_sha256']) or not isinstance(scope['stop'],dict) or
+                set(scope['stop'])!={'at','id'}):
+            raise ValueError('Invalid E50 scope fence')
+        stop=scope['stop']
+        try:
+            at=datetime.fromisoformat(stop['at'])
+            if at.tzinfo is None or str(UUID(stop['id']))!=stop['id']:raise ValueError()
+            stop['at']=at.astimezone(timezone.utc).isoformat()
+        except (TypeError,ValueError,AttributeError):
+            raise ValueError('Invalid E50 stop') from None
+        identity=(scope['subject'],scope['variant'],scope['range_key'])
+        if identity in seen:raise ValueError('Duplicate E50 scope')
+        seen.add(identity)
+    return value
+
+
+def _e50_refused():
+    error=DataStoreError('SOURCE_CONFLICT')
+    error.preserve_continuation=True
+    return error
+
+
+def _e50_scope_digest(fence,scope):
+    return digest([{k:fence[k] for k in ('version','entry_id','source','dataset','contract','bootstrap_boundary')},scope])
+
+
+def _e50_runtime(c,entry,sources,fence):
+    if (type(sources) is not NativeSources or entry.id!='E50' or entry.source!=fence['source'] or
+            entry.native!=fence['dataset'] or digest(entry.spec.descriptor())!=fence['contract']):
+        raise _e50_refused()
+    encoded=c.execute(text('SELECT summary_json FROM data_store_entry_status WHERE entry_id=:id'),
+                      {'id':entry.id}).scalar_one_or_none()
+    state=json.loads(encoded).get('incremental',{}) if encoded else {}
+    if (state.get('contract')!=fence['contract'] or
+            state.get('bootstrap_boundary')!=fence['bootstrap_boundary'] or state.get('reconciling')):
+        raise _e50_refused()
+
+
+def _e50_original(c,job,scope):
+    # The queue row lock serializes every producer's trigger with claim. A
+    # writer still in flight dirties pending after this transaction commits.
+    rows=[dict(r) for r in c.execute(text('SELECT observed_at AS at,id::text,content_hash,row_count,'
+        'chain_depth,base_observation_id::text,encode(sha256(convert_to(request_json,\'UTF8\')),\'hex\') AS request_sha256 '
+        'FROM tonghuashun_observations WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+        'AND observed_at>=CAST(:lower AS timestamptz) '
+        'AND (observed_at,id)<=(CAST(:at AS timestamptz),CAST(:id AS uuid)) '
+        'ORDER BY observed_at,id LIMIT 33'),{**job,'lower':scope['lower'],**scope['stop']}).mappings()]
+    for row in rows:row['at']=row['at'].astimezone(timezone.utc).isoformat()
+    if (len(rows)!=scope['observation_count'] or digest(rows)!=scope['metadata_sha256'] or
+            not rows or {k:rows[-1][k] for k in ('at','id')}!=scope['stop']):
+        raise _e50_refused()
+    active=job['active']
+    if active is not None:
+        after=active.get('after')
+        if after is not None:
+            try:after={'at':datetime.fromisoformat(after['at']).astimezone(timezone.utc).isoformat(),'id':after['id']}
+            except (TypeError,ValueError,KeyError,AttributeError):raise _e50_refused() from None
+        if (not active.get('bootstrap') or active.get('blocked') or
+                active.get('e50_fence')!=job['scope_digest'] or active.get('lower')!=scope['lower'] or
+                active.get('stop')!=scope['stop'] or not isinstance(active.get('id'),str) or
+                after is not None and after not in
+                    [{k:row[k] for k in ('at','id')} for row in rows]):
+            raise _e50_refused()
+    elif not job['bootstrap_pending'] or job['lower_text']!=scope['lower']:
+        raise _e50_refused()
+
+
+def _e50_remaining(c,entry,fence):
+    # Pending tails are ordinary incremental work. Within the bootstrap queue
+    # retain the normal head order and never skip a foreign/blocked active claim.
+    rows=[dict(r) for r in c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,'
+        'bootstrap_pending,active,lower_at::text AS lower_text FROM data_store_source_ranges '
+        'WHERE source=:source AND dataset=:dataset AND (bootstrap_pending OR active IS NOT NULL) '
+        'ORDER BY (active IS NOT NULL) DESC,enqueued_at,subject,variant,range_key LIMIT 33'),_params(entry)).mappings()]
+    scope_map={(s['subject'],s['variant'],s['range_key']):s for s in fence['candidates']}
+    # Look up all manifest identities as well: a reordered queue must not make
+    # an unfinished manifest appear complete just because its head is foreign.
+    unfinished=[]
+    for scope in fence['candidates']:
+        job=c.execute(text('SELECT bootstrap_pending,active FROM data_store_source_ranges WHERE '+WHERE),
+            {**_params(entry),**scope}).mappings().first()
+        if job and (job['bootstrap_pending'] or job['active'] is not None):unfinished.append(scope)
+    if [(r['subject'],r['variant'],r['range_key']) for r in rows[:len(unfinished)]]!=[
+            (s['subject'],s['variant'],s['range_key']) for s in unfinished]:raise _e50_refused()
+    if not unfinished and rows and rows[0]['active'] is not None:raise _e50_refused()
+    return [(r,scope_map[(r['subject'],r['variant'],r['range_key'])]) for r in rows[:len(unfinished)]]
+
+
+def validate_e50_fence(store,entry,sources,encoded):
+    fence=parse_e50_fence(encoded)
+    with sources.engine.connect() as c:
+        _e50_runtime(c,entry,sources,fence)
+        for job,scope in _e50_remaining(c,entry,fence):
+            job['scope_digest']=_e50_scope_digest(fence,scope)
+            _e50_original(c,job,scope)
+    return fence
 
 
 def enabled(sources, entry, options):
@@ -44,9 +167,40 @@ def available(engine,entry=None):
         return c.execute(text("SELECT count(*) FROM pg_trigger WHERE tgname='data_store_capture_range' AND tgenabled IN ('O','A') AND tgrelid IN (to_regclass('tonghuashun_observations'),to_regclass('tonghuashun_collection_states'),to_regclass('etf_daily_bars'),to_regclass('etf_adjustment_factors'))")).scalar_one()==4
 
 
-def claim(sources,entry):
+def claim(sources,entry,*,fence=None):
     """Capture an active source boundary without holding locks during file IO."""
     with sources.engine.begin() as c:
+        if fence is not None:
+            _e50_runtime(c,entry,sources,fence)
+            remaining=_e50_remaining(c,entry,fence)
+            if not remaining:return None
+            expected,scope=remaining[0]
+            row=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,'
+                'active,lower_at::text AS lower_text FROM data_store_source_ranges WHERE '+WHERE+' FOR UPDATE'),
+                expected).mappings().one()
+            row=dict(row);row['scope_digest']=_e50_scope_digest(fence,scope)
+            _e50_original(c,row,scope)
+            if row['active'] is None:
+                tail=c.execute(text('SELECT min(observed_at)::text FROM tonghuashun_observations '
+                    'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+                    'AND (observed_at,id)>(CAST(:at AS timestamptz),CAST(:id AS uuid))'),
+                    {**row,**scope['stop']}).scalar_one()
+                state_tail=c.execute(text('SELECT EXISTS(SELECT 1 FROM tonghuashun_collection_states '
+                    'WHERE dataset=:dataset AND subject=:subject AND variant=:variant '
+                    'AND (attempted_at>CAST(:at AS timestamptz) OR succeeded_at>CAST(:at AS timestamptz)))'),
+                    {**row,**scope['stop']}).scalar_one()
+                # Reset the pending lower bound to the earliest existing tail.
+                # A later trigger takes least(lower_at, its timestamp), so both
+                # new appends and historical late commits remain discoverable.
+                # Timestamp ties deliberately overlap in the ordinary consumer;
+                # they can never lose a UUID greater than the frozen stop.
+                active={'id':uuid4().hex,'bootstrap':True,'when':datetime.now(timezone.utc).isoformat(),
+                    'lower':scope['lower'],'after':None,'stop':scope['stop'],'e50_fence':row['scope_digest']}
+                row['active']=active
+                c.execute(text('UPDATE data_store_source_ranges SET active=CAST(:a AS jsonb),'
+                    'pending=:pending,bootstrap_pending=false,lower_at=CAST(:tail AS timestamptz) WHERE '+WHERE),
+                    {**row,'a':json.dumps(active),'pending':tail is not None or state_tail,'tail':tail or 'infinity'})
+            return row
         row=c.execute(text('SELECT source,dataset,subject,variant,range_key,pending,bootstrap_pending,active,lower_at::text AS lower_text FROM data_store_source_ranges '
             "WHERE source=:source AND dataset=:dataset AND (active->'blocked' IS NULL OR EXISTS(SELECT 1 FROM tonghuashun_collection_states s WHERE s.dataset=data_store_source_ranges.dataset AND s.subject=data_store_source_ranges.subject AND s.variant=data_store_source_ranges.variant AND s.status='succeeded')) "
             'ORDER BY (active IS NOT NULL) DESC,enqueued_at,subject,variant,range_key LIMIT 1 FOR UPDATE'),_params(entry)).mappings().first()
@@ -372,6 +526,7 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None,restored=None
         raise NativeInputError('SOURCE_INCREMENTAL_NOT_INITIALIZED','请先运行正常数据库迁移以启用本地行情变化捕获。')
     old=read_entry_status(store,entry.id)
     contract=digest(entry.spec.descriptor())
+    fixed=validate_e50_fence(store,entry,sources,options.e50_input_fence) if options.e50_input_fence is not None else None
     if options.resume_sealed_only and entry.id in ('E23','E44') and restored is None:
         from .sealed_funds import restore_fund_batch
         restored=restore_fund_batch(store,entry,sources,options,old,cancelled=cancelled)
@@ -413,7 +568,8 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None,restored=None
                   [j for j,_ in admitted.pairs] if options.admit_active_only else
                   existing_claims(sources,entry) if options.resume_sealed_only else
                   claim_funds(sources,entry,min(64,options.claim_batches)) if fund_batch else
-                  claim_tables(sources,entry,min(64,options.claim_batches)) if entry.source=='tushare' else [claim(sources,entry)])
+                  claim_tables(sources,entry,min(64,options.claim_batches)) if entry.source=='tushare' else
+                  [claim(sources,entry,fence=fixed)] if fixed is not None else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
             if not jobs or jobs[0] is None:
                 if options.resume_sealed_only:raise continuation_refused('SOURCE_CONFLICT')
@@ -526,6 +682,11 @@ def run(store,entry,sources,*,options,cancelled=None,admitted=None,restored=None
     totals['complete']=remaining==0
     totals['qualified']=not blocked and not store.catalog.issues(entry.spec.name,limit=1)
     totals['state']='processed' if totals['complete'] else 'incomplete'
+    if fixed is not None:
+        with sources.engine.connect() as c:
+            fixed_remaining=len(_e50_remaining(c,entry,fixed))
+        totals['fixed_input_fence']={'manifest_sha256':digest(fixed),'scope_count':len(fixed['candidates']),
+            'remaining_bootstrap_ranges':fixed_remaining,'complete':fixed_remaining==0}
     if not totals['complete']:totals['reason']='SOURCE_RANGES_BLOCKED' if remaining==blocked else 'NATIVE_RANGES_PENDING'
     if not remaining or (not old.get('incremental',{}).get('bootstrap_complete') and not bootstrap_remaining):
         # Every seeded native range and transactionally captured change up to
