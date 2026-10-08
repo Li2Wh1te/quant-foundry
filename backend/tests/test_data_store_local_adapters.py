@@ -2,16 +2,21 @@
 from datetime import datetime,timezone,timedelta
 from decimal import Decimal
 from pathlib import Path
+from dataclasses import replace
+from copy import deepcopy
 import ast
 import json
+from types import SimpleNamespace
 import pytest
 
 from app.data_store.adapters.contracts import LocalInput,digest,native_json
 from app.data_store.adapters.registry import ENTRIES,BY_ID,BY_NATIVE,SYNTHETIC
 from app.data_store.adapters.normalize import normalize
 from app.data_store.local_sources import materialize_observation,EffectiveBasis,SourceLimits,RescueSources
+from app.data_store.local_sources import _requests, _receipt_excludes
 from app.data_store.adapters.canonical import NativeInputError
 from app.data_ingestion.tonghuashun.confirmation import returned_keys
+from app.data_store.merge import MergeSpool
 
 NOW=datetime(2026,1,1,tzinfo=timezone.utc)
 
@@ -127,3 +132,160 @@ def test_import_receipt_keeps_inherited_groups_and_original_acquisition_order():
     assert not uncertain and basis['1743350400000']==old['1743350400000']
     from app.data_store.adapters.contracts import instant_ns
     assert basis['1743436800000'][0]==instant_ns(NOW+timedelta(seconds=2))
+
+
+def _tracked_units(tracker, row):
+    """Exercise the same native materialization and normalization as the reader."""
+    data,basis,field=materialize_observation(row,lambda _:None)
+    requests=json.loads(row['request_json'])
+    basis,uncertain=tracker.apply(row,data,basis,field,requests)
+    scope=(row['dataset'],row['subject'],row['variant'])
+    source=LocalInput('tonghuashun',row['dataset'],row['subject'],row['variant'],
+                     row['observed_at'],data,
+                     digest([scope,row['content_hash'],row['observed_at'],requests]),
+                     row_basis=basis,basis_field=field,unconfirmed_keys=uncertain)
+    return tuple(normalize(BY_ID['E50'],source))
+
+
+def _spool(tmp_path):
+    # Use only a bounded, disposable working file. These pure tests neither
+    # create a current store nor depend on PostgreSQL or supplier access.
+    space=SimpleNamespace(spill=tmp_path,spill_limit=16*1024*1024,check=lambda:None)
+    return MergeSpool(space,BY_ID['E50'].spec,partition_count=None)
+
+
+def _problem(spool, key):
+    partition=spool.spec.partitioner((*key,'root'))
+    return next((problem,blocking,resolved) for problem,blocking,resolved in
+                spool.problem_records(partition) if problem['o']==key[2])
+
+
+@pytest.mark.parametrize('later_receipt', ['empty','other_key','outside_range','legacy'])
+def test_rescued_unconfirmed_basis_stays_blocking_until_actual_returned_key(tmp_path,later_receipt):
+    old,recent=price(),price(1743436800000)
+    data=daily([old,recent]).content
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[recent]})}]
+    if later_receipt=='empty':
+        requests=[{'parameters':{},**returned_keys({'item':[]})}]
+    elif later_receipt=='other_key':
+        requests=[{'parameters':{},**returned_keys({'item':[recent]})}]
+    elif later_receipt=='outside_range':
+        requests=[{'parameters':{'start':recent['date_ms'],'end':recent['date_ms']}}]
+    else:
+        requests=[]
+    tracker=EffectiveBasis();spool=_spool(tmp_path)
+    try:
+        first=_tracked_units(tracker,observation('import',data,requests=imported))
+        key=first[0].key
+        assert first[0].failure=='SOURCE_CONFIRMATION_UNPROVEN'
+        for unit in first:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        # Empty, excluded and unrelated receipts may keep an old *confirmed*
+        # basis. They must never validate a basis that was unproven at import.
+        second=_tracked_units(tracker,observation('later',data,1,requests=requests))
+        assert second[0].failure=='SOURCE_CONFIRMATION_UNPROVEN'
+        for unit in second:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        real=[{'parameters':{},**returned_keys({'item':[old,recent]})}]
+        third=_tracked_units(tracker,observation('real',data,2,requests=real))
+        assert all(unit.failure is None for unit in third)
+        for unit in third:spool.offer(unit)
+        assert _problem(spool,key)[1:]==(False,True)
+    finally:spool.close()
+
+
+def test_rescued_unconfirmed_key_cannot_become_confirmed_by_absence_and_reappearance(tmp_path):
+    old,recent=price(),price(1743436800000)
+    data=daily([old,recent]).content
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[recent]})}]
+    other=[{'parameters':{},**returned_keys({'item':[recent]})}]
+    tracker=EffectiveBasis();spool=_spool(tmp_path)
+    try:
+        first=_tracked_units(tracker,observation('import',data,requests=imported))
+        key=first[0].key
+        for unit in first:spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('gap',daily([recent]).content,1,requests=other)):
+            spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('again',data,2,requests=other)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+    finally:spool.close()
+
+
+def test_ordinary_sparse_basis_cannot_clear_a_newer_unconfirmed_observation(tmp_path):
+    data=daily([price()]).content;tracker=EffectiveBasis();spool=_spool(tmp_path)
+    confirmed=[{'parameters':{},**returned_keys(data)}]
+    empty=[{'parameters':{},**returned_keys({'item':[]})}]
+    try:
+        first=_tracked_units(tracker,observation('real',data,requests=confirmed))
+        key=first[0].key
+        for unit in first:spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('ambiguous',data,1)):
+            spool.offer(unit)
+        for unit in _tracked_units(tracker,observation('empty',data,2,requests=empty)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(True,False)
+        for unit in _tracked_units(tracker,observation('confirmed',data,3,requests=confirmed)):
+            spool.offer(unit)
+        assert _problem(spool,key)[1:]==(False,True)
+    finally:spool.close()
+
+
+@pytest.mark.parametrize('changed_scope',['subject','variant'])
+def test_unproven_import_basis_is_scoped_to_the_native_subject_and_variant(changed_scope):
+    data=daily([price()]).content;tracker=EffectiveBasis()
+    imported=[{'parameters':{},'artifact_sha256':'a'*64,**returned_keys({'item':[]})}]
+    assert _tracked_units(tracker,observation('import',data,requests=imported))[0].failure
+    other=observation('other',data,1)
+    # Readers promise lexicographically sorted native scopes, not time alone.
+    other[changed_scope]='ZZZ.SH' if changed_scope=='subject' else 'zz_date_variant'
+    if changed_scope=='subject':
+        content={**data,'thscode':other['subject']}
+        other.update(content_hash=digest(content),data_json=native_json(content))
+    assert _tracked_units(tracker,other)[0].failure is None
+
+
+@pytest.mark.parametrize('entry_id', ['E08', 'E09'])
+def test_indexed_report_directory_retains_missing_duplicate_and_failed_reports(entry_id):
+    from tests.test_data_store_domain_samples import sample
+    source=sample(entry_id)
+    body=deepcopy(source.content)
+    first=body['report_directory']['item'][0]
+    later={**first, 'start_date_ms':first['start_date_ms']+91*86400000,
+           'end_date_ms':first['end_date_ms']+91*86400000}
+    from app.data_store.adapters.periods import report_key
+    first_key=report_key(first)[0];later_key=report_key(later)[0]
+    body['report_directory']['item'].append(later)
+    # A listed report with no wrapper remains a real missing report. Indexing
+    # the directory must not invent a successful empty source object for it.
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert not units[first_key].failure and units[later_key].failure
+    body['item'].append({'report_key':later_key,'report':later,'data':{'item':[]}})
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert all(not unit.failure for unit in units.values())
+    # Duplicate descriptors stay visible to the complete report validator;
+    # only the affected scope is invalid, even though its dictionary key agrees.
+    body['report_directory']['item'].append(deepcopy(first))
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert units[first_key].failure and not units[later_key].failure
+    body['report_directory']['item'].pop()
+    body['failed_requests']=[{'parameters':{'end_date':later_key.split(':')[0],
+                                          'report_type':'quarter'}}]
+    units={unit.object_key:unit for unit in normalize(BY_ID[entry_id],replace(source,content=body))}
+    assert not units[first_key].failure and units[later_key].failure
+
+
+@pytest.mark.parametrize('keys', [[1, '1', True, None], [['nested'], {'key':1}, 2]])
+def test_indexed_exclusion_keeps_exact_membership_and_requires_every_receipt(keys):
+    receipt={'parameters':{},'key_receipt':'actual_returned_keys_v1',
+             'returned_keys':{'date_ms':keys}}
+    requests=_requests({'request_json':native_json([receipt])},SourceLimits())
+    # Scalar and malformed structured keys keep Python's original membership
+    # equality. Missing, mixed or legacy receipts cannot prove non-membership.
+    for key in [*keys, 'absent', 7, ['absent'], {'key':2}]:
+        assert _receipt_excludes('date_ms',key,requests)==(key not in keys)
+    assert not _receipt_excludes('date_ms','absent',[])
+    for unproven in [{'parameters':{}}, {**receipt,'returned_keys':{}},
+                     {**receipt,'returned_keys':{'date_ms':None}}]:
+        assert not _receipt_excludes('date_ms','absent',
+                                    _requests({'request_json':native_json([receipt,unproven])},SourceLimits()))

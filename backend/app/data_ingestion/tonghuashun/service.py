@@ -5,18 +5,23 @@ provider request-budget transaction spans network I/O, serializing worker
 processes without imposing a lock on readers of already published data.
 """
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
+import re
+import sys
 import time
+import traceback
 
 from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 import structlog
 
-from app.data_ingestion.clients.tonghuashun import TonghuashunError
+from app.data_ingestion.clients.tonghuashun import BUSINESS_ERRORS, TonghuashunError
 from app.data_ingestion.models.tonghuashun import TonghuashunRequestBudget
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
-from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI
+from app.data_ingestion.tonghuashun.contracts import (
+    CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI, exact_json, provider_date,
+)
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
 
 logger = structlog.get_logger(__name__)
@@ -32,6 +37,8 @@ class BudgetedClient:
         self.client, self.engine = client, engine
 
     def request(self, interface, params):
+        from app.data_ingestion.tonghuashun.control import check_execution, note_response, wait_for_pacing
+        check_execution()
         if self.engine.dialect.name != "postgresql":
             return self.client.request(interface, params)
         failure = None
@@ -45,7 +52,8 @@ class BudgetedClient:
             if delay > 60:
                 raise TonghuashunError("rate_limited", retry_after=delay)
             if delay:
-                time.sleep(delay)
+                wait_for_pacing(delay)
+            check_execution()
             try:
                 result = self.client.request(interface, params)
             except TonghuashunError as exc:
@@ -56,6 +64,13 @@ class BudgetedClient:
                 max(1, failure.retry_after) if failure and failure.kind == "rate_limited" else 0)
             budget.next_allowed_at = datetime.now(UTC) + timedelta(seconds=cooldown)
             session.commit()
+        # Keep the ordinary shared cooldown transaction intact before checking
+        # a cancellation that arrived while the supplier request was in flight.
+        # A true return remains bounded diagnostic evidence even if cancellation
+        # prevents its response journal and source version from being published.
+        if failure is None:
+            note_response(result.data, params)
+        check_execution()
         if failure:
             raise failure from None
         return result
@@ -95,8 +110,19 @@ def due(spec, previous, parameters, now):
 
 def collect(dataset: str, parameters: CollectionParameters, client, engine,
             *, now: datetime | None = None) -> dict:
-    from app.data_ingestion.tonghuashun.control import control
+    from app.data_ingestion.tonghuashun.control import control, default_repair, execution_deadline
     monitor = control()
+    repair = default_repair.get()
+    if repair is not None:
+        repair.validate()
+        limit = execution_deadline.get()
+        if (dataset != repair.dataset or parameters.subjects != [repair.subject]
+                or parameters.asset_types != [repair.asset_type] or parameters.start_date is not None
+                or parameters.end_date is not None or parameters.mode != 'incremental'
+                or parameters.batch_size != 1 or parameters.max_requests > repair.request_limit
+                or limit is None or limit.max_http_attempts is None
+                or limit.max_http_attempts > repair.request_limit):
+            raise CollectionError('原默认修复需要正式单目标监督预算及一致参数。')
     spec = DATASETS[dataset]
     if spec.kind.startswith("m3_"):
         from app.data_ingestion.tonghuashun.research_service import collect_research
@@ -165,36 +191,59 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         monitor.emit(batch_total=min(len(eligible), parameters.batch_size), coverage_total=len(subjects),
                      coverage_pending=len(eligible), skipped=summary["skipped"])
     for subject in eligible[:parameters.batch_size]:
+        repair_native_keys = None
         with Session(engine) as session:
-            previous = CollectionRepository(session).read(dataset, subject, variant)
+            if repair is not None:
+                # Admission releases its source row transaction before network
+                # I/O. Recheck and retain the exact pinned body and state here.
+                # Never reread/adopt the visible head after this verification:
+                # a concurrent collector could otherwise supply revision r+1,
+                # causing an approved repair for r to overwrite it as r+2.
+                previous, repair_native_keys = repair.baseline(
+                    session, with_keys=True, with_previous=True)
+            else:
+                previous = CollectionRepository(session).read(dataset, subject, variant)
+        # Both successful publication and failure-state recording must compare
+        # against the user's original pin. A concurrent head is preserved even
+        # when it changes after admission or while the source request is open.
+        expected_revision = repair.revision if repair is not None else previous.revision
         if not due(spec, previous, parameters, now):
             summary["skipped"] += 1
             continue
         if monitor:
-            monitor.begin(dataset, subject, variant, previous.revision, parameters,
+            monitor.begin(dataset, subject, variant, expected_revision, parameters,
                           cache=spec.kind in ("reports", "bars", "financials", "indicators"))
-        acquisition = Acquisition(client)
+        acquisition = Acquisition(client, repair_native_keys=repair_native_keys)
         try:
             data = acquisition.fetch(spec, subject, parameters, previous.data, now)
             if acquisition.failures:
                 data = {**data, "failed_requests": acquisition.failures}
             published_at = datetime.now(UTC)
+            from app.data_ingestion.tonghuashun.control import check_execution
+            check_execution()
             with Session(engine) as session:
                 result = CollectionRepository(session).publish(dataset, subject, variant,
-                    expected=previous.revision, data=data, requests=acquisition.requests,
+                    expected=expected_revision, data=data, requests=acquisition.requests,
                     now=published_at, ticker_rows=data["item"] if spec.kind == "directory" else None,
                     reconcile=parameters.mode == "reconcile")
                 if monitor:
                     monitor.published(session)
+                check_execution()
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
+            if repair is not None:
+                # This identifies our committed version, not whichever head a
+                # competing collector happens to leave visible afterwards.
+                summary['repair_publication_id'] = result['version_id']
+                summary['repair_retained_failures'] = len(data.get('failed_requests', []))
             result["fetched_count"] = acquisition.fetched_count
             for field in ("received", "changed", "unchanged", "removed"):
                 summary[field] += result[field]
             if monitor:
                 monitor.completed(summary)
-            log_result(spec, subject, parameters, data, result, not acquisition.failures,
-                       "partial_reports" if acquisition.failures else None)
+            incomplete = bool(acquisition.failures or (repair is not None and data.get('failed_requests')))
+            log_result(spec, subject, parameters, data, result, not incomplete,
+                       "partial_reports" if incomplete else None)
         except CollectionConflict:
             # Preserve the newer publication and recheck this scope next run.
             summary["skipped"] += 1
@@ -206,7 +255,7 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             with Session(engine) as session:
                 try:
                     CollectionRepository(session).fail(dataset, subject, variant,
-                        expected=previous.revision, kind=kind, now=datetime.now(UTC))
+                        expected=expected_revision, kind=kind, now=datetime.now(UTC))
                     session.commit()
                 except CollectionError:
                     session.rollback()  # A newer run owns the visible state.
@@ -214,7 +263,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if monitor:
                 monitor.completed(summary, advanced=False)
             log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
-                       error_message=str(exc))
+                       error_message=str(exc), failure_request=acquisition.bar_request_context,
+                       supplier_business_code=exc.business_code if isinstance(exc, TonghuashunError) else None)
             if kind in ("unauthenticated", "forbidden", "rate_limited"):
                 # Account-wide failures must not repeat thousands of times.
                 break
@@ -229,19 +279,124 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         f"已跳过 {summary['skipped']} 个，读取版本记录 {summary['received']} 条，变更 {summary['changed']} 条，"
         f"未变更 {summary['unchanged']} 条，失败 0 个，待后续采集 {summary['pending']} 个；"
         + ("本次成功标的完成标记已推进。" if summary["succeeded"] else "本次未推进完成标记；待续采范围将在后续运行重新检查。"))
+    if repair is not None:
+        first = repair.day or repair.start_date or repair.end_date
+        last = repair.day or repair.end_date
+        summary['message'] = (f"{spec.name}原默认目标修复：标的 {repair.subject}，日期 {first} 至 {last}，"
+            f"已确认目标 {summary['succeeded']} 个，失败 {summary['failed']} 个，变更 {summary['changed']} 条，"
+            f"保留未尝试失败 {summary.get('repair_retained_failures', 0)} 个；"
+            + ("已推进源版本，未推进全量核对完成标记或底座检查点。" if summary['succeeded'] else
+               "未推进源版本、全量完成标记或底座检查点。"))
     return summary
 
 
-def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
+def bounded_bar_failure(spec, subject, context):
+    """Rebuild diagnostic fields from a bounded, source-specific allowlist.
+
+    An unexpected caller or future adapter must not turn this log sink into a
+    response/credential dump. Reject malformed identities and dates instead
+    of truncating them into apparently valid evidence; ignore unknown fields.
+    No response value, URL, header, request ID or provider message is accepted.
+    """
+    if spec.key not in ("etf_daily", "index_daily") or type(context) is not dict:
+        return None
+    parameters = context.get("parameters")
+    stage = context.get("stage")
+    if (context.get("interface") != spec.interface
+        or stage not in ("request", "response_validation", "history_validation")
+        or type(parameters) is not dict):
+        return None
+    identity = parameters.get("thscode")
+    if (type(identity) is not str or len(identity) > 64 or identity != subject
+        or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", identity) is None
+        or parameters.get("interval") != "1d"):
+        return None
+    start, end = parameters.get("start"), parameters.get("end")
+    if any(type(value) is not int or abs(value) >= 10 ** 15 for value in (start, end)):
+        return None
+    try:
+        first, last = provider_date(start), provider_date(end)
+        if start > end:
+            return None
+        safe = {"interface": spec.interface, "stage": stage,
+                "parameters": {"thscode": identity, "interval": "1d", "start": start, "end": end}}
+        if stage == "history_validation":
+            scope = context.get("validation_range")
+            if type(scope) is not dict:
+                return None
+            dates = [scope.get(key) for key in ("start_date", "end_date")]
+            if any(type(value) is not str or len(value) != 10 for value in dates):
+                return None
+            a, b = (date.fromisoformat(value) for value in dates)
+            if not a <= first <= last <= b:
+                return None
+            safe["validation_range"] = {"start_date": a.isoformat(), "end_date": b.isoformat()}
+    except (CollectionError, ValueError):
+        return None
+    # The encoded cap is in UTF-8 bytes and supplements the per-field limits.
+    # A rejected diagnostic never alters the failed state or its checkpoint.
+    return safe if len(exact_json(safe).encode("utf-8")) <= 512 else None
+
+
+def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None,
+               *, failure_request=None, supplier_business_code=None):
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
+    details = {}
+    from app.data_ingestion.tonghuashun.control import default_repair, execution_deadline
+    repair = default_repair.get()
+    if repair is not None:
+        # The operator sees the selected repair period, not an inherited full
+        # merged range. This does not add unsupported vendor date parameters.
+        start = (repair.day or repair.start_date or repair.end_date).isoformat()
+        end = (repair.day or repair.end_date).isoformat()
+        details['default_repair_target'] = repair.as_dict()['selector']
+        details['retained_failures'] = len((data or {}).get('failed_requests', []))
+    exc_info = error_message is not None
+    if not succeeded and spec.key in ("etf_daily", "index_daily"):
+        # Source errors use fixed transport text or locally authored validation
+        # text. Retain a bounded call stack without locals or an exception-chain
+        # rendering that could reintroduce a discarded provider response.
+        error_message = error_message[:512] if type(error_message) is str else None
+        details["exception"] = "".join(traceback.format_tb(sys.exc_info()[2], limit=20))[:4096]
+        exc_info = False
+        if type(subject) is not str or re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", subject) is None:
+            subject = "无效标的（已省略）"
+    if not succeeded and failure_request is not None:
+        # An automatic collection has no top-level dates, and a manual range
+        # may span several calls. Report the failing request's generated dates;
+        # a history-wide validation error instead retains its aggregate range
+        # beside the last request so an operator cannot mistake it for a
+        # transport rejection of just that final window.
+        # Recheck the business-code allowlist at the sink as well as transport.
+        code = (supplier_business_code if type(supplier_business_code) is int
+                and BUSINESS_ERRORS.get(supplier_business_code) == kind else None)
+        safe_request = bounded_bar_failure(spec, subject, failure_request)
+        details["supplier_business_code"] = code
+        if safe_request is None:
+            details["failure_request_omitted"] = True
+        else:
+            request_parameters = safe_request["parameters"]
+            start = provider_date(request_parameters["start"]).isoformat()
+            end = provider_date(request_parameters["end"]).isoformat()
+            if safe_request["stage"] == "history_validation":
+                start = safe_request["validation_range"]["start_date"]
+                end = safe_request["validation_range"]["end_date"]
+            details["failure_request"] = safe_request
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"
     counts = {"fetched_count": result.get("fetched_count", 0), "changed_count": result.get("changed", 0),
               "unchanged_count": result.get("unchanged", 0), "failed_count": 0 if succeeded else 1}
     checkpoint_message = ("已推进至版本 " + result["version_id"] if succeeded else
         "完整范围未推进，已保存成功报告，失败报告待补采" if kind == "partial_reports" else
         "未推进，保留已有成功版本")
-    write = logger.info if succeeded else logger.warning
+    # A supervised worker installs a sanitized processor boundary. Application
+    # startup may already have cached this module's logger with an older chain;
+    # structlog.configure cannot replace that bound chain. Resolve a fresh
+    # proxy inside the supervised context so failures reach the current capture
+    # processor and cannot escape through stale raw-event/exception processors.
+    # Ordinary collectors retain their existing module logger and logging policy.
+    event_logger = structlog.get_logger(__name__) if execution_deadline.get() is not None else logger
+    write = event_logger.info if succeeded else event_logger.warning
     write("tonghuashun_collection_completed" if succeeded else "tonghuashun_collection_failed",
         title=f"{spec.name}{'采集完成' if succeeded else '采集失败'}",
         message=(f"{spec.name}采集{'完成' if succeeded else '失败'}：标的 {subject}，日期范围 {date_label}，"
@@ -251,4 +406,4 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
         source="tonghuashun", data_type=spec.key, subject=subject,
         start_date=start, end_date=end, checkpoint_advanced=succeeded,
         version_id=result.get("version_id"), error_type=kind,
-        error_message=error_message, exc_info=error_message is not None, **counts)
+        error_message=error_message, exc_info=exc_info, **counts, **details)

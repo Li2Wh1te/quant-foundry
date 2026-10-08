@@ -16,11 +16,18 @@ class DirectorySnapshotChanged(CollectionError):
 
 
 class Acquisition:
-    def __init__(self, client):
+    def __init__(self, client, *, repair_native_keys=None):
         self.client = client
+        # Only the registered service resolves these raw identities from pinned
+        # immutable native input. They are process-local, never a second ledger.
+        self.repair_native_keys = repair_native_keys
         self.requests: list[dict] = []
         self.failures: list[dict] = []
         self.fetched_count = 0
+        # Keep only the current ETF/index bar window for failure diagnostics.
+        # This is not a successful response or a returned-key receipt: request
+        # errors occur before read() appends such proof, and cannot confirm data.
+        self.bar_request_context: dict | None = None
 
     def read(self, interface: str, params: dict) -> dict:
         from app.data_ingestion.tonghuashun.control import control
@@ -30,6 +37,9 @@ class Acquisition:
         else:
             response = self.client.request(interface, params)
             data, request_id = response.data, response.request_id
+        from app.data_ingestion.tonghuashun.control import default_repair
+        if monitor and default_repair.get() is not None:
+            monitor.emit(request_stage='response_validation')
         # Store only allowlisted request parameters and the sanitized trace ID;
         # neither connection URL nor headers can enter source versions.
         # Compact *actual returned-key* evidence. A requested date range alone
@@ -101,6 +111,11 @@ class Acquisition:
 
     def fetch(self, spec: Dataset, subject: str, parameters: CollectionParameters,
               previous: dict | None, now: datetime) -> dict:
+        self.bar_request_context = None
+        from app.data_ingestion.tonghuashun.control import default_repair
+        repair = default_repair.get()
+        if repair is not None:
+            return self.repair_default(spec, subject, parameters, previous, now, repair)
         if spec.kind == "directory":
             return self.directory(spec, subject)
         if spec.kind == "bars":
@@ -153,6 +168,139 @@ class Acquisition:
         # valuations remain observations, never invented historical facts.
         return data
 
+    def repair_default(self, spec, subject, parameters, previous, now, repair):
+        """Read one approved target while preserving its original-default body.
+
+        Selection cannot change ordinary dated variants or broaden into a
+        rolling collection. The service has already verified the pinned native
+        head (and an original financial period) before reaching this method.
+        Only actual successful requests may remove an identical old failure.
+        """
+        from types import SimpleNamespace
+        from app.data_store.adapters.canonical import NativeInputError
+        repair.validate()
+        if (spec.key, subject) != (repair.dataset, repair.subject) or previous is None:
+            raise CollectionError('修复目标与原默认采集范围不一致。')
+        if self.repair_native_keys is None:
+            raise CollectionError('修复缺少已经核验的原始日期键。')
+        if spec.key == 'stock_daily':
+            if previous.get('adjust') not in (None, 'none'):
+                raise CollectionError('股票单日修复不能混合复权基准。')
+            # These dates steer an internal read only. The service's ordinary
+            # parameters have no dates and its head remains "default". Bars
+            # already validate the exact interval, values and actual identity.
+            selected = parameters.model_copy(update={'start_date': repair.day, 'end_date': repair.day})
+            fetched = self.bars(spec, subject, selected, previous, now)
+            target_key, = self.repair_native_keys
+            if (not self.requests or self.requests[-1].get('returned_keys', {}).get('date_ms') != [target_key]):
+                # General date validation accepts the same calendar date. An
+                # exact repair additionally requires the actual native key;
+                # presence of the old target in the merged body proves nothing.
+                raise CollectionError('股票修复响应未实际返回确切日期键。')
+            if any(envelope.get('adjust') not in (None, 'none')
+                   for envelope in fetched['provider_envelopes']):
+                raise CollectionError('股票单日修复不能混合复权基准。')
+            if any(row.get('thscode', subject) != subject for row in fetched['item']
+                   if row['date_ms'] == target_key):
+                raise CollectionError('历史行情响应标的与请求不一致。')
+            # Preserve the full historical request bounds and unrelated source
+            # metadata. A one-day response must not recast inherited rows as a
+            # new one-day source window or update their confirmation basis.
+            result = {**previous, 'item': fetched['item']}
+        elif spec.kind == 'reports':
+            result = self.repair_report(spec, subject, previous, repair)
+        else:
+            data = self.read(spec.interface, {'thscode': subject})
+            rows = items(data)
+            if data.get('thscode', subject) != subject or any(data.get(name) for name in ('has_more', 'next_cursor', 'next_page')):
+                raise CollectionError('财报修复响应主体或完整窗口不一致。')
+            # A requested selector is not a supplier filter. All fresh rows
+            # must have real periods, and the exact original pair must actually
+            # be returned. Never fill a missing period with the plan's dates.
+            periods = []
+            raw_periods = []
+            for row in rows:
+                first, last = provider_date(row.get('start_date_ms')), provider_date(row.get('end_date_ms'))
+                if first > last or row['start_date_ms'] > row['end_date_ms']:
+                    raise CollectionError('财报修复响应缺少完整且一致的实际期间。')
+                periods.append((first, last))
+                raw_periods.append((row['start_date_ms'], row['end_date_ms']))
+            if len(set(periods)) != len(periods) or self.repair_native_keys not in raw_periods:
+                raise CollectionError('财报修复响应未命中原始确切期间。')
+            from app.data_store.adapters.financial_windows import financial_body
+            try:
+                financial_body(SimpleNamespace(dataset=spec.key, subject=subject), data)
+            except NativeInputError:
+                raise CollectionError('财报修复响应完整窗口校验失败。') from None
+            # Financial windows are direct source observations, not merged
+            # histories. Earlier immutable originals remain in the same store;
+            # appending their rows here would invent a fresh direct confirmation.
+            result = dict(data)
+        old_failures = previous.get('failed_requests', [])
+        if not isinstance(old_failures, list):
+            raise CollectionError('原默认版本的失败请求结构无法核对。')
+        remaining = [failure for failure in old_failures if not any(
+            isinstance(failure, dict) and failure.get('interface') == request['interface']
+            and failure.get('parameters') == request['parameters'] for request in self.requests)]
+        if remaining or 'failed_requests' in previous:
+            result['failed_requests'] = remaining
+        return result
+
+    def repair_report(self, spec, subject, previous, repair):
+        """Require a fresh exact directory entry and a complete fresh group.
+
+        Historical descriptors retained alongside untouched wrappers describe
+        materialized old history only. They never become target candidates or
+        appear in current_provider_directory as freshly returned descriptors.
+        """
+        from types import SimpleNamespace
+        from app.data_store.adapters.canonical import NativeInputError
+        from app.data_store.adapters.portfolio_windows import directory as validate_directory, portfolio_body
+        directory_key = spec.interface.replace('-history', '-report-dates')
+        current = self.read(directory_key, {'thscode': subject})
+        if current.get('thscode', subject) != subject or any(current.get(name) for name in ('has_more', 'next_cursor', 'next_page')):
+            raise CollectionError('持仓修复目录主体或完整范围不一致。')
+        old_directory = previous.get('report_directory', {'item': []})
+        try:
+            fresh_descriptors = validate_directory(current)
+            old_descriptors = validate_directory(old_directory)
+        except NativeInputError:
+            raise CollectionError('持仓修复目录期间校验失败。') from None
+        fresh = {item['report_key']: (raw, item) for raw, item in zip(current['item'], fresh_descriptors)}
+        declared = {item['report_key']: (raw, item) for raw, item in zip(old_directory['item'], old_descriptors)}
+        target = f'{repair.end_date.isoformat()}:{repair.report_type}'
+        if target not in fresh:
+            raise CollectionError('本次真实目录未确认目标报告，未使用旧目录回退。')
+        # This minimum path cannot truthfully label newly advertised, uncollected
+        # reports complete within a two-request approval. Stop rather than issue
+        # extra requests, silently discard their availability, or fabricate a
+        # failed HTTP request for an object we never attempted.
+        if set(fresh) - set(declared) - {target}:
+            raise CollectionError('本次目录出现未批准且未采集的其他报告。')
+        if any(key != target and key in declared and item != declared[key][1]
+               for key, (_, item) in fresh.items()):
+            raise CollectionError('本次目录改变了未尝试历史报告的期间。')
+        known = {row['report_key']: row for row in previous.get('item', [])}
+        if len(known) != len(previous.get('item', [])) or set(known) - set(declared):
+            raise CollectionError('原默认报告与声明目录无法核对。')
+        descriptor = fresh[target][0]
+        data = self.read(spec.interface, {'thscode': subject, 'end_date': repair.end_date.isoformat(),
+                                          'report_type': repair.report_type})
+        if data.get('thscode', subject) != subject:
+            raise CollectionError('持仓修复响应主体与目标不一致。')
+        wrapper = {'report_key': target, 'report': descriptor, 'data': data}
+        try:
+            portfolio_body(SimpleNamespace(dataset=spec.key, subject=subject),
+                {'item': [wrapper], 'report_directory': {'item': [descriptor]},
+                 'current_provider_directory': current})
+        except NativeInputError:
+            raise CollectionError('持仓修复响应未通过整组完整校验。') from None
+        known[target] = wrapper
+        declared[target] = fresh[target]
+        return {**previous, 'item': [known[key] for key in sorted(known)],
+                'report_directory': {**old_directory, 'item': [declared[key][0] for key in sorted(declared)]},
+                'current_provider_directory': current}
+
     @staticmethod
     def end_day(now: datetime) -> date:
         local = now.astimezone(SHANGHAI)
@@ -185,7 +333,16 @@ class Acquisition:
                 params = {"thscode": subject, "interval": "1d", "start": date_ms(a), "end": date_ms(b)}
                 if spec.key == "stock_daily":
                     params["adjust"] = "none"
+                if spec.key in ("etf_daily", "index_daily"):
+                    # These four parameters are generated locally from the
+                    # selected native identity and this exact window. Snapshot
+                    # them before calling the client; never copy credentials,
+                    # connection URLs, vendor messages or response payloads.
+                    self.bar_request_context = {"interface": spec.interface,
+                        "parameters": dict(params), "stage": "request"}
                 data = self.read(spec.interface, params)
+                if self.bar_request_context is not None:
+                    self.bar_request_context["stage"] = "response_validation"
                 if data.get("thscode", subject) != subject:
                     raise CollectionError("历史行情响应标的与请求不一致。")
                 part = items(data, allow_empty=True)
@@ -206,6 +363,13 @@ class Acquisition:
             # so a yield resumes these exact segments without publishing a
             # partial head. A genuinely empty range still fails below.
             read_windows(1)
+        if self.bar_request_context is not None:
+            # Empty history and forward-adjustment completeness are aggregate
+            # checks. The last window supplies context, not a claim that the
+            # transport rejected that window or that earlier dates were absent.
+            self.bar_request_context["stage"] = "history_validation"
+            self.bar_request_context["validation_range"] = {
+                "start_date": start.isoformat(), "end_date": end.isoformat()}
         rows = [by_date[key] for key in sorted(by_date)]
         if not rows:
             raise CollectionError("历史行情为空，尚不能确认该范围覆盖。")
@@ -222,6 +386,7 @@ class Acquisition:
             if not required_dates <= returned_dates:
                 raise CollectionError("前复权历史重采缺少已有日期，未发布不完整或混合基准版本。")
         merged = self.merge_rows(previous, rows, "date_ms")
+        self.bar_request_context = None
         return {"item": merged, "adjust": spec.adjust or "not_applicable",
                 "requested_start": full_start.isoformat(), "requested_end": end.isoformat(),
                 "coverage": "observed_rows_only", "provider_envelopes": envelopes}
@@ -249,7 +414,25 @@ class Acquisition:
 
     def financials(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)
-        start = parameters.start_date or years_before(end, 10 if not previous or parameters.mode == "reconcile" else 2)
+        full_start = parameters.start_date or years_before(end, 10)
+        if parameters.start_date is None and previous:
+            # The ordinary two-year refresh merges older reports into its head.
+            # Preserve their historical boundary even if old collector metadata
+            # already drifted forward. Reconciliation must actually request the
+            # oldest retained report, rather than silently keeping it forever
+            # outside the moving ten-year window without a new source receipt.
+            starts = [full_start]
+            if previous.get("requested_start"):
+                starts.append(date.fromisoformat(previous["requested_start"]))
+            if previous.get("item"):
+                starts.append(min(provider_date(row["period_end_ms"]) for row in previous["item"]))
+            full_start = min(starts)
+        start = full_start
+        if previous and parameters.mode == "incremental" and parameters.start_date is None:
+            # Keep the small recent request scope separate from the historical
+            # head boundary. Actual returned-key receipts alone reconfirm rows;
+            # neither this metadata nor a requested range invents confirmation.
+            start = years_before(end, 2)
         rows = []
         for a, b in windows(start, end, 10):
             data = self.read(spec.interface, {"thscode": subject, "period": "quarterly", "start": date_ms(a), "end": date_ms(b)})
@@ -266,7 +449,7 @@ class Acquisition:
             raise CollectionError("财务报表包含重复报告期。")
         return {"item": self.merge_rows(previous, rows, "period_end_ms"),
                 "period": "quarterly", "historical_revision_evidence": False,
-                "requested_start": start.isoformat(), "requested_end": end.isoformat()}
+                "requested_start": full_start.isoformat(), "requested_end": end.isoformat()}
 
     def indicators(self, spec, subject, parameters, previous, now):
         end = parameters.end_date or self.end_day(now)

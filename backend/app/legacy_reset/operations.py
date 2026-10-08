@@ -511,10 +511,16 @@ def status(engine, *, expect_database: str) -> dict:
 
 
 def finish_rebuild(engine, *, expect_database: str) -> dict:
-    """Open the store only after all static business entries are qualified."""
+    """Finalize R01 only after all static business entries are qualified."""
     from app.data_store.adapters.registry import ENTRIES
     from app.data_store.coverage import check_coverage
     with transaction(engine, isolation_level='READ COMMITTED') as c:
+        # Current requests/updates hold a SHARE maintenance fence before any
+        # catalog work. Acquire its exclusive counterpart first to preserve
+        # that lock order: finish must not hold status/file locks while waiting
+        # for an admitted updater that still needs to commit its checkpoint.
+        # All full-range/quality guards below remain mandatory and unchanged.
+        c.execute(text('LOCK TABLE data_store_legacy_maintenance IN EXCLUSIVE MODE'))
         # Fence both pipeline status writes and direct kernel commits before
         # taking any evidence snapshot. The locks remain held through ready's
         # commit, so a concurrent reset/contract change cannot win the gap.

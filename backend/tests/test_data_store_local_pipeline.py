@@ -433,6 +433,92 @@ def test_idle_continuations_remain_charged_and_are_reclaimed_only_when_done(read
         reservation.discard=True
 
 
+@pytest.mark.parametrize('protected_continuation', [False, True])
+def test_rejected_scratch_admission_preserves_current_receipt_and_existing_pending(ready, protected_continuation):
+    from app.data_store.budget import Budget
+    from app.data_store.coverage import check_coverage
+    from app.data_store.limits import MiB
+    from app.data_store.pipeline import _status, read_entry_status
+    from app.data_store.updates import RetryPolicy
+
+    entry=BY_ID['E41'];value=company('accepted',3)
+    # Seed and exercise the store under one deliberately small quota policy.
+    # Idle coordination markers from a larger policy must not become the
+    # refusal reason: this test targets an actual concurrent growth allowance.
+    ready.limits=replace(ready.limits,scratch_bytes=64*MiB,
+        duckdb_memory_bytes=16*MiB,pipeline_spill_bytes=32*MiB,query_bytes=8*MiB,
+        batch_bytes=16*MiB,commit_bytes=MiB,operation_slots=3)
+    budget=Budget(ready.files,ready.locks,ready.limits)
+    ready.budget=budget
+    assert run_entry(ready,entry,Inputs(value))['qualified']
+    unit=list(normalize(entry,value))[0]
+    partition=entry.spec.partitioner((*unit.key,'root'))
+    retained=None
+    if protected_continuation:
+        # An idle acquisition belongs to the existing exact selector. Refusing
+        # its growth allowance must not abandon it, even at the retry threshold.
+        with budget.reserve('read',pending='pipeline.E41') as space:
+            retained=space.spill/'protected-input'
+            retained.write_bytes(b'owned unfinished input')
+        pending=read_entry_status(ready,entry.id)
+        pending.update(complete=False,qualified=False,state='incomplete',coverage_pending=['entry'])
+        _status(ready,entry,pending)
+    before=read_entry_status(ready,entry.id)
+    current=ready.catalog.dataset(entry.spec.name)
+    files=ready.catalog.files(entry.spec.name,partition)
+
+    class UnreadInput(Inputs):
+        def iter_entry(self,entry):
+            raise AssertionError('A rejected reservation must not start native reading')
+
+    # One admitted 32 MiB reader plus the required writer headroom fits; a
+    # second reader does not. This exercises real quota files and flock locks.
+    with budget.reserve('read',pending='pipeline.occupied') as occupied:
+        with pytest.raises(DataStoreError) as error:
+            run_entry(ready,entry,UnreadInput(),_policy=RetryPolicy(abandon_after=1))
+        assert error.value.code=='SCRATCH_BUDGET_EXCEEDED'
+        result=error.value.entry_result
+        assert result['complete'] is False and result['qualified'] is False
+        assert result['work_admitted'] is False
+        assert result['source_rows']==result['committed_partitions']==0
+        occupied.discard=True
+
+    after=read_entry_status(ready,entry.id)
+    assert {k:v for k,v in after.items() if k!='refresh'}=={k:v for k,v in before.items() if k!='refresh'}
+    assert after['refresh']['reason']=='SCRATCH_BUDGET_EXCEEDED'
+    assert after['refresh']['outcome']=='failed'
+    assert ready.catalog.dataset(entry.spec.name)['generation']==current['generation']
+    assert ready.catalog.files(entry.spec.name,partition)==files
+    assert rows(ready,entry,unit)[0]['f0_name']=='accepted'
+    with ready.catalog.transaction() as connection:
+        assert check_coverage(connection,entry,after)['satisfied'] is (not protected_continuation)
+    if retained is not None:
+        assert retained.read_bytes()==b'owned unfinished input'
+        assert 'pipeline.E41' in budget.pending_keys()
+
+
+def test_scratch_failure_after_admission_still_blocks_unfinished_input(ready):
+    from app.data_store.coverage import check_coverage
+    from app.data_store.pipeline import read_entry_status
+
+    entry=BY_ID['E41']
+    assert run_entry(ready,entry,Inputs(company()))['qualified']
+
+    class AdmittedFailure(Inputs):
+        def iter_entry(self,entry):
+            raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
+
+    with pytest.raises(DataStoreError) as error:
+        run_entry(ready,entry,AdmittedFailure())
+    assert error.value.code=='SCRATCH_BUDGET_EXCEEDED'
+    status=read_entry_status(ready,entry.id)
+    assert status['work_admitted'] is True
+    assert status['complete'] is False and status['qualified'] is False
+    assert status['coverage_pending']==['entry']
+    with ready.catalog.transaction() as connection:
+        assert check_coverage(connection,entry,status)['satisfied'] is False
+
+
 def test_mutable_trading_status_snapshot_noop_and_deletion(ready):
     from app.data_store.local_sources import NativeSources
     entry=BY_ID['E64']

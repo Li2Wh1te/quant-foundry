@@ -29,7 +29,8 @@ from app.scheduling.schemas import (
 )
 from app.scheduling.service import SchedulerService, TaskConflictError
 from app.scheduling.models import TaskRun
-from app.data_store.availability import RETIRED_TASK_TYPES, read_availability
+from app.data_store.availability import RETIRED_TASK_TYPES, require_operable
+from app.data_store.errors import DataStoreError
 from app.data_store.scheduler_tasks import TASK_KEY as LOCAL_UPDATE_TASK_KEY
 from app.scheduling.triggers import build_trigger
 
@@ -124,8 +125,12 @@ class SchedulerRuntime:
     def stop(self) -> None:
         if self.running:
             self.scheduler.shutdown(wait=False)
-        self.executor.shutdown(wait=False, cancel_futures=True)
-        logger.info("scheduler_stopped", message="本实例调度器已停止，待执行任务已取消。")
+        # Lifespan must retain database/logging resources until accepted
+        # handlers publish their final checkpoint and terminal run status.
+        # Uvicorn can re-raise SIGTERM immediately after lifespan returns;
+        # relying on Python's later thread-pool exit hook loses those workers.
+        self.executor.shutdown(wait=True, cancel_futures=True)
+        logger.info("scheduler_stopped", message="本实例调度器已停止，已接受运行完成退出，待执行任务已取消。")
 
     def sync_task(self, task_id: UUID) -> None:
         if not self.settings.scheduler_enabled:
@@ -212,8 +217,15 @@ class SchedulerRuntime:
                         TaskRun.status == RunStatus.QUEUED.value,
                     ).limit(1)
                 )
-                if queued_local and not read_availability(session).ready:
-                    allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
+                if queued_local:
+                    try:
+                        # A PostgreSQL lock timeout aborts its transaction. Keep
+                        # this optional local-update probe inside a savepoint so
+                        # refusing it cannot poison healthy shared queue claims.
+                        with session.begin_nested():
+                            require_operable(session)
+                    except DataStoreError:
+                        allowed_types.remove(LOCAL_UPDATE_TASK_KEY)
                 run_ids = repository.claim_queued_runs(slots, task_types=allowed_types)
                 run_context = {
                     run.id: (run.task_id, run.task_type)

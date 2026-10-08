@@ -19,7 +19,7 @@ from app.core.config import Settings
 from app.db.session import get_db_session, get_engine
 
 from .adapters.registry import ENTRIES, Entry
-from .availability import read_availability, require_ready
+from .availability import read_availability, require_operable
 from .errors import DataStoreError
 from .readers import Query
 from .storage import CurrentStore
@@ -70,7 +70,10 @@ def _http_error(error: DataStoreError) -> HTTPException:
               else 503 if error.code in {"DATA_STORE_REBUILDING", "DATA_STORE_NOT_INITIALIZED",
                                           "CATALOG_UNAVAILABLE", "STORAGE_UNAVAILABLE", "LOCK_TIMEOUT"}
               else 422)
-    return HTTPException(status, detail={"code": error.code, "message": str(error)})
+    detail = {"code": error.code, "message": str(error)}
+    if getattr(error, 'restriction_reason', None):
+        detail['reason'] = error.restriction_reason
+    return HTTPException(status, detail=detail)
 
 
 @contextmanager
@@ -139,6 +142,30 @@ def _legacy_restrictions(session: Session, dataset: str) -> int:
     ), {"dataset": dataset}).scalar_one())
 
 
+def _read_coverage(store, entry):
+    """Use the existing full proof, never an operation's success flag.
+
+    Callers hold the dataset read lock through this check and the real query.
+    File pins and the kernel's generation vector remain the consistency fence;
+    this admission neither writes status nor substitutes an old source.
+    """
+    from .coverage import check_coverage
+    with store.catalog.transaction() as connection:
+        raw = connection.execute(text(
+            'SELECT summary_json FROM data_store_entry_status WHERE entry_id=:id'
+        ), {'id': entry.id}).scalar_one_or_none()
+        return check_coverage(connection, entry, json.loads(raw) if raw else {})
+
+
+def _require_read_coverage(store, entry):
+    proof = _read_coverage(store, entry)
+    if not proof['satisfied']:
+        error = DataStoreError('DATA_RESTRICTED')
+        error.restriction_reason = proof['reason']
+        raise error
+    return proof
+
+
 def _describe(entry: Entry, store: CurrentStore | None, phase: str, session: Session) -> dict:
     capability = entry.describe_capability()
     result = {
@@ -198,6 +225,11 @@ def _describe(entry: Entry, store: CurrentStore | None, phase: str, session: Ses
     result["legacy_restrictions"] = legacy_count
     if legacy_count:
         result["status"] = "restricted"
+    if phase == 'reset_done':
+        proof = _read_coverage(store, entry)
+        result['read_restriction'] = proof['reason']
+        if not proof['satisfied']:
+            result['status'] = 'restricted'
     return result
 
 
@@ -212,9 +244,10 @@ def list_datasets(
         availability = read_availability(session)
         entries = list(BUSINESS.values())
         selected = entries[offset:offset + limit]
-        if not availability.ready:
+        if not availability.operable:
             items = [_describe(entry, None, availability.phase, session) for entry in selected]
         else:
+            require_operable(session)
             with _store(_settings(request), availability.fresh_install) as store:
                 items = [_describe(entry, store, availability.phase, session) for entry in selected]
         return {"items": items, "total": len(entries), "phase": availability.phase,
@@ -230,8 +263,9 @@ def get_dataset(
     entry = _entry(dataset)
     try:
         availability = read_availability(session)
-        if not availability.ready:
+        if not availability.operable:
             return _describe(entry, None, availability.phase, session)
+        require_operable(session)
         with _store(_settings(request), availability.fresh_install) as store:
             return _describe(entry, store, availability.phase, session)
     except DataStoreError as error:
@@ -274,6 +308,8 @@ def get_status(
         "phase": availability.phase,
         "code": "READY" if availability.ready else "DATA_STORE_REBUILDING",
         "fresh_install": availability.fresh_install,
+        "system_safe": availability.operable,
+        "r01_complete": availability.ready and availability.operable,
         "items": items[offset:offset + limit], "total": len(items),
         "next_offset": offset + limit if offset + limit < len(items) else None,
     }
@@ -390,79 +426,93 @@ def query_current(
         raise HTTPException(422, detail={"code": "FREQUENCY_UNSUPPORTED",
                                          "message": "所选频率与数据集契约不一致。"})
     try:
-        availability = require_ready(session)
+        availability = require_operable(session)
         if _legacy_restrictions(session, entry.spec.name):
             raise DataStoreError("DATA_RESTRICTED")
         with _store(_settings(request), availability.fresh_install) as store:
-            partitions = _matching_partitions(store, entry, payload)
-            if not partitions:
-                try:
-                    descriptor = store.describe_capability(entry.spec)
-                except DataStoreError as error:
-                    if error.code != "DATASET_MISSING":
-                        raise
-                    descriptor = None
-                issues = descriptor["issues"] if descriptor else 0
-                if issues and not payload.allow_partial:
-                    raise DataStoreError("DATA_RESTRICTED")
-                return {
-                    "dataset": entry.spec.name, "rows": [], "next_cursor": None,
-                    "status": "restricted" if issues else "empty",
-                    "request_satisfied": False,
-                    "business_date_coverage_verified": False,
-                    "partial_requested": payload.allow_partial,
-                    "actual_range": {"from": None, "to": None},
-                    "selected_partitions": [],
-                    "generation": descriptor["generation"] if descriptor else None,
-                    "schema_id": entry.spec.schema_id,
-                    "semantics": dict(entry.spec.semantics),
-                    "unresolved_issues": issues,
-                    "limitations": entry.describe_capability()["limitations"],
-                }
-            columns = tuple(payload.columns or entry.spec.schema.names)
-            if any(column not in entry.spec.schema.names for column in columns):
-                raise DataStoreError("INVALID_VALUE")
-            query = Query(
-                partitions=tuple(partitions),
-                lower=(payload.representation, payload.subject, payload.from_key),
-                upper=(payload.representation, payload.subject, payload.to_key + "\x00"),
-                columns=columns, page_size=payload.page_size,
-                cursor=payload.cursor, require_qualified=not payload.allow_partial,
-            )
-            # FastAPI runs this synchronous handler in an AnyIO worker. The
-            # kernel also calls the callback from a DuckDB watchdog thread;
-            # carry the event-loop token explicitly and serialize receive
-            # checks across both threads.
-            token = from_thread.run_sync(current_token)
-            disconnect_lock = Lock()
+            return _query_current(store, entry, payload, request, availability)
+    except DataStoreError as error:
+        raise _http_error(error) from None
 
-            def cancelled() -> bool:
-                with disconnect_lock:
-                    return from_thread.run(request.is_disconnected, token=token)
 
-            page = store.read_many(
-                [(entry.spec, query)],
-                cancelled=cancelled,
-            )[0]
-            rows = page.rows
-            keys = [str(row["object_key"]) for row in rows if "object_key" in row]
+def _query_current(store, entry, payload, request, availability):
+    # Pin the domain across proof validation, partition selection, and the
+    # existing kernel read. A concurrent commit cannot change the inspected
+    # files between these steps. Unrelated domains do not join this lock set.
+    with store.locks.read(entry.spec.name, timeout_ms=store.limits.lock_timeout_ms):
+        if not availability.ready:
+            _require_read_coverage(store, entry)
+        partitions = _matching_partitions(store, entry, payload)
+        if not partitions:
+            try:
+                descriptor = store.describe_capability(entry.spec)
+            except DataStoreError as error:
+                if error.code != "DATASET_MISSING":
+                    raise
+                # Missing output is not an authoritative empty source.
+                _require_read_coverage(store, entry)
+                raise
+            if not descriptor['row_count']:
+                _require_read_coverage(store, entry)
+            issues = descriptor["issues"] if descriptor else 0
+            if issues and not payload.allow_partial:
+                raise DataStoreError("DATA_RESTRICTED")
             return {
-                **page.to_dict(),
-                "status": page.quality_status,
-                # The current catalog proves which rows exist, but it cannot
-                # prove continuous business-date coverage for an arbitrary
-                # requested interval. Keep that claim false even for a clean
-                # page; the caller may inspect the actual page and cursor.
+                "dataset": entry.spec.name, "rows": [], "next_cursor": None,
+                "status": "restricted" if issues else "empty",
                 "request_satisfied": False,
                 "business_date_coverage_verified": False,
                 "partial_requested": payload.allow_partial,
-                "actual_range": {"from": min(keys) if keys else None,
-                                 "to": max(keys) if keys else None},
-                "selected_partitions": partitions,
+                "actual_range": {"from": None, "to": None},
+                "selected_partitions": [],
+                "generation": descriptor["generation"] if descriptor else None,
+                "schema_id": entry.spec.schema_id,
+                "semantics": dict(entry.spec.semantics),
+                "unresolved_issues": issues,
                 "limitations": entry.describe_capability()["limitations"],
             }
-    except DataStoreError as error:
-        raise _http_error(error) from None
+        columns = tuple(payload.columns or entry.spec.schema.names)
+        if any(column not in entry.spec.schema.names for column in columns):
+            raise DataStoreError("INVALID_VALUE")
+        query = Query(
+            partitions=tuple(partitions),
+            lower=(payload.representation, payload.subject, payload.from_key),
+            upper=(payload.representation, payload.subject, payload.to_key + "\x00"),
+            columns=columns, page_size=payload.page_size,
+            cursor=payload.cursor, require_qualified=not payload.allow_partial,
+        )
+        # FastAPI runs this synchronous handler in an AnyIO worker. The
+        # kernel also calls the callback from a DuckDB watchdog thread;
+        # carry the event-loop token explicitly and serialize receive
+        # checks across both threads.
+        token = from_thread.run_sync(current_token)
+        disconnect_lock = Lock()
+
+        def cancelled() -> bool:
+            with disconnect_lock:
+                return from_thread.run(request.is_disconnected, token=token)
+
+        page = store.read_many(
+            [(entry.spec, query)],
+            cancelled=cancelled,
+        )[0]
+        rows = page.rows
+        keys = [str(row["object_key"]) for row in rows if "object_key" in row]
+        return {
+            **page.to_dict(),
+            "status": page.quality_status,
+            # The current catalog proves which rows exist, but it cannot
+            # prove continuous business-date coverage for an arbitrary
+            # requested interval. Keep that claim false even for a clean
+            # page; the caller may inspect the actual page and cursor.
+            "request_satisfied": False,
+            "business_date_coverage_verified": False,
+            "partial_requested": payload.allow_partial,
+            "actual_range": {"from": min(keys) if keys else None,
+                             "to": max(keys) if keys else None},
+            "selected_partitions": partitions,
+            "limitations": entry.describe_capability()["limitations"],
+        }
 
 
 @legacy_router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE"], include_in_schema=False)

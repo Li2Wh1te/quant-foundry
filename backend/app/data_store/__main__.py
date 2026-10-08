@@ -12,13 +12,27 @@ import sys
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Process existing local Quant Foundry sources only')
-    parser.add_argument('command',choices=('describe','status','rebuild','update','retry',
-                                           'cleanup','verify-coverage','compact-issues','audit-export','configure-resources'))
+    parser.add_argument('command',choices=('describe','status','plan-active','rebuild','update','retry',
+                                           'cleanup','cancel-sealed','verify-coverage','compact-issues','audit-export','configure-resources'))
     parser.add_argument('--entry',action='append',help='Static E01–E71 entry; repeatable. Omit to process all.')
     parser.add_argument('--root',type=Path,help='Existing trusted shared local current-store directory')
     parser.add_argument('--initialize',action='store_true',help='Explicit first store initialization; never migrates or resets')
     parser.add_argument('--partition',action='append',default=[],help='Exact bounded target partition; repeat at most eight times')
     parser.add_argument('--max-passes',type=int,default=256)
+    parser.add_argument('--max-claim-batches',type=int,
+                        help='Independent native claim-batch limit; defaults to --max-passes')
+    parser.add_argument('--max-partition-passes',type=int,
+                        help='Independent partition-pass limit; defaults to --max-passes')
+    parser.add_argument('--resume-sealed-only',action='store_true',
+                        help='Resume exactly one existing sealed batch; never claim new native work')
+    parser.add_argument('--admit-active-only',action='store_true',
+                        help='Atomically admit one existing E23/E44 batch using exact plan-active fences')
+    parser.add_argument('--e50-input-fence',type=Path,
+                        help='Exact finite E50 bootstrap manifest; preserve later inputs as ordinary pending work')
+    parser.add_argument('--expect-input-identity',
+                        help='Exact sealed input identity SHA256 for --resume-sealed-only')
+    parser.add_argument('--expect-source-selection',
+                        help='Exact sealed source-selection SHA256 for --resume-sealed-only')
     parser.add_argument('--pass-seconds',type=int,default=300)
     parser.add_argument('--pipeline-spill-bytes',type=int,help='Explicit finite disk quota for a complete native scan; does not increase RAM')
     parser.add_argument('--scratch-bytes',type=int,help='Explicit shared staging/spill disk budget, at most 128 GiB')
@@ -33,9 +47,52 @@ def main(argv=None):
     parser.add_argument('--audit-bytes',type=int,default=8*1024**3)
     parser.add_argument('--audit-rows',type=int,default=20_000_000)
     parser.add_argument('--audit-api-samples',type=int,default=8)
+    parser.add_argument('--audit-api-entry',action='append',
+                        help='Audit only: required business API entry; repeat to require every exact member')
     parser.add_argument('--audit-local-only',action='store_true',
                         help='Explicit local file/API audit; never a full-range acceptance result')
     args=parser.parse_args(argv)
+    e50_fence=None
+    if args.e50_input_fence is not None:
+        if (args.command!='update' or args.entry!=['E50'] or args.initialize or args.rescue or
+                args.partition or args.allow_incompatible_rebuild or
+                args.resume_sealed_only or args.admit_active_only):
+            parser.error('--e50-input-fence requires one existing native E50 bootstrap update')
+        try:
+            with args.e50_input_fence.open('rb') as handle:
+                encoded=handle.read(262145)
+            if len(encoded)>262144:raise ValueError('Oversized E50 input fence')
+            e50_fence=encoded.decode('utf8')
+            from .incremental import parse_e50_fence
+            parse_e50_fence(e50_fence)
+        except (OSError,UnicodeError,ValueError):
+            parser.error('Invalid E50 input fence')
+    if args.resume_sealed_only and args.admit_active_only:
+        parser.error('Choose one input admission mode')
+    if args.resume_sealed_only or args.admit_active_only:
+        if (args.command!='update' or not args.entry or len(args.entry)!=1 or
+                args.initialize or args.rescue or args.partition or args.allow_incompatible_rebuild or
+                args.max_claim_batches not in (None,1) or
+                any(not fence or not re.fullmatch(r'[0-9a-f]{64}',fence) for fence in
+                    (args.expect_input_identity,args.expect_source_selection))):
+            parser.error('--resume-sealed-only requires one existing update entry and both exact fences')
+    elif args.command == 'cancel-sealed':
+        if (not args.entry or len(args.entry) != 1 or args.initialize or args.rescue or
+                args.partition or args.allow_incompatible_rebuild or
+                any(not fence or not re.fullmatch(r'[0-9a-f]{64}', fence) for fence in
+                    (args.expect_input_identity, args.expect_source_selection))):
+            parser.error('cancel-sealed requires one existing business entry and both original fences')
+    elif args.expect_input_identity is not None or args.expect_source_selection is not None:
+        parser.error('Input fences require an explicit admission mode')
+    if args.command=='plan-active' or args.admit_active_only:
+        if (not args.entry or len(args.entry)!=1 or args.entry[0] not in ('E23','E44') or
+                args.initialize or args.rescue or args.partition or args.allow_incompatible_rebuild):
+            parser.error('Active input planning/admission requires one existing E23/E44 entry')
+    if any(value is not None for value in (args.max_claim_batches,args.max_partition_passes)):
+        if args.command not in ('rebuild','update','retry') or any(
+                value is not None and not 1<=value<=4096
+                for value in (args.max_claim_batches,args.max_partition_passes)):
+            parser.error('Independent pass limits require a bounded processing command')
     resource_change=any(value is not None for value in
                         (args.pipeline_spill_bytes,args.scratch_bytes,args.issue_count))
     if resource_change and args.command!='configure-resources':
@@ -52,6 +109,8 @@ def main(argv=None):
     except KeyError:
         parser.error('Unknown entry; use describe to list E01–E71')
     if len(set(e.id for e in selected))!=len(selected): parser.error('Duplicate entry')
+    if args.resume_sealed_only and not selected[0].business:
+        parser.error('Sealed continuation requires exactly one business entry')
     if args.command=='cleanup' and any(not e.business for e in selected):
         parser.error('cleanup accepts business entries only')
     if args.command in ('compact-issues','verify-coverage') and (args.initialize or args.rescue or args.partition or any(not e.business for e in selected)):
@@ -75,6 +134,7 @@ def main(argv=None):
                                api_samples=args.audit_api_samples)
             result=export_audit(get_engine(),args.root,args.output,entries=tuple(selected),
                                 local_only=args.audit_local_only,
+                                api_entries=tuple(args.audit_api_entry) if args.audit_api_entry else None,
                                 limits=limits,api_base_url=args.api_base_url,
                                 api_token=os.environ.get(args.api_token_env))
         except (ValueError,OSError) as error:
@@ -97,11 +157,29 @@ def main(argv=None):
     for sig in (signal.SIGINT,signal.SIGTERM): signal.signal(sig,cancel)
     output={'command':args.command,'entries':[],'complete':True,'supplier_network_used':False}
     try:
+        # Cancellation validates the original seal directly and admits no
+        # acquisition. Its two fences must reach cancel_sealed unchanged,
+        # without activating the update-only PipelineOptions fence contract.
+        input_admission = args.resume_sealed_only or args.admit_active_only
         options=PipelineOptions(mode=args.command if args.command in ('rebuild','update','retry') else 'update',
             partitions=tuple(args.partition),maximum_passes=args.max_passes,pass_seconds=args.pass_seconds,
-            allow_incompatible_rebuild=args.allow_incompatible_rebuild)
+            allow_incompatible_rebuild=args.allow_incompatible_rebuild,
+            maximum_claim_batches=args.max_claim_batches,maximum_partition_passes=args.max_partition_passes,
+            resume_sealed_only=args.resume_sealed_only,
+            expected_input_identity=args.expect_input_identity if input_admission else None,
+            expected_source_selection=args.expect_source_selection if input_admission else None,
+            admit_active_only=args.admit_active_only,e50_input_fence=e50_fence)
         engine=get_engine()
-        with CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize) as store:
+        if args.command=='plan-active':
+            from .active_input import planning_store
+            # A plan never uses the mutating root-binding/scratch constructor.
+            # Enforce read-only for all native metadata connections as well as
+            # the catalog view, even if the caller omitted libpq PGOPTIONS.
+            engine=engine.execution_options(postgresql_readonly=True)
+            context=planning_store(engine,args.root)
+        else:
+            context=CurrentStore(engine,args.root,cursor_key=key,initialize=args.initialize)
+        with context as store:
             if args.command=='configure-resources':
                 output.update(store.configure_resources(scratch_bytes=args.scratch_bytes,
                     pipeline_spill_bytes=args.pipeline_spill_bytes,issue_count=args.issue_count))
@@ -109,7 +187,19 @@ def main(argv=None):
             native=NativeSources(engine,limits=source_limits,cancelled=lambda:cancelled[0])
             sources=(CombinedSources(native,RescueSources(args.rescue,limits=source_limits,
                      cancelled=lambda:cancelled[0])) if args.rescue else native)
-            if args.command in ('rebuild','update','retry'):
+            if args.command=='plan-active':
+                from .active_input import active_input_plan
+                output['entries']=[active_input_plan(store,selected[0],native,
+                    cancelled=lambda:cancelled[0]).plan]
+                output['plan_ready']=True
+            elif args.command == 'cancel-sealed':
+                from .cancel_sealed import cancel_sealed
+                output['entries'] = [cancel_sealed(store, selected[0],
+                    expected_identity=args.expect_input_identity,
+                    expected_selection=args.expect_source_selection,
+                    cancelled=lambda: cancelled[0])]
+                output['complete'] = output['entries'][0]['scratch_released']
+            elif args.command in ('rebuild','update','retry'):
                 output['entries']=run_local(store,sources,entries=selected,options=options,
                                             cancelled=lambda:cancelled[0])
                 output['complete']=all(row.get('complete') and row.get('qualified',True)
