@@ -1,0 +1,13 @@
+{
+  "api_schema": "qf.backtest.v2",
+  "strategy_revision_id": "synthetic-strategy-1",
+  "account_id": "synthetic-account-1",
+  "initial_cash": "10000.00",
+  "start": "2026-01-01",
+  "end": "2026-01-31",
+  "frequency": "1d",
+  "universe": ["510300.SH", "000001.SZ"],
+  "parameters": {"window": 20},
+  "execution_model": "bar_next_interval_v1",
+  "cost_overrides": {"commission_rate": "0.001", "minimum_commission": "1"}
+}

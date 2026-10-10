@@ -21,3 +21,9 @@ __pycache__/
 
 # Immutable runtime evidence is local deployment data, never source code.
 /data/foundation-runtime-archives/
+
+# Rust build and Python packaging outputs; only source and dependency locks ship.
+/engine/target/
+*.whl
+/sdk/python/dist/
+*.egg-info/

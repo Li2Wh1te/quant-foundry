@@ -79,7 +79,7 @@ def check_version_consistency(
     pyproject_file: Path = PYPROJECT_FILE,
     package_json_file: Path = PACKAGE_JSON_FILE,
 ) -> str:
-    """Validate that every derived value and an optional release tag agree."""
+    """Validate derived values (including the Rust workspace) and an optional tag."""
 
     canonical_version = read_canonical_version(version_file)
     backend_version, frontend_version = read_package_versions(
@@ -97,6 +97,23 @@ def check_version_consistency(
             f"frontend/package.json version is {frontend_version!r}; "
             f"expected {canonical_version!r} from VERSION"
         )
+    engine_manifest = version_file.parent / "engine" / "Cargo.toml"
+    if engine_manifest.exists():
+        with engine_manifest.open("rb") as handle:
+            engine_version = tomllib.load(handle).get("workspace", {}).get("package", {}).get("version")
+        if engine_version != canonical_version:
+            errors.append(
+                f"engine/Cargo.toml version is {engine_version!r}; "
+                f"expected {canonical_version!r} from VERSION"
+            )
+        engine_lock = engine_manifest.with_name("Cargo.lock")
+        if engine_lock.exists():
+            with engine_lock.open("rb") as handle:
+                packages = tomllib.load(handle).get("package", [])
+            for name in ("qf-core", "qf-python"):
+                package = next((p for p in packages if p.get("name") == name), {})
+                if package.get("version") != canonical_version:
+                    errors.append(f"engine/Cargo.lock {name} version must match VERSION")
     if tag is not None and tag != f"v{canonical_version}":
         errors.append(
             f"release tag is {tag!r}; expected 'v{canonical_version}' from VERSION"
@@ -114,7 +131,7 @@ def set_version(
     pyproject_file: Path = PYPROJECT_FILE,
     package_json_file: Path = PACKAGE_JSON_FILE,
 ) -> str:
-    """Set the canonical version and regenerate its two package metadata copies."""
+    """Set VERSION and its package copies; SDK version derives from Cargo."""
 
     normalized = validate_version(version)
     pyproject_text = pyproject_file.read_text(encoding="utf-8")
@@ -137,6 +154,24 @@ def set_version(
         pyproject_file: updated_pyproject,
         package_json_file: updated_package_json,
     }
+    engine_manifest = version_file.parent / "engine" / "Cargo.toml"
+    if engine_manifest.exists():
+        engine_text = engine_manifest.read_text(encoding="utf-8")
+        updated_engine, count = PYPROJECT_VERSION_PATTERN.subn(
+            rf'\g<1>"{normalized}"', engine_text
+        )
+        if count != 1:
+            raise VersionError("expected one workspace version declaration in engine/Cargo.toml")
+        updates[engine_manifest] = updated_engine
+        engine_lock = engine_manifest.with_name("Cargo.lock")
+        if engine_lock.exists():
+            lock_text = engine_lock.read_text(encoding="utf-8")
+            for name in ("qf-core", "qf-python"):
+                pattern = re.compile(rf'(\[\[package\]\]\nname = "{name}"\nversion = )"[^"]*"')
+                lock_text, count = pattern.subn(rf'\g<1>"{normalized}"', lock_text)
+                if count != 1:
+                    raise VersionError(f"expected one {name} version declaration in engine/Cargo.lock")
+            updates[engine_lock] = lock_text
     for path, content in updates.items():
         atomic_write(path, content)
 
