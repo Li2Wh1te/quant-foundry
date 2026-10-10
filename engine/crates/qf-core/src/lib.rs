@@ -3,6 +3,7 @@ pub mod accounting;
 pub mod analysis;
 pub mod clock;
 pub mod data;
+pub mod engine;
 pub mod matching;
 pub mod orders;
 pub mod results;
