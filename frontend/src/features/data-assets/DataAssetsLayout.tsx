@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { createRequestScope, currentStatus, dataAssetsClient, frequencyLabel, isCancellation,
+import { clearsPreview, createRequestScope, currentStatus, dataAssetsClient, DataStoreApiError, frequencyLabel, isCancellation,
   type CurrentDataset, type RequestScope } from "./data";
 import { DatasetView } from "./DatasetView";
 import { PreviewPanel } from "./PreviewPanel";
@@ -34,10 +34,18 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
     setBusy(true); setError("");
     scope.run(signal => dataAssetsClient.getDataset(datasetId, { signal }))
       .then(result => { if (!disposed) setDataset(result); })
-      .catch(problem => { if (!disposed && !isCancellation(problem)) setError(failure(problem)); })
+      .catch(problem => {
+        if (disposed || isCancellation(problem)) return;
+        // A metadata refresh can revoke the same read boundary as /query.
+        // Unmount all object panels before reporting an authoritative refusal,
+        // so an older successful preview cannot remain visible as current data.
+        if (clearsPreview(problem) || (problem instanceof DataStoreApiError
+          && ["DATASET_UNKNOWN", "DATASET_MISSING"].includes(problem.code))) clear();
+        setError(failure(problem));
+      })
       .finally(() => { if (!disposed && active.current === scope) setBusy(false); });
     return () => { disposed = true; scope.dispose(); };
-  }, [datasetId, refreshVersion, failure]);
+  }, [datasetId, refreshVersion, clear, failure]);
 
   useEffect(() => {
     const frame = requestAnimationFrame(() => {

@@ -1,0 +1,714 @@
+{
+  "source": "Actual App routes with synthetic unavailable-data HTTP",
+  "passed": 22,
+  "cases": [
+    {
+      "route": "/",
+      "destination": "/admin"
+    },
+    {
+      "route": "/login",
+      "destination": "/admin"
+    },
+    {
+      "route": "/admin",
+      "destination": "/admin"
+    },
+    {
+      "route": "/admin/data-assets",
+      "destination": "/admin/data-assets"
+    },
+    {
+      "route": "/admin/data-assets/fixture.daily",
+      "destination": "/admin/data-assets/fixture.daily"
+    },
+    {
+      "route": "/admin/data-sources",
+      "destination": "/admin/data-sources"
+    },
+    {
+      "route": "/admin/tasks",
+      "destination": "/admin/tasks"
+    },
+    {
+      "route": "/admin/data/trading-calendar",
+      "destination": "/admin/data/etf-basics?calendar=open"
+    },
+    {
+      "route": "/admin/data/etf-basics",
+      "destination": "/admin/data/etf-basics"
+    },
+    {
+      "route": "/admin/data/etf-basics/510300.SH",
+      "destination": "/admin/data/etf-basics/510300.SH"
+    },
+    {
+      "route": "/admin/strategy-data",
+      "destination": "/admin/strategy-data"
+    },
+    {
+      "route": "/admin/strategies",
+      "destination": "/admin/strategies"
+    },
+    {
+      "route": "/admin/backtest-accounts",
+      "destination": "/admin/backtest-accounts"
+    },
+    {
+      "route": "/admin/backtest-preflight",
+      "destination": "/admin/backtest-runs"
+    },
+    {
+      "route": "/admin/backtest-compare",
+      "destination": "/admin/backtest-compare"
+    },
+    {
+      "route": "/admin/backtest-runs/fixture-run/results",
+      "destination": "/admin/backtest-runs/fixture-run/results"
+    },
+    {
+      "route": "/admin/backtest-runs",
+      "destination": "/admin/backtest-runs"
+    },
+    {
+      "route": "/admin/strategies/fixture-strategy",
+      "destination": "/admin/strategies/fixture-strategy"
+    },
+    {
+      "route": "/admin/strategies/fixture-strategy/backtests",
+      "destination": "/admin/strategies/fixture-strategy/backtests"
+    },
+    {
+      "route": "/admin/retired-unknown",
+      "destination": "/admin"
+    },
+    {
+      "route": "/admin/logs",
+      "destination": "/admin"
+    },
+    {
+      "route": "/admin/data/daily-quotes",
+      "destination": "/admin"
+    }
+  ],
+  "errors": [],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data-sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data-sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/task-workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/task-types"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data-sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/task-workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/task-types"
+    },
+    {
+      "method": "GET",
+      "path": "/api/data-sources"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/SSE/2026-10-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/SSE/2026-10-10"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/etf-watchlist"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH/daily-bars"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH/adjustment-factors"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/etf-watchlist"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH/daily-bars"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/510300.SH/adjustment-factors"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-account-profiles/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-account-profiles/page"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-account-profiles/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-account-profiles/page"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/fixture-run"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/fixture-run"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies/fixture-strategy"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies/fixture-strategy/revisions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies/fixture-strategy"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/strategies/fixture-strategy/revisions"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/backtest-runs/workspace"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/etfs/overview"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-collections/trading-calendar/overview"
+    }
+  ],
+  "realDataAcceptance": false
+}
