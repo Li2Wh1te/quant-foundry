@@ -148,7 +148,7 @@ class MarketBinding:
     def project(self, table, wanted):
         for column, expected in self.guards:
             values = table[column]
-            if values.null_count or not pc.all(pc.equal(values, expected)).as_py():
+            if table.num_rows and (values.null_count or not pc.all(pc.equal(values, expected)).as_py()):
                 raise GatewayError('CAPABILITY_UNAVAILABLE', '存储字段单位或价格基础未满足运行能力')
         if self.transform is not None:
             table = self.transform(table)

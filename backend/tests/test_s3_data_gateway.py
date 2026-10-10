@@ -315,6 +315,8 @@ def test_existing_registry_tick_projection_to_rust_no_read_normalizer(formal,tmp
     projection=replace(synthetic_market_binding(entry,inputs[0].representation_key),name='market')
     gateway=make_gateway(formal,(projection,)); ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
     monkeypatch.setattr(normalize,'normalize',lambda *_:pytest.fail('read cannot normalize'))
+    empty=list(gateway.read('market',request(start=BASE+1),ctx))
+    assert len(empty)==1 and empty[0].table.num_rows==0
     result,output=rust_probe(gateway,ctx,tmp_path,request())
     assert result.returncode==0 and output['count']==3,output
     assert output['samples'][0]['event']['price']=='10.123456789012345678'
