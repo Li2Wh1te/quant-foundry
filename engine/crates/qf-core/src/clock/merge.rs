@@ -55,6 +55,7 @@ pub struct StreamingMerge<S> {
     buffered_events: usize,
     buffered_bytes: usize,
     last_output: Option<EventKey>,
+    failure: Option<QfError>,
     stats: MergeStats,
 }
 fn invalid(message: &str) -> QfError {
@@ -103,6 +104,7 @@ impl<S: EventSource> StreamingMerge<S> {
             buffered_events: 0,
             buffered_bytes: 0,
             last_output: None,
+            failure: None,
             stats: MergeStats::default(),
         })
     }
@@ -166,14 +168,31 @@ impl<S: EventSource> StreamingMerge<S> {
         Ok(())
     }
     pub fn peek(&mut self, checkpoint: &mut dyn Checkpoint) -> QfResult<Option<&MarketEvent>> {
-        checkpoint.check()?;
-        self.prime(checkpoint)?;
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+        if let Err(failure) = checkpoint.check().and_then(|_| self.prime(checkpoint)) {
+            self.failure = Some(failure.clone());
+            return Err(failure);
+        }
         Ok(self
             .heads
             .peek()
             .map(|Reverse((_, index))| &self.cursors[*index].chunk.front().expect("heap head").0))
     }
     pub fn pop(&mut self, checkpoint: &mut dyn Checkpoint) -> QfResult<Option<MarketEvent>> {
+        if let Some(failure) = &self.failure {
+            return Err(failure.clone());
+        }
+        let result = self.pop_inner(checkpoint);
+        if let Err(failure) = &result {
+            // A read/contract error may have consumed part of a source or a heap
+            // head. Resuming could silently omit events, so errors are terminal.
+            self.failure = Some(failure.clone());
+        }
+        result
+    }
+    fn pop_inner(&mut self, checkpoint: &mut dyn Checkpoint) -> QfResult<Option<MarketEvent>> {
         checkpoint.check()?;
         self.prime(checkpoint)?;
         let Some(Reverse((key, index))) = self.heads.pop() else {

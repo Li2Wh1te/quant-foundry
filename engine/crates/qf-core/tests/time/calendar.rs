@@ -2,6 +2,7 @@ use super::support::*;
 use qf_core::clock::{
     Cadence, CallbackId, Registration, ScheduleTime, SessionCalendar, SimClock, SubscriptionKind,
 };
+use qf_core::rules::market::{AuctionPhase, SessionTemplate};
 use qf_core::run::Frequency;
 use qf_core::{ErrorCode, QfResult};
 
@@ -180,6 +181,63 @@ fn daily_intraday_lunch_and_incompatible_precision_schedules_reject() {
     assert_eq!(
         auction.for_session(&row(0)).unwrap()[0].time_ns,
         local(&row(0), 560)
+    );
+}
+#[test]
+fn dated_instrument_phase_template_keeps_auctions_separate_from_bar_buckets() {
+    let session = row(0);
+    let cases = [
+        (555, AuctionPhase::OpeningCall),
+        (565, AuctionPhase::OpeningCall),
+        (570, AuctionPhase::Continuous),
+        (690, AuctionPhase::Continuous),
+        (780, AuctionPhase::Continuous),
+        (896, AuctionPhase::Continuous),
+        (897, AuctionPhase::ClosingCall),
+        (900, AuctionPhase::ClosingCall),
+    ];
+    for (minute, phase) in cases {
+        assert_eq!(
+            session
+                .scheduled_phase_at(SessionTemplate::ChinaAuction, local(&session, minute))
+                .unwrap(),
+            phase
+        );
+    }
+    for minute in [897, 899, 900] {
+        assert_eq!(
+            session
+                .scheduled_phase_at(
+                    SessionTemplate::ShanghaiFundBefore2026,
+                    local(&session, minute)
+                )
+                .unwrap(),
+            AuctionPhase::Continuous
+        );
+    }
+    for minute in [554, 566, 720, 901] {
+        assert_eq!(
+            session
+                .scheduled_phase_at(SessionTemplate::ChinaAuction, local(&session, minute))
+                .unwrap_err()
+                .code,
+            ErrorCode::RuleUnavailable
+        );
+    }
+    let mut wrong_timezone = session.clone();
+    wrong_timezone.session.exchange_timezone = "Etc/UTC".into();
+    assert!(
+        wrong_timezone
+            .scheduled_phase_at(SessionTemplate::ChinaAuction, local(&session, 600))
+            .is_err()
+    );
+    // The public helper must reject an unvalidated input instead of indexing it.
+    let mut missing = session.clone();
+    missing.bar_windows.clear();
+    assert!(
+        missing
+            .validate_event(&daily(&session, "A"), Frequency::Day)
+            .is_err()
     );
 }
 #[test]

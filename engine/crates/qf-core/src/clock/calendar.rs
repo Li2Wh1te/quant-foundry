@@ -1,6 +1,9 @@
 //! Small authoritative calendar contracts, not holiday/weekend inference.
 use super::TradingSession;
-use crate::rules::{date::RuleDate, market::SessionTemplate};
+use crate::rules::{
+    date::RuleDate,
+    market::{AuctionPhase, SessionTemplate},
+};
 use crate::run::Frequency;
 use crate::types::{MarketEvent, Nanoseconds, SessionKey};
 use crate::{ErrorCode, QfError, QfResult};
@@ -145,6 +148,42 @@ impl CalendarSession {
         }
         at(self.local_midnight_ns, minute)
     }
+    /// Join the instrument's D02 dated template to the authoritative calendar.
+    /// At an adjacent boundary the later phase wins. Temporary-halt auctions
+    /// require actual status facts in RulesPort and must override this schedule.
+    /// A reference Bar window alone cannot distinguish stock/fund auction phases.
+    pub fn scheduled_phase_at(
+        &self,
+        template: SessionTemplate,
+        time: Nanoseconds,
+    ) -> QfResult<AuctionPhase> {
+        if self.session.exchange_timezone != template.timezone()
+            || !self
+                .market_windows
+                .iter()
+                .any(|window| window.contains(time))
+        {
+            return Err(invalid("事件时点或时区不在权威交易窗口内"));
+        }
+        let contains = |(start, end)| -> QfResult<bool> {
+            Ok(at(self.local_midnight_ns, start)? <= time
+                && time <= at(self.local_midnight_ns, end)?)
+        };
+        if let Some(window) = template.closing_call()
+            && contains(window)?
+        {
+            return Ok(AuctionPhase::ClosingCall);
+        }
+        if contains(template.opening_call())? {
+            return Ok(AuctionPhase::OpeningCall);
+        }
+        for window in template.continuous_windows() {
+            if contains(*window)? {
+                return Ok(AuctionPhase::Continuous);
+            }
+        }
+        Err(invalid("该时点没有适用模板的交易阶段"))
+    }
     pub fn buckets(&self, frequency: Frequency) -> QfResult<BucketIter<'_>> {
         let duration = match frequency {
             Frequency::Minute => MINUTE_NS,
@@ -172,8 +211,12 @@ impl CalendarSession {
         let (session, time) = match event {
             MarketEvent::Bar(bar) => {
                 if frequency == Frequency::Day {
+                    let first = self
+                        .bar_windows
+                        .first()
+                        .ok_or_else(|| invalid("日Bar缺少声明交易窗口"))?;
                     if bar.interval_start_ns < self.session.open_ns
-                        || bar.interval_start_ns > self.bar_windows[0].start_ns
+                        || bar.interval_start_ns > first.start_ns
                         || bar.interval_end_ns != self.session.close_ns
                     {
                         return Err(invalid("日Bar必须覆盖声明会话并在收盘完成"));

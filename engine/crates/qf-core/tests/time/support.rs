@@ -704,6 +704,7 @@ pub struct Writer {
     pub finalized: usize,
     pub aborted: usize,
     pub fail_write: bool,
+    pub fail_after_write: bool,
     pub final_cancel: bool,
 }
 impl Default for Writer {
@@ -716,6 +717,7 @@ impl Default for Writer {
             finalized: 0,
             aborted: 0,
             fail_write: false,
+            fail_after_write: false,
             final_cancel: false,
         }
     }
@@ -734,6 +736,9 @@ impl ResultSink for Writer {
         assert_eq!(batch.first_sequence().get(), self.records.len() as u64 + 1);
         self.first_sequences.push(batch.first_sequence().get());
         self.records.extend(batch.records().iter().cloned());
+        if self.fail_after_write {
+            return Err(failure(ErrorCode::Cancelled));
+        }
         Ok(())
     }
     fn finalize(&mut self, _outcome: &RunOutcome) -> QfResult<()> {

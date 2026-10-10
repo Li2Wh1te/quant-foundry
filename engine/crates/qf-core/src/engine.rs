@@ -272,10 +272,10 @@ struct Output {
     pending: VecDeque<ResultRecord>,
     bytes: usize,
     next_sequence: u64,
-    wrote: bool,
+    write_attempted: bool,
 }
 /// Count encoded bytes without allocating an extra, possibly huge message.
-fn encoded_len(value: &ResultRecord, maximum: usize) -> QfResult<usize> {
+fn encoded_len(value: &impl serde::Serialize, maximum: usize) -> QfResult<usize> {
     struct Counter {
         bytes: usize,
         maximum: usize,
@@ -308,7 +308,7 @@ impl Output {
             pending: VecDeque::new(),
             bytes: 0,
             next_sequence: 1,
-            wrote: false,
+            write_attempted: false,
         }
     }
     fn push(&mut self, record: ResultRecord, limits: &EngineLimits) -> QfResult<()> {
@@ -348,17 +348,26 @@ impl Output {
                     "结果接收信用无效",
                 ));
             }
-            let mut bytes = 128; // bounded batch framing + a u64 decimal sequence
+            // Include the exact shared batch framing; a credit equal to the
+            // encoded single-record batch must be usable, even at tight limits.
+            let mut bytes = encoded_len(
+                &serde_json::json!({
+                    "first_sequence": Sequence::new(self.next_sequence),
+                    "records": [],
+                }),
+                credit.max_bytes,
+            )?;
             let mut records = Vec::new();
             while records.len() < credit.max_records.min(crate::results::MAX_PAGE_ITEMS) {
                 let Some(record) = self.pending.front() else {
                     break;
                 };
                 let size = encoded_len(record, crate::run::MAX_CONTROL_BYTES)?;
-                if size + 1 > credit.max_bytes.saturating_sub(bytes) {
+                let comma = usize::from(!records.is_empty());
+                if size + comma > credit.max_bytes.saturating_sub(bytes) {
                     break;
                 }
-                bytes += size + 1;
+                bytes += size + comma;
                 self.bytes -= size;
                 records.push(self.pending.pop_front().expect("pending record"));
             }
@@ -372,8 +381,10 @@ impl Output {
             let count = records.len() as u64;
             let batch = ResultBatch::new(Sequence::new(self.next_sequence), records, &credit)?;
             control.check()?;
+            // An interrupted acknowledgement may follow a persisted write.
+            // Keep the terminal report conservative even on the first batch.
+            self.write_attempted = true;
             writer.write(&batch)?;
-            self.wrote = true;
             self.next_sequence = self
                 .next_sequence
                 .checked_add(count)
@@ -446,6 +457,16 @@ impl<D: StrategyDataPort, E: ExecutionPort> ReadView for ScopedView<'_, D, E> {
                 ErrorCode::LookaheadForbidden,
                 "strategy_read",
                 "数据帧越过已发布事件或知识时间边界",
+            ));
+        }
+        if frame
+            .latest_market_key()
+            .is_some_and(|key| key.time_ns > request.end_ns)
+        {
+            return Err(error(
+                ErrorCode::InvalidContract,
+                "strategy_read",
+                "数据帧越过请求行情终点",
             ));
         }
         Ok(frame)
@@ -718,7 +739,7 @@ impl<S: EventSource> Engine<S> {
         if result.is_ok() {
             result = runtime.ports.results.finalize(&success);
         }
-        let partial = runtime.output.wrote || runtime.progress.completed_events > 0;
+        let partial = runtime.output.write_attempted || runtime.progress.completed_events > 0;
         let outcome = match result {
             Ok(()) => success,
             Err(failure) => {
@@ -1179,6 +1200,10 @@ where
                     .get(timer_cursor)
                     .filter(|t| next_time.is_none_or(|market| t.time_ns < market))
                 {
+                    // There is no market event at this timer's timestamp. At
+                    // close all earlier events are complete, so new DAY orders
+                    // belong to the next session even with an empty source.
+                    let closing = timer.time_ns >= session.session.close_ns;
                     self.budget = BoundaryBudget::new();
                     self.timers(
                         &intraday,
@@ -1186,7 +1211,7 @@ where
                         timer.time_ns,
                         config,
                         calendar,
-                        (index, false),
+                        (index, closing),
                     )?;
                     continue;
                 }

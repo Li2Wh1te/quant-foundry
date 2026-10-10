@@ -8,19 +8,23 @@
 同刻全部 Bar 的撮合/账户/行情屏障、单次聚合回调、逐 Tick 纳秒游标、
 订单生效与盘后 DAY、非递归有界通知、取消/异常/进度和信用分块结果结束路径。
 收盘同纳秒尚有后续 Tick 时保留当前会话资格，最后市场事件完成后归下一会话。
+无剩余行情的收盘定时也归下一会话，不使新 DAY 单立即到期。
 
 定向复核补齐了首事件前历史读取、同回调预留后账户可见、按标的有界订单访问、
 撮合输出数量/身份检查、资源错误被策略捕获后的终止、编码字节计数及最终一致性
 检查。接口和可运行隔离接入例见 [README.md](README.md)；替身只在
 `tests/time/support.rs`，明确标为 `synthetic_clock_only`。
+合并前复核修正精确结果信用的头部计算、首次写入确认中断的 partial 标记及
+无收盘行情的 DAY 定时归属；新增历史请求终点检查、报错不可恢复的事件合并器，
+并提供按标的有效 D02 模板的常规竞价阶段接缝。规则/费用事实未改。
 
 ## 已执行
 
-- Rust 1.90.0：`cargo test -p qf-core --locked --test time`，31 项通过。
+- Rust 1.90.0：`cargo test -p qf-core --locked --test time`，37 项通过。
   包含分块/来源排列的穷举小属性、50,000 条惰性输入/62 条缓冲上限、跨标的
   Bar、同纳秒 Tick（含收盘）、日周月/午休、DAY、通知、取消/异常/未来读取。
 - `QF_S3_PYTHON=<CPython 3.12.2> bash scripts/test_s3_engine.sh` 完整通过：
-  fmt、workspace clippy `-D warnings`、Rust 72 项、公共契约例、生成签名/版本
+  fmt、workspace clippy `-D warnings`、Rust 78 项、公共契约例、生成签名/版本
   检查、根目录 18 项、release wheel 构建、独立安装/导入及 SDK/D02 wheel 17 项。
   本地先修正 Python 安装路径后在独立环境重跑；仓库脚本没有修改。
 - `PYO3_PYTHON=/nonexistent-python-core-must-not-use cargo test -p qf-core --locked`

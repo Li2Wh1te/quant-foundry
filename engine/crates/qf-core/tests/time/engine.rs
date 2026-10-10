@@ -3,8 +3,9 @@ use qf_core::ErrorCode;
 use qf_core::clock::{Cadence, CallbackId, ScheduleTime, SubscriptionKind};
 use qf_core::engine::Notification;
 use qf_core::orders::{OrderStatus, TimeInForce};
+use qf_core::results::{ResultBatch, SinkCredit};
 use qf_core::run::{ExecutionModel, Frequency, RunOutcome};
-use qf_core::types::{ExactDecimal, MarketEvent};
+use qf_core::types::{ExactDecimal, MarketEvent, Sequence};
 use std::cell::Cell;
 use std::rc::Rc;
 
@@ -334,6 +335,39 @@ fn lifecycle_and_duplicate_week_month_registrations_execute_once_per_registratio
     );
 }
 #[test]
+fn close_timer_without_remaining_market_assigns_day_to_next_session() {
+    for prior_market in [false, true] {
+        let session = row(0);
+        let mut h = Harness::default();
+        h.host.initialize = Some(Box::new(|_, _, r| {
+            r.register(
+                CallbackId::new("at_close")?,
+                Cadence::Daily,
+                "15:00".parse()?,
+            )?;
+            Ok(())
+        }));
+        h.host.scheduled_hook = Some(Box::new(|_, c| {
+            c.submit(&intent("A", TimeInForce::Day))?;
+            Ok(())
+        }));
+        let sources = if prior_market {
+            vec![Source::new(
+                vec![tick(&session, "A", "a", local(&session, 899), 1)],
+                1,
+            )]
+        } else {
+            vec![]
+        };
+        let report = h.run(config(Frequency::Tick), calendar(1), sources);
+        assert_eq!(code(&report), None);
+        let order = &h.execution.orders["o1"];
+        assert_eq!(order.effective_session, session_key("NEXT"));
+        assert_eq!(order.status, OrderStatus::Open);
+        assert_eq!(h.host.scheduled_calls.len(), 1);
+    }
+}
+#[test]
 fn after_close_day_order_expires_only_after_the_next_sessions_last_market() {
     let sessions = calendar(3);
     let mut h = Harness::default();
@@ -509,6 +543,29 @@ fn future_request_rejects_before_port_and_same_ns_prefetch_leak_also_rejects() {
 }
 
 #[test]
+fn historical_request_cannot_receive_a_later_but_already_published_tick() {
+    let session = row(0);
+    let time = local(&session, 600);
+    let mut h = Harness::default();
+    h.data.leaked = Some(tick(&session, "A", "a", time, 1).key());
+    h.host.ticks = Some(Box::new(|_, view, _| {
+        assert_eq!(
+            view.read(&request(ns(view.now_ns().get() - 1), Frequency::Tick))
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidContract
+        );
+        Ok(())
+    }));
+    let report = h.run(
+        config(Frequency::Tick),
+        calendar(1),
+        vec![Source::new(vec![tick(&session, "A", "a", time, 1)], 1)],
+    );
+    assert_eq!(code(&report), None);
+    assert_eq!(h.data.reads, 1);
+}
+#[test]
 fn initialize_and_before_open_can_read_completed_history_but_not_todays_bar() {
     let session = row(0);
     let previous = tick(&session, "A", "history", ns(-1), 1).key();
@@ -552,6 +609,56 @@ fn dependency_change_at_final_check_or_next_chunk_cannot_commit_success() {
     let report = h.run(config(Frequency::Tick), calendar(1), vec![source]);
     assert_eq!(code(&report), Some(ErrorCode::DataChanged));
     assert_eq!(h.writer.finalized, 0);
+}
+#[test]
+fn exact_result_credit_accepts_a_record_including_only_actual_batch_framing() {
+    let mut baseline = Harness::default();
+    baseline.host.initialize = Some(Box::new(|_, c, _| {
+        c.submit(&intent("A", TimeInForce::Gtc))?;
+        Ok(())
+    }));
+    assert_eq!(
+        code(&baseline.run(config(Frequency::Day), calendar(1), vec![])),
+        None
+    );
+    assert_eq!(baseline.writer.records.len(), 1);
+    let batch = ResultBatch::new(
+        Sequence::new(1),
+        baseline.writer.records.clone(),
+        &SinkCredit {
+            max_records: 1,
+            max_bytes: qf_core::run::MAX_CONTROL_BYTES,
+        },
+    )
+    .unwrap();
+    let mut h = Harness::default();
+    h.writer.credit_records = 1;
+    h.writer.credit_bytes = serde_json::to_vec(&batch).unwrap().len();
+    h.host.initialize = baseline.host.initialize.take();
+    let report = h.run(config(Frequency::Day), calendar(1), vec![]);
+    assert_eq!(code(&report), None);
+    assert_eq!(h.writer.records, baseline.writer.records);
+    assert_eq!(h.writer.finalized, 1);
+    assert_eq!(h.writer.aborted, 0);
+}
+#[test]
+fn interrupted_first_write_reports_partial_when_the_ack_is_unknown() {
+    let mut h = Harness::default();
+    h.writer.fail_after_write = true;
+    h.host.initialize = Some(Box::new(|_, c, _| {
+        c.submit(&intent("A", TimeInForce::Gtc))?;
+        Ok(())
+    }));
+    let report = h.run(config(Frequency::Day), calendar(1), vec![]);
+    assert_eq!(h.writer.records.len(), 1);
+    assert!(matches!(
+        report.outcome,
+        RunOutcome::Cancelled { partial: true }
+    ));
+    assert_eq!(h.writer.finalized, 0);
+    assert_eq!(h.writer.aborted, 1);
+    assert_eq!(h.host.finish_count, 1);
+    assert_eq!(h.data.closed, 1);
 }
 #[test]
 fn result_credit_and_finalize_cancellation_keep_partial_results_and_one_outcome() {

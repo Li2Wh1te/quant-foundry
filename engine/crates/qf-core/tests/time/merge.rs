@@ -115,6 +115,26 @@ fn exact_key_collisions_unsorted_sources_and_empty_chunks_fail() {
     );
 }
 #[test]
+fn merge_errors_are_terminal_and_retry_cannot_skip_a_conflicting_event() {
+    let session = row(0);
+    let event = tick(&session, "A", "a", local(&session, 600), 1);
+    let source = Source::new(vec![event.clone()], 1);
+    let reads = source.reads.clone();
+    let mut merge = StreamingMerge::new(
+        vec![source, Source::new(vec![event], 1)],
+        MergeLimits::default(),
+    )
+    .unwrap();
+    let mut control = Control::default();
+    let failure = merge.pop(&mut control).unwrap_err();
+    assert_eq!(failure.code, ErrorCode::InvalidContract);
+    for _ in 0..3 {
+        assert_eq!(merge.pop(&mut control).unwrap_err(), failure);
+        assert_eq!(merge.peek(&mut control).unwrap_err(), failure);
+    }
+    assert_eq!(reads.get(), 1);
+}
+#[test]
 fn missing_source_sequence_uses_declared_stable_input_identity() {
     let session = row(0);
     let events: Vec<_> = (1..=3)
