@@ -1,6 +1,16 @@
 # Generated from qf-core serde DTO fields; decimal/time wire values are strings.
 from typing import Any, Literal, NotRequired, TypedDict
 
+class CorporateEffect(TypedDict):
+    action_id: str
+    security: str
+    kind: Literal['registered', 'ex_dividend', 'paid_dividend', 'shares_changed', 'rights_not_participated']
+    quantity: int
+    cash_delta: str
+    receivable_delta: str
+    tax: str
+    policy: str
+
 class PositionView(TypedDict):
     security: str
     quantity: int
@@ -95,6 +105,7 @@ class Order(TypedDict):
     filled_quantity: int
     status: Literal['accepted', 'open', 'partially_filled', 'filled', 'cancelled', 'expired', 'rejected']
     submitted_ns: str
+    updated_at: EventKey | None
     limit_price: str | None
     tif: Literal['day', 'gtc']
     effective_session: str
@@ -121,6 +132,11 @@ class LogRecord(TypedDict):
     level: Literal['info', 'warning', 'error']
     message: str
     truncated: bool
+
+class CorporateActionEvent(TypedDict):
+    time_ns: str
+    session: str
+    effect: CorporateEffect
 
 class ResultBatch(TypedDict):
     first_sequence: str
@@ -349,10 +365,13 @@ class TradeRecord(TypedDict):
 class PositionRecord(TypedDict):
     kind: Literal['position']
     record: PositionView
+class CorporateActionRecord(TypedDict):
+    kind: Literal['corporate_action']
+    record: CorporateActionEvent
 class UserRecordEnvelope(TypedDict):
     kind: Literal['record']
     record: UserRecord
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope

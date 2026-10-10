@@ -90,6 +90,13 @@ pub struct LogRecord {
     pub message: String,
     pub truncated: bool,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CorporateActionEvent {
+    pub time_ns: Nanoseconds,
+    pub session: crate::types::SessionKey,
+    pub effect: crate::accounting::CorporateEffect,
+}
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
     tag = "kind",
@@ -102,6 +109,7 @@ pub enum ResultRecord {
     Order(Order),
     Trade(Fill),
     Position(PositionView),
+    CorporateAction(CorporateActionEvent),
     Record(UserRecord),
     Log(LogRecord),
 }

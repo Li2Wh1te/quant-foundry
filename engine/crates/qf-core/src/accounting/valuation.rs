@@ -45,6 +45,19 @@ pub struct ValuedAccount {
     pub valuation: BTreeMap<SecurityKey, PositionValuation>,
 }
 impl Account {
+    /// A previously validated raw observation for D06's estimate, never a new
+    /// quote or a price inferred from portfolio value. Staleness stays explicit.
+    pub fn order_estimate(
+        &self,
+        security: &SecurityKey,
+        now: Nanoseconds,
+    ) -> QfResult<&ValuationMark> {
+        self.state
+            .marks
+            .get(security)
+            .filter(|m| m.known_ns <= now)
+            .ok_or_else(|| error(ErrorCode::RuleUnavailable, "没有已公开有效原价用于订单估算"))
+    }
     pub fn set_raw_mark(
         &mut self,
         security: SecurityKey,

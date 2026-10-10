@@ -2,6 +2,10 @@ use crate::types::{EventKey, ExactDecimal, Nanoseconds, Price, Quantity, Securit
 use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 
+mod execution;
+mod manager;
+pub use manager::*;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Side {
@@ -75,6 +79,11 @@ pub enum OrderStatus {
     Expired,
     Rejected,
 }
+impl OrderStatus {
+    pub fn is_active(self) -> bool {
+        matches!(self, Self::Accepted | Self::Open | Self::PartiallyFilled)
+    }
+}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Order {
@@ -85,6 +94,9 @@ pub struct Order {
     pub filled_quantity: Quantity,
     pub status: OrderStatus,
     pub submitted_ns: Nanoseconds,
+    /// Actual status-change boundary, including the complete market/command key.
+    #[serde(default)]
+    pub updated_at: Option<Box<EventKey>>,
     pub limit_price: Option<Price>,
     pub tif: TimeInForce,
     pub effective_session: SessionKey,
@@ -92,6 +104,11 @@ pub struct Order {
     pub eligible_after_event: Option<EventKey>,
     pub reason_code: Option<ErrorCode>,
     pub message: String,
+}
+impl Order {
+    pub fn remaining(&self) -> QfResult<Quantity> {
+        self.quantity.checked_sub(self.filled_quantity)
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

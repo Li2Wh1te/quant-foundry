@@ -302,6 +302,9 @@ impl Account {
     pub fn totals(&self) -> &AccountTotals {
         &self.state.totals
     }
+    pub(crate) fn sessions(&self) -> &[CalendarSession] {
+        &self.sessions
+    }
     pub fn available_cash(&self) -> QfResult<Money> {
         self.state.cash.checked_sub(self.frozen_cash()?)
     }
@@ -374,7 +377,7 @@ impl Account {
             .insert(terms.instrument.security.clone(), terms);
         Ok(())
     }
-    pub(super) fn terms(&self, security: &SecurityKey) -> QfResult<&AccountTerms> {
+    pub(crate) fn terms(&self, security: &SecurityKey) -> QfResult<&AccountTerms> {
         self.state
             .terms
             .get(security)
