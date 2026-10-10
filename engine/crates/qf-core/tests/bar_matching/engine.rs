@@ -474,6 +474,31 @@ fn description_is_required_result_even_without_market_and_mismatched_matcher_con
         ResultRecord::ExecutionModel(_)
     ));
     let mut h = Harness::new(Frequency::Day, "0.1", "10000");
+    h.host.initialize = Some(Box::new(|_, _, _| {
+        Err(QfError::new(
+            ErrorCode::StrategyError,
+            "initialize",
+            "synthetic initialization failure",
+        ))
+    }));
+    let report = h.run(1, vec![], 1, false);
+    assert!(matches!(
+        report.outcome,
+        RunOutcome::Failed {
+            error: QfError {
+                code: ErrorCode::StrategyError,
+                ..
+            },
+            partial: true
+        }
+    ));
+    assert_eq!(h.writer.records.len(), 1);
+    assert!(matches!(
+        &h.writer.records[0],
+        ResultRecord::ExecutionModel(_)
+    ));
+    assert_eq!(h.writer.aborted, 1);
+    let mut h = Harness::new(Frequency::Day, "0.1", "10000");
     h.matcher = matcher("0.1", "0"); // Minute matcher cannot describe a daily run.
     let report = h.run(1, vec![], 1, false);
     assert!(matches!(

@@ -50,8 +50,9 @@ D04 的 `RulesPort<BarRules>` 必须按事件标的和实际会话提供正式�
 另建状态机；相同原因不反复输出记录。
 
 `Matcher::model_description` 返回小型 `ExecutionModelDescription`。D03 用
-已有有界 ResultSink 在初始化时写一次 `ResultRecord::ExecutionModel`，即使
-无成交也保留模型、频率、参与率、滑点、成交单位、价格/量/路径/队列假设。
+已有有界 ResultSink 在 initialize 前写一次 `ResultRecord::ExecutionModel`，
+无成交或初始化异常也保留模型、频率、参与率、滑点、成交单位及价格/量/路径/
+队列假设。
 `Engine::from_run` 检查描述和同一归一化配置一致，信用不足使运行失败。该
 serde 变体和 Python wire 类型由同一生成器同步；D11/D13 应接收至结果摘要。
 

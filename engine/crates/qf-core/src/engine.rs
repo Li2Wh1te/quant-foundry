@@ -1344,6 +1344,9 @@ where
             }
             self.output
                 .push(ResultRecord::ExecutionModel(description), &config.limits)?;
+            // Preserve the assumptions even if initialize fails before any
+            // market result is produced. Required writer credit comes first.
+            self.flush()?;
         }
         self.call(Call::Initialize, config, calendar, 0, false)?;
         self.registration.seal();
