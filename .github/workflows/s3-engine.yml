@@ -29,6 +29,28 @@ jobs:
   wheel:
     name: Python 3.12 wheel, numerics, contracts and shared tests
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres-test-password
+          POSTGRES_DB: quant_foundry_test
+        ports: [5432:5432]
+        options: >-
+          --health-cmd "pg_isready -U postgres -d quant_foundry_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      QF_ENVIRONMENT: test
+      QF_API_TOKEN: ci-api-token-at-least-thirty-two-characters
+      QF_CURSOR_SIGNING_KEY: ci-cursor-signing-key-at-least-thirty-two
+      QF_DATABASE_HOST: 127.0.0.1
+      QF_DATABASE_PORT: 5432
+      QF_DATABASE_USER: postgres
+      QF_DATABASE_PASSWORD: postgres-test-password
+      QF_DATABASE_NAME: quant_foundry_test
+      POSTGRES_TEST_ENABLED: "1"
+      QF_S3_INTEGRATION_REQUIRED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -48,4 +70,11 @@ jobs:
           QF_CURSOR_SIGNING_KEY: ci-cursor-signing-key-at-least-thirty-two
         run: |
           uv sync --locked
+          uv run --locked alembic upgrade head
           uv run --locked python -m pytest -q tests/test_account_workspace.py tests/test_backtesting_account_profiles.py tests/test_backtesting_account_profile_storage.py tests/test_strategy_storage.py tests/test_backtesting_result_api.py tests/test_backtesting_pagination.py
+      - name: Build the real Rust IPC consumer
+        working-directory: engine
+        run: cargo build -p qf-core --locked --example consume_gateway
+      - name: CurrentStore to Arrow to Rust, consistency and release regressions
+        working-directory: backend
+        run: uv run --locked python -m pytest -q tests/test_s3_data_gateway.py
