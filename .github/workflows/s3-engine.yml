@@ -51,9 +51,10 @@ jobs:
       QF_DATABASE_NAME: quant_foundry_test
       POSTGRES_TEST_ENABLED: "1"
       QF_S3_INTEGRATION_REQUIRED: "1"
-      QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-build
     steps:
       - uses: actions/checkout@v4
+      - name: Keep the wheel build directory for the integration consumer
+        run: printf 'QF_S3_BUILD_ROOT=%s/s3-build\n' "$RUNNER_TEMP" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.2"
