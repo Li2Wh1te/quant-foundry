@@ -357,6 +357,11 @@ impl AccountPort for Execution {
             .push(format!("settle:{}", session.as_str()));
         Ok(())
     }
+    fn check_session_end(&self, _session: &SessionKey) -> QfResult<()> {
+        // Explicit clock-only fixture acknowledgement, not D09 readiness.
+        // Real adapters forward the actual account's postcondition.
+        Ok(())
+    }
     fn value(&self, _now: Nanoseconds) -> QfResult<AccountView> {
         let reserved = ExactDecimal::from_integer(self.active_order_count() as i64);
         Ok(AccountView {

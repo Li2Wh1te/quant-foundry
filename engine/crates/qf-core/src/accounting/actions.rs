@@ -270,6 +270,54 @@ fn validate_share_tax(tax: &Option<ShareTaxFact>) -> QfResult<()> {
     Ok(())
 }
 impl Account {
+    pub(super) fn ensure_payments_ready(&self, now: Nanoseconds) -> QfResult<()> {
+        // Keep the global earliest deadline, rather than scanning every
+        // corporate action on each fill/quote/portfolio query.
+        if let Some((due, id)) = &self.state.next_payment
+            && *due < now
+        {
+            let a = self
+                .state
+                .actions
+                .get(id)
+                .ok_or_else(|| error(ErrorCode::InvalidContract, "到期支付缺少公司行动状态"))?;
+            return Err(action_error(
+                &a.action,
+                error(
+                    ErrorCode::RuleUnavailable,
+                    "已到期分红支付未处理，不能给完整账户结果",
+                ),
+            ));
+        }
+        Ok(())
+    }
+    pub(super) fn check_closing_actions(&self, session: &SessionKey) -> QfResult<()> {
+        if self.index(session)? != self.state.current {
+            return Err(error(ErrorCode::InvalidContract, "关闭检查不是当前会话"));
+        }
+        let now = self.sessions[self.state.current].session.close_ns;
+        for a in self.state.actions.values() {
+            let payment_missing = match &a.action.kind {
+                CorporateActionKind::CashDividend { payment, .. } => {
+                    !a.paid && self.action_time(payment)? <= now
+                }
+                _ => false,
+            };
+            if !a.registered && self.action_time(&a.action.record)? <= now
+                || !a.ex_applied && self.action_time(&a.action.ex)? <= now
+                || payment_missing
+            {
+                return Err(action_error(
+                    &a.action,
+                    error(
+                        ErrorCode::RuleUnavailable,
+                        "会话关闭公司行动未完成，必须接入真实登记/除权/支付",
+                    ),
+                ));
+            }
+        }
+        Ok(())
+    }
     pub(super) fn action_time(&self, boundary: &ActionBoundary) -> QfResult<Nanoseconds> {
         let row = &self.sessions[self.index(&boundary.session)?];
         Ok(match boundary.phase {
@@ -512,6 +560,19 @@ impl Account {
             }
             self.state.actions.insert(id, a);
         }
+        self.state.next_payment = self.state.actions.values().try_fold(
+            None::<(Nanoseconds, String)>,
+            |earliest, a| {
+                if let CorporateActionKind::CashDividend { payment, .. } = &a.action.kind
+                    && !a.paid
+                {
+                    let due = (self.action_time(payment)?, a.action.action_id.clone());
+                    Ok(Some(earliest.map_or(due.clone(), |old| old.min(due))))
+                } else {
+                    Ok::<_, QfError>(earliest)
+                }
+            },
+        )?;
         self.state.last_action_boundary = Some(now);
         self.state.as_of = now;
         Ok(report)
@@ -885,7 +946,14 @@ impl Account {
             ]) {
                 liability = liability.checked_add(model.liability(*gross, band, settlement)?)?;
             }
-            let due = liability.checked_sub(action.initial_disposed)?;
+            // Share allocation keeps a rational residual internally, but cash
+            // tax adjustments must use the accepted settlement precision.
+            // Round cumulative adjustment once, then subtract already settled
+            // cash, so partial disposals neither create fractional cents nor
+            // repeat the initial withholding.
+            let due = liability
+                .checked_sub(action.initial_disposed)?
+                .round(settlement.scale, settlement.rounding)?;
             let old = self
                 .state
                 .actions

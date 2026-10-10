@@ -21,6 +21,12 @@ fn wrong_fee_and_replayed_fill_do_not_mutate_the_authoritative_account() {
     assert_eq!(a.reservation("buy").unwrap(), reserve);
     let assessed = a.assess_fill(&candidate).unwrap();
     assert_eq!(assessed.fee, d("5"));
+    let (_, prepared) = a.preview(|_| Ok(())).unwrap();
+    assert_eq!(a.assess_fill(&candidate).unwrap(), assessed);
+    assert_eq!(a.value(at(&r[0], 1)).unwrap(), before);
+    assert_eq!(a.reservation("buy").unwrap(), reserve);
+    assert_eq!(a.totals().trading_fees, d("0"));
+    a.commit(prepared).unwrap(); // assessment did not advance account revision.
     a.apply_fill(&assessed).unwrap();
     let after = a.value(at(&r[0], 2)).unwrap();
     code(a.apply_fill(&assessed), ErrorCode::InvalidContract);
@@ -362,6 +368,33 @@ fn repeated_same_day_fills_coalesce_and_no_completed_order_history_grows() {
 }
 #[test]
 fn calendar_boundaries_and_decimal_inputs_are_not_silently_repaired() {
+    struct UnwiredPort;
+    impl AccountPort for UnwiredPort {
+        fn validate_and_reserve(
+            &mut self,
+            _: &qf_core::orders::OrderIntent,
+        ) -> qf_core::QfResult<qf_core::orders::OrderResult> {
+            unreachable!()
+        }
+        fn apply_fill(&mut self, _: &qf_core::matching::Fill) -> qf_core::QfResult<()> {
+            unreachable!()
+        }
+        fn release(&mut self, _: &str) -> qf_core::QfResult<()> {
+            unreachable!()
+        }
+        fn settle(&mut self, _: &qf_core::types::SessionKey) -> qf_core::QfResult<()> {
+            unreachable!()
+        }
+        fn value(&self, _: qf_core::types::Nanoseconds) -> qf_core::QfResult<AccountView> {
+            unreachable!()
+        }
+    }
+    // A source-compatible older adapter cannot silently omit the new real
+    // closing postcondition, even when the strategy never queries its account.
+    code(
+        UnwiredPort.check_session_end(&key("S1")),
+        ErrorCode::CapabilityUnavailable,
+    );
     let r = rows();
     let mut a = account("2000", &r, S::NextSession, "0");
     code(a.settle(&r[2].session.key), ErrorCode::RuleUnavailable);

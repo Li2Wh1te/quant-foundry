@@ -172,6 +172,9 @@ impl Account {
                 "账户视图越过当前会话，必须先结算",
             ));
         }
+        // A receivable after a known missed payment is not a complete account
+        // result, including when its original position has already been sold.
+        self.ensure_payments_ready(now)?;
         let mut positions = BTreeMap::new();
         let mut valuation = BTreeMap::new();
         let mut total = Some(self.state.cash.checked_add(self.state.receivables)?);

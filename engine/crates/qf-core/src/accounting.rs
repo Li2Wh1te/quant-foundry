@@ -1,7 +1,7 @@
-use crate::QfResult;
 use crate::matching::Fill;
 use crate::orders::{OrderIntent, OrderResult};
 use crate::types::{Money, Nanoseconds, Quantity, SecurityKey, SessionKey};
+use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -48,5 +48,16 @@ pub trait AccountPort {
     fn apply_fill(&mut self, fill: &Fill) -> QfResult<()>;
     fn release(&mut self, order_id: &str) -> QfResult<()>;
     fn settle(&mut self, session: &SessionKey) -> QfResult<()>;
+    /// Read-only postcondition after ExecutionPort::session_end. Concrete D09
+    /// adapters must forward this even when the closing hook is a no-op.
+    /// The default preserves source compatibility but fails at runtime until
+    /// linked to the real account. A missing delegate is never certification.
+    fn check_session_end(&self, _session: &SessionKey) -> QfResult<()> {
+        Err(QfError::new(
+            ErrorCode::CapabilityUnavailable,
+            "session_end",
+            "账户关闭后置检查未接入",
+        ))
+    }
     fn value(&self, now: Nanoseconds) -> QfResult<AccountView>;
 }

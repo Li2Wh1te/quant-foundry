@@ -4,6 +4,87 @@ use qf_core::accounting::*;
 use qf_core::orders::Side;
 use qf_core::rules::fees::InvestorKind;
 use qf_core::rules::market::SellAvailability as S;
+use qf_core::types::RoundingPolicy;
+
+#[test]
+fn overdue_close_payment_cannot_hide_in_receivables_after_position_is_fully_sold() {
+    let r = rows();
+    let mut a = account("2000", &r, S::SameSession, "0");
+    let mut action = dividend(&r, CashDividendTax::SyntheticFlat { rate: d("0") });
+    if let CorporateActionKind::CashDividend { payment, .. } = &mut action.kind {
+        *payment = boundary(&r[1], ActionPhase::SessionClose);
+    }
+    a.add_corporate_action(action, r[0].before_open_ns).unwrap();
+    trade(&mut a, &r[0], "buy", Side::Buy, 100, "10", 1);
+    close(&mut a, &r[0]);
+    open(&mut a, &r[1], S::SameSession, "0");
+    trade(&mut a, &r[1], "sell", Side::Sell, 100, "9.8", 1);
+    let stats = a.totals().clone();
+    assert_eq!(a.held_quantity(&sec("A")), q(0));
+    code(
+        a.check_session_end(&r[1].session.key),
+        ErrorCode::RuleUnavailable,
+    );
+    code(a.value(r[1].after_close_ns), ErrorCode::RuleUnavailable);
+    assert_eq!(a.totals(), &stats);
+    // Catching a read error did not consume or lose the registered right.
+    close(&mut a, &r[1]);
+    a.check_session_end(&r[1].session.key).unwrap();
+    let v = a.value(r[1].after_close_ns).unwrap();
+    assert_eq!(v.cash, d("2000"));
+    assert_eq!(v.receivables, d("0"));
+    assert_eq!(v.total_value, Some(d("2000")));
+    assert_eq!(a.totals(), &stats);
+}
+
+#[test]
+fn dated_dividend_tax_adjustments_settle_in_cents_with_one_cumulative_liability() {
+    let r: Vec<_> = ["2015-01-12", "2015-01-13", "2015-01-14"]
+        .iter()
+        .enumerate()
+        .map(|(i, date)| row(i, date))
+        .collect();
+    let mut a = account("2000", &r, S::SameSession, "0");
+    let mut action = dividend(
+        &r,
+        CashDividendTax::DatedStock {
+            investor: InvestorKind::ResidentIndividual,
+            restricted_stock: false,
+        },
+    );
+    if let CorporateActionKind::CashDividend { per_share, .. } = &mut action.kind {
+        *per_share = d("0.1");
+    }
+    action.ex_raw_mark = Some(raw(&r[1], "9.9", r[1].before_open_ns));
+    a.add_corporate_action(action, r[0].before_open_ns).unwrap();
+    trade(&mut a, &r[0], "buy", Side::Buy, 3, "10", 1);
+    close(&mut a, &r[0]);
+    open(&mut a, &r[1], S::SameSession, "0");
+    // Gross .30, initial 5% = .015 -> .02; net payable .28.
+    assert_eq!(a.value(r[1].before_open_ns).unwrap().receivables, d("0.28"));
+    assert_eq!(a.totals().dividend_tax, d("0.02"));
+    // Cumulative short-holding liability .02/.04/.06, less allocated initial
+    // .02/3, 2*.02/3, .02. Round cumulative adjustment to cents, then subtract
+    // already settled adjustment: additional charges .01/.02/.01.
+    for (i, expected_tax) in ["0.03", "0.05", "0.06"].iter().enumerate() {
+        trade(
+            &mut a,
+            &r[1],
+            &format!("sale-{i}"),
+            Side::Sell,
+            1,
+            "9.9",
+            1 + i as i64 * 2,
+        );
+        let v = a.value(at(&r[1], 2 + i as i64 * 2)).unwrap();
+        assert_eq!(a.totals().dividend_tax, d(expected_tax));
+        assert_eq!(v.cash.round(2, RoundingPolicy::HalfEven).unwrap(), v.cash);
+    }
+    close(&mut a, &r[1]);
+    open(&mut a, &r[2], S::SameSession, "0");
+    assert_eq!(a.value(r[2].before_open_ns).unwrap().cash, d("1999.94"));
+    assert_eq!(a.totals().realized_pnl, d("-0.06"));
+}
 
 #[test]
 fn dividend_contract_moves_receivable_to_cash_without_second_income() {

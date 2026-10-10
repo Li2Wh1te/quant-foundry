@@ -15,7 +15,8 @@
   实际调用约定见同目录 [README.md](README.md)。
 - D03 增补默认兼容 `AccountPort::assess_fill`：只核定 fee，账户、通知、结果使用
   同一费用；`ExecutionPort::session_end` 在末次行情后、DAY 到期/盘后回调前处理
-  登记及收盘支付。现有 DTO/方法签名保持；D02 价格格检查仅扩大为 crate 内可用。
+  登记及收盘支付，并以 `check_session_end` 验证真实关闭状态（默认明确拒绝）。
+  现有 DTO/方法签名保持；D02 价格格检查仅扩大为 crate 内可用。
 
 ## 已运行验证
 
@@ -23,13 +24,13 @@
 `synthetic_business_oracles`、`production_executed=false`；预期直接取包内原本缺失的
 `contracts/accounting_cases.json` 和手算断言，不以旧 Python 引擎作正确性 oracle。
 
-- `cargo test -p qf-core --locked --test accounting`：42 passed，0 ignored。
-  含 3 个真实 D03 driver + D09 + D02 费用接缝用例；host/data/matcher/订单存储
+- `cargo test -p qf-core --locked --test accounting`：47 passed，0 ignored。
+  含 6 个真实 D03 driver + D09 + D02 费用接缝用例；host/data/matcher/订单存储
   明确为隔离适配。另有官方 D02 股票/ETF 日期规则与费用案例，行情/现金可用
   事实仍为明示隔离输入，不代表正式数据联调。
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `QF_S3_PYTHON=backend/.venv/bin/python bash scripts/test_s3_engine.sh`：退出 0；
-  fmt/clippy、workspace Rust 134 项、公共核心契约、生成契约/版本一致性、仓库
+  fmt/clippy、workspace Rust 139 项、公共核心契约、生成契约/版本一致性、仓库
   Python 18 项、release wheel 构建及独立安装后的 SDK 29 项全部通过。
 - `git diff --check` 通过；D05 `data/views.rs` / `analysis/indicators.rs` 无改动。
   云端 CI 以本 PR 最终精确 head 的 Actions 输出为准，不能用本地通过代替。
@@ -39,6 +40,16 @@
 0.005/0.015 half-even 到 0.00/0.02；分批及跨日只收一次最低佣金，撤单不再收费；
 20 元分红在除权后作为应收，支付不再增加权益。极端 Decimal/整数溢出、公司行动
 批次后项失败、资金不足的 target 候选均验证无半状态。
+
+正式合并前审查修复两项：关闭公司行动原先晚于 close 市场/定时回调，且兼容
+no-op 可能漏终点登记/支付；现改为末笔成交后、关闭回调前处理一次，D06 必须
+转发真实 `check_session_end` 后置检查，漏转发默认 `CAPABILITY_UNAVAILABLE`；
+旧时钟隔离 fixture 显式承认无会计业务，清仓后漏支付也拒绝。旧 driver 的三个
+独立关闭回归均实际失败，修复后通过。另修复 FIFO 初扣税分摊产生分以下现金：
+累计应扣调整按指定精度舍入再减已收；独立 0.30 元分红案例由旧算式实际输出
+0.033333333333 首次累计税，改为 0.03，最终总税 0.06。预估多次不修改费用或
+账户 revision；候选过期/跨账户、跨日最低佣金及撤单、零碎/溢出批次回滚、
+raw/stale/缺价和成本全卖清零的原有回归继续通过。
 
 ## 保留项与依赖
 

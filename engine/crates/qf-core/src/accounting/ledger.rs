@@ -177,6 +177,7 @@ pub(super) struct State {
     pub marks: BTreeMap<SecurityKey, ValuationMark>,
     pub actions: BTreeMap<String, ActionState>,
     pub security_actions: BTreeMap<SecurityKey, Vec<String>>,
+    pub next_payment: Option<(Nanoseconds, String)>,
     pub totals: AccountTotals,
     pub current: usize,
     pub settled: Option<usize>,
@@ -260,6 +261,7 @@ impl Account {
                 marks: BTreeMap::new(),
                 actions: BTreeMap::new(),
                 security_actions: BTreeMap::new(),
+                next_payment: None,
                 totals: AccountTotals::default(),
                 current: 0,
                 settled: None,
@@ -440,6 +442,7 @@ impl Account {
     }
     fn reserve_inner(&mut self, request: ReservationRequest) -> QfResult<ReservationView> {
         crate::types::keys::label(&request.order_id, 128)?;
+        self.ensure_payments_ready(request.submitted_ns)?;
         if request.submitted_ns < self.state.as_of {
             return Err(error(ErrorCode::InvalidOrder, "委托时间早于当前账户状态"));
         }
@@ -847,6 +850,7 @@ impl Account {
         security: &SecurityKey,
         now: Nanoseconds,
     ) -> QfResult<()> {
+        self.ensure_payments_ready(now)?;
         for id in self
             .state
             .security_actions
@@ -878,7 +882,22 @@ impl Account {
         if self.state.actions.len() >= self.limits.max_actions {
             return Err(error(ErrorCode::ResourceLimit, "公司行动超过预算"));
         }
+        let payment = match &action.kind {
+            super::CorporateActionKind::CashDividend { payment, .. } => {
+                Some((self.action_time(payment)?, action.action_id.clone()))
+            }
+            _ => None,
+        };
         self.bump()?;
+        if let Some(payment) = payment
+            && self
+                .state
+                .next_payment
+                .as_ref()
+                .is_none_or(|old| &payment < old)
+        {
+            self.state.next_payment = Some(payment);
+        }
         self.state
             .security_actions
             .entry(action.security.clone())
@@ -1060,5 +1079,8 @@ impl AccountPort for Account {
     }
     fn value(&self, now: Nanoseconds) -> QfResult<AccountView> {
         Ok(self.valuation(now)?.account)
+    }
+    fn check_session_end(&self, session: &SessionKey) -> QfResult<()> {
+        self.check_closing_actions(session)
     }
 }

@@ -22,6 +22,7 @@ struct Execution {
     orders: BTreeMap<String, Order>,
     reports: Vec<CorporateActionReport>,
     malicious_assessment: bool,
+    omit_closing_actions: bool,
 }
 impl Execution {
     fn result(order: &Order) -> OrderResult {
@@ -102,6 +103,9 @@ impl AccountPort for Execution {
     }
     fn value(&self, now: Nanoseconds) -> QfResult<AccountView> {
         self.account.value(now)
+    }
+    fn check_session_end(&self, session: &SessionKey) -> QfResult<()> {
+        self.account.check_session_end(session)
     }
 }
 impl ExecutionPort for Execution {
@@ -213,7 +217,13 @@ impl ExecutionPort for Execution {
         self.apply_boundary(session, ActionPhase::BeforeOpen)
     }
     fn session_end(&mut self, session: &CalendarSession) -> QfResult<Vec<Order>> {
-        self.apply_boundary(session, ActionPhase::SessionClose)
+        if self.omit_closing_actions {
+            // Same behavior as the backwards-compatible default; D03's
+            // separate real-account postcondition must reject missing work.
+            Ok(Vec::new())
+        } else {
+            self.apply_boundary(session, ActionPhase::SessionClose)
+        }
     }
 }
 
@@ -249,12 +259,6 @@ fn run(
             .add_corporate_action(action, r[0].before_open_ns)
             .unwrap();
     }
-    let mut execution = Execution {
-        account,
-        orders: BTreeMap::new(),
-        reports: vec![],
-        malicious_assessment: malicious,
-    };
     let mut host = clock_fixture::Host {
         initialize: Some(Box::new(|_, commands, _| {
             commands.submit(&clock_fixture::intent("A", TimeInForce::Day))?;
@@ -270,6 +274,37 @@ fn run(
         Ok(())
     }));
     let event = clock_fixture::daily(&r[0], "A");
+    run_fixture(
+        account,
+        r,
+        vec![event],
+        host,
+        Frequency::Day,
+        malicious,
+        false,
+    )
+}
+fn run_fixture(
+    account: Account,
+    r: Vec<CalendarSession>,
+    events: Vec<MarketEvent>,
+    mut host: clock_fixture::Host,
+    frequency: Frequency,
+    malicious_assessment: bool,
+    omit_closing_actions: bool,
+) -> (
+    EngineReport,
+    Execution,
+    clock_fixture::Writer,
+    clock_fixture::Host,
+) {
+    let mut execution = Execution {
+        account,
+        orders: BTreeMap::new(),
+        reports: vec![],
+        malicious_assessment,
+        omit_closing_actions,
+    };
     let mut data = clock_fixture::Data::default();
     let mut control = clock_fixture::Control::default();
     let mut matcher = clock_fixture::Matching::default();
@@ -277,9 +312,9 @@ fn run(
     let mut writer = clock_fixture::Writer::default();
     let calendar = SessionCalendar::new(MODEL.into(), r, Some(key("NEXT"))).unwrap();
     let report = Engine::new(
-        clock_fixture::config(Frequency::Day),
+        clock_fixture::config(frequency),
         calendar,
-        vec![clock_fixture::Source::new(vec![event], 1)],
+        vec![clock_fixture::Source::new(events, 1)],
     )
     .unwrap()
     .run(EnginePorts {
@@ -370,4 +405,176 @@ fn corporate_failure_aborts_driver_and_preserves_reservation_cancelled_only_in_c
     assert_eq!(execution.account.held_quantity(&sec("A")), q(1));
     assert!(execution.account.reservation("o2").is_some());
     assert_eq!(execution.orders["o2"].status, OrderStatus::Open);
+}
+
+#[test]
+fn close_bar_callback_sees_paid_dividend_for_halted_security_after_all_market_fills() {
+    let r: Vec<_> = (0..3).map(clock_fixture::row).collect();
+    let mut a = account("1000", &r, SellAvailability::NextSession, "1");
+    let mut action = dividend(&r, CashDividendTax::SyntheticFlat { rate: d("0") });
+    if let CorporateActionKind::CashDividend { payment, .. } = &mut action.kind {
+        *payment = boundary(&r[1], ActionPhase::SessionClose);
+    }
+    action.ex_raw_mark = Some(raw(&r[1], "10.8", r[1].before_open_ns));
+    a.add_corporate_action(action, r[0].before_open_ns).unwrap();
+    let pay_time = r[1].session.close_ns;
+    let host = clock_fixture::Host {
+        initialize: Some(Box::new(|_, commands, _| {
+            commands.submit(&clock_fixture::intent("A", TimeInForce::Day))?;
+            Ok(())
+        })),
+        bars: Some(Box::new(move |_, view, _| {
+            if view.now_ns() == pay_time {
+                let v = view.account()?;
+                // Bought one at raw 10 + fee 1, dividend .2; A is halted.
+                assert_eq!(v.cash, d("989.2"));
+                assert_eq!(v.receivables, d("0"));
+                assert_eq!(v.total_value, Some(d("1000")));
+            }
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let events = vec![
+        clock_fixture::daily(&r[0], "A"),
+        clock_fixture::daily(&r[1], "B"),
+    ];
+    let (report, e, _, host) = run_fixture(a, r, events, host, Frequency::Day, false, false);
+    assert!(
+        matches!(report.outcome, RunOutcome::Succeeded { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(host.calls.iter().filter(|s| s.as_str() == "bar").count(), 2);
+    assert_eq!(e.account.totals().dividend_income, d("0.2"));
+    assert_eq!(
+        e.reports
+            .iter()
+            .flat_map(|r| &r.effects)
+            .filter(|e| e.kind == CorporateEffectKind::PaidDividend)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn same_ns_close_ticks_register_last_successor_and_empty_close_timer_sees_payment_once() {
+    use qf_core::clock::{Cadence, CallbackId, ScheduleTime};
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let r: Vec<_> = (0..3).map(clock_fixture::row).collect();
+    let mut a = account("1000", &r, SellAvailability::NextSession, "1");
+    let mut action = dividend(&r, CashDividendTax::SyntheticFlat { rate: d("0") });
+    if let CorporateActionKind::CashDividend { payment, .. } = &mut action.kind {
+        *payment = boundary(&r[1], ActionPhase::SessionClose);
+    }
+    action.ex_raw_mark = Some(raw(&r[1], "9.8", r[1].before_open_ns));
+    a.add_corporate_action(action, r[0].before_open_ns).unwrap();
+    let ticks = Rc::new(Cell::new(0));
+    let tick_calls = ticks.clone();
+    let pay_time = r[1].session.close_ns;
+    let paid_observed = Rc::new(Cell::new(false));
+    let observed = paid_observed.clone();
+    let host = clock_fixture::Host {
+        initialize: Some(Box::new(|_, commands, registration| {
+            commands.submit(&clock_fixture::intent("A", TimeInForce::Day))?;
+            registration.register(
+                CallbackId::new("close")?,
+                Cadence::Daily,
+                ScheduleTime::LocalMinute(900),
+            )?;
+            Ok(())
+        })),
+        ticks: Some(Box::new(move |_, view, commands| {
+            tick_calls.set(tick_calls.get() + 1);
+            assert_eq!(
+                view.account()?.positions[&sec("A")].quantity,
+                q(tick_calls.get())
+            );
+            if tick_calls.get() == 1 {
+                commands.submit(&clock_fixture::intent("A", TimeInForce::Day))?;
+            }
+            Ok(())
+        })),
+        scheduled_hook: Some(Box::new(move |view, _| {
+            if view.now_ns() == pay_time {
+                let v = view.account()?;
+                // Two raw 10 purchases with two independent fees of 1;
+                // record both close ticks, .2 per share paid once.
+                assert_eq!(v.cash, d("978.4"));
+                assert_eq!(v.receivables, d("0"));
+                assert_eq!(v.total_value, Some(d("998")));
+                observed.set(true);
+            }
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let events = vec![
+        clock_fixture::tick(&r[0], "A", "trade", r[0].session.close_ns, 1),
+        clock_fixture::tick(&r[0], "A", "trade", r[0].session.close_ns, 2),
+    ];
+    let (report, e, _, _) = run_fixture(a, r, events, host, Frequency::Tick, false, false);
+    assert!(
+        matches!(report.outcome, RunOutcome::Succeeded { .. }),
+        "{:?}",
+        report.outcome
+    );
+    assert_eq!(ticks.get(), 2);
+    assert!(paid_observed.get());
+    let registered: Vec<_> = e
+        .reports
+        .iter()
+        .flat_map(|r| &r.effects)
+        .filter(|e| e.kind == CorporateEffectKind::Registered)
+        .collect();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(registered[0].quantity, q(2));
+    assert_eq!(e.account.totals().trading_fees, d("2"));
+    assert_eq!(e.account.totals().dividend_income, d("0.4"));
+}
+
+#[test]
+fn no_op_close_adapter_is_rejected_without_strategy_account_read_even_at_equal_after_close() {
+    let mut r: Vec<_> = (0..3).map(clock_fixture::row).collect();
+    r[0].after_close_ns = r[0].session.close_ns;
+    let mut a = account("1000", &r, SellAvailability::NextSession, "1");
+    a.add_corporate_action(
+        dividend(&r, CashDividendTax::SyntheticFlat { rate: d("0") }),
+        r[0].before_open_ns,
+    )
+    .unwrap();
+    let host = clock_fixture::Host {
+        initialize: Some(Box::new(|_, commands, _| {
+            commands.submit(&clock_fixture::intent("A", TimeInForce::Day))?;
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let events = vec![clock_fixture::daily(&r[0], "A")];
+    // Account knows the necessary future action dates, but this run ends at
+    // the record close. There is no later session to accidentally detect it.
+    let (report, e, writer, host) = run_fixture(
+        a,
+        r[..1].to_vec(),
+        events,
+        host,
+        Frequency::Day,
+        false,
+        true,
+    );
+    assert_eq!(
+        clock_fixture::code(&report),
+        Some(ErrorCode::RuleUnavailable)
+    );
+    assert_eq!(writer.finalized, 0);
+    assert_eq!(writer.aborted, 1);
+    assert!(host.bar_boundaries.is_empty());
+    assert!(!host.calls.iter().any(|s| s == "after_close"));
+    assert!(
+        e.reports
+            .iter()
+            .flat_map(|r| &r.effects)
+            .all(|e| e.kind != CorporateEffectKind::Registered)
+    );
 }
