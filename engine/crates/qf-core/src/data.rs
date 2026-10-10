@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod arrow;
 pub mod ipc;
+pub mod views;
 
 pub const MAX_ARROW_BATCH_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

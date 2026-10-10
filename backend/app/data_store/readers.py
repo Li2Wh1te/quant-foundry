@@ -39,6 +39,8 @@ class Query:
     require_qualified: bool = True
     descending: bool = False
     filters: tuple[tuple[str, str, Any], ...] = ()
+    per_group: tuple[str, int] | None = None
+    group_order: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.release is not None or self.snapshot is not None:
@@ -61,8 +63,21 @@ class Query:
             identifier(p)
         for item in self.filters:
             if (type(item) is not tuple or len(item) != 3 or type(item[0]) is not str
-                    or item[1] not in ('=', '>=', '<=', '>', '<')):
+                    or item[1] not in ('=', '>=', '<=', '>', '<', 'in')):
                 raise DataStoreError('INVALID_VALUE')
+            if item[1] == 'in' and (type(item[2]) is not tuple or not 1 <= len(item[2]) <= 10000
+                    or any(type(v) not in (str, int) for v in item[2])
+                    or len(control_json(item[2], max_bytes=1024*1024).encode()) > 1024*1024):
+                raise DataStoreError('INVALID_VALUE')
+        if self.per_group is not None and (type(self.per_group) is not tuple
+                or len(self.per_group) != 2 or type(self.per_group[0]) is not str
+                or type(self.per_group[1]) is not int or not 1 <= self.per_group[1] <= 100000):
+            raise DataStoreError('INVALID_VALUE')
+        if (type(self.group_order) is not tuple or len(self.group_order) > 16
+                or any(type(c) is not str for c in self.group_order)
+                or len(set(self.group_order)) != len(self.group_order)
+                or self.group_order and self.per_group is None):
+            raise DataStoreError('INVALID_VALUE')
 
 
 @dataclass(frozen=True)
@@ -111,6 +126,10 @@ def _request(spec, query):
     # additive projection change. New variants remain distinct and bound.
     if query.descending or query.filters:
         request.update(descending=query.descending, filters=query.filters)
+    if query.per_group is not None:
+        request['per_group'] = query.per_group
+    if query.group_order:
+        request['group_order'] = query.group_order
     return fingerprint(request)
 
 
@@ -188,7 +207,9 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None, arro
         if (query.page_size > store.limits.query_rows
                 or len(query.partitions) > store.limits.query_partitions
                 or any(c not in spec.schema.names for c in query.columns)
-                or any(c not in spec.schema.names for c, _, _ in query.filters)):
+                or any(c not in spec.schema.names for c, _, _ in query.filters)
+                or any(c not in spec.schema.names for c in query.group_order)
+                or query.per_group is not None and query.per_group[0] not in spec.schema.names):
             raise DataStoreError('QUERY_BUDGET_EXCEEDED')
     metrics = Metrics()
     try:
@@ -218,9 +239,9 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None, arro
                         spec.key_bytes(last)
                     lower = spec.key_bytes(query.lower) if query.lower is not None else None
                     upper = spec.key_bytes(query.upper) if query.upper is not None else None
-                    if last is not None and not query.descending:
+                    if last is not None and not query.descending and query.per_group is None:
                         lower = max(lower or b'', spec.key_bytes(last))
-                    elif last is not None:
+                    elif last is not None and query.per_group is None:
                         upper = min(upper or b'\xff'*2048, spec.key_bytes(last))
                     if lower is not None and upper is not None and lower >= upper:
                         raise DataStoreError('INVALID_VALUE')
@@ -248,21 +269,36 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None, arro
                         where, params = [], []
                         if spec.semantics.get('tombstones') == 'explicit-current-state' and query.require_qualified:
                             where.append("basis_state='valid'")
-                        for values, operator in ((query.lower, '>='), (query.upper, '<'),
-                                                 (last, '<' if query.descending else '>')):
+                        for values, operator in ((query.lower, '>='), (query.upper, '<')):
                             if values is not None:
                                 spec.key_bytes(values)
                                 predicate, bound_values = _predicate(spec, values, operator)
                                 where.append(predicate)
                                 params.extend(bound_values)
                         for column, operator, value in query.filters:
-                            where.append('"'+column+'" '+operator+' ?')
-                            params.append(value)
+                            if operator == 'in':
+                                where.append('"'+column+'" IN ('+','.join('?' for _ in value)+')')
+                                params.extend(value)
+                            else:
+                                where.append('"'+column+'" '+operator+' ?')
+                                params.append(value)
                         fields = ','.join('"'+f+'"' for f in selected)
                         order = ','.join('"'+k+'"'+(' DESC' if query.descending else '') for k in spec.key)
                         sql = 'SELECT ' + fields + ' FROM current_data'
                         if where:
                             sql += ' WHERE ' + ' AND '.join(where)
+                        if query.per_group is not None:
+                            group, maximum = query.per_group
+                            # Rank the complete requested window BEFORE applying the
+                            # cursor; otherwise each page would admit another N rows.
+                            ranking = (','.join('"'+c+'"'+(' DESC NULLS LAST' if query.descending else ' ASC NULLS FIRST')
+                                               for c in query.group_order) if query.group_order else order)
+                            sql += ' QUALIFY row_number() OVER (PARTITION BY "'+group+'" ORDER BY '+ranking+') <= ?'
+                            params.append(maximum)
+                        if last is not None:
+                            predicate, bound_values = _predicate(spec, last, '<' if query.descending else '>')
+                            sql = 'SELECT * FROM ('+sql+') AS grouped_page WHERE '+predicate
+                            params.extend(bound_values)
                         sql += ' ORDER BY ' + order + ' LIMIT ?'
                         params.append(query.page_size+1)
                         reader = con.execute(sql, params).fetch_record_batch(

@@ -13,7 +13,8 @@ pub const MINUTE_NS: i64 = 60_000_000_000;
 pub const MAX_CALENDAR_SESSIONS: usize = 20_000;
 pub const MAX_SESSION_WINDOWS: usize = 16;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TimeWindow {
     pub start_ns: Nanoseconds,
     pub end_ns: Nanoseconds,
@@ -25,7 +26,8 @@ impl TimeWindow {
 }
 /// Ordinals include the *whole* exchange trading week/month, even if this run
 /// starts mid-period. D04 must supply them; a truncated run is not a calendar.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct TradingPeriod {
     pub id: String,
     pub trading_day: u16,
@@ -43,7 +45,8 @@ impl TradingPeriod {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CalendarSession {
     pub session: TradingSession,
     pub date: RuleDate,

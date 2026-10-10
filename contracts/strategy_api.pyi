@@ -80,7 +80,7 @@ class CurrentQuote:
 
 class Tick(CurrentQuote):
     channel: str
-    sequence: int | str
+    sequence: int | str | None
     kind: Literal["trade", "quote"]
     bid: Decimal | None
     ask: Decimal | None

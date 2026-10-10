@@ -6,8 +6,9 @@ build-backend = "maturin"
 name = "quantfoundry-sdk"
 dynamic = ["version"]
 requires-python = ">=3.12,<3.13"
-description = "Quant Foundry S3 contracts and Rust numeric boundary; engine modules pending"
+description = "Quant Foundry S3 contracts, callback research views and Rust indicators"
 license = "Apache-2.0"
+dependencies = ["numpy>=2.3,<3", "pandas>=2.3,<4"]
 
 [tool.maturin]
 manifest-path = "../../engine/crates/qf-python/Cargo.toml"

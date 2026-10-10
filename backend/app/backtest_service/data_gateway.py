@@ -350,7 +350,7 @@ class RunDataGateway:
         if binding is None:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '所需频率、字段或口径尚未具备正式读取能力')
         if binding.unavailable_reason:
-            error = GatewayError('CAPABILITY_UNAVAILABLE', '正式数据尚不满足所需成交能力，请核对入口口径缺口')
+            error = GatewayError('CAPABILITY_UNAVAILABLE', '正式数据尚不满足所需读取能力，请核对入口口径缺口')
             error.scope.update(binding=name, capability_gap=binding.unavailable_reason)
             raise error
         names = set(context.dependencies) | {name}
@@ -403,7 +403,10 @@ class RunDataGateway:
         return binding, start, end, count
 
     def _pages(self, binding, security, start, end, context, fields, *, count=None, page_rows=None):
-        lower, upper = binding.bounds(security, start, end)
+        securities = security if type(security) is tuple else (security,)
+        bounds = [binding.bounds(s, start, end) for s in securities]
+        lower = min((b[0] for b in bounds), key=binding.spec.key_bytes)
+        upper = max((b[1] for b in bounds), key=binding.spec.key_bytes)
         lo, hi = binding.spec.key_bytes(lower), binding.spec.key_bytes(upper)
         with store_errors(), self.store.catalog.transaction() as c:
             partitions = c.execute(text('SELECT DISTINCT partition_key FROM data_store_files WHERE dataset=:d '
@@ -428,17 +431,41 @@ class RunDataGateway:
                     # Feed the declared restriction scope into the ORIGINAL
                     # relevant_issue_count gate, including when no files exist.
                     partitions = list(dict.fromkeys([*partitions, overflow['partition']]))
-        columns = tuple(dict.fromkeys([binding.fields[f] for f in (*sorted(IDENTITY_FIELDS), *fields)
+        identity = getattr(binding, 'identity_fields', IDENTITY_FIELDS)
+        columns = tuple(dict.fromkeys([binding.fields[f] for f in (*sorted(identity), *fields)
                     if f in binding.fields and binding.fields[f] in binding.spec.schema.names]
                     +[binding.time_column]+[c for c, _ in binding.guards]+list(binding.extra_columns)))
-        rows = min(page_rows or self.batch_rows, self.batch_rows, count or self.batch_rows)
+        rows = min(page_rows or self.batch_rows, self.batch_rows,
+                   count*len(securities) if count is not None else self.batch_rows)
+        if count is not None and len(securities)>1 and page_rows is None:
+            # Materialize one admitted bounded cross-section in the parent's
+            # window cache, then read() slices it to the worker's row credit.
+            # The grouped ranking is not repeated in N single-symbol pages.
+            rows = min(count*len(securities), self.store.limits.query_rows)
         # Contract worst-case materialization, before any strings/Arrow allocation.
         rows = binding.spec.bounded_rows(rows, min(self.batch_bytes//4, self.store.limits.query_bytes))
+        security_column = binding.fields.get('security')
+        if len(securities) > 1 and security_column not in binding.spec.schema.names:
+            raise GatewayError('CAPABILITY_UNAVAILABLE', '此身份投影尚不支持集合批量读取')
+        membership = ((security_column, 'in', securities),) if len(securities) > 1 else ()
+        group_order = []
+        if count is not None:
+            for field in ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'):
+                if field in binding.constants:
+                    continue
+                column = binding.fields.get(field)
+                if column not in binding.spec.schema.names:
+                    raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的完整事件排序投影')
+                group_order.append(column)
+            if security_column not in binding.spec.schema.names:
+                raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的标的集合投影')
         query = Query(partitions=tuple(partitions), lower=lower, upper=upper, columns=columns,
             page_size=rows, descending=count is not None,
             filters=((binding.time_column, '>=', start-binding.time_offset_ns),
-                     (binding.time_column, '<=', end-binding.time_offset_ns), *binding.selectors))
-        remaining = count
+                     (binding.time_column, '<=', end-binding.time_offset_ns), *binding.selectors, *membership),
+            per_group=(security_column, count) if count is not None else None,
+            group_order=tuple(dict.fromkeys(group_order)))
+        remaining = count if len(securities) == 1 else None
         while True:
             self.check(context)
             with store_errors():
@@ -448,8 +475,9 @@ class RunDataGateway:
             self.stats['storage_rows'] += page.table.num_rows
             self.check(context)  # quality may change without generation during read
             with store_errors():
-                table = binding.project(page.table, set(fields) | IDENTITY_FIELDS)
-            if table.num_rows and (table['security'].null_count or not pc.all(pc.equal(table['security'], security)).as_py()):
+                table = binding.project(page.table, set(fields) | identity)
+            if table.num_rows and (table['security'].null_count or not pc.all(pc.is_in(table['security'],
+                    value_set=pa.array(securities, type=pa.string()))).as_py()):
                 raise GatewayError('INVALID_CONTRACT', '存储身份与请求标的不一致')
             if remaining is not None:
                 table = table.slice(0, remaining)
@@ -464,6 +492,8 @@ class RunDataGateway:
     def _batch(self, table, binding):
         if table.nbytes+16384 > self.batch_bytes:
             raise GatewayError('RESOURCE_LIMIT', 'Arrow 批次超过内存预算')
+        if hasattr(binding, 'batch_metadata'):
+            return DataBatch(table, binding.batch_metadata(table))
         if table.num_rows:
             table = table.take(pc.sort_indices(table, sort_keys=[('time_ns', 'ascending'),
                 ('security', 'ascending'), ('source_session', 'ascending'), ('channel', 'ascending'),
@@ -493,7 +523,8 @@ class RunDataGateway:
             return
         if not request['securities']:
             yield self._batch(pa.Table.from_batches([], schema=MARKET_SCHEMA), binding)
-        for security in request['securities']:
+        if request['securities']:
+            security = tuple(sorted(request['securities'])) if len(request['securities']) > 1 else request['securities'][0]
             yield from self._pages(binding, security, start, end, context, request['fields'],
                                    count=count, page_rows=page_rows)
         self.check(context)
@@ -504,7 +535,8 @@ class RunDataGateway:
         if count is None or count*len(request['securities']) > self.cache_rows:
             raise GatewayError('RESOURCE_LIMIT', '历史窗口超过缓存预算')
         parts = []
-        for security in request['securities']:
+        groups = ([tuple(sorted(request['securities']))] if len(request['securities']) > 1 else request['securities'])
+        for security in groups:
             key = (name, security, tuple(request['fields']))
             cached = self.cache.get(key)
             if cached is None and len(self.cache) >= self.cache_entries:
@@ -518,10 +550,20 @@ class RunDataGateway:
                 previous = pa.Table.from_batches([], schema=MARKET_SCHEMA)
             joined = previous
             def compact(table):
-                indices = pc.sort_indices(table, sort_keys=[('time_ns','ascending'),
+                indices = pc.sort_indices(table, sort_keys=[('security','ascending'),('time_ns','ascending'),
                     ('source_session','ascending'),('channel','ascending'),('sequence','ascending'),
                     ('stable_input_sequence','ascending')])
-                indices = indices.slice(max(0, len(indices)-count))
+                if type(security) is tuple:
+                    ordered = table['security'].take(indices).to_pylist()
+                    taken, counts = [], {}
+                    for i in range(len(ordered)-1, -1, -1):
+                        s = ordered[i]
+                        if counts.get(s, 0) < count:
+                            taken.append(indices[i].as_py())
+                            counts[s] = counts.get(s, 0)+1
+                    indices = pa.array(taken[::-1], type=pa.uint64())
+                else:
+                    indices = indices.slice(max(0, len(indices)-count))
                 return table.take(indices).combine_chunks()
             if lower <= end:
                 # Compact/check each page rather than retaining an entire

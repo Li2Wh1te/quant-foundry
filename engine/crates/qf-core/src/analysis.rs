@@ -1,6 +1,8 @@
 use crate::types::{Money, Nanoseconds};
 use serde::{Deserialize, Serialize};
 
+pub mod indicators;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EquityPoint {

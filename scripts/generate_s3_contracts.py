@@ -213,7 +213,11 @@ from ._native import ContractError
 if TYPE_CHECKING:
     from pandas import DataFrame
 ''').body
+    data_names = {'Filter', 'CurrentQuote', 'Tick', 'get_price', 'get_current_data', 'get_fundamentals',
+                  'get_valuation', 'get_index_stocks', 'get_industry', 'get_instruments'}
     for item in tree.body:
+        if isinstance(item, (ast.FunctionDef, ast.ClassDef)) and item.name in data_names:
+            continue
         if isinstance(item, ast.ImportFrom) and item.module == "pandas":
             continue
         item = copy.deepcopy(item)
@@ -234,6 +238,7 @@ if TYPE_CHECKING:
         elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and item.target.id == "log":
             item.value = ast.Call(func=ast.Name(id="_Logger", ctx=ast.Load()), args=[], keywords=[])
         output.append(item)
+    output.append(ast.ImportFrom(module='data', names=[ast.alias(name=n) for n in sorted(data_names)], level=1))
     return "# Generated from contracts/strategy_api.pyi. D01 runtime functions explicitly refuse.\n" + ast.unparse(ast.Module(body=output, type_ignores=[])) + "\n"
 
 def outputs() -> dict[Path, str]:

@@ -397,7 +397,12 @@ pub fn capabilities() -> Capabilities {
     Capabilities {
         api_schema: API_SCHEMA.into(),
         contract_version: "1.1".into(),
-        implemented: vec!["checked_numeric".into(), "shared_contracts".into()],
+        implemented: vec![
+            "checked_numeric".into(),
+            "shared_contracts".into(),
+            "research_views".into(),
+            "technical_indicators".into(),
+        ],
         execution_models: vec![],
         frequencies: vec![],
         production_data_available: false,

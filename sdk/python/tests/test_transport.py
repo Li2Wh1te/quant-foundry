@@ -7,6 +7,12 @@ import unittest
 from quantfoundry import _transport as ipc
 
 class TransportTests(unittest.TestCase):
+    def test_closed_channel_keeps_canonical_terminal_error(self):
+        a,b=socket.socketpair(); client=ipc.Client(ipc.Channel(a),'run')
+        client.channel.close(); b.close()
+        with self.assertRaises(ipc.TransportError) as caught:
+            client.call('check',{})
+        self.assertEqual(caught.exception.code,'CANCELLED')
     def test_frame_roundtrip_and_exact_time_string(self):
         a,b=socket.socketpair()
         parent,child=ipc.Channel(a),ipc.Channel(b)
