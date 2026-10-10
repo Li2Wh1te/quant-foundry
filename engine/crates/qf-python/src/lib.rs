@@ -320,6 +320,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_commission_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(compose_official_fee_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(indicator_json, m)?)?;
+    m.add("MAX_VIEW_ROWS", qf_core::data::views::MAX_VIEW_ROWS)?;
+    m.add("MAX_VIEW_BYTES", qf_core::data::views::MAX_VIEW_BYTES)?;
     m.add_class::<PythonReadView>()?;
     Ok(())
 }

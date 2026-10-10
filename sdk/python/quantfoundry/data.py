@@ -122,8 +122,8 @@ class _DataSession:
     """
     def __init__(self, client, *, universe, frequency, market_routes, research_routes=None,
                  calendar=(), max_rows=10000, max_bytes=64*1024*1024, cache_bytes=8*1024*1024):
-        if (type(max_rows) is not int or not 1 <= max_rows <= 100000
-                or type(max_bytes) is not int or not 1 <= max_bytes <= 64*1024*1024
+        if (type(max_rows) is not int or not 1 <= max_rows <= _native.MAX_VIEW_ROWS
+                or type(max_bytes) is not int or not 1 <= max_bytes <= _native.MAX_VIEW_BYTES
                 or type(cache_bytes) is not int or not 1 <= cache_bytes <= max_bytes):
             raise _error('RESOURCE_LIMIT', '研究会话预算无效')
         self.client, self.universe, self.frequency = client, tuple(universe), frequency

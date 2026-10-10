@@ -19,6 +19,10 @@ use std::sync::{
 };
 
 pub const RESEARCH_SCHEMA_ID: &str = "qf.research.v1";
+// A callback window can contain many bounded Arrow batches. D10 chooses these
+// limits from the complete run budget; IPC still has its independent 64 MiB cap.
+pub const MAX_VIEW_ROWS: usize = 1_000_000;
+pub const MAX_VIEW_BYTES: usize = 1024 * 1024 * 1024;
 pub const RESEARCH_TEXT: &[&str] = &[
     "security",
     "instrument_id",
@@ -300,7 +304,7 @@ pub struct ReadView {
 }
 impl ReadView {
     pub fn new(boundary: Boundary, max_rows: usize, max_bytes: usize) -> QfResult<Self> {
-        if max_rows == 0 || max_rows > 100000 || max_bytes == 0 || max_bytes > MAX_ARROW_BATCH_BYTES
+        if max_rows == 0 || max_rows > MAX_VIEW_ROWS || max_bytes == 0 || max_bytes > MAX_VIEW_BYTES
         {
             return Err(limit());
         }
@@ -355,7 +359,7 @@ impl ReadView {
         let input = arrow::decode_flat(
             payload,
             10000,
-            self.max_bytes,
+            self.max_bytes.min(MAX_ARROW_BATCH_BYTES),
             arrow::TEXT,
             arrow::INTS,
             arrow::SEQS,
@@ -368,10 +372,11 @@ impl ReadView {
         }
         self.reserve(
             input.num_rows(),
-            input
-                .get_array_memory_size()
-                .saturating_mul(2)
-                .saturating_add(input.num_rows().saturating_mul(2048)),
+            // Account owned row/maps/strings, not shared transient Arrow
+            // backing storage duplicated by every array's capacity report.
+            payload
+                .len()
+                .saturating_add(input.num_rows().saturating_mul(3072)),
         )?;
         for row in 0..input.num_rows() {
             let key = EventKey {
@@ -436,7 +441,7 @@ impl ReadView {
         let input = arrow::decode_flat(
             payload,
             10000,
-            self.max_bytes,
+            self.max_bytes.min(MAX_ARROW_BATCH_BYTES),
             RESEARCH_TEXT,
             RESEARCH_INTS,
             &[],
@@ -453,10 +458,9 @@ impl ReadView {
         }
         self.reserve(
             input.num_rows(),
-            input
-                .get_array_memory_size()
-                .saturating_mul(2)
-                .saturating_add(input.num_rows().saturating_mul(512)),
+            payload
+                .len()
+                .saturating_add(input.num_rows().saturating_mul(1024)),
         )?;
         for i in 0..input.num_rows() {
             let row = ResearchRow {
@@ -526,8 +530,9 @@ impl ReadView {
         }
         let mut output = Vec::new();
         let mut counts = BTreeMap::new();
+        let securities: BTreeSet<_> = request.securities.iter().collect();
         for row in self.prices.iter().rev() {
-            if !request.securities.contains(&row.key.security)
+            if !securities.contains(&row.key.security)
                 || row.key.time_ns > request.end_ns
                 || request.start_ns.is_some_and(|n| row.key.time_ns < n)
             {
@@ -644,8 +649,9 @@ impl ReadView {
         request.validate(self.visibility.now_ns)?;
         let mut groups: BTreeMap<(String, String, String), Vec<&ResearchRow>> = BTreeMap::new();
         let mut identities: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let securities: BTreeSet<_> = request.securities.iter().collect();
         for row in &self.research {
-            if !request.securities.contains(&row.security)
+            if !securities.contains(&row.security)
                 || !request.fields.contains(&row.field)
                 || !row.visible(request.as_of_ns)
             {
@@ -840,13 +846,11 @@ impl ReadView {
             BTreeMap<(String, Nanoseconds), BTreeMap<(Nanoseconds, String), Vec<&'a ResearchRow>>>;
         let mut records: DailyRecords<'_> = BTreeMap::new();
         let mut identities: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+        let securities: BTreeSet<_> = request.securities.iter().map(SecurityKey::as_str).collect();
         for row in &self.research {
             if row.time_ns <= request.end_ns
                 && row.effective_from_ns <= request.end_ns
-                && request
-                    .securities
-                    .iter()
-                    .any(|s| s.as_str() == row.security)
+                && securities.contains(row.security.as_str())
                 && request.fields.contains(&row.field)
             {
                 if (row.field == "quantity" && row.value_kind != "integer")
@@ -871,7 +875,7 @@ impl ReadView {
         }
         let additional = records.len();
         self.bytes =
-            self.reservation(additional, additional.checked_mul(2048).ok_or_else(limit)?)?;
+            self.reservation(additional, additional.checked_mul(4096).ok_or_else(limit)?)?;
         for ((security, _), revisions) in records {
             let ((_, record), rows) = revisions
                 .into_iter()

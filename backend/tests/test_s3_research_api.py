@@ -172,6 +172,40 @@ def test_same_nanosecond_unpublished_ticks_cannot_evict_count_or_leak(formal):
             assert get_price('A.SH', count=1, fields=['price']).empty
 
 
+def test_configured_cross_section_window_separates_total_budget_from_arrow_batch():
+    # Bounded window smoke only, not the 12.6M-row end-to-end D18 benchmark.
+    securities = [f'A{i:04d}.SH' for i in range(5000)]
+    view = _native.ReadView(json.dumps(boundary(sequence=105000, security=securities[-1])),
+                            105000, 512*1024*1024)
+    template = rows(1)[0]
+    for offset in range(0, 100000, 10000):
+        samples = [dict(template, security=securities[i//20], time_ns=BASE-20+i%20,
+                        sequence=i+1, stable_input_sequence=i+1) for i in range(offset, offset+10000)]
+        batch = DataBatch(pa.Table.from_pylist(samples, schema=MARKET_SCHEMA),
+                         dict(schema_id='qf.market.v1', rows=len(samples)))
+        view.push_market(json.dumps(batch.metadata), batch.ipc(64*1024*1024))
+    samples = [dict(template, security=s, time_ns=BASE, sequence=100001+i,
+                    stable_input_sequence=100001+i) for i, s in enumerate(securities)]
+    batch = DataBatch(pa.Table.from_pylist(samples, schema=MARKET_SCHEMA),
+                     dict(schema_id='qf.market.v1', rows=len(samples)))
+    view.push_market(json.dumps(batch.metadata), batch.ipc(64*1024*1024))
+    request = dict(securities=securities, fields=['price'], frequency='tick', start_ns=None,
+                   end_ns=str(BASE), count_per_security=20, adjustment='none')
+    result = json.loads(view.prices_json(json.dumps(request), 'tick'))
+    assert len(result) == 100000
+    assert result[0]['time_ns'] == str(BASE-19) and result[19]['time_ns'] == str(BASE)
+    assert result[0]['price'] == PRICE and result[-1]['security'] == securities[-1]
+    view.expire()
+    oversized = [dict(template, sequence=i+1, stable_input_sequence=i+1) for i in range(10001)]
+    batch = DataBatch(pa.Table.from_pylist(oversized, schema=MARKET_SCHEMA),
+                     dict(schema_id='qf.market.v1', rows=len(oversized)))
+    view = _native.ReadView(json.dumps(boundary()), 105000, 512*1024*1024)
+    with pytest.raises(ContractError) as error:
+        view.push_market(json.dumps(batch.metadata), batch.ipc(64*1024*1024))
+    assert error.value.code == 'RESOURCE_LIMIT'
+    view.expire()
+
+
 def test_native_prefetch_filter_and_view_expiry_are_cross_language(formal):
     samples = market_data(count=3)
     samples[2]['time_ns'] = BASE+10

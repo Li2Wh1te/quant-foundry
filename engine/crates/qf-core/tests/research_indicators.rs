@@ -1,6 +1,8 @@
 use qf_core::ErrorCode;
 use qf_core::analysis::indicators::{self as i, Status};
-use qf_core::data::views::{Boundary, ReadView, compare_decimal, exact_decimal_text};
+use qf_core::data::views::{
+    Boundary, MAX_VIEW_ROWS, ReadView, compare_decimal, exact_decimal_text,
+};
 use qf_core::types::Nanoseconds;
 use std::collections::BTreeMap;
 
@@ -118,7 +120,7 @@ fn expired_callback_lease_is_shared_and_terminal() {
                 now_ns: Nanoseconds::new(123),
                 market_through: None
             },
-            100001,
+            MAX_VIEW_ROWS + 1,
             65536
         )
         .is_err()

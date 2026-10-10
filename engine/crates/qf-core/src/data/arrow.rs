@@ -296,9 +296,10 @@ pub(crate) fn decode_flat(
     if reader.next().is_some() {
         return Err(invalid());
     }
-    if input.get_array_memory_size() > byte_budget {
-        return Err(limit());
-    }
+    // Flat, uncompressed, disjoint/aligned buffers were bounded before reader
+    // allocation. StreamReader shares one message body among all columns;
+    // get_array_memory_size counts that backing allocation once per slice.
+    // The payload bound covers the backing body, not that multiplied estimate.
     Ok(input)
 }
 fn price(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<Price>> {

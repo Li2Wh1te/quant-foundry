@@ -17,6 +17,9 @@
 - CurrentStore Query 窄增集合 IN 和每组 count，游标在分组排名后分页；旧默认签名
   游标不变，仍走原质量、锁、generation 和资源门禁。D04 网关增加同路径集合读取，
   不逐标的 N+1；原 Arrow 平坦布局预检复用，未新增 IPC 协议或底座判断。
+- 多批窗口预算独立于64MiB单批 IPC；默认视图仍10000行/64MiB，可信宿主可从
+  run 总预算配置至100万行/1GiB。D05 按投影后拥有的行/字符串计费，不把共享 Arrow
+  backing 按列重复累计；多标的成员筛选使用有界集合。D04 行情解码策略未替换。
 - ResearchDataGateway 复用 D04 declare/check/read/finalize/serve；研究映射拒绝未知
   公开时间/历史成员/因子锚点。窗口、缓存、控制/Arrow、取消均有界，缓存命中仍验依赖。
   SDK 的旧七个占位拒绝已替换；其余未实现模块仍保持原拒绝，不退回旧 Python 引擎。
@@ -37,7 +40,10 @@
    16 容器及随机 schema 中运行 `python -m pytest -q tests/test_s3_data_gateway.py
    tests/test_s3_research_api.py`：62 passed，30.67 秒，0 skipped（D04 43、D05 19）。
    `QF_S3_INTEGRATION_REQUIRED=1` 强制真实 Rust IPC 消费者及已安装 wheel。
-   覆盖七 API/执行研究示例、200 标的集合读取、缓存复用、公开时间晚于期末、当前
+   最后容量修正后重建消费者/wheel，再运行 `python -m pytest -q
+   tests/test_s3_research_api.py`：20 passed，16.60 秒，0 skipped。新增5000×20窗口
+   加5000个当前事件的105000行 smoke，输出10万点；单批超10000行仍拒绝。
+   这不是 D18 全量 B1。覆盖七 API/执行研究示例、200 标的集合读取、缓存复用、公开时间晚于期末、当前
    名称/成员不填历史、同 ns 发布键、预取/过期视图、双边数量/stale/未知停牌、
    复权未来因子/缺锚拒绝、跨午休/末短桶/缺 Bar、不升频、精度和资源/取消。
 3. 空隔离库 `alembic upgrade head` 通过；`python -m pytest -q
