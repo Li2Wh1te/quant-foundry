@@ -1,13 +1,13 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { dataStoreApi, type CurrentDataset } from "../../api/dataStore";
+import { createRequestScope, currentStatus, dataAssetsClient, frequencyLabel, isCancellation,
+  type CurrentDataset, type RequestScope } from "./data";
 import { DatasetView } from "./DatasetView";
 import { PreviewPanel } from "./PreviewPanel";
 import { UpdateIssuesPanel } from "./UpdateIssuesPanel";
 import { DatasetTabs, LocalNotice, WorkspaceHeader } from "./components";
 import { useDataAssetsFailure } from "./components/useDataAssetsFailure";
-import { frequencies, statusNames } from "./legacyPresentation";
 import { catalogHref, dataAssetsView, viewParams, type DataAssetsView } from "./navigation";
 
 export interface DataAssetsLayoutProps { datasetId: string; }
@@ -20,18 +20,23 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const active = useRef<RequestScope | null>(null);
   const scroll = useRef<Record<DataAssetsView, number>>({ overview: 0, preview: 0, updates: 0 });
-  const clear = useCallback(() => setDataset(null), []);
-  const failure = useDataAssetsFailure(clear);
+  const clear = useCallback(() => {
+    active.current?.cancel(); setDataset(null); setBusy(false);
+  }, []);
+  const failure = useDataAssetsFailure(clear, setError);
 
   useEffect(() => {
-    const controller = new AbortController();
+    const scope = createRequestScope();
+    active.current = scope;
+    let disposed = false;
     setBusy(true); setError("");
-    dataStoreApi<CurrentDataset>(`/datasets/${encodeURIComponent(datasetId)}`, controller.signal)
-      .then(result => { if (!controller.signal.aborted) setDataset(result); })
-      .catch(problem => { if (!controller.signal.aborted) setError(failure(problem)); })
-      .finally(() => { if (!controller.signal.aborted) setBusy(false); });
-    return () => controller.abort();
+    scope.run(signal => dataAssetsClient.getDataset(datasetId, { signal }))
+      .then(result => { if (!disposed) setDataset(result); })
+      .catch(problem => { if (!disposed && !isCancellation(problem)) setError(failure(problem)); })
+      .finally(() => { if (!disposed && active.current === scope) setBusy(false); });
+    return () => { disposed = true; scope.dispose(); };
   }, [datasetId, refreshVersion, failure]);
 
   useEffect(() => {
@@ -50,9 +55,9 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
 
   return <section className="qf-assets" aria-busy={busy}>
     <WorkspaceHeader title={dataset?.name ?? "数据集详情"}
-      description={dataset ? `${frequencies[dataset.frequency] ?? "未声明频率"} · ${dataset.source}` : "查看当前数据集、字段和能力说明。"}
+      description={dataset ? `${frequencyLabel(dataset.frequency)} · ${dataset.source}` : "查看当前数据集、字段和能力说明。"}
       back={<Link className="qf-assets-back" to={catalogHref(params)}>← 数据资产</Link>}
-      status={dataset && <span className={`qf-assets-state state-${dataset.status}`}>{statusNames[dataset.status] ?? "状态待确认"}</span>}
+      status={dataset && <span className={`qf-assets-state state-${dataset.status}`}>{currentStatus(dataset.status).label}</span>}
       actions={<>
         <button className="qfo-secondary-btn" type="button" disabled={busy} onClick={() => setRefreshVersion(value => value + 1)}>
           <RefreshCw size={16} aria-hidden="true" />{busy ? "刷新中…" : "刷新页面"}

@@ -1,11 +1,11 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { dataStoreApi, type DatasetList } from "../../api/dataStore";
+import { createRequestScope, currentStatus, dataAssetsClient, formatCount as count,
+  formatTimestamp as time, frequencyLabel, isCancellation, type CatalogSnapshot, type RequestScope } from "./data";
 import { Select } from "../../components/controls/Select";
 import { DataSheet, LocalNotice, WorkspaceHeader } from "./components";
 import { useDataAssetsFailure } from "./components/useDataAssetsFailure";
-import { count, frequencies, statusNames, time } from "./legacyPresentation";
 import { catalogParams, datasetHref, restoreCatalogScroll, saveCatalogScroll } from "./navigation";
 
 const PAGE_SIZE = 20;
@@ -13,31 +13,37 @@ const PAGE_SIZE = 20;
 export function CatalogView() {
   const [params, setParams] = useSearchParams();
   const restoredScroll = useRef(false);
-  const [catalog, setCatalog] = useState<DatasetList | null>(null);
+  const [catalog, setCatalog] = useState<CatalogSnapshot | null>(null);
   const [loadedAt, setLoadedAt] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refresh, setRefresh] = useState(0);
-  const clear = useCallback(() => setCatalog(null), []);
-  const failure = useDataAssetsFailure(clear);
+  const active = useRef<RequestScope | null>(null);
+  const clear = useCallback(() => {
+    active.current?.cancel(); setCatalog(null); setLoadedAt(null); setBusy(false);
+  }, []);
+  const failure = useDataAssetsFailure(clear, setError);
 
   useEffect(() => {
-    const controller = new AbortController();
+    const scope = createRequestScope();
+    active.current = scope;
+    let disposed = false;
     setBusy(true);
     setError("");
-    dataStoreApi<DatasetList>("/datasets?limit=100", controller.signal)
+    scope.run(signal => dataAssetsClient.loadCatalog({ signal }))
       .then(result => {
-        if (controller.signal.aborted) return;
+        if (disposed) return;
         setCatalog(result);
-        setLoadedAt(new Date().toISOString());
+        setLoadedAt(result.readAt);
+        if (result.error) setError(failure(result.error));
       })
       .catch(problem => {
-        if (!controller.signal.aborted) setError(failure(problem));
+        if (!disposed && !isCancellation(problem)) setError(failure(problem));
       })
       .finally(() => {
-        if (!controller.signal.aborted) setBusy(false);
+        if (!disposed && active.current === scope) setBusy(false);
       });
-    return () => controller.abort();
+    return () => { disposed = true; scope.dispose(); };
   }, [refresh, failure]);
 
   useEffect(() => {
@@ -60,6 +66,7 @@ export function CatalogView() {
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visiblePage = Math.min(page, pages);
   const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
+  const statusCount = (status: string) => catalog?.complete ? catalog.counts?.byStatus[status] ?? 0 : null;
 
   function update(key: string, value: string) {
     const next = catalogParams(params);
@@ -86,11 +93,11 @@ export function CatalogView() {
     {catalog && <>
       <div className="qf-assets-metrics" aria-label="数据目录摘要">
         <div><span>已加载数据集</span><strong>{count(catalog.items.length)}</strong></div>
-        <div><span>当前可用</span><strong>{count(catalog.items.filter(item => item.status === "available").length)}</strong></div>
-        <div><span>需要处理</span><strong>{count(catalog.items.filter(item => ["restricted", "rebuild_required"].includes(item.status)).length)}</strong></div>
-        <div><span>尚未检查</span><strong>{count(catalog.items.filter(item => item.status === "not_checked").length)}</strong></div>
+        <div><span>当前可用</span><strong>{count(statusCount("available"))}</strong></div>
+        <div><span>需要处理</span><strong>{count(catalog.complete ? (statusCount("restricted") ?? 0) + (statusCount("rebuild_required") ?? 0) : null)}</strong></div>
+        <div><span>尚未检查</span><strong>{count(statusCount("not_checked"))}</strong></div>
       </div>
-      {catalog.next_offset !== null && <LocalNotice tone="warning">目录未完整加载，以下计数和筛选仅涵盖已加载的数据集。</LocalNotice>}
+      {!catalog.complete && <LocalNotice tone="warning">目录未完整加载，筛选仅涵盖已加载的数据集，完整状态计数未声明。</LocalNotice>}
       <div className="qf-assets-toolbar">
         <label>搜索数据集<input value={search} placeholder="名称或数据集标识" onChange={event => update("search", event.target.value)} /></label>
         <label>当前状态<Select value={filter} onChange={event => update("status", event.target.value)}>
@@ -107,11 +114,11 @@ export function CatalogView() {
         <thead><tr><th>数据集</th><th>频率 / 口径</th><th>当前分区范围</th><th className="qf-assets-number">当前记录</th><th>更新时间</th><th>状态</th></tr></thead>
         <tbody>{visible.map(item => <tr key={item.dataset}>
           <td><Link onClick={() => saveCatalogScroll(params)} to={datasetHref(item.dataset, params)}>{item.name}</Link><small><code>{item.dataset}</code></small></td>
-          <td>{frequencies[item.frequency] ?? "未声明"}<small>{item.source} · 类型化对象</small></td>
+          <td>{frequencyLabel(item.frequency)}<small>{item.source} · 类型化对象</small></td>
           <td>{item.partition_range.from ?? "未检查"}{item.partition_range.to && ` ～ ${item.partition_range.to}`}<small>按存储分区统计</small></td>
           <td className="qf-assets-number">{count(item.row_count)}</td>
           <td>{time(item.updated_at)}</td>
-          <td><span className={`qf-assets-state state-${item.status}`}>{statusNames[item.status] ?? "状态未知"}</span></td>
+          <td><span className={`qf-assets-state state-${item.status}`}>{currentStatus(item.status).label}</span></td>
         </tr>)}</tbody>
       </table></div></DataSheet> : <div className="qf-assets-empty" role="status">
         {catalog.items.length ? "没有符合筛选条件的数据集，请调整搜索或状态。" : "当前目录未登记业务数据集。"}

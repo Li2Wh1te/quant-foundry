@@ -1,4 +1,4 @@
-import type { CurrentDataset } from "../../api/dataStore";
+import type { CurrentDataset } from "./data";
 import { DataSheet } from "./components";
 
 /** D04 owns field content; the shared shell only supplies the surrounding view. */

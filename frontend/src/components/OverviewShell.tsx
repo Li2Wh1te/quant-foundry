@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthContext";
 import { FRONTEND_VERSION } from "../version";
+import { invalidateDataAssetsSession } from "../features/data-assets/data";
 import "./Overview.css";
 
 const groups = [
@@ -76,7 +77,7 @@ export function OverviewShell({ children, title = "数据运营总览", section 
   function go(to: string) {
     if (to === "logout" && beforeNavigate && !beforeNavigate()) return;
     close();
-    if (to === "logout") { logout(); navigate("/login", { replace: true }); }
+    if (to === "logout") { invalidateDataAssetsSession(); logout(); navigate("/login", { replace: true }); }
     else navigate(to);
   }
   function navItem(item: typeof toolItems[number], tool = false) {
