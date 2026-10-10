@@ -1,0 +1,2792 @@
+{
+  "isolated": true,
+  "productionValidated": false,
+  "results": [
+    "1440px: readable current data and failed update remain distinct",
+    "1440px: 20 server records, overlapping members, hidden diagnostics and manual tail",
+    "1024px: readable current data and failed update remain distinct",
+    "1024px: 20 server records, overlapping members, hidden diagnostics and manual tail",
+    "390px: readable current data and failed update remain distinct",
+    "390px: 20 server records, overlapping members, hidden diagnostics and manual tail",
+    "complete, unqualified, qualified, absent and unknown update states never certify coverage",
+    "empty response and first-read API failure differ; issues failure retains descriptor",
+    "ordinary page/refresh failure retains original page and time; refresh resets pagination",
+    "missing member counts and malformed pagination never become zeros or success",
+    "changed inventory clears cached page sequence",
+    "repeated tab switches preserve page without requests; rapid refresh makes one GET",
+    "object switch aborts old requests and never mixes late issue pages",
+    "generation change resets page; current restrictions remain declarations without frontend permission grants",
+    "panel links navigate only and keep list context in current-query navigation",
+    "403 revokes cached content across panels; 401 clears session and redirects"
+  ],
+  "pageErrors": [],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=40&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=40&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=40&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=40&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=20&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "query": ""
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "query": "?limit=20&offset=0&dataset=fixture.daily"
+    }
+  ],
+  "geometry": [
+    {
+      "name": "normal-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 1247,
+          "right": 1378,
+          "width": 131
+        },
+        {
+          "left": 1178,
+          "right": 1274,
+          "width": 96
+        },
+        {
+          "left": 1282,
+          "right": 1378,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    },
+    {
+      "name": "paged-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 1247,
+          "right": 1378,
+          "width": 131
+        },
+        {
+          "left": 1178,
+          "right": 1274,
+          "width": 96
+        },
+        {
+          "left": 1282,
+          "right": 1378,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    },
+    {
+      "name": "normal-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 831,
+          "right": 962,
+          "width": 131
+        },
+        {
+          "left": 762,
+          "right": 858,
+          "width": 96
+        },
+        {
+          "left": 866,
+          "right": 962,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    },
+    {
+      "name": "paged-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 831,
+          "right": 962,
+          "width": 131
+        },
+        {
+          "left": 762,
+          "right": 858,
+          "width": 96
+        },
+        {
+          "left": 866,
+          "right": 962,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    },
+    {
+      "name": "normal-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 101,
+          "right": 232,
+          "width": 131
+        },
+        {
+          "left": 101,
+          "right": 197,
+          "width": 96
+        },
+        {
+          "left": 205,
+          "right": 301,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    },
+    {
+      "name": "paged-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "fonts": [
+        "14px"
+      ],
+      "buttons": [
+        {
+          "left": 101,
+          "right": 232,
+          "width": 131
+        },
+        {
+          "left": 101,
+          "right": 197,
+          "width": 96
+        },
+        {
+          "left": 205,
+          "right": 301,
+          "width": 96
+        }
+      ],
+      "compactCounts": [
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        },
+        {
+          "height": 32,
+          "line": 32
+        }
+      ],
+      "nested": 0
+    }
+  ],
+  "serverRequests": [
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "page-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "page-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.report",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "forbidden",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unauthorized",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "page-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "page-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.report",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "forbidden",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unauthorized",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "complete-unqualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "qualified",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "no-update",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "empty",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 40,
+      "limit": 20,
+      "scenario": "page-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "issues-error",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "counts-unknown",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "malformed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "page-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "slow",
+      "aborted": true
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.report",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 20,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "generation-changed",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "restricted",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "maintenance",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "rebuild-required",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "forbidden",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "dataset": null,
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "normal",
+      "aborted": false
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "dataset": "fixture.daily",
+      "offset": 0,
+      "limit": 20,
+      "scenario": "unauthorized",
+      "aborted": false
+    }
+  ],
+  "screenshots": [
+    "complete-unqualified-390.jpg",
+    "counts-unknown-390.jpg",
+    "diagnostics-1024.jpg",
+    "diagnostics-1440.jpg",
+    "diagnostics-390.jpg",
+    "empty-390.jpg",
+    "empty-refresh-failure-390.jpg",
+    "forbidden-390.jpg",
+    "issues-1024.jpg",
+    "issues-1440.jpg",
+    "issues-390.jpg",
+    "issues-error-390.jpg",
+    "loading-retained-390.jpg",
+    "maintenance-390.jpg",
+    "malformed-390.jpg",
+    "no-update-390.jpg",
+    "page-changed-390.jpg",
+    "qualified-390.jpg",
+    "rebuild-required-390.jpg",
+    "refresh-failure-390.jpg",
+    "restricted-390.jpg",
+    "status-1024.jpg",
+    "status-1440.jpg",
+    "status-390.jpg",
+    "switch-390.jpg",
+    "tail-1024.jpg",
+    "tail-1440.jpg",
+    "tail-390.jpg",
+    "unauthorized-390.jpg",
+    "unknown-390.jpg",
+    "update-1024.jpg",
+    "update-1440.jpg",
+    "update-390.jpg"
+  ]
+}
