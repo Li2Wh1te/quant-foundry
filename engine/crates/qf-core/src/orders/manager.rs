@@ -232,6 +232,9 @@ impl<F: OrderFacts> OrderManager<F> {
         if let Some(entry) = self.entries.get(id) {
             return Ok(entry.order.clone());
         }
+        if !self.issued(id) {
+            return Err(failure(ErrorCode::InvalidOrder, "订单 ID 未在本次运行受理"));
+        }
         let order = self.facts.terminal_order(id)?;
         if order.order_id != id
             || order.status.is_active()
@@ -244,13 +247,17 @@ impl<F: OrderFacts> OrderManager<F> {
         }
         Ok(order)
     }
+    fn issued(&self, id: &str) -> bool {
+        let Some(sequence) = id
+            .strip_prefix("qf-order-")
+            .and_then(|value| value.parse::<u64>().ok())
+        else {
+            return false;
+        };
+        sequence != 0 && sequence < self.next_order && id == format!("qf-order-{sequence:020}")
+    }
     pub(super) fn evicted_terminal_cancel(&self, id: &str) -> Option<OrderResult> {
-        if self.entries.contains_key(id) {
-            return None;
-        }
-        let sequence: u64 = id.strip_prefix("qf-order-")?.parse().ok()?;
-        if sequence == 0 || sequence >= self.next_order || id != format!("qf-order-{sequence:020}")
-        {
+        if self.entries.contains_key(id) || !self.issued(id) {
             return None;
         }
         // Accepted IDs are contiguous and never reused; every active order is
@@ -574,10 +581,16 @@ impl<F: OrderFacts> OrderManager<F> {
                 } else { raw_delta }
             };
             let effective = if target { quantity_from_projected(base, side, quantity)? } else { quantity };
-            // Identical projected target keeps its remaining order/priority.
-            if target && old.len() == 1 && old[0].order.side == side && old[0].order.remaining()? == quantity
+            // A partially filled legal declaration keeps its existing remainder:
+            // the remainder is not a new order subject to declaration minimums.
+            // Preserve it only while it stays within the raw goal and a newly
+            // quantized declaration would not cover more of the requested delta.
+            if target && old.len() == 1 && old[0].order.side == side
                 && old[0].order.limit_price == limit && old[0].order.tif == intent.tif {
-                return Ok((quantity, effective, true));
+                let remaining = old[0].order.remaining()?;
+                if remaining == quantity || monetary && remaining <= raw_delta && quantity <= remaining {
+                    return Ok((remaining, quantity_from_projected(base, side, remaining)?, true));
+                }
             }
             if quantity != Quantity::ZERO {
                 let terms = account.terms(&intent.security)?;

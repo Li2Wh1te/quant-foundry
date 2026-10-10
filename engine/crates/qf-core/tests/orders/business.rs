@@ -157,6 +157,109 @@ fn replacement_insufficient_cash_reports_reachable_target_and_preserves_old_rese
 }
 
 #[test]
+fn monetary_target_after_partial_ordinary_and_target_fills_keeps_legal_existing_remainder() {
+    let row = &rows()[0];
+    for value in [
+        IntentValue::TargetValue(d("3010")),
+        IntentValue::TargetPercent(d("0.3")),
+    ] {
+        let mut m = manager(
+            "10050",
+            Facts {
+                unit: 100,
+                minimum: 100,
+                ..Facts::default()
+            },
+        );
+        let ordinary = submit(
+            &mut m,
+            "A",
+            IntentValue::Quantity(q(100)),
+            1,
+            time(row, 570),
+            TimeInForce::Gtc,
+        )
+        .order_id
+        .unwrap();
+        let target = submit(
+            &mut m,
+            "A",
+            value.clone(),
+            2,
+            time(row, 570),
+            TimeInForce::Gtc,
+        )
+        .order_id
+        .unwrap();
+        assert_eq!(m.get_order(&target).unwrap().quantity, q(200));
+        execute(
+            &mut m,
+            &ordinary,
+            30,
+            &tick(row, "A", 1, time(row, 580), "10"),
+            "10",
+        );
+        let event = tick(row, "A", 2, time(row, 590), "10");
+        execute(&mut m, &target, 40, &event, "10");
+        // Hand oracle: held 70 + ordinary 70 + target 160 = 300.
+        // Cash 10050 - (30*10+1) - (40*10+1) = 9348;
+        // equity 10048 keeps floor(equity*0.3/10) at 301.
+        let before = m.value(event.key().time_ns).unwrap();
+        assert_eq!(before.cash, d("9348"));
+        assert_eq!(before.total_value, Some(d("10048")));
+        assert_eq!(before.frozen_cash, d("2300"));
+        let target_before = m.get_order(&target).unwrap();
+        let ordinary_before = m.get_order(&ordinary).unwrap();
+        let reservation_before = m.account().reservation(&target).unwrap();
+        m.take_order_changes();
+        for sequence in 3..=102 {
+            let repeated = submit(
+                &mut m,
+                "A",
+                value.clone(),
+                sequence,
+                event.key().time_ns,
+                TimeInForce::Gtc,
+            );
+            assert!(repeated.accepted && repeated.unchanged && repeated.order_id.is_none());
+            assert_eq!(repeated.requested_quantity, Some(q(301)));
+            assert_eq!(repeated.effective_quantity, Some(q(300)));
+        }
+        assert_eq!(m.get_order(&target).unwrap(), target_before);
+        assert_eq!(m.get_order(&ordinary).unwrap(), ordinary_before);
+        assert_eq!(
+            m.account().reservation(&target).unwrap(),
+            reservation_before
+        );
+        assert_eq!(m.value(event.key().time_ns).unwrap(), before);
+        assert!(m.take_order_changes().is_empty());
+        assert_eq!(m.open_orders().len(), 2);
+
+        // Explicit ordinary cancellation changes the projected basis; the
+        // old target must then be adjusted, not mistaken for the same goal.
+        m.cancel_at(&ordinary, &command(row, "A", 103, event.key().time_ns))
+            .unwrap();
+        let adjusted = submit(
+            &mut m,
+            "A",
+            value,
+            104,
+            event.key().time_ns,
+            TimeInForce::Gtc,
+        );
+        assert!(adjusted.accepted && !adjusted.unchanged);
+        assert_eq!(adjusted.effective_quantity, Some(q(270)));
+        let replacement = m.get_order(&adjusted.order_id.unwrap()).unwrap();
+        assert_eq!(replacement.quantity, q(200));
+        assert_eq!(m.get_order(&target).unwrap().status, OrderStatus::Cancelled);
+        assert_eq!(m.get_order(&target).unwrap().filled_quantity, q(40));
+        assert_eq!(m.value(event.key().time_ns).unwrap().cash, d("9348"));
+        assert_eq!(m.account().held_quantity(&sec("A")), q(70));
+        assert_eq!(m.account().totals().trading_fees, d("2"));
+    }
+}
+
+#[test]
 fn reverse_target_t_plus_failure_keeps_buy_and_later_sell_only_releases_unfilled_part() {
     let calendar = rows();
     let row = &calendar[0];
@@ -818,6 +921,104 @@ fn unchanged_tick_emits_no_order_or_success_ledger() {
     assert!(m.take_order_changes().is_empty());
     assert_eq!(m.open_orders().len(), 1);
     assert_eq!(m.account().totals().trading_fees, d("0"));
+}
+
+#[test]
+fn unissued_ids_cannot_be_confirmed_by_another_runs_terminal_history() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    struct WrongRunHistory {
+        order: Order,
+        calls: Rc<Cell<usize>>,
+    }
+    impl OrderFacts for WrongRunHistory {
+        fn session_terms(&mut self, _row: &CalendarSession) -> QfResult<Vec<AccountTerms>> {
+            panic!("no lifecycle work is needed to reject an unissued order")
+        }
+        fn admission(
+            &self,
+            _security: &SecurityKey,
+            _side: Side,
+            _row: &CalendarSession,
+            _now: Nanoseconds,
+        ) -> QfResult<AdmissionFacts> {
+            panic!("no admission work is needed to reject an unissued order")
+        }
+        fn terminal_order(&self, _id: &str) -> QfResult<Order> {
+            self.calls.set(self.calls.get() + 1);
+            Ok(self.order.clone())
+        }
+    }
+    let row = &rows()[0];
+    let mut source = manager("10000", Facts::default());
+    let id = submit(
+        &mut source,
+        "A",
+        IntentValue::Quantity(q(1)),
+        1,
+        time(row, 570),
+        TimeInForce::Gtc,
+    )
+    .order_id
+    .unwrap();
+    source
+        .cancel_at(&id, &command(row, "A", 2, time(row, 570)))
+        .unwrap();
+    let calls = Rc::new(Cell::new(0));
+    let account = Account::new(d("10000"), rows(), usage(), AccountLimits::default()).unwrap();
+    let mut other = OrderManager::new(
+        account,
+        WrongRunHistory {
+            order: source.get_order(&id).unwrap(),
+            calls: calls.clone(),
+        },
+        vec![sec("A")],
+        OrderLimits::default(),
+    )
+    .unwrap();
+    // The same ordinal may exist in another run's persisted results. It was
+    // never accepted here, so a provider cannot turn it into a successful cancel.
+    code(other.get_order(&id), ErrorCode::InvalidOrder);
+    code(other.cancel_order(&id), ErrorCode::InvalidOrder);
+    assert_eq!(calls.get(), 0);
+    assert!(other.open_orders().is_empty());
+    assert_eq!(other.value(row.before_open_ns).unwrap().cash, d("10000"));
+}
+
+#[test]
+fn order_wire_reads_pre_d06_dto_and_preserves_full_change_key_and_corporate_effect() {
+    let mut legacy = serde_json::json!({
+        "order_id": "qf-order-00000000000000000001", "security": "A", "side": "buy",
+        "quantity": 100, "filled_quantity": 30, "status": "partially_filled",
+        "submitted_ns": "1767225600000000123", "limit_price": null, "tif": "gtc",
+        "effective_session": "S1", "eligible_interval_start": "1767225600000000123",
+        "eligible_after_event": null, "reason_code": null, "message": "pre-D06 DTO"
+    });
+    let old: Order = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(old.updated_at, None);
+    assert_eq!(old.submitted_ns, ns(1767225600000000123));
+    let key = serde_json::json!({
+        "time_ns": "1767225600000000123", "phase": "callback", "security": "A",
+        "identity": {"source_session": "S1", "channel": "strategy_commands",
+                     "sequence": "2", "stable_input_sequence": "2"}
+    });
+    legacy["updated_at"] = key.clone();
+    let current: Order = serde_json::from_value(legacy.clone()).unwrap();
+    assert_eq!(serde_json::to_value(current).unwrap(), legacy);
+    legacy["quantity"] = serde_json::json!(true);
+    assert!(serde_json::from_value::<Order>(legacy).is_err());
+
+    let effect = serde_json::json!({
+        "kind": "corporate_action", "record": {
+            "time_ns": "1767225600000000123", "session": "S1", "effect": {
+                "action_id": "dividend-A", "security": "A", "kind": "paid_dividend",
+                "quantity": 100, "cash_delta": "20", "receivable_delta": "-20",
+                "tax": "0", "policy": "synthetic fixture"
+            }
+        }
+    });
+    let record: qf_core::results::ResultRecord = serde_json::from_value(effect.clone()).unwrap();
+    assert_eq!(serde_json::to_value(record).unwrap(), effect);
 }
 
 #[test]

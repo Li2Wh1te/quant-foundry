@@ -1,7 +1,8 @@
 # S3-D06 RESULT
 
 基于最新 main `60d1c9639b5d2f90547da8edd219d410641cb5ba`，独立分支
-`codex/s3-d06-orders-targets`。本次终点为 D06 README，草稿 PR 交父线程正式审查。
+`codex/s3-d06-orders-targets`。本次终点为 D06 README，实际审查、CI 与授权合并
+状态以 [PR #165](https://github.com/Li2Wh1te/quant-foundry/pull/165) 为准。
 
 ## 已交付
 
@@ -28,12 +29,12 @@ Rust 1.90.0 / Python 3.12.2，隔离输入明确
 `synthetic_business_oracles / production_executed=false`。预期来自手算，不用旧
 Python 引擎输出。以下不是生产验收或全量 B1–B4 性能结论。
 
-- `cargo test -p qf-core --locked --test orders`：26 passed，0 ignored。其中
+- `cargo test -p qf-core --locked --test orders`：29 passed，0 ignored。其中
   8 项使用真实 D03 driver + D06 + D09 + D02 规则/费用；host/data/显式成交计划/
   writer 为隔离适配，不能称 D07 matcher 或正式 CurrentStore 联调。
 - `cargo clippy --workspace --all-targets --locked -- -D warnings`：通过。
 - `QF_S3_PYTHON=backend/.venv/bin/python bash scripts/test_s3_engine.sh`：通过。
-  fmt/clippy、workspace Rust 165 项、公共核心契约、wire/版本一致性、仓库 Python
+  fmt/clippy、workspace Rust 168 项、公共核心契约、wire/版本一致性、仓库 Python
   18 项、release wheel 构建及独立安装后的 SDK 29 项均通过。最终云端 Actions
   只以草稿 PR 的精确 head 为准，回传提供 commit 与运行链接。
 - `git diff --check` 通过；D05 `data/views.rs` / `analysis/indicators.rs` 无改动。
@@ -45,6 +46,14 @@ Python 引擎输出。以下不是生产验收或全量 B1–B4 性能结论。
 终态撤单、当日买后卖仍计买入限制、Bar 同刻屏障、同 ns 合法后续 Tick、过期/
 跨运行/未知 claim 和后项失败无半批状态。末笔之前的收盘 Tick 保持实际竞价
 阶段，末笔后的 DAY 才归下一会话。
+
+合并前复核修正两处已复现缺口：金额/比例 target 的整手订单部分成交后，不将
+合法余单重新量化取消；历史查询前先确认本运行已受理 ID，不让另一运行同序号
+终态伪确认未知 ID。新增手算案例：10050 元，普通 100 份成交 30、target 200 份
+成交 40 后，持仓 70＋普通余量 70＋target 余量 160＝300，现金 9348、权益 10048。
+金额/比例目标各重复 100 次仍保留同单/预留；显式取消普通余量后才合法调整至
+270。两项新回归修复前实际失败、修复后通过；另补旧 DTO 缺 updated_at 兼容、
+完整事件键/公司行动 wire 往返，以及 driver 中零号/未来号/非规范 ID 拒绝。
 
 ## 保留边界
 
@@ -59,4 +68,4 @@ D04/D05 正式行情、历史公开时间/成员/因子、公司行动及资金�
 用于历史读取。没有提前删除活依赖或迁出第二套旧计算。本模块不 import/fallback
 旧算法；控制面/完整执行切换及物理退役继续交 D12/D13/D17/D18。
 `new_engine_code_ready` 仅指 D06，`legacy_execution_removed`、`production_switched`、
-`runtime_cleanup_done` 均未完成。合并由父线程正式审查后协调。
+`runtime_cleanup_done` 均未完成。授权合并仍以正式审查和精确 head CI 通过为前提。

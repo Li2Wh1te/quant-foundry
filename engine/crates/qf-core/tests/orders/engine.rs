@@ -547,9 +547,17 @@ fn actual_driver_terminal_cancel_after_cache_eviction_and_unknown_cancel_do_not_
         assert!(commands.cancel(&b)?.accepted);
         let again = commands.cancel(&a)?;
         assert!(again.accepted && again.unchanged);
-        let unknown = commands.cancel("unknown-order")?;
-        assert!(!unknown.accepted);
-        assert_eq!(unknown.reason_code, Some(ErrorCode::InvalidOrder));
+        for unknown_id in [
+            "unknown-order",
+            "qf-order-00000000000000000000",
+            "qf-order-00000000000000000003",
+            "qf-order-18446744073709551615",
+            "qf-order-1",
+        ] {
+            let unknown = commands.cancel(unknown_id)?;
+            assert!(!unknown.accepted);
+            assert_eq!(unknown.reason_code, Some(ErrorCode::InvalidOrder));
+        }
         assert_eq!(view.account()?.frozen_cash, d("0"));
         assert_eq!(view.account()?.cash, d("10000"));
         Ok(())
