@@ -1,0 +1,32 @@
+/* D06-only content; the existing shell remains the sole vertical scroll region. */
+.qfo-root.qf-assets-root .qf-assets .qf-updates{min-width:0}
+.qfo-root.qf-assets-root .qf-assets .qf-updates p,.qfo-root.qf-assets-root .qf-assets .qf-updates li,.qfo-root.qf-assets-root .qf-assets .qf-updates summary,.qfo-root.qf-assets-root .qf-assets .qf-updates dt,.qfo-root.qf-assets-root .qf-assets .qf-updates code{font-size:14px;line-height:22px;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-assets .qf-updates .qf-assets-properties>div{grid-template-columns:170px minmax(0,1fr)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-note{color:var(--muted)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-number{text-align:right;font-variant-numeric:tabular-nums}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-explanation{display:flex;align-items:start;gap:10px;background:var(--amber-bg);border-left:3px solid var(--amber);padding:12px;margin-top:14px}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-explanation>svg{flex:none;margin-top:2px}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-explanation p{margin-bottom:0}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-actions{display:flex;align-items:center;justify-content:space-between;gap:16px;flex-wrap:wrap;margin-bottom:12px}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-actions button{flex:none}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));margin:16px 0;border-block:1px solid var(--border)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-counts>div{padding:14px;min-width:0}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-counts>div+div{border-left:1px solid var(--border)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-counts dt{color:var(--muted)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-counts dd{margin:8px 0 0;text-align:right;font-size:24px;line-height:32px;font-weight:650;font-variant-numeric:tabular-nums;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-records{list-style:none;margin:0;padding:0}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-records>li{padding:16px 0;border-top:1px solid var(--border)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-record-heading{display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-record-heading>span{color:var(--muted)}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-record-meta{display:flex;gap:8px 24px;flex-wrap:wrap;color:var(--muted);font-variant-numeric:tabular-nums}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-links{display:flex;flex-wrap:wrap;gap:12px 24px}
+.qfo-root.qf-assets-root .qf-assets .qf-updates-links a{color:var(--orange);text-decoration:underline;text-underline-offset:3px;font-size:14px;line-height:22px}
+@media(max-width:620px){
+ .qfo-root.qf-assets-root .qf-assets .qf-updates .qf-assets-properties>div{grid-template-columns:1fr;gap:4px}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates-counts{grid-template-columns:1fr}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates-counts>div{display:flex;align-items:center;justify-content:space-between;gap:12px}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates-counts dt{flex:1;min-width:0}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates-counts>div+div{border-left:0;border-top:1px solid var(--border)}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates-counts dd{margin:0;flex:none;min-width:4ch;max-width:50%}
+ .qfo-root.qf-assets-root .qf-assets .qf-updates .qf-assets-pager{justify-content:flex-start}
+}
