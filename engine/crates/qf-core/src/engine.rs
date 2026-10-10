@@ -51,6 +51,12 @@ pub trait ExecutionPort: AccountPort {
     /// D06/D09 recheck GTC, apply due corporate actions/rules, release cancelled
     /// orders and return notifications. Called after AccountPort::settle.
     fn session_start(&mut self, session: &CalendarSession) -> QfResult<Vec<Order>>;
+    /// D09 registers close-date entitlements/payments after the last market
+    /// event, including halted securities with no event. D06 stages any order
+    /// notifications atomically with the account. Default keeps D03 adapters.
+    fn session_end(&mut self, _session: &CalendarSession) -> QfResult<Vec<Order>> {
+        Ok(Vec::new())
+    }
 }
 pub trait RulesPort<R> {
     /// D02 facts/catalogue are consumed by the concrete matcher, never replaced
@@ -1077,6 +1083,17 @@ where
         }
         for fill in outcome.fills {
             self.ports.control.check()?;
+            let assessed = self.ports.execution.assess_fill(&fill)?;
+            let mut expected = fill;
+            expected.fee = assessed.fee;
+            if assessed != expected || assessed.fee.is_negative() {
+                return Err(error(
+                    ErrorCode::InvalidContract,
+                    "account_fill",
+                    "账户费用核定不能改变成交身份、价格、数量或时间",
+                ));
+            }
+            let fill = assessed;
             self.ports.execution.apply_fill(&fill)?;
             enqueue(
                 Notification::Trade(fill),
@@ -1307,6 +1324,24 @@ where
             // after_close callbacks. Expiry notifications also belong next DAY.
             self.budget = BoundaryBudget::new();
             self.clock.advance(session.session.close_ns)?;
+            let closing_orders = self.ports.execution.session_end(session)?;
+            if closing_orders.len() > config.limits.max_notifications_per_boundary {
+                return Err(error(
+                    ErrorCode::ResourceLimit,
+                    "session_end",
+                    "会话关闭通知超过预算",
+                ));
+            }
+            for order in closing_orders {
+                self.ports.control.check()?;
+                enqueue(
+                    Notification::Order(order),
+                    &mut self.pending,
+                    &mut self.output,
+                    &mut self.budget,
+                    &config.limits,
+                )?;
+            }
             let expired = self.ports.execution.expire_day(&session.session.key)?;
             if expired.len() > config.limits.max_notifications_per_boundary {
                 return Err(error(

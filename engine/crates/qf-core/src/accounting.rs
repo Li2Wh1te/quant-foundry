@@ -5,6 +5,15 @@ use crate::types::{Money, Nanoseconds, Quantity, SecurityKey, SessionKey};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+mod actions;
+mod ledger;
+mod terms;
+mod valuation;
+pub use actions::*;
+pub use ledger::*;
+pub use terms::*;
+pub use valuation::*;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PositionView {
@@ -30,6 +39,12 @@ pub struct AccountView {
 /// D09 holds the only mutable account state. D01 supplies no accounting engine.
 pub trait AccountPort {
     fn validate_and_reserve(&mut self, intent: &OrderIntent) -> QfResult<OrderResult>;
+    /// D09 assesses fees on the authoritative order accumulator before D03
+    /// applies/notifies/persists a fill. The default preserves older adapters.
+    /// Assessment may change only fee; it never commits money or quantity.
+    fn assess_fill(&self, fill: &Fill) -> QfResult<Fill> {
+        Ok(fill.clone())
+    }
     fn apply_fill(&mut self, fill: &Fill) -> QfResult<()>;
     fn release(&mut self, order_id: &str) -> QfResult<()>;
     fn settle(&mut self, session: &SessionKey) -> QfResult<()>;
