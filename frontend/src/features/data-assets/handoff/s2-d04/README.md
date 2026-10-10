@@ -8,6 +8,8 @@ not complete, and no production operation, main merge or deployment was run.
 - Main was fetched before implementation and again before submission:
   `4c9e8167d49ef1d6bbc49afc6578208d7a339f97`.
 - Branch: `codex/s2-d04-dataset-details`, in its own cloud worktree.
+- D04 implementation commit: `0397371fde35304e189fd46317b9360493ca8cd1`;
+  the subsequent evidence commit improves scenario screenshot framing only.
 - Exact D01 dependency: `1e7643a96440602575b31995fbec8c03304aa6ab`.
 - Exact D02 dependency: `9dafeb6eb052796d3b4783785feb104f1de3cf5b`.
 - Both original commits and their ancestors are preserved by merges; the

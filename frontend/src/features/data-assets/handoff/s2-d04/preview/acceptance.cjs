@@ -184,6 +184,7 @@ async function geometry(page, kind) {
         const boundaries = await p.locator('.qf-dataset-boundaries').innerText();
         assert.ok(boundaries.includes(label)); assert.ok(boundaries.includes(explanation));
         assert.equal(await p.getByRole('button', { name: '查看当前数据', exact: true }).isEnabled(), true);
+        await p.locator('.qf-dataset-boundaries').scrollIntoViewIfNeeded();
         await shot(p, `${name}-390`);
       });
       await check('absent fields, limits and preview keys remain undeclared rather than empty data', async () => {
@@ -192,9 +193,12 @@ async function geometry(page, kind) {
           assert.equal(await p.getByRole('heading', { name: '能提供什么', exact: true }).count(), 1);
           if (name === 'fields-empty') await p.getByText('接口未声明字段说明；不能据此判断数据集为空。', { exact: true }).waitFor();
           if (name === 'limits-empty') await p.getByText('服务端未提供具体限制说明；这不代表没有限制。', { exact: true }).waitFor();
+          if (name === 'fields-empty') await p.locator('.qf-dataset-fields').scrollIntoViewIfNeeded();
+          if (name === 'limits-empty') await p.locator('.qf-dataset-boundaries').scrollIntoViewIfNeeded();
           if (name === 'no-preview') {
             await p.getByText('展开定位与存储信息', { exact: true }).click();
             assert.ok((await p.locator('.qf-dataset-technical').innerText()).includes('源表示键\n未声明'));
+            await p.getByText('源表示键', { exact: true }).scrollIntoViewIfNeeded();
           }
           await shot(p, `${name}-390`);
         }
