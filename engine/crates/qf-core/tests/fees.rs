@@ -39,7 +39,7 @@ fn commission(rate: &str, minimum: &str) -> CommissionConfig {
         settlement_scale: 2,
         rounding: R::HalfEven,
         included_components: vec![],
-        basis: "explicit synthetic commission agreement".into(),
+        basis: "selected account commission agreement (test input)".into(),
     }
 }
 fn fixture(
@@ -168,7 +168,16 @@ fn official_tax_and_fee_changes_apply_to_direction_market_product_and_date() {
             FeeFact::Inapplicable { .. }
         ));
         code(
-            catalog.fact(&s, K::TransferFee, &date("2022-04-27"), &RuleUse::Market),
+            catalog.fact(
+                &s,
+                K::TransferFee,
+                &date(if exchange == Exchange::Beijing {
+                    "2022-04-27"
+                } else {
+                    "2015-07-31"
+                }),
+                &RuleUse::Market,
+            ),
             ErrorCode::RuleUnavailable,
         );
     }
@@ -198,68 +207,51 @@ fn official_tax_and_fee_changes_apply_to_direction_market_product_and_date() {
         } else {
             "0.00004"
         };
-        // Current observed tariff, not an invented historical start date.
-        assert_eq!(
-            applicable_rate(
-                &catalog
-                    .fact(&s, K::HandlingFee, &date("2026-10-10"), &RuleUse::Market)
-                    .unwrap()
-                    .fact
-            ),
-            d(rate)
-        );
-        code(
-            catalog.fact(&s, K::HandlingFee, &date("2026-10-09"), &RuleUse::Market),
-            ErrorCode::RuleUnavailable,
-        );
+        // The July 19, 2021 adjustment and maintained exemptions establish
+        // intervals. The current tariff inspection date is not commencement.
+        for exchange in [Exchange::Shanghai, Exchange::Shenzhen] {
+            let mut s = s.clone();
+            s.instrument.exchange = exchange;
+            for value in ["2021-07-19", "2023-04-10", "2026-07-07", "2026-10-10"] {
+                assert_eq!(
+                    applicable_rate(
+                        &catalog
+                            .fact(&s, K::HandlingFee, &date(value), &RuleUse::Market)
+                            .unwrap()
+                            .fact
+                    ),
+                    d(rate)
+                );
+            }
+            let previous_rate = if matches!(product, Product::BondEtf | Product::MoneyEtf) {
+                "0"
+            } else if exchange == Exchange::Shanghai {
+                "0.000045"
+            } else {
+                "0.0000487"
+            };
+            assert_eq!(
+                applicable_rate(
+                    &catalog
+                        .fact(&s, K::HandlingFee, &date("2021-07-18"), &RuleUse::Market)
+                        .unwrap()
+                        .fact
+                ),
+                d(previous_rate)
+            );
+        }
     }
 }
 
 #[test]
-fn market_composition_requires_all_components_even_if_commission_includes_them() {
+fn official_stock_composition_covers_trading_dates_and_keeps_dated_tariffs() {
     let catalog = verified_fee_catalog().unwrap();
     let commission = commission("0.0003", "5");
-    let s = scope(
-        Exchange::Shanghai,
-        Product::MainBoardStock,
-        Side::Sell,
-        RuleOrigin::Official("verified-fee-catalog".into()),
-    );
-    let current = range("2026-10-10", "2026-10-10");
-    let fees = catalog
-        .compose(
-            s.clone(),
-            &current,
-            &commission,
-            &CostOverrides::default(),
-            &RuleUse::Market,
-        )
-        .unwrap();
-    fees.validate_date(&date("2026-10-10")).unwrap();
-    assert_eq!(fees.config().components.len(), 4);
-    let mut accumulator = OrderFeeAccumulator::new("observed-tariff-example", fees).unwrap();
-    // Independently: commission 5 + stamp 5 + transfer .10 + regulatory .20 + handling .34.
-    assert_eq!(
-        accumulator
-            .apply_fill(&s, &date("2026-10-10"), d("10000"))
-            .unwrap()
-            .total,
-        d("10.64")
-    );
-    code(
-        catalog.compose(
-            s.clone(),
-            &range("2026-10-09", "2026-10-10"),
-            &commission,
-            &CostOverrides::default(),
-            &RuleUse::Market,
-        ),
-        ErrorCode::RuleUnavailable,
-    );
     for (exchange, product) in [
+        (Exchange::Shanghai, Product::MainBoardStock),
+        (Exchange::Shanghai, Product::StarStock),
         (Exchange::Shenzhen, Product::MainBoardStock),
-        (Exchange::Beijing, Product::BeijingStock),
-        (Exchange::Shanghai, Product::EquityEtf),
+        (Exchange::Shenzhen, Product::ChiNextStock),
     ] {
         let s = scope(
             exchange,
@@ -267,12 +259,151 @@ fn market_composition_requires_all_components_even_if_commission_includes_them()
             Side::Sell,
             RuleOrigin::Official("verified-fee-catalog".into()),
         );
-        let mut all_included = commission.clone();
+        let fees = catalog
+            .compose(
+                s.clone(),
+                &range("2022-07-01", "2026-10-10"),
+                &commission,
+                &CostOverrides::default(),
+                &RuleUse::Market,
+            )
+            .unwrap();
+        assert!(fees.config().synthetic_model.is_none());
+        // Independent per-order liabilities on opposite sides of the statutory
+        // change: 5 + 10 + .10 + .20 + .49; then 5 + 5 + .10 + .20 + .34.
+        for (value, total) in [
+            ("2023-04-10", "15.79"),
+            ("2023-08-25", "15.79"),
+            ("2023-08-28", "10.64"),
+            ("2026-07-07", "10.64"),
+        ] {
+            let mut accumulator =
+                OrderFeeAccumulator::new("dated-tariff-example", fees.clone()).unwrap();
+            assert_eq!(
+                accumulator
+                    .apply_fill(&s, &date(value), d("10000"))
+                    .unwrap()
+                    .total,
+                d(total)
+            );
+        }
+    }
+}
+
+#[test]
+fn official_secondary_etf_and_beijing_applicability_has_evidenced_intervals() {
+    let catalog = verified_fee_catalog().unwrap();
+    for (exchange, products) in [
+        (
+            Exchange::Shanghai,
+            vec![
+                Product::EquityEtf,
+                Product::BondEtf,
+                Product::MoneyEtf,
+                Product::GoldEtf,
+                Product::CommodityEtf,
+                Product::CrossBorderEtf,
+            ],
+        ),
+        (
+            Exchange::Shenzhen,
+            vec![
+                Product::EquityEtf,
+                Product::BondEtf,
+                Product::MoneyEtf,
+                Product::GoldEtf,
+                Product::CommodityEtf,
+                Product::CrossBorderEtf,
+            ],
+        ),
+        (Exchange::Beijing, vec![Product::BeijingStock]),
+    ] {
+        for product in products {
+            for side in [Side::Buy, Side::Sell] {
+                let mut s = scope(
+                    exchange,
+                    product,
+                    side,
+                    RuleOrigin::Official("verified-fee-catalog".into()),
+                );
+                for investor in [
+                    InvestorKind::ResidentIndividual,
+                    InvestorKind::ResidentEnterprise,
+                ] {
+                    s.investor = investor;
+                    let fees = catalog
+                        .compose(
+                            s.clone(),
+                            &range("2025-05-01", "2026-10-10"),
+                            &commission("0.0003", "5"),
+                            &CostOverrides::default(),
+                            &RuleUse::Market,
+                        )
+                        .unwrap();
+                    assert_eq!(fees.config().components.len(), 4);
+                    let mut accumulator =
+                        OrderFeeAccumulator::new("applicable-tariff-example", fees).unwrap();
+                    let charge = accumulator
+                        .apply_fill(&s, &date("2026-07-07"), d("10000"))
+                        .unwrap();
+                    let total = if product == Product::BeijingStock {
+                        if side == Side::Sell { "11.35" } else { "6.35" }
+                    } else if matches!(product, Product::BondEtf | Product::MoneyEtf) {
+                        "5"
+                    } else {
+                        "5.40"
+                    };
+                    assert_eq!(charge.total, d(total));
+                    assert!(matches!(
+                        catalog
+                            .fact(&s, K::RegulatoryFee, &date("2026-07-07"), &RuleUse::Market)
+                            .unwrap()
+                            .fact,
+                        FeeFact::Inapplicable { .. }
+                    ));
+                }
+            }
+        }
+    }
+    let s = scope(
+        Exchange::Shanghai,
+        Product::EquityEtf,
+        Side::Sell,
+        RuleOrigin::Official("verified-fee-catalog".into()),
+    );
+    catalog
+        .compose(
+            s,
+            &range("2023-11-24", "2026-10-10"),
+            &commission("0.0003", "5"),
+            &CostOverrides::default(),
+            &RuleUse::Market,
+        )
+        .unwrap();
+}
+
+#[test]
+fn market_composition_still_refuses_unknown_coverage_even_if_commission_includes_it() {
+    let catalog = verified_fee_catalog().unwrap();
+    for (exchange, product, missing_date) in [
+        (Exchange::Shanghai, Product::MainBoardStock, "2022-06-30"),
+        (Exchange::Shenzhen, Product::MainBoardStock, "2022-06-30"),
+        (Exchange::Beijing, Product::BeijingStock, "2025-04-30"),
+        (Exchange::Shanghai, Product::EquityEtf, "2023-11-23"),
+        (Exchange::Shenzhen, Product::BondEtf, "2025-04-30"),
+    ] {
+        let s = scope(
+            exchange,
+            product,
+            Side::Sell,
+            RuleOrigin::Official("verified-fee-catalog".into()),
+        );
+        let mut all_included = commission("0.0003", "5");
         all_included.included_components = REQUIRED_COMPONENTS.to_vec();
         let error = catalog
             .compose(
                 s,
-                &current,
+                &range(missing_date, "2026-10-10"),
                 &all_included,
                 &CostOverrides::default(),
                 &RuleUse::Market,
@@ -283,6 +414,16 @@ fn market_composition_requires_all_components_even_if_commission_includes_them()
         assert!(error.scope.contains_key("field"));
         assert!(error.scope.contains_key("date"));
     }
+    let s = scope(
+        Exchange::Shanghai,
+        Product::EquityEtf,
+        Side::Buy,
+        RuleOrigin::Official("verified-fee-catalog".into()),
+    );
+    code(
+        catalog.fact(&s, K::TransferFee, &date("2026-10-11"), &RuleUse::Market),
+        ErrorCode::RuleUnavailable,
+    );
 }
 
 #[test]

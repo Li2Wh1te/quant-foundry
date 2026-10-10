@@ -1,8 +1,10 @@
 //! Published-rule assertions use a verified catalog and synthetic DAILY facts.
 //! Named synthetic rule books are separate: they prove mechanics, not coverage.
 use qf_core::orders::Side;
-use qf_core::rules::catalog::verified_market_rules;
+use qf_core::rules::CostOverrides;
+use qf_core::rules::catalog::{verified_fee_catalog, verified_market_rules};
 use qf_core::rules::date::{EffectiveRange, RuleDate};
+use qf_core::rules::fees::{CommissionConfig, FeeScope, InvestorKind, OrderFeeAccumulator};
 use qf_core::rules::market::*;
 use qf_core::types::{
     ExactDecimal as D, Price, Quantity as Q, QuantityStep, SecurityKey, SessionKey,
@@ -401,6 +403,168 @@ fn official_date_coverage_and_named_fixture_changes_are_separate() {
         RuleBook::new(vec![old, overlap]),
         ErrorCode::RuleUnavailable,
     );
+}
+
+#[test]
+fn shenzhen_2023_activation_and_2026_risk_change_use_official_editions() {
+    let book = verified_market_rules().unwrap();
+    let inst = instrument(Exchange::Shenzhen, Product::MainBoardStock);
+    let mut day = facts(&inst);
+    for value in ["2023-02-17", "2023-04-07"] {
+        day.date = date(value);
+        code(
+            book.resolve(&inst, &day, &RuleUse::Market),
+            ErrorCode::RuleUnavailable,
+        );
+    }
+    day.date = date("2023-04-10");
+    day.listing.as_mut().unwrap().first_trading_date = day.date.clone();
+    day.listing.as_mut().unwrap().session_ordinal = 1;
+    day.price_limit = DailyPriceLimit::NoLimit {
+        reason: NoLimitReason::Ipo,
+        session_ordinal: 1,
+        basis: "explicit daily IPO fixture".into(),
+    };
+    let first = book.resolve(&inst, &day, &RuleUse::Market).unwrap();
+    assert_eq!(
+        first.rule().origin,
+        RuleOrigin::Official("szse-trading-2023".into())
+    );
+    assert_eq!(first.rule().ipo_no_limit_sessions, 5);
+    // July 3 and 6 are Friday / Monday around the legal July 6 transition.
+    // These daily facts remain fixtures; no market calendar is generated here.
+    day = facts(&inst);
+    day.risk = RiskState::RiskWarning;
+    for (value, rate, lower, upper, source) in [
+        ("2026-07-03", "0.05", "9.5", "10.5", "szse-trading-2023"),
+        ("2026-07-06", "0.10", "9", "11", "szse-trading-2026"),
+    ] {
+        day.date = date(value);
+        day.price_limit = DailyPriceLimit::Limited {
+            rate: d(rate),
+            lower: p(lower),
+            upper: p(upper),
+        };
+        let r = book.resolve(&inst, &day, &RuleUse::Market).unwrap();
+        assert_eq!(r.rule().origin, RuleOrigin::Official(source.into()));
+        assert_eq!(r.rule().risk_limit_rate, d(rate));
+        assert_eq!(
+            r.rule().price_band(p("10"), d(rate)).unwrap(),
+            (p(lower), p(upper))
+        );
+        day.price_limit = DailyPriceLimit::Limited {
+            rate: d(if rate == "0.05" { "0.10" } else { "0.05" }),
+            lower: p(lower),
+            upper: p(upper),
+        };
+        code(
+            book.resolve(&inst, &day, &RuleUse::Market),
+            ErrorCode::RuleUnavailable,
+        );
+    }
+    for product in [
+        Product::ChiNextStock,
+        Product::EquityEtf,
+        Product::BondEtf,
+        Product::MoneyEtf,
+        Product::GoldEtf,
+        Product::CommodityEtf,
+        Product::CrossBorderEtf,
+    ] {
+        let inst = instrument(Exchange::Shenzhen, product);
+        let mut day = facts(&inst);
+        day.date = date("2023-04-10");
+        let r = book.resolve(&inst, &day, &RuleUse::Market).unwrap();
+        assert_eq!(
+            r.rule().origin,
+            RuleOrigin::Official("szse-trading-2023".into())
+        );
+        assert_eq!(r.rule().session_template.closing_call(), Some((897, 900)));
+    }
+}
+
+#[test]
+fn official_market_and_fee_chain_accepts_a_trading_date_without_synthetic_rules() {
+    let book = verified_market_rules().unwrap();
+    let catalog = verified_fee_catalog().unwrap();
+    for (exchange, stocks) in [
+        (
+            Exchange::Shanghai,
+            vec![Product::MainBoardStock, Product::StarStock],
+        ),
+        (
+            Exchange::Shenzhen,
+            vec![Product::MainBoardStock, Product::ChiNextStock],
+        ),
+        (Exchange::Beijing, vec![Product::BeijingStock]),
+    ] {
+        let products: Vec<_> = if exchange == Exchange::Beijing {
+            stocks
+        } else {
+            stocks
+                .into_iter()
+                .chain([
+                    Product::EquityEtf,
+                    Product::BondEtf,
+                    Product::MoneyEtf,
+                    Product::GoldEtf,
+                    Product::CommodityEtf,
+                    Product::CrossBorderEtf,
+                ])
+                .collect()
+        };
+        for product in products {
+            let inst = instrument(exchange, product);
+            let day = facts(&inst); // Tuesday 2026-07-07; all daily facts explicitly supplied.
+            let r = book.resolve(&inst, &day, &RuleUse::Market).unwrap();
+            r.validate_quantity(Side::Sell, q(200), q(200), false)
+                .unwrap();
+            r.validate_execution(p("10")).unwrap();
+            let scope = FeeScope {
+                instrument: inst.clone(),
+                side: Side::Sell,
+                investor: InvestorKind::ResidentIndividual,
+                origin: r.rule().origin.clone(),
+            };
+            let commission = CommissionConfig {
+                commission_rate: d("0.0003"),
+                minimum_commission: d("5"),
+                currency: qf_core::types::market::Currency::CNY,
+                settlement_scale: 2,
+                rounding: qf_core::types::RoundingPolicy::HalfEven,
+                included_components: vec![],
+                basis: "explicit selected-account agreement (test input)".into(),
+            };
+            let fees = catalog
+                .compose(
+                    scope.clone(),
+                    &EffectiveRange {
+                        from: date("2026-07-06"),
+                        through: date("2026-10-10"),
+                    },
+                    &commission,
+                    &CostOverrides::default(),
+                    &RuleUse::Market,
+                )
+                .unwrap();
+            assert!(fees.config().synthetic_model.is_none());
+            let mut a = OrderFeeAccumulator::new("market-and-fee-chain", fees).unwrap();
+            // Amount = 200 * 10; commission minimum 5; mandatory rates are official.
+            let expected = if product == Product::BeijingStock {
+                "6.27"
+            } else if product.is_stock() {
+                "6.13"
+            } else if matches!(product, Product::BondEtf | Product::MoneyEtf) {
+                "5"
+            } else {
+                "5.08"
+            };
+            assert_eq!(
+                a.apply_fill(&scope, &day.date, d("2000")).unwrap().total,
+                d(expected)
+            );
+        }
+    }
 }
 
 #[test]

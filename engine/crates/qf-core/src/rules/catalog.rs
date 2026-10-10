@@ -18,8 +18,9 @@ fn range(from: &str, through: &str) -> QfResult<EffectiveRange> {
     })
 }
 
-/// Verified 2026 auction profiles. Earlier dated editions are not inferred from
-/// their publication dates. Pending Beijing risk/after-hours activation is not
+/// Verified auction profiles, including SZSE's 2023 edition activated on the
+/// first registered main-board IPO listing date, rather than publication day.
+/// Pending Beijing risk/after-hours activation is not
 /// activated by the date printed in the general trading rule.
 pub fn verified_market_rules() -> QfResult<RuleBook> {
     let mut rules = Vec::new();
@@ -64,7 +65,7 @@ pub fn verified_market_rules() -> QfResult<RuleBook> {
                 Exchange::Beijing => "bse-trading-2026",
                 Exchange::Unknown => unreachable!(),
             };
-            rules.push(TradingRule {
+            let rule = TradingRule {
                 exchange,
                 product,
                 effective: range("2026-07-06", VERIFIED_THROUGH)?,
@@ -138,7 +139,20 @@ pub fn verified_market_rules() -> QfResult<RuleBook> {
                 } else {
                     Some(RoundingPolicy::HalfUp)
                 },
-            });
+            };
+            if exchange == Exchange::Shenzhen {
+                // SZSE 2023 clauses 2.3.2, 3.1.5, 3.3.5-19, 4.5 and 10.9;
+                // CSRC's first-main-board listing announcement: 2023-04-10.
+                // The 2026 notice explicitly replaces this edition on July 6.
+                let mut previous = rule.clone();
+                previous.effective = range("2023-04-10", "2026-07-05")?;
+                previous.origin = RuleOrigin::Official("szse-trading-2023".into());
+                if product == Product::MainBoardStock {
+                    previous.risk_limit_rate = "0.05".parse()?;
+                }
+                rules.push(previous);
+            }
+            rules.push(rule);
         }
     }
     RuleBook::new(rules)
@@ -341,7 +355,8 @@ impl FeeCatalog {
 }
 /// Verified facts may be queried individually. compose refuses if *any* required
 /// component lacks full date coverage; inclusion in commission does not waive
-/// this check. This catalog intentionally does not assert all ETF/BSE fees.
+/// this check. The source's legal commencement and inspected scope determine
+/// coverage, rather than the date on which a current web table was read.
 pub fn verified_fee_catalog() -> QfResult<FeeCatalog> {
     let mut records = Vec::new();
     for exchange in [Exchange::Shanghai, Exchange::Shenzhen, Exchange::Beijing] {
@@ -428,14 +443,22 @@ pub fn verified_fee_catalog() -> QfResult<FeeCatalog> {
                     if product.is_stock() {
                         add(
                             FeeComponentKind::TransferFee,
-                            "2022-04-28",
+                            if exchange == Exchange::Beijing {
+                                "2022-04-28"
+                            } else {
+                                "2015-08-01"
+                            },
                             "2022-04-28",
                             Some(if exchange == Exchange::Beijing {
                                 "0.000025"
                             } else {
                                 "0.00002"
                             }),
-                            "chinaclear-transfer-2022:previous-observation",
+                            if exchange == Exchange::Beijing {
+                                "chinaclear-transfer-2022:previous-observation"
+                            } else {
+                                "chinaclear-transfer-2015"
+                            },
                         )?;
                         add(
                             FeeComponentKind::TransferFee,
@@ -446,14 +469,22 @@ pub fn verified_fee_catalog() -> QfResult<FeeCatalog> {
                         )?;
                         add(
                             FeeComponentKind::HandlingFee,
-                            "2023-08-18",
+                            if exchange == Exchange::Beijing {
+                                "2023-08-18"
+                            } else {
+                                "2015-08-01"
+                            },
                             "2023-08-27",
                             Some(if exchange == Exchange::Beijing {
                                 "0.00025"
                             } else {
                                 "0.0000487"
                             }),
-                            "csrc-handling-2023:previous-observation",
+                            match exchange {
+                                Exchange::Shanghai => "sse-handling-2015-67",
+                                Exchange::Shenzhen => "szse-handling-2015",
+                                _ => "csrc-handling-2023:previous-observation",
+                            },
                         )?;
                         add(
                             FeeComponentKind::HandlingFee,
@@ -467,28 +498,97 @@ pub fn verified_fee_catalog() -> QfResult<FeeCatalog> {
                             "csrc-handling-2023",
                         )?;
                     }
-                    if exchange == Exchange::Shanghai && product.is_stock() {
-                        // An observation date is not backdated to the month shown
-                        // on a current tariff page. Historical gaps stay explicit.
+                    if exchange != Exchange::Beijing && product.is_stock() {
+                        // The 2018 renewal explicitly supersedes 2016-14 and
+                        // sets commencement for SH/SZ business regulatory fees.
+                        // The 2018-2020 exemption concerns institution fees only.
                         add(
                             FeeComponentKind::RegulatoryFee,
-                            VERIFIED_THROUGH,
+                            "2018-01-01",
                             VERIFIED_THROUGH,
                             Some("0.00002"),
-                            "sse-taxfee:observed-2026-10-10",
+                            "ndrc-regulatory-2018-917",
                         )?;
                     }
-                    if exchange == Exchange::Shanghai && product.is_etf() {
+                    if product.is_etf() {
+                        // 财税[2015]20 expressly exempts investment funds;
+                        // 2018-917 renews this closed SH/SZ charging program.
+                        add(
+                            FeeComponentKind::RegulatoryFee,
+                            "2018-01-01",
+                            VERIFIED_THROUGH,
+                            None,
+                            "mof-regulatory-2015-20:fund-exemption",
+                        )?;
+                        // The complete ChinaClear SH/SZ tariff's investor
+                        // transfer-fee scopes cover stocks and specified
+                        // exercises / ETF primary baskets, not secondary ETF
+                        // units. 2015's notice forbids brokers inventing a
+                        // transfer fee. This is a scoped applicability fact,
+                        // not zero substituted for a missing tariff.
+                        add(
+                            FeeComponentKind::TransferFee,
+                            if exchange == Exchange::Shanghai {
+                                "2023-11-24"
+                            } else {
+                                "2025-05-01"
+                            },
+                            VERIFIED_THROUGH,
+                            None,
+                            if exchange == Exchange::Shanghai {
+                                "chinaclear-tariffs-2023-2025:secondary-etf-outside-transfer-scope"
+                            } else {
+                                "chinaclear-tariff-2025:secondary-etf-outside-transfer-scope"
+                            },
+                        )?;
+                        let exempt = matches!(product, Product::BondEtf | Product::MoneyEtf);
                         add(
                             FeeComponentKind::HandlingFee,
-                            VERIFIED_THROUGH,
-                            VERIFIED_THROUGH,
-                            Some(if matches!(product, Product::BondEtf | Product::MoneyEtf) {
+                            match (exchange, exempt) {
+                                (Exchange::Shenzhen, true) => "2016-05-09",
+                                _ => "2015-08-01",
+                            },
+                            "2021-07-18",
+                            Some(if exempt {
                                 "0"
+                            } else if exchange == Exchange::Shanghai {
+                                "0.000045"
                             } else {
-                                "0.00004"
+                                "0.0000487"
                             }),
-                            "sse-handling:observed-2026-10-10",
+                            match (exchange, exempt) {
+                                (Exchange::Shanghai, _) => "sse-handling-2015-67",
+                                (Exchange::Shenzhen, true) => "szse-fund-2016-139:exemption",
+                                _ => "szse-handling-2015",
+                            },
+                        )?;
+                        add(
+                            FeeComponentKind::HandlingFee,
+                            "2021-07-19",
+                            VERIFIED_THROUGH,
+                            Some(if exempt { "0" } else { "0.00004" }),
+                            match (exchange, exempt) {
+                                (Exchange::Shanghai, _) => {
+                                    "sse-fund-2021-49:continued-by-2021-95-2023-137"
+                                }
+                                (Exchange::Shenzhen, true) => {
+                                    "szse-fund-2016-139:continued-exemption"
+                                }
+                                _ => "szse-fund-2021-655",
+                            },
+                        )?;
+                    }
+                    if exchange == Exchange::Beijing {
+                        // The statutory regulatory-fee program expressly
+                        // names SH/SZ and forbids expanding its scope. The
+                        // complete Beijing tariff corroborates applicability
+                        // for the inspected interval, not a guessed zero rate.
+                        add(
+                            FeeComponentKind::RegulatoryFee,
+                            "2025-05-01",
+                            VERIFIED_THROUGH,
+                            None,
+                            "ndrc-regulatory-2018-917:beijing-outside-scope",
                         )?;
                     }
                 }

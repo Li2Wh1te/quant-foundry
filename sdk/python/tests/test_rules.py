@@ -121,12 +121,12 @@ class RulesWheelTests(unittest.TestCase):
 
     def test_real_fee_composition_keeps_shared_feeconfig_shape_and_scope_errors(self):
         adapted = ADAPTER.commission_from_account_fee_schedule(saved_schedule(), side="sell", included_components=[])
-        # This is the catalog inspection date, not an assertion that this
-        # Saturday is a trading session or that production market data exists.
+        # A continuous interval contains ordinary trading dates; the fee
+        # composer still does not invent a calendar or production market facts.
         request = {
             "scope": {"instrument": {"security": "fee-fixture", "exchange": "shanghai", "product": "main_board_stock"},
                       "side": "sell", "investor": "resident_individual", "origin": {"kind": "official", "reference": "verified-fee-catalog"}},
-            "effective": {"from": "2026-10-10", "through": "2026-10-10"}, "commission": adapted,
+            "effective": {"from": "2026-07-06", "through": "2026-10-10"}, "commission": adapted,
         }
         composed = json.loads(_native.compose_official_fee_config_json(json.dumps(request)))
         self.assertEqual(EffectiveRange(**request["effective"]), request["effective"])
@@ -137,12 +137,23 @@ class RulesWheelTests(unittest.TestCase):
         self.assertIsNone(fees["synthetic_model"])
         self.assertEqual({c["kind"] for c in fees["components"]}, {"stamp_duty", "transfer_fee", "handling_fee", "regulatory_fee"})
         self.assertTrue(all(isinstance(c["fact"].get("rate", "0"), str) for c in fees["components"]))
-        request["scope"]["instrument"]["product"] = "equity_etf"
+        for exchange, products in [
+            ("shanghai", ["main_board_stock", "star_stock", "equity_etf", "bond_etf", "money_etf", "gold_etf", "commodity_etf", "cross_border_etf"]),
+            ("shenzhen", ["main_board_stock", "chi_next_stock", "equity_etf", "bond_etf", "money_etf", "gold_etf", "commodity_etf", "cross_border_etf"]),
+            ("beijing", ["beijing_stock"]),
+        ]:
+            for product in products:
+                request["scope"]["instrument"].update(exchange=exchange, product=product)
+                composed = json.loads(_native.compose_official_fee_config_json(json.dumps(request)))
+                self.assertEqual(composed["scope"], request["scope"])
+                self.assertIsNone(composed["fee_config"]["synthetic_model"])
+        request["scope"]["instrument"].update(exchange="shanghai", product="equity_etf")
+        request["effective"]["from"] = "2023-11-23"
         with self.assertRaises(ContractError) as caught:
             _native.compose_official_fee_config_json(json.dumps(request))
         self.assertEqual(caught.exception.code, "RULE_UNAVAILABLE")
         self.assertEqual(caught.exception.scope["security"], "fee-fixture")
-        self.assertEqual(caught.exception.scope["date"], "2026-10-10")
+        self.assertEqual(caught.exception.scope["date"], "2023-11-23")
         self.assertEqual(caught.exception.operation, "fee_catalog")
         request["scope"]["origin"] = {"kind": "synthetic", "reference": "fee-oracle"}
         with self.assertRaises(ContractError):
