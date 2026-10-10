@@ -23,7 +23,8 @@ jobs:
         run: |
           cargo test -p qf-core --locked
           cargo run -p qf-core --locked --example public_contract
-          if cargo tree -p qf-core --locked | rg 'pyo3|postgres|sqlx'; then exit 1; fi
+          qf_core_tree=$(cargo tree -p qf-core --locked)
+          case "$qf_core_tree" in *pyo3*|*postgres*|*sqlx*) exit 1;; esac
 
   wheel:
     name: Python 3.12 wheel, numerics, contracts and shared tests

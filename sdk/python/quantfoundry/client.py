@@ -3,9 +3,22 @@ import json
 from typing import Any, Mapping, Sequence
 from . import _native
 
+def _json_value(value: Any, parent_depth: int = 0) -> Any:
+    if isinstance(value, Mapping):
+        if parent_depth >= 9 or len(value) > 1024 * 1024 or any(not isinstance(k, str) for k in value):
+            raise ValueError("invalid JSON object")
+        return {key: _json_value(item, parent_depth + 1) for key, item in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        if parent_depth >= 9 or len(value) > 1024 * 1024:
+            raise ValueError("invalid JSON array")
+        return [_json_value(item, parent_depth + 1) for item in value]
+    if isinstance(value, str) and len(value) > 1024 * 1024:
+        raise ValueError("oversized JSON string")
+    return value
+
 def _json(value: Any) -> str:
     try:
-        return json.dumps(value, ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
+        return json.dumps(_json_value(value), ensure_ascii=False, allow_nan=False, separators=(",", ":"), sort_keys=True)
     except (TypeError, ValueError, RecursionError) as exc:
         error = _native.ContractError("INVALID_RUN_CONFIG: 运行参数必须为有界有限JSON")
         error.code = "INVALID_RUN_CONFIG"

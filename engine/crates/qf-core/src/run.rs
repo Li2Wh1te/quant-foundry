@@ -7,6 +7,8 @@ use serde_json::{Map, Value};
 use std::collections::BTreeSet;
 use std::ops::Deref;
 
+mod parameters;
+
 pub const API_SCHEMA: &str = "qf.backtest.v2";
 pub const MAX_CONTROL_BYTES: usize = 1024 * 1024;
 pub const MAX_PARAMETER_BYTES: usize = 64 * 1024;
@@ -67,6 +69,7 @@ pub struct RunConfigFields {
     pub end: String,
     pub frequency: Frequency,
     pub universe: Vec<SecurityKey>,
+    #[serde(deserialize_with = "parameters::deserialize")]
     pub parameters: Map<String, Value>,
     pub execution_model: ExecutionModel,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -168,7 +171,11 @@ fn depth(value: &Value) -> usize {
 
 fn finite_json(value: &Value) -> bool {
     match value {
-        Value::Number(n) => n.as_f64().is_some_and(f64::is_finite),
+        // Integer tokens are exact and finite even beyond f64's range. JSON
+        // real numbers must remain finite at the Python float boundary.
+        Value::Number(n) => {
+            !n.as_str().contains(['.', 'e', 'E']) || n.as_f64().is_some_and(f64::is_finite)
+        }
         Value::Object(m) => m.values().all(finite_json),
         Value::Array(a) => a.iter().all(finite_json),
         _ => true,

@@ -13,7 +13,7 @@ qf-core = { path = "crates/qf-core" }
 rust_decimal = { version = "=1.43.0", default-features = false, features = ["std"] }
 bnum = { version = "=0.14.4", default-features = false }
 serde = { version = "=1.0.229", features = ["derive"] }
-serde_json = { version = "=1.0.151", features = ["arbitrary_precision"] }
+serde_json = { version = "=1.0.151", features = ["arbitrary_precision", "raw_value"] }
 pyo3 = "=0.29.2"
 
 [workspace.lints.rust]

@@ -89,6 +89,35 @@ fn parameters_do_not_silently_convert_large_integers_or_infinity() {
     );
     let invalid = value.to_string().replace("18446744073709551617", "1e400");
     assert!(RunConfig::from_json(&invalid).is_err());
+    let large_integer = format!("1{}1", "0".repeat(998));
+    let valid = value
+        .to_string()
+        .replace("18446744073709551617", &large_integer);
+    let config = RunConfig::from_json(&valid).unwrap();
+    assert_eq!(config.parameters["n"].to_string(), large_integer);
+}
+
+#[test]
+fn parameter_object_keys_are_never_internal_serde_markers() {
+    let mut value = base();
+    let parameters = json!({
+        "$serde_json::private::Number": "123",
+        "nested": [
+            {"$serde_json::private::Number": "18446744073709551617"},
+            {"$serde_json::private::RawValue": "[1,2]"},
+            {"$serde_json::private::Number": "not a number", "other": true}
+        ],
+        "large_integer": serde_json::from_str::<Value>("18446744073709551617").unwrap()
+    });
+    value["parameters"] = parameters.clone();
+    let from_json = RunConfig::from_json(&value.to_string()).unwrap();
+    assert_eq!(from_json.parameters, *parameters.as_object().unwrap());
+    let from_value: RunConfig = serde_json::from_value(value).unwrap();
+    assert_eq!(from_value, from_json);
+    let normalized = from_json.normalized_json().unwrap();
+    let repeated = RunConfig::from_json(&normalized).unwrap();
+    assert_eq!(repeated.parameters, from_json.parameters);
+    assert_eq!(repeated.normalized_json().unwrap(), normalized);
 }
 
 #[test]

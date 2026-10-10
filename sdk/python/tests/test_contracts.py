@@ -1,7 +1,10 @@
 """Real installed-wheel and shared Rust/JSON/Python contract regression."""
 import ast
 from copy import deepcopy
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
+from random import Random
+from types import MappingProxyType
 import inspect
 import json
 from pathlib import Path
@@ -74,6 +77,8 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(RunConfig(**data).to_dict()["parameters"]["n"], 18446744073709551617)
         with self.assertRaises(ContractError):
             _native.validate_run_config_json(json.dumps(data).replace("18446744073709551617", "1e400"))
+        data["parameters"] = {"n":10 ** 999 + 1}
+        self.assertEqual(RunConfig(**data).to_dict()["parameters"], data["parameters"])
 
     def test_decimal_range_exact_conversion_and_half_even(self):
         for value in [Decimal("0.1"), 1, "0.01", Decimal("1E-28")]:
@@ -96,6 +101,63 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(LimitOrder(Decimal("0.01")).price, Decimal("0.01"))
         for price in ["0", "-1"]:
             with self.assertRaises(ContractError): LimitOrder(price)
+
+    def test_parameter_mapping_preserves_object_keys_and_numbers(self):
+        parameters = {
+            "$serde_json::private::Number": "123",
+            "nested": [
+                {"$serde_json::private::Number": "18446744073709551617"},
+                {"$serde_json::private::RawValue": "[1,2]"},
+                {"$serde_json::private::Number": "not a number", "other": True}
+            ],
+            "large_integer": 18446744073709551617,
+        }
+        data = base(); data["parameters"] = parameters
+        normalized = json.loads(_native.validate_run_config_json(json.dumps(data)))
+        self.assertEqual(normalized["parameters"], parameters)
+        self.assertEqual(RunConfig(**data).to_dict(), normalized)
+        data["parameters"] = MappingProxyType(parameters)
+        data["cost_overrides"] = MappingProxyType({"commission_rate": "0.001"})
+        data["universe"] = tuple(data["universe"])
+        self.assertEqual(RunConfig(**data).to_dict()["parameters"], parameters)
+        for invalid in [{1: "silently converted key"}, {"nested": {False: "invalid key"}}]:
+            data["parameters"] = invalid
+            with self.assertRaises(ContractError) as error:
+                RunConfig(**data)
+            self.assertEqual(error.exception.code, "INVALID_RUN_CONFIG")
+
+    def test_decimal_conversion_bounds_exponent_padding_losslessly(self):
+        # These tiny Decimal objects must never expand into a billion bytes.
+        for value in [Decimal("1e1000000000"), Decimal("1e-1000000000"), 10 ** 5000]:
+            with self.assertRaises(ContractError) as error:
+                decimal_input(value)
+            self.assertEqual(error.exception.code, "NUMERIC_RANGE_UNSUPPORTED")
+        self.assertEqual(decimal_input(Decimal("0e-1000000000")), Decimal(0))
+        self.assertEqual(decimal_input(Decimal("-0e1000000000")), Decimal(0))
+        self.assertEqual(decimal_input(Decimal("1." + "0" * 1000)), Decimal(1))
+        self.assertEqual(decimal_input(Decimal("0.01" + "0" * 1000)), Decimal("0.01"))
+        self.assertEqual(decimal_input(Decimal("-1." + "0" * 1000)), Decimal(-1))
+
+    def test_numeric_results_match_independent_decimal_and_rational_oracles(self):
+        rng = Random(301)
+        with localcontext() as context:
+            context.prec = 80
+            for index in range(200):
+                with self.subTest(index=index):
+                    value = Decimal(rng.randrange(-10 ** 14, 10 ** 14)).scaleb(-rng.randrange(13))
+                    denominator = Decimal(rng.randrange(2, 20))
+                    scale = rng.randrange(13)
+                    quantum = Decimal(1).scaleb(-scale)
+                    expected = value.quantize(quantum, rounding=ROUND_HALF_EVEN)
+                    self.assertEqual(Decimal(_native.round_decimal(format(value, "f"), scale)), expected)
+                    expected = (value / denominator).quantize(quantum, rounding=ROUND_HALF_EVEN)
+                    self.assertEqual(Decimal(_native.divide_decimal(format(value, "f"), str(denominator), scale)), expected)
+                    quantity = rng.randrange(10001)
+                    numerator = Decimal(rng.randrange(100001)).scaleb(-rng.randrange(7))
+                    step = rng.randrange(1, 1001)
+                    ratio = quantity * Fraction(numerator) / Fraction(denominator) / step
+                    expected_quantity = (ratio.numerator // ratio.denominator) * step
+                    self.assertEqual(_native.legal_quantity(quantity, format(numerator, "f"), str(denominator), step), expected_quantity)
 
     def test_exact_nanoseconds_across_python_rust_and_json(self):
         for value in [-(1<<63), 1767225600000000123, (1<<63)-1]:

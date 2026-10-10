@@ -4,10 +4,14 @@ Trading inputs accept exact Decimal, integer or ordinary decimal strings. Python
 bool and float cannot become trading amounts. JSON money/price/time/sequence are
 decimal strings; quantities are nonnegative checked i64. NaN/Infinity, exponents
 in JSON decimal strings, silent truncation and unsupported range are rejected.
-`Decimal` objects with exponent notation are formatted exactly before parsing.
+`Decimal` objects with exponent notation are formatted exactly before parsing,
+with a bounded conversion that never expands extreme exponents into huge text.
+Redundant trailing zeros may be shed losslessly; caller Decimal context is unused.
 JSON parameter integer representations are preserved exactly, including values
-above u64; their finite numeric bounds are validated separately. This JSON-only
-serde feature does not change trading Decimal's fixed storage/checked arithmetic.
+above u64 or float64 range. JSON real numbers must remain finite in Python.
+Parameter containers are decoded from raw JSON so internal serde marker keys
+remain ordinary object keys. This JSON-only serde feature does not change trading
+Decimal's fixed storage/checked arithmetic.
 
 `types::numeric::ExactDecimal` stores a signed 96-bit coefficient with scale 0..28
 using locked rust_decimal. Redundant fractional zeros may be removed losslessly.

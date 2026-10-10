@@ -14,6 +14,8 @@ Python 公开签名、JSON wire 提示和安装包通过生成脚本同步，JSO
 half-even 舍入、数量商余数和最终范围。1/3 均价允许 scale12 舍入，最后卖出释放全部余成本；
 不是用库默认除法/round 冒充业务政策。金额、价格、纳秒、事件序号使用 JSON 字符串。
 参数中的大整数也保留原值；NaN/Infinity、隐式精度丢失、非法数量及任意费用字段被拒绝。
+定向复查修复了 serde 内部键名改变参数对象类型、大整数被 float64 范围误拒、
+Decimal 极端指数展开及 SDK Mapping/非字符串键转换问题；加入真实回归和独立数值 oracle。
 
 锁定：Rust 1.90.0、PyO3 0.29.2、rust_decimal 1.43.0、bnum 0.14.4、
 serde 1.0.229、serde_json 1.0.151、maturin 1.15.0；构建/契约测试工具全依赖含 SHA256 锁。
@@ -26,11 +28,12 @@ serde 1.0.229、serde_json 1.0.151、maturin 1.15.0；构建/契约测试工具�
 - `QF_S3_PYTHON=backend/.venv/bin/python bash scripts/test_s3_engine.sh`：通过。
   入口实际执行 cargo fmt/clippy/test、公开契约样例、生成契约检查、版本检查及 wheel 构建/安装。
   clippy 使用 `--workspace --all-targets --locked -- -D warnings`，无警告。
-- Rust：15 项真实回归通过（9 契约、6 数值），另公开 example 编译并运行。
+- Rust：16 项真实回归通过（10 契约、6 数值），另公开 example 编译并运行。
   qf-python 的 Rust 测试 target 无业务测试；绑定由安装 wheel 的 Python 测试验证。
-- 独立消费 venv 的 `python -I -m unittest discover -s sdk/python/tests -v`：7 项通过，
+- 独立消费 venv 的 `python -I -m unittest discover -s sdk/python/tests -v`：10 项通过，
   含72个有效/无效配置用例、纳秒/Decimal 往返及另一独立进程从 site-packages 导入。
   SDK 可选 None 按签名表示省略/默认；JSON 服务边界的显式 null 按 schema 拒绝。
+  其中200组固定输入对 round/divide/合法数量的600个结果，与 Python Decimal/Fraction 独立复算一致。
 - `python -m unittest discover -s tests -v`：18 项通过，包含已有共享根测试和 Rust 单版本同步。
 - 既有 backend 保护回归：账户 workspace、账户 profiles/storage、策略 storage、历史结果 API、
   分页六个模块，`.venv/bin/python -m pytest -q ...`：78 passed（隔离 test 环境）。
@@ -38,15 +41,20 @@ serde 1.0.229、serde_json 1.0.151、maturin 1.15.0；构建/契约测试工具�
   `cargo test/run --offline --locked -p qf-core`：通过；依赖树无 PyO3 或数据库客户端。
 
 本地实际 wheel：`quantfoundry_sdk-0.3.0-cp312-cp312-manylinux_2_34_x86_64.whl`，
-504961 字节，SHA256 `6d6d5bde0abbaa285bfd3701e875b37c1d69d60a9007ffb24afc626f4c420cd0`。
-自动构建输出在云端 `/workspace/artifacts/s3-d01/verification.log`，
-core 独立验证输出在同目录 `core-without-python.log`；wheel 位于 `verify/wheels/`。
+526290 字节，SHA256 `834efedf0e39b9ca9a4b9111deeb1c370280a331fba8f8f0b00c1e6653e58d1d`。
+复查后构建输出在云端 `/workspace/artifacts/s3-d01/review-verification.log`，
+core 独立验证输出在同目录 `review-core-without-python.log`；wheel 位于 `review-verify/wheels/`。
 
 边界：D01 完成共享基础。事件循环、市场规则、撮合、账户引擎、Arrow 真实编码/网关、
 策略回调、运行调度/仓储/API/客户端传输和分析尚未实现；capabilities 的模型/频率列表为空，
-生产数据未检查，未实现入口明确 CAPABILITY_UNAVAILABLE。未运行全仓后端/前端、D18基准、
-生产隔离/市场数据验收或远端 GitHub Actions；新增 CI 入口已经本地真实执行。
+生产数据未检查，未实现入口明确 CAPABILITY_UNAVAILABLE。本地未运行全仓后端/前端、D18基准、
+生产隔离/市场数据验收。远端 Validate 及两项 S3 CI 已在首个提交通过；
+复查提交重新触发 CI，最终状态以 [PR159 Checks](https://github.com/Li2Wh1te/quant-foundry/pull/159/checks)
+对应 head 为准。main 活跃 ruleset 要求 `Test and validate release metadata`；
+CurrentStore 专项工作流的 paths 不匹配本次差异，未触发且未改动。
 
 无旧实现删除：D01 没有替换旧算法或生产调用方，现有共享账户、策略、历史结果、CurrentStore
 及后端锁文件均保留原样。未部署、切换生产、R01 reset、C01 清理、供应商调用或凭据修改。
-未上传原包/全部参考资料，未执行 GitHub 推送/PR/合并；本地提交与必要差异交回父会话。
+仅按后续明确授权推送必要代码/契约/测试，创建 [草稿 PR159](https://github.com/Li2Wh1te/quant-foundry/pull/159)。
+未上传原包/全部参考资料，未合并 main；与 S2 PR158 的325个改动文件无交集。
+精确 head、CI及差异交回父会话决定合并；不启动后续包、生产切换或清理。
