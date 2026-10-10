@@ -21,6 +21,10 @@
 - 原生 PostgreSQL HTTP 暴露 `/issues` 的参数类型推断错误（500）。只为可空筛选参数添加 text cast，保留数据集筛选、全局限制和成员计数；没有修改 `require_ready` 或权限。真实 PostgreSQL 筛选、分页、空参数和认证测试通过。
 - D07 使用 D04 的 3 个新版呈现断言，并验证 D05 的单次导航即读取行为与 D06 问题分页共同工作。D06 交付文件未编辑；旧包截图与脚本保留为各自阶段的历史证据。
 
+范围确认（2026-10-10）：父线程提供用户在 S2 Slack 回复“同意修复”（回复时间戳 `1791626815.436359`）的证据。用户已明确批准保留共享后端 `backend/app/data_store/router.py` 的 `/issues` 可空参数 CAST 修复及 `backend/tests/test_data_store_issues_api.py` 对应两项测试，纳入后续审查。包内没有明示 D07 后端修复授权，此次用户确认补足该项范围；CI 通过不代替范围确认。
+
+该确认不包含合并或部署，也不扩展到全局门禁、权限架构或目录续读。现有修复和测试保持不变，PR 仍为草稿；待用户回家恢复 R01 后，再安排已有授权路线上的真实只读联调。
+
 ## 本组合实际验证
 
 | 命令 / 证据 | 结果 |
@@ -37,7 +41,7 @@
 
 目录→筛选→详情→预览→问题→返回、页替换、键盘/焦点、切换/取消/晚到、401/403 清缓存、维护/限制/代次/字段变化、Decimal/大整数/纳秒/null 精度已覆盖。检查没有生产可达夹具开关、新轮询、全库下载或写操作；原有其他工作区路由仍可导航。
 
-这些套件覆盖有交集，不累计为独立测试总数。日志摘要见 [local-validation.json](evidence/local-validation.json)。最终精确 head 与正式 CI 链接写入草稿 PR；以该 head 的检查为准。
+这些套件覆盖有交集，不累计为独立测试总数。日志摘要见 [local-validation.json](evidence/local-validation.json)。代码验收提交 `2c0e8cccd45d95337ede9e74a089107d115c8610` 的 [Validate #382](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38042417244) 与 [Current store isolated acceptance #84](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38042417226) 均通过。后续范围确认只更新本交接说明，未改变代码或测试，不重跑上述精确提交的 CI；文档交付 head 与代码一致性核验写入草稿 PR。
 
 D02 独立 PR153 的 [Validate #376](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38038179548/job/114172910644) 在 `9dafeb6…` 上为 90 pass / 1 fail：壳测试导入缺少 D01 `data` 模块。组合工作树的测试不能证明这个独立 PR CI 通过。本组合保留 D01 原始提交并运行完整测试，没有重跑缺依赖分支。
 
