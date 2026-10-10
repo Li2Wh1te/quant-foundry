@@ -149,15 +149,19 @@ impl<F: OrderFacts> OrderManager<F> {
                 .copied()
                 .unwrap_or(Quantity::ZERO);
             let expected_filled = previous.filled_quantity.checked_add(filled)?;
+            let reason_changed =
+                order.reason_code != previous.reason_code || order.message != previous.message;
             let status_valid = match order.status {
                 OrderStatus::Filled => expected_filled == previous.quantity,
                 OrderStatus::PartiallyFilled => {
                     expected_filled != Quantity::ZERO
                         && expected_filled < previous.quantity
-                        && filled != Quantity::ZERO
+                        && (filled != Quantity::ZERO || reason_changed)
                 }
                 OrderStatus::Open => {
-                    previous.status == OrderStatus::Accepted && expected_filled == Quantity::ZERO
+                    expected_filled == Quantity::ZERO
+                        && (previous.status == OrderStatus::Accepted
+                            || (previous.status == OrderStatus::Open && reason_changed))
                 }
                 OrderStatus::Cancelled | OrderStatus::Expired | OrderStatus::Rejected => {
                     expected_filled < previous.quantity
@@ -237,12 +241,16 @@ impl<F: OrderFacts> OrderManager<F> {
                 if entry.order.side == Side::Buy
                     && entry.order.status == OrderStatus::PartiallyFilled
                 {
-                    let price = assessed
+                    let Some(price) = assessed
                         .iter()
                         .rev()
                         .find(|fill| fill.order_id == entry.order.order_id)
-                        .expect("partial fill has trade")
-                        .price;
+                        .map(|fill| fill.price)
+                    else {
+                        // A matcher may report a changed non-fill reason for
+                        // an existing partial order; there is no new price.
+                        continue;
+                    };
                     let remaining = entry.order.remaining()?;
                     let affordable = account.max_affordable(
                         &entry.order.order_id,
