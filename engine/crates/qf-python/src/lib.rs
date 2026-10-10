@@ -21,7 +21,11 @@ fn python_error(error: QfError) -> PyErr {
         let _ = value.setattr("code", code);
         let _ = value.setattr("operation", operation);
         let _ = value.setattr("message", error.message);
-        let _ = value.setattr("scope", PyDict::new(py));
+        let scope = PyDict::new(py);
+        for (key, item) in error.scope {
+            let _ = scope.set_item(key, item);
+        }
+        let _ = value.setattr("scope", scope);
         exception
     })
 }
@@ -37,6 +41,70 @@ fn validate_run_config_json(py: Python<'_>, input: &str) -> PyResult<String> {
 fn capabilities_json() -> PyResult<String> {
     serde_json::to_string(&qf_core::run::capabilities())
         .map_err(|_| PyValueError::new_err("contract serialization"))
+}
+fn fee_json<T: serde::de::DeserializeOwned>(input: &str) -> QfResult<T> {
+    if input.len() > qf_core::run::MAX_CONTROL_BYTES {
+        return Err(QfError::new(
+            qf_core::ErrorCode::ResourceLimit,
+            "fee_config",
+            "费用配置消息超过预算",
+        ));
+    }
+    serde_json::from_str(input).map_err(|_| {
+        QfError::new(
+            qf_core::ErrorCode::RuleUnavailable,
+            "fee_config",
+            "费用配置契约无效",
+        )
+    })
+}
+#[pyfunction]
+#[pyo3(signature = (input, overrides="{}"))]
+fn validate_commission_config_json(input: &str, overrides: &str) -> PyResult<String> {
+    convert((|| {
+        let config: qf_core::rules::fees::CommissionConfig = fee_json(input)?;
+        let overrides: qf_core::rules::CostOverrides = fee_json(overrides)?;
+        let config = config.with_overrides(&overrides)?;
+        serde_json::to_string(&config).map_err(|_| {
+            QfError::new(
+                qf_core::ErrorCode::InvalidContract,
+                "fee_config",
+                "费用配置序列化失败",
+            )
+        })
+    })())
+}
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FeeCompositionRequest {
+    scope: qf_core::rules::fees::FeeScope,
+    effective: qf_core::rules::date::EffectiveRange,
+    commission: qf_core::rules::fees::CommissionConfig,
+    #[serde(default)]
+    cost_overrides: qf_core::rules::CostOverrides,
+}
+#[pyfunction]
+fn compose_official_fee_config_json(py: Python<'_>, input: &str) -> PyResult<String> {
+    convert(py.detach(|| {
+        let request: FeeCompositionRequest = fee_json(input)?;
+        let fees = qf_core::rules::catalog::verified_fee_catalog()?.compose(
+            request.scope,
+            &request.effective,
+            &request.commission,
+            &request.cost_overrides,
+            &qf_core::rules::market::RuleUse::Market,
+        )?;
+        serde_json::to_string(
+            &serde_json::json!({"scope": fees.scope(), "fee_config": fees.config()}),
+        )
+        .map_err(|_| {
+            QfError::new(
+                qf_core::ErrorCode::InvalidContract,
+                "fee_config",
+                "费用配置序列化失败",
+            )
+        })
+    }))
 }
 #[pyfunction]
 fn parse_decimal(input: &str) -> PyResult<String> {
@@ -138,5 +206,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(legal_quantity, m)?)?;
     m.add_function(wrap_pyfunction!(roundtrip_ns, m)?)?;
     m.add_function(wrap_pyfunction!(validate_market_event_json, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_commission_config_json, m)?)?;
+    m.add_function(wrap_pyfunction!(compose_official_fee_config_json, m)?)?;
     Ok(())
 }

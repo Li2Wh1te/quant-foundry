@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import ast
 import copy
+import keyword
 import re
 from pathlib import Path
 
@@ -25,22 +26,25 @@ def rust_wire_stub() -> str:
     selected = {"EventIdentity", "MarketUnits", "Bar", "TradeTick", "QuoteTick", "EventKey",
                 "OrderIntent", "Order", "OrderResult", "Fill", "TradePage", "PositionView",
                 "AccountView", "RunConfigFields", "CostOverrides", "FeeConfig", "DatedFeeComponent",
-                "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
+                "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
                 "DependencyState", "DependencyContext", "DataRequest", "ActualScope", "BatchMetadata", "RunScope",
                 "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError"}
     aliases = {"String":"str", "bool":"bool", "u64":"int", "u32":"int", "u16":"int", "i64":"int",
                "Nanoseconds":"str", "Sequence":"str", "SecurityKey":"str", "SessionKey":"str", "ChannelKey":"str",
                "Quantity":"int", "Money":"str", "Price":"str", "ExactDecimal":"str", "Value":"Any", "FiniteStatistic":"float",
+               "RuleDate":"str", "Exchange":"Literal['shanghai', 'shenzhen', 'beijing', 'unknown']",
+               "Product":"Literal['main_board_stock', 'star_stock', 'chi_next_stock', 'beijing_stock', 'equity_etf', 'bond_etf', 'money_etf', 'gold_etf', 'commodity_etf', 'cross_border_etf', 'index', 'unknown']",
+               "InvestorKind":"Literal['resident_individual', 'resident_enterprise', 'other', 'unknown']",
                "RunConfig":"RunConfigFields", "ErrorCode":"str", "QfError":"ErrorDTO",
                "Currency":"Literal['CNY']", "QuantityUnit":"Literal['shares']",
-               "TimeUnit":"Literal['utc_nanoseconds']", "RoundingPolicy":"Literal['half_even', 'toward_zero']",
+               "TimeUnit":"Literal['utc_nanoseconds']", "RoundingPolicy":"Literal['half_even', 'half_up', 'toward_zero', 'away_from_zero']",
                "Frequency":"Literal['1d', '1m', '5m', '15m', '30m', '60m', 'tick']",
                "ExecutionModel":"Literal['bar_next_interval_v1', 'trade_tick_v1', 'quote_tick_v1']",
                "ResultSampling":"Literal['session_close', 'bar_close']", "Side":"Literal['buy', 'sell']",
                "TimeInForce":"Literal['day', 'gtc']", "EventPhase":"Literal['settlement', 'market', 'notification', 'callback']",
                "Adjustment":"Literal['none', 'pre', 'post']", "RunStatus":"Literal['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled']",
                "OrderStatus":"Literal['accepted', 'open', 'partially_filled', 'filled', 'cancelled', 'expired', 'rejected']",
-               "FeeComponentKind":"Literal['stamp_duty', 'transfer_fee', 'regulatory_fee']", "LogLevel":"Literal['info', 'warning', 'error']"}
+               "FeeComponentKind":"Literal['stamp_duty', 'transfer_fee', 'regulatory_fee', 'handling_fee']", "LogLevel":"Literal['info', 'warning', 'error']"}
 
     def split(value: str) -> list[str]:
         result, part, depth = [], [], 0
@@ -60,7 +64,7 @@ def rust_wire_stub() -> str:
             value = value.rsplit("::", 1)[-1]
         if value in aliases:
             return aliases[value]
-        if value in selected or value in {"OrderStyle", "IntentValue", "FeeFact", "RecordValue", "ResultRecord"}:
+        if value in selected or value in {"OrderStyle", "IntentValue", "FeeFact", "RecordValue", "ResultRecord", "RuleOrigin"}:
             return value
         match = re.fullmatch(r"(Option|Vec|Map|BTreeMap)<(.*)>", value)
         if match:
@@ -78,7 +82,7 @@ def rust_wire_stub() -> str:
     for name, body in re.findall(r"pub struct (\w+)\s*\{([^{}]*)\}", source):
         if name not in selected: continue
         found.add(name)
-        output.append(f"class {'ErrorDTO' if name == 'QfError' else name}(TypedDict):")
+        fields = []
         for field in split(re.sub(r"#\[[^\]]*\]", "", body)):
             match = re.fullmatch(r"\s*(?:pub\s+)?(\w+)\s*:\s*(.*?)\s*", field, re.S)
             if not match: raise ValueError(f"unmapped Rust field {name}: {field}")
@@ -91,10 +95,26 @@ def rust_wire_stub() -> str:
                 if name == "CostOverrides" or match[1] in {"reference_calendar", "cost_overrides"}:
                     hint = hint.removesuffix(" | None")
                 hint = "NotRequired[" + hint + "]"
-            output.append(f"    {match[1]}: {hint}")
+            fields.append((match[1], hint))
+        public_name = 'ErrorDTO' if name == 'QfError' else name
+        if any(keyword.iskeyword(field) for field, _ in fields):
+            # Preserve Rust's exact JSON key (e.g. EffectiveRange.from) without
+            # emitting invalid Python syntax or a competing renamed wire field.
+            hints = ", ".join(f"{field!r}: {hint!r}" for field, hint in fields)
+            output.append(f"{public_name} = TypedDict({public_name!r}, {{{hints}}})")
+        else:
+            output.append(f"class {public_name}(TypedDict):")
+            output.extend(f"    {field}: {hint}" for field, hint in fields)
         output.append("")
     if found != selected: raise ValueError(f"missing Rust DTOs: {selected-found}")
-    output.append('''class MarketStyle(TypedDict):
+    output.append('''class OfficialRuleOrigin(TypedDict):
+    kind: Literal['official']
+    reference: str
+class SyntheticRuleOrigin(TypedDict):
+    kind: Literal['synthetic']
+    reference: str
+RuleOrigin = OfficialRuleOrigin | SyntheticRuleOrigin
+class MarketStyle(TypedDict):
     kind: Literal['market']
 class LimitStyle(TypedDict):
     kind: Literal['limit']
@@ -229,6 +249,7 @@ def main() -> None:
     parser.add_argument("--check", action="store_true")
     args = parser.parse_args()
     for path, expected in outputs().items():
+        ast.parse(expected, filename=str(path))
         if args.check:
             if not path.exists() or path.read_text() != expected:
                 raise SystemExit(f"stale generated contract: {path.relative_to(ROOT)}")

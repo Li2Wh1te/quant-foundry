@@ -258,6 +258,7 @@ version = "0.3.0"
 dependencies = [
  "pyo3",
  "qf-core",
+ "serde",
  "serde_json",
 ]
 

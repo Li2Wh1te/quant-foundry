@@ -126,12 +126,34 @@ class ResultBatch(TypedDict):
     first_sequence: str
     records: list[ResultRecord]
 
+EffectiveRange = TypedDict('EffectiveRange', {'from': 'str', 'through': 'str'})
+
+class CommissionConfig(TypedDict):
+    commission_rate: str
+    minimum_commission: str
+    currency: Literal['CNY']
+    settlement_scale: int
+    rounding: Literal['half_even', 'half_up', 'toward_zero', 'away_from_zero']
+    included_components: list[Literal['stamp_duty', 'transfer_fee', 'regulatory_fee', 'handling_fee']]
+    basis: str
+
+class FeeScope(TypedDict):
+    instrument: Instrument
+    side: Literal['buy', 'sell']
+    investor: Literal['resident_individual', 'resident_enterprise', 'other', 'unknown']
+    origin: RuleOrigin
+
+class Instrument(TypedDict):
+    security: str
+    exchange: Literal['shanghai', 'shenzhen', 'beijing', 'unknown']
+    product: Literal['main_board_stock', 'star_stock', 'chi_next_stock', 'beijing_stock', 'equity_etf', 'bond_etf', 'money_etf', 'gold_etf', 'commodity_etf', 'cross_border_etf', 'index', 'unknown']
+
 class CostOverrides(TypedDict):
     commission_rate: NotRequired[str]
     minimum_commission: NotRequired[str]
 
 class DatedFeeComponent(TypedDict):
-    kind: Literal['stamp_duty', 'transfer_fee', 'regulatory_fee']
+    kind: Literal['stamp_duty', 'transfer_fee', 'regulatory_fee', 'handling_fee']
     effective_from: str
     effective_through: str
     included_in_commission: bool
@@ -142,7 +164,7 @@ class FeeConfig(TypedDict):
     minimum_commission: str
     currency: Literal['CNY']
     settlement_scale: int
-    rounding: Literal['half_even', 'toward_zero']
+    rounding: Literal['half_even', 'half_up', 'toward_zero', 'away_from_zero']
     components: list[DatedFeeComponent]
     synthetic_model: str | None
 
@@ -253,6 +275,13 @@ class EventKey(TypedDict):
     security: str
     identity: EventIdentity
 
+class OfficialRuleOrigin(TypedDict):
+    kind: Literal['official']
+    reference: str
+class SyntheticRuleOrigin(TypedDict):
+    kind: Literal['synthetic']
+    reference: str
+RuleOrigin = OfficialRuleOrigin | SyntheticRuleOrigin
 class MarketStyle(TypedDict):
     kind: Literal['market']
 class LimitStyle(TypedDict):

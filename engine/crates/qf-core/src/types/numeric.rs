@@ -27,7 +27,12 @@ fn power(scale: u32) -> I512 {
 #[serde(rename_all = "snake_case")]
 pub enum RoundingPolicy {
     HalfEven,
+    /// Nearest value; exact midpoints round away from zero. Used by dated
+    /// exchange price rules and explicitly configured CNY fee settlement.
+    HalfUp,
     TowardZero,
+    /// Explicit saved-account ROUND_UP agreement; never an analysis default.
+    AwayFromZero,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -100,7 +105,11 @@ impl ExactDecimal {
         }
         let twice = remainder.abs() * I512::cast_from(2);
         let bound = denominator.abs();
-        if twice > bound || (twice == bound && quotient % I512::cast_from(2) != WIDE_ZERO) {
+        if policy == RoundingPolicy::AwayFromZero
+            || twice > bound
+            || (twice == bound
+                && (policy == RoundingPolicy::HalfUp || quotient % I512::cast_from(2) != WIDE_ZERO))
+        {
             let sign = if (numerator < WIDE_ZERO) == (denominator < WIDE_ZERO) {
                 1
             } else {
