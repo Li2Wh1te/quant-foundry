@@ -40,6 +40,7 @@ class Query:
     descending: bool = False
     filters: tuple[tuple[str, str, Any], ...] = ()
     per_group: tuple[str, int] | None = None
+    group_order: tuple[str, ...] = ()
 
     def __post_init__(self):
         if self.release is not None or self.snapshot is not None:
@@ -71,6 +72,11 @@ class Query:
         if self.per_group is not None and (type(self.per_group) is not tuple
                 or len(self.per_group) != 2 or type(self.per_group[0]) is not str
                 or type(self.per_group[1]) is not int or not 1 <= self.per_group[1] <= 100000):
+            raise DataStoreError('INVALID_VALUE')
+        if (type(self.group_order) is not tuple or len(self.group_order) > 16
+                or any(type(c) is not str for c in self.group_order)
+                or len(set(self.group_order)) != len(self.group_order)
+                or self.group_order and self.per_group is None):
             raise DataStoreError('INVALID_VALUE')
 
 
@@ -122,6 +128,8 @@ def _request(spec, query):
         request.update(descending=query.descending, filters=query.filters)
     if query.per_group is not None:
         request['per_group'] = query.per_group
+    if query.group_order:
+        request['group_order'] = query.group_order
     return fingerprint(request)
 
 
@@ -200,6 +208,7 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None, arro
                 or len(query.partitions) > store.limits.query_partitions
                 or any(c not in spec.schema.names for c in query.columns)
                 or any(c not in spec.schema.names for c, _, _ in query.filters)
+                or any(c not in spec.schema.names for c in query.group_order)
                 or query.per_group is not None and query.per_group[0] not in spec.schema.names):
             raise DataStoreError('QUERY_BUDGET_EXCEEDED')
     metrics = Metrics()
@@ -282,7 +291,9 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None, arro
                             group, maximum = query.per_group
                             # Rank the complete requested window BEFORE applying the
                             # cursor; otherwise each page would admit another N rows.
-                            sql += ' QUALIFY row_number() OVER (PARTITION BY "'+group+'" ORDER BY '+order+') <= ?'
+                            ranking = (','.join('"'+c+'"'+(' DESC NULLS LAST' if query.descending else ' ASC NULLS FIRST')
+                                               for c in query.group_order) if query.group_order else order)
+                            sql += ' QUALIFY row_number() OVER (PARTITION BY "'+group+'" ORDER BY '+ranking+') <= ?'
                             params.append(maximum)
                         if last is not None:
                             predicate, bound_values = _predicate(spec, last, '<' if query.descending else '>')

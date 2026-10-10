@@ -68,6 +68,63 @@ fn missing_samples_reset_seed_and_macd_signal_has_separate_warmup() {
     close(line.histogram[4].value.unwrap(), 0.);
 }
 #[test]
+fn recursive_gap_reseeds_wilder_and_both_macd_emas_and_signal() {
+    let input = [
+        Some(1.),
+        Some(2.),
+        Some(3.),
+        None,
+        Some(10.),
+        Some(12.),
+        Some(11.),
+        Some(13.),
+        Some(12.),
+        Some(14.),
+    ];
+    let rsi = i::rsi(&input, 2).unwrap();
+    assert_eq!(rsi[5].status, Status::Missing);
+    close(rsi[6].value.unwrap(), 200. / 3.);
+    close(rsi[7].value.unwrap(), 600. / 7.);
+    let atr = i::atr(
+        &[
+            Some(2.),
+            Some(3.),
+            Some(4.),
+            None,
+            Some(11.),
+            Some(13.),
+            Some(12.),
+            Some(14.),
+        ],
+        &[
+            Some(0.),
+            Some(1.),
+            Some(2.),
+            None,
+            Some(9.),
+            Some(11.),
+            Some(10.),
+            Some(12.),
+        ],
+        &input[..8],
+        2,
+    )
+    .unwrap();
+    assert_eq!(atr[4].status, Status::Missing);
+    close(atr[5].value.unwrap(), 2.5);
+    close(atr[6].value.unwrap(), 2.25);
+    close(atr[7].value.unwrap(), 2.625);
+    let macd = i::macd(&input, 2, 3, 2).unwrap();
+    assert_eq!(macd.macd[5].status, Status::Missing);
+    close(macd.macd[6].value.unwrap(), 0.);
+    assert_eq!(macd.signal[6].status, Status::Missing);
+    close(macd.signal[7].value.unwrap(), 1. / 6.);
+    close(macd.histogram[7].value.unwrap(), 1. / 6.);
+    close(macd.signal[8].value.unwrap(), 7. / 54.);
+    close(macd.histogram[8].value.unwrap(), -1. / 54.);
+    close(macd.histogram[9].value.unwrap(), 13. / 162.);
+}
+#[test]
 fn equal_ranks_average_and_unknown_values_remain_missing() {
     let input = BTreeMap::from([
         ("B".into(), Some(10.)),

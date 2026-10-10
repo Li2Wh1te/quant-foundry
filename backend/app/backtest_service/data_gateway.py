@@ -448,11 +448,23 @@ class RunDataGateway:
         if len(securities) > 1 and security_column not in binding.spec.schema.names:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '此身份投影尚不支持集合批量读取')
         membership = ((security_column, 'in', securities),) if len(securities) > 1 else ()
+        group_order = []
+        if count is not None:
+            for field in ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'):
+                if field in binding.constants:
+                    continue
+                column = binding.fields.get(field)
+                if column not in binding.spec.schema.names:
+                    raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的完整事件排序投影')
+                group_order.append(column)
+            if security_column not in binding.spec.schema.names:
+                raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的标的集合投影')
         query = Query(partitions=tuple(partitions), lower=lower, upper=upper, columns=columns,
             page_size=rows, descending=count is not None,
             filters=((binding.time_column, '>=', start-binding.time_offset_ns),
                      (binding.time_column, '<=', end-binding.time_offset_ns), *binding.selectors, *membership),
-            per_group=(security_column, count) if len(securities) > 1 and count is not None else None)
+            per_group=(security_column, count) if count is not None else None,
+            group_order=tuple(dict.fromkeys(group_order)))
         remaining = count if len(securities) == 1 else None
         while True:
             self.check(context)

@@ -36,7 +36,7 @@ class IndicatorTests(unittest.TestCase):
         self.assertEqual(rank({})['value'].dtype, np.dtype('float64'))
 
     def test_input_resource_and_finite_checks(self):
-        for value in (float('inf'), Decimal('NaN'), True, '1'):
+        for value in (float('inf'), Decimal('NaN'), Decimal('sNaN'), 10**400, True, '1'):
             with self.assertRaises(ContractError):
                 sma([value], 1)
         for period in (0, True, 10001):
@@ -46,6 +46,13 @@ class IndicatorTests(unittest.TestCase):
             rolling_std([1], 1)
         with self.assertRaises(ContractError):
             macd([1, 2], 3, 2)
+
+    def test_macd_numeric_columns_are_float_even_empty_or_not_warmed(self):
+        for values in ([], [1], [None, None]):
+            frame = macd(values)
+            for field in ('macd', 'signal', 'histogram'):
+                self.assertEqual(frame[field].dtype, np.dtype('float64'))
+                self.assertTrue(frame[field].isna().all())
 
 
 if __name__ == '__main__':

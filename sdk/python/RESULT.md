@@ -18,8 +18,9 @@
   游标不变，仍走原质量、锁、generation 和资源门禁。D04 网关增加同路径集合读取，
   不逐标的 N+1；原 Arrow 平坦布局预检复用，未新增 IPC 协议或底座判断。
 - 多批窗口预算独立于64MiB单批 IPC；默认视图仍10000行/64MiB，可信宿主可从
-  run 总预算配置至100万行/1GiB。D05 按投影后拥有的行/字符串计费，不把共享 Arrow
-  backing 按列重复累计；多标的成员筛选使用有界集合。D04 行情解码策略未替换。
+  run 总预算配置至100万行/1GiB。扩大视图必须显式分配包含转换、缓存和 IPC 的数据
+  份额；行信用保守覆盖拥有的投影和转换峰值，不把共享 Arrow backing 按列重复累计。
+  reset/expire 释放真实 Vec 容量。多标的成员筛选使用有界集合，D04 行情解码未替换。
 - ResearchDataGateway 复用 D04 declare/check/read/finalize/serve；研究映射拒绝未知
   公开时间/历史成员/因子锚点。窗口、缓存、控制/Arrow、取消均有界，缓存命中仍验依赖。
   SDK 的旧七个占位拒绝已替换；其余未实现模块仍保持原拒绝，不退回旧 Python 引擎。
@@ -35,7 +36,8 @@
 1. `bash scripts/test_s3_engine.sh`：rustfmt、clippy -D warnings、workspace Rust 测试
    91 项、公共合同/版本检查、根 Python 18 项、Python 3.12.2 release wheel 构建通过。
    D05 Rust 6 项用独立手算 SMA/EMA/RSI/ATR/MACD/std/rank 与 Decimal 比较验证。
-   最终 wheel 在独立消费 venv 重装后，SDK 28 项全部通过。
+   实现阶段 wheel 的 SDK 28 项通过；合并前修正后 workspace Rust 92 项、
+   独立消费 venv 重装 wheel 的 SDK 29 项通过，clippy 无告警。
 2. `cargo build -p qf-core --locked --example consume_gateway` 后，在独立 PostgreSQL
    16 容器及随机 schema 中运行 `python -m pytest -q tests/test_s3_data_gateway.py
    tests/test_s3_research_api.py`：62 passed，30.67 秒，0 skipped（D04 43、D05 19）。
@@ -56,6 +58,35 @@
    挂载验证。Current store isolated acceptance 的支持挂载检查由本 PR CI 另行执行。
    不将其描述为原 D04 merge 的补验。未运行 D18 的 B1–B4 全量产品基准。
 
+## 合并前审查与修复证据
+
+64d6d2b 的三项 PR CI 虽通过，审查仍发现下列语义/资源阻塞并修复，不以旧 CI 代替新 head 验证：
+
+- 后复权错误地用第一条现存因子为锚。旧 wheel 上独立反例实际返回10而预期20；
+  ResearchBinding 现在必须提供 factor_anchor 的原始值、真实公开/生效时间，Rust
+  不猜基准。pre 要求终点有效因子；未来锚/因子、过期因子和歧义修订明确拒绝。
+  先复权细 Bar 再聚合，来源 Bar 内的因子变化或覆盖缺口拒绝；按标的分组因子。
+- 历史 count 原按存储键排名，可能选错同刻不同通道事件。Query 窄增白名单
+  group_order 排名列，按完整事件顺序选 N，再按原键分页；原默认游标签名不变。
+  同 ns 当前事件仍先在 Rust 裁剪后计数；price/current/research 缓存命中均实测
+  拒绝不增 generation 的质量变化。同边界的缓存不被字段修改或下一个发布键污染。
+- 无历史成员依据不再返回空名单；明确空集须有已公开有效的空集记录，完整成员
+  超 limit 拒绝，不截断。财报同报告期/公开时点的歧义修订不按 record_id 猜选择。
+  当前 ns 的细 Bar 未发布时不输出完成目标桶。MACD 空集/预热列也保持 float64。
+- 视图原 reset 保留 Vec 容量、SDK 整表重复 JSON 图及1GiB未含转换/IPC份额的问题
+  已修复。扩大窗口须显式 run_data_budget_bytes；原生工作集信用包括转换余量，
+  reset/expire 真正释放容量。独立 native/SDK Arrow replay smoke 每窗口105000行、
+  输出100000点，保留首个 DataFrame 再做第二次查询（共210000 replay 行）：
+  峰值 RSS 748265472 B（713.6MiB），工作集信用823147392 B，数据份额1218445312 B
+  （1162MiB），视图上限1GiB，reset 两项 Vec 容量均0。此 smoke 不包含 CurrentStore
+  存储读取/父进程/cgroup，不冒充完整 run/D18 验收；D10/D12 必须落实总体预算。
+- 最后重装 wheel/重建消费者后，`python -m pytest -q -s tests/test_s3_data_gateway.py
+  tests/test_s3_research_api.py`：74 passed，34.32 秒，0 skipped（D04 43、D05 31，含
+  真实隔离链与上述原生/SDK smoke）。RSI/ATR/MACD 缺值后重新预热用独立手算回归。
+  最终精确 head、PR CI 与 merge 后状态通过同一交付回传，不写自引用 SHA 台账。
+  共享 CurrentStore 窄改动另复测 kernel/local_pipeline/api：78 passed，53.83 秒；空库迁移通过。
+  TimeLike 还修复了 Pandas 对第10位小数无声截断：非 ISO/超 ns 精度字符串拒绝。
+
 ## 接缝与未完成条件
 
 - D10 必须用 `_callback(session,boundary)` 包住每个回调并 finally 退出；boundary
@@ -63,6 +94,8 @@
   已物化过去 DataFrame/Decimal/冻结 DTO 可保留。D10 可传入经过接受的当前行情及
   完整键，get_current_data 在内存裁剪且不逐 Tick 调父进程；D10/D12 仍负责引擎块
   依赖复核、受限 worker 和私有连接认证。本包没有创建另一个宿主/事件循环。
+  扩大窗口要从 run 总额分配 run_data_budget_bytes；常驻引擎/账户/父进程及策略
+  主动保留的结果由 D10/D12 的总体资源预算和进程组/cgroup 约束，不能只看视图上限。
 - D11 不得覆盖 data/views.rs、analysis/indicators.rs。D13 的成功终态继续使用
   原 `finalize(context,commit(connection))` 单事务接缝，不拆为检查后单独提交。
 - 正式 E14/E15 缺真实历史公开时间，E39 不能用当前观察快照填历史估值；E56/E57

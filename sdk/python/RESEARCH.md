@@ -22,6 +22,7 @@
 TimeLike 接受 UTC ns 整数、有时区 datetime、带时区 ISO 字符串；ISO 的九位小数
 保持 ns。日期字符串只能由已接受的参考日历解释为当日开市/闭市边界；缺日历
 返回 RULE_UNAVAILABLE。bool、无时区时间、未来 end/as_of 拒绝。
+ISO 小数最多九位；超纳秒精度或非 ISO 文本拒绝，不能依赖 Pandas 的无声截断。
 get_price 的 start/count 恰好一个；count 按每标的计算，先裁剪完整已发布事件键
 再计数。同 ns 尚未发布的 Tick 和引擎未来预取不出现在公开结果。
 
@@ -39,14 +40,19 @@ Filter 只支持 eq/ne/lt/le/gt/ge/in，值为 Decimal/int/bool/有界字符串�
 
 只有经过底座接受的累积因子/公式/锚点能进入研究复权。pre 使用查询终点前最后
 已公开有效因子为锚，post 使用已接受原始锚；不得跨稳定身份，未来因子不参与。
-post 的第一条因子必须经映射验证为原始基准，缺历史时不能拿第一条现存值充当锚。
+ResearchBinding 必须明确传入 factor_anchor 的 factor/effective_ns/public_ns；原始锚
+缺失、未生效或当时尚未公开均拒绝。post 不从现存因子行推断基准；pre 还要求
+查询终点有有效因子，不能用已过期因子代替。重叠身份或同边界歧义修订拒绝。
 价格按 `p*factor/basis` 计算，12位 half-even；原价查询保持原 Decimal，不改变
 撮合输入。缺因子、锚点或精确数值范围明确拒绝。正式 E51/E69 仍未启用复权。
+先按细粒度原 Bar 的有效因子复权，再聚合 OHLC；因子在来源 Bar 内变化或存在
+覆盖缺口时拒绝，不能假定盘中路径。因子先按标的分组，避免每个价格重扫横截面。
 
 分钟→更粗分钟/60m 只在 D03 已接受的 bar_windows 内分桶；源与目标必须整除，
 源 Bar 必须匹配源桶，不跨午休或会话。只输出已结束桶；会话末短桶标 is_partial。
 窗口有洞或 OHLC 缺失时 status=missing 且价格/量为 None；不完整未来桶不返回。
 不能从日线升分钟、小时升分钟或把 Tick 粗略解释为 Bar。
+当前 ns 的最终细 Bar 尚未发布时，目标桶也不返回；已完成历史桶的缺失与此分开。
 
 ## 指标
 
@@ -81,8 +87,19 @@ ResearchBinding 只映射既有布局；可接入被底座接受的研究事实�
 依赖状态，命中仍复核依赖。默认最多10000输入行、64MiB视图、8MiB/32项 SDK
 缓存；父进程预算另独立受 D04 控制。超限 RESOURCE_LIMIT，取消打断等待/读取。
 可信宿主可从全 run 预算配置视图，硬上限100万行/1GiB；IPC 单批仍最多1万行/64MiB。
+扩大至64MiB以上必须给 _DataSession 显式 run_data_budget_bytes，覆盖视图工作集、
+缓存、两份最大 IPC 缓冲和2MiB控制开销。该数据份额须由 D10/D12 从完整 run 预算
+扣除常驻 Python/引擎/账户等开销后分配；D12 的进程组/cgroup 仍约束完整运行以及
+策略主动保留的历史 DataFrame。不能把1GiB视图上限当作整个运行的 RSS 上限。
+原生行信用保守覆盖投影、输出映射、JSON/Decimal/Pandas 转换，字符串按输入
+payload 的六倍留额外复制余量。reset/expire 释放 Vec 容量；SDK 整表 JSON 只解析
+一次。resources_json 提供工作集信用及真实 Vec 容量，用于接缝验证。
 例如5000标的×20点需容纳10万历史点与当前已发布事件，不能按单批大小限制整个
 lookback。父进程 count 缓存须同时明确配置其原有预算；这些配置不是全量基准通过。
+分组排名按映射后的完整事件列排序，最终分页仍按原存储键和签名游标；新 group_order
+仅是白名单排名列，旧默认请求指纹不变。无对应历史成员集合明确拒绝；已验证空集
+需真实空集记录，完整成员超过返回上限时拒绝而不截断。相同公开时点的歧义修订
+不依赖 record_id 字典顺序选取。
 
 D10 每次回调进入 `_callback(session, boundary)`，必须在 finally 退出。原生
 ReadView expire 清空缓冲，任何保留的活视图方法返回过期错误；已物化的过去

@@ -13,6 +13,8 @@ from pathlib import Path
 import runpy
 import socket
 import threading
+import subprocess
+import sys
 
 import pyarrow as pa
 import pytest
@@ -66,7 +68,8 @@ def research_binding(spec, kind):
     return ResearchBinding(kind, spec, kind, {n: n for n in SCHEMA.names}, {},
         lambda s, *_: ((s,), (s+'\0',)), 'time_ns', types,
         ('verified_public_time', 'stable_identity', 'verified_effective_dates', 'verified_cumulative_anchor', 'verified_complete_sets'),
-        limitations=('synthetic_business_oracle_not_production_data',))
+        limitations=('synthetic_business_oracle_not_production_data',),
+        factor_anchor=dict(factor='1', effective_ns=str(BASE-1000), public_ns=str(BASE-1000)) if kind == 'adjustment' else None)
 
 
 def fact(security='A.SH', field='revenue', value='123456789012345678901234567890.1234567890123456789',
@@ -176,7 +179,7 @@ def test_configured_cross_section_window_separates_total_budget_from_arrow_batch
     # Bounded window smoke only, not the 12.6M-row end-to-end D18 benchmark.
     securities = [f'A{i:04d}.SH' for i in range(5000)]
     view = _native.ReadView(json.dumps(boundary(sequence=105000, security=securities[-1])),
-                            105000, 512*1024*1024)
+                            105000, 1024*1024*1024)
     template = rows(1)[0]
     for offset in range(0, 100000, 10000):
         samples = [dict(template, security=securities[i//20], time_ns=BASE-20+i%20,
@@ -195,11 +198,16 @@ def test_configured_cross_section_window_separates_total_budget_from_arrow_batch
     assert len(result) == 100000
     assert result[0]['time_ns'] == str(BASE-19) and result[19]['time_ns'] == str(BASE)
     assert result[0]['price'] == PRICE and result[-1]['security'] == securities[-1]
+    resources = json.loads(view.resources_json())
+    assert resources['working_set_bytes'] <= resources['max_bytes']
+    view.reset()
+    assert json.loads(view.resources_json()) == dict(working_set_bytes=0, max_bytes=1024*1024*1024,
+        price_rows=0, research_rows=0, price_capacity=0, research_capacity=0)
     view.expire()
     oversized = [dict(template, sequence=i+1, stable_input_sequence=i+1) for i in range(10001)]
     batch = DataBatch(pa.Table.from_pylist(oversized, schema=MARKET_SCHEMA),
                      dict(schema_id='qf.market.v1', rows=len(oversized)))
-    view = _native.ReadView(json.dumps(boundary()), 105000, 512*1024*1024)
+    view = _native.ReadView(json.dumps(boundary()), 105000, 1024*1024*1024)
     with pytest.raises(ContractError) as error:
         view.push_market(json.dumps(batch.metadata), batch.ipc(64*1024*1024))
     assert error.value.code == 'RESOURCE_LIMIT'
@@ -234,9 +242,13 @@ def test_price_parameters_time_like_and_no_tick_close_default(formal):
             iso = '2026-01-01T00:00:00.000000123Z'
             assert get_price('A.SH', count=1, end=iso, fields=['price']).attrs['qf']['requested_scope']['end_ns'] == str(BASE)
             for kwargs in ({}, {'count': True}, {'start': BASE-10, 'count': 1}, {'count': 1, 'end': datetime(2026, 1, 1)},
-                           {'count': 1, 'end': True}, {'count': 1, 'fields': ['close']}):
+                           {'count': 1, 'end': True}, {'count': 1, 'fields': ['close']},
+                           {'count': 1, 'end': '2026/01/01 00:00:00+00:00'}):
                 with pytest.raises(ContractError):
                     get_price('A.SH', **kwargs)
+            with pytest.raises(ContractError) as error:
+                get_price('A.SH', count=1, fields=['price'], end='2026-01-01T00:00:00.0000001234Z')
+            assert error.value.code == 'NUMERIC_RANGE_UNSUPPORTED'
 
 
 def test_cross_section_one_bulk_storage_scan_and_bounded_cache(formal):
@@ -487,6 +499,12 @@ def test_minute_hour_no_lunch_join_partial_missing_and_no_upsampling(formal):
             assert len(by_date) == 130
         with _callback(data, boundary(BASE+30*minute)):
             assert get_price('A.SH', start=BASE, frequency='60m', fields=['close']).empty
+        with _callback(data, boundary(BASE+60*minute)):
+            assert get_price('A.SH', start=BASE, frequency='60m', fields=['close', 'status']).empty
+        published = boundary(BASE+60*minute, sequence=60)
+        published['market_through']['identity'].update(source_session='S', channel='1m')
+        with _callback(data, published):
+            assert get_price('A.SH', start=BASE, frequency='60m', fields=['close'])['close'].tolist() == [Decimal('11')]
     # A separately declared synthetic input contains a known hole. Upsert
     # would preserve old rows, so it cannot represent this independent oracle.
     spec = contract('d05_minute_hole'); formal.register(spec)
@@ -550,3 +568,178 @@ def test_currentstore_group_count_cursor_cannot_admit_extra_rows(formal):
     assert len(collected) == 4
     assert {s: sorted(r['time_ns'] for r in collected if r['security'] == s) for s in ('A.SH', 'B.SH')} == {
         'A.SH': [BASE-18, BASE-17], 'B.SH': [BASE-18, BASE-17]}
+
+
+def test_historical_count_uses_complete_event_order_before_source_key_paging(formal):
+    spec = contract('d05_complete_count'); formal.register(spec)
+    samples = []
+    for security in ('A.SH', 'B.SH'):
+        samples += [dict(rows(1)[0], security=security, time_ns=BASE-1, channel='Z', price='11'),
+                    dict(rows(2)[1], security=security, time_ns=BASE-1, channel='A', price='12')]
+    put(formal, spec, samples)
+    g = gateway(formal, [binding(spec)], ('A.SH', 'B.SH'))
+    with session(g, market_routes={'tick': _MarketRoute('market', ('price',))}) as (data, _):
+        with _callback(data, boundary()):
+            for securities in (['A.SH'], ['A.SH', 'B.SH']):
+                frame = get_price(securities, count=1, fields=['price', 'channel'])
+                assert frame['price'].tolist() == [Decimal('11')]*len(securities)
+                assert frame['channel'].tolist() == ['Z']*len(securities)
+    q = Query(columns=('security', 'time_ns', 'channel'), page_size=1, descending=True,
+              filters=(('security', 'in', ('A.SH', 'B.SH')),), per_group=('security', 1),
+              group_order=('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'))
+    collected = []
+    while True:
+        page = formal.read_arrow(spec, q); collected.extend(page.table.to_pylist())
+        if not page.next_cursor:
+            break
+        q = replace(q, cursor=page.next_cursor)
+    assert len(collected) == 2 and {r['channel'] for r in collected} == {'Z'}
+
+
+@pytest.mark.parametrize('kind', ['price', 'current', 'research'])
+def test_same_query_cache_hit_rechecks_quality_without_content_generation_change(formal, kind):
+    market = contract('d05_cached_quality'); formal.register(market); put(formal, market, market_data())
+    fundamental = research_spec('fundamentals'); formal.register(fundamental); put(formal, fundamental, [fact()])
+    g = gateway(formal, [binding(market), research_binding(fundamental, 'fundamentals')])
+    with session(g, market_routes={'tick': _MarketRoute('market', ('price',))},
+                 research_routes={'fundamentals': 'fundamentals'}) as (data, _):
+        with _callback(data, boundary()):
+            operation = {'price': lambda: get_price('A.SH', count=1, fields=['price']),
+                         'current': get_current_data,
+                         'research': lambda: get_fundamentals(['A.SH'], fields=['revenue'])}[kind]
+            operation(); reads = g.stats['storage_reads']; operation()
+            assert g.stats['storage_reads'] == reads and data.cache
+            spec = fundamental if kind == 'research' else market
+            generation = formal.catalog.dataset(spec.name)['generation']; quality(formal, spec)
+            assert formal.catalog.dataset(spec.name)['generation'] == generation
+            with pytest.raises(ContractError) as error:
+                operation()
+            assert error.value.code == 'DATA_CHANGED'
+
+
+def test_explicit_original_anchor_is_independent_of_first_available_factor(formal):
+    market = contract('d05_truncated_anchor'); formal.register(market)
+    put(formal, market, [dict(r, price='10') for r in market_data(count=2)])
+    spec = research_spec('adjustment'); formal.register(spec)
+    put(formal, spec, [fact(field='factor', value='2', published=BASE-100, effective=BASE-100,
+                           unit='verified_cumulative_factor')])
+    base = research_binding(spec, 'adjustment')
+    for anchor, expected in ((base.factor_anchor, Decimal('20')),
+                             (dict(factor='4', effective_ns=str(BASE-1000), public_ns=str(BASE-1000)), Decimal('5'))):
+        g = gateway(formal, [binding(market), replace(base, factor_anchor=anchor)])
+        with session(g, market_routes={'tick': _MarketRoute('market', ('price',))},
+                     research_routes={'adjustment': 'adjustment'}) as (data, _):
+            with _callback(data, boundary()):
+                assert get_price('A.SH', count=2, fields=['price'], adjustment='post')['price'].tolist() == [expected]*2
+                assert get_price('A.SH', count=2, fields=['price'], adjustment='pre')['price'].tolist() == [Decimal('10')]*2
+    for anchor in (None, dict(factor='1', effective_ns=str(BASE-1000), public_ns=str(BASE+1))):
+        g = gateway(formal, [binding(market), replace(base, factor_anchor=anchor)])
+        with session(g, market_routes={'tick': _MarketRoute('market', ('price',))},
+                     research_routes={'adjustment': 'adjustment'}) as (data, _):
+            with _callback(data, boundary()):
+                with pytest.raises(ContractError) as error:
+                    get_price('A.SH', count=2, fields=['price'], adjustment='post')
+                assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+def test_pre_anchor_requires_a_factor_effective_at_the_requested_endpoint(formal):
+    market = contract('d05_expired_factor'); formal.register(market)
+    put(formal, market, [dict(r, price='10') for r in market_data(count=2)])
+    spec = research_spec('adjustment'); formal.register(spec)
+    put(formal, spec, [fact(field='factor', value='2', published=BASE-100, effective=BASE-100,
+                           until=BASE-10, unit='verified_cumulative_factor')])
+    g = gateway(formal, [binding(market), research_binding(spec, 'adjustment')])
+    with session(g, market_routes={'tick': _MarketRoute('market', ('price',))},
+                 research_routes={'adjustment': 'adjustment'}) as (data, _):
+        with _callback(data, boundary()):
+            with pytest.raises(ContractError) as error:
+                get_price('A.SH', count=2, fields=['price'], adjustment='pre')
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+            assert get_price('A.SH', count=2, fields=['price'], adjustment='post')['price'].tolist() == [Decimal('20')]*2
+
+
+def test_unknown_historical_members_are_not_a_verified_empty_set(formal):
+    spec = research_spec('index_stocks'); formal.register(spec)
+    put(formal, spec, [fact(security='I.SH', field='member', value=None, kind='text', unit='synthetic_text',
+                           published=BASE-5, effective=BASE-5)])
+    g = gateway(formal, [research_binding(spec, 'index_stocks')], reference_indices=('I.SH',))
+    with session(g, research_routes={'index_stocks': 'index_stocks'}) as (data, _):
+        with _callback(data, boundary()):
+            assert get_index_stocks('I.SH') == ()
+            with pytest.raises(ContractError) as error:
+                get_index_stocks('I.SH', as_of=BASE-10)
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+def test_complete_membership_is_never_silently_truncated():
+    view = _native.ReadView(json.dumps(boundary()), 20000, 128*1024*1024)
+    for offset in (0, 10000):
+        payload = [fact(security='I.SH', field='member', value=f'A{i:05d}.SH', kind='text', unit='synthetic_text',
+                        record=f'member-{i:05d}') for i in range(offset, min(offset+10000, 10001))]
+        batch = DataBatch(pa.Table.from_pylist(payload, schema=SCHEMA), dict(schema_id='qf.research.v1', rows=len(payload)))
+        view.push_research(json.dumps(batch.metadata), batch.ipc(64*1024*1024))
+    request = dict(kind='index_stocks', securities=['I.SH'], fields=['member'], as_of_ns=str(BASE), limit=10000)
+    with pytest.raises(ContractError) as error:
+        view.research_json(json.dumps(request))
+    assert error.value.code == 'RESOURCE_LIMIT'
+    view.expire()
+
+
+def test_native_and_sdk_conversion_peak_fits_explicit_run_data_budget():
+    result = subprocess.run([sys.executable, str(Path(__file__).parent/'fixtures'/'research_memory.py')],
+                            check=True, capture_output=True, text=True, timeout=90,
+                            env=dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1'))
+    report = json.loads(result.stdout)
+    assert report['points'] == 100000 and report['window_input_rows'] == 105000
+    assert report['replayed_rows'] == 210000
+    assert report['peak_rss_bytes'] < report['allocated_data_bytes']
+    assert report['reserved_working_set_bytes'] <= report['view_bytes']
+    assert report['reset_capacities'] == [0, 0]
+    print(json.dumps(report, sort_keys=True))
+
+
+def test_adjust_fine_bars_before_resampling_and_refuse_intrabar_factor_changes(formal):
+    minute = 60_000_000_000
+    market = contract('d05_factor_bucket'); formal.register(market)
+    samples = [dict(rows(1)[0], kind='bar', session='S', source_session='S', channel='1m',
+        time_ns=BASE+(i+1)*minute, interval_start_ns=BASE+i*minute, interval_end_ns=BASE+(i+1)*minute,
+        open='10', high='10', low='10', close='10', price=None, quantity=1,
+        sequence=i+1, stable_input_sequence=i+1) for i in range(5)]
+    put(formal, market, samples)
+    factor = research_spec('adjustment'); formal.register(factor)
+    transition = BASE+3*minute
+    put(formal, factor, [fact(field='factor', value='1', effective=BASE-100, published=BASE-100,
+                             until=transition, unit='verified_cumulative_factor'),
+        fact(field='factor', value='2', effective=transition, published=BASE-100, record='factor-2',
+             unit='verified_cumulative_factor')])
+    route = _MarketRoute('market', ('open', 'high', 'low', 'close', 'quantity'))
+    g = gateway(formal, [replace(binding(market), frequency='1m'), research_binding(factor, 'adjustment')])
+    with session(g, market_routes={'1m': route}, research_routes={'adjustment': 'adjustment'},
+                 frequency='1m', calendar=calendar()) as (data, _):
+        with _callback(data, boundary(BASE+6*minute)):
+            frame = get_price('A.SH', start=BASE, frequency='5m', fields=['open', 'high', 'low', 'close'], adjustment='pre')
+            assert frame.iloc[0][['open', 'high', 'low', 'close']].tolist() == [Decimal('5'), Decimal('10'), Decimal('5'), Decimal('10')]
+    # A transition inside the available one-minute bar has no known OHLC path.
+    changed = [fact(field='factor', value='1', effective=BASE-100, published=BASE-100,
+                    until=transition-1, unit='verified_cumulative_factor'),
+        fact(field='factor', value='2', effective=transition-1, published=BASE-100, record='factor-2',
+             unit='verified_cumulative_factor')]
+    put(formal, factor, changed, token='intrabar')
+    g = gateway(formal, [replace(binding(market), frequency='1m'), research_binding(factor, 'adjustment')])
+    with session(g, market_routes={'1m': route}, research_routes={'adjustment': 'adjustment'},
+                 frequency='1m', calendar=calendar()) as (data, _):
+        with _callback(data, boundary(BASE+6*minute)):
+            with pytest.raises(ContractError) as error:
+                get_price('A.SH', start=BASE, fields=['close'], adjustment='pre')
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+def test_ambiguous_same_public_time_financial_revision_is_not_arbitrarily_selected(formal):
+    spec = research_spec('fundamentals'); formal.register(spec)
+    put(formal, spec, [fact(value='10'), fact(record='same-time-revision', value='20')])
+    g = gateway(formal, [research_binding(spec, 'fundamentals')])
+    with session(g, research_routes={'fundamentals': 'fundamentals'}) as (data, _):
+        with _callback(data, boundary()):
+            with pytest.raises(ContractError) as error:
+                get_fundamentals(['A.SH'], fields=['revenue'])
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'

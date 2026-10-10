@@ -243,6 +243,9 @@ impl PythonReadView {
     fn reset(&mut self) -> PyResult<()> {
         convert(self.view.reset())
     }
+    fn resources_json(&self) -> PyResult<String> {
+        convert((|| research_json(&self.view.resources()?))())
+    }
     fn expire(&mut self) {
         self.view.expire();
     }
@@ -269,6 +272,7 @@ impl PythonReadView {
         convert(py.detach(|| {
             let request: qf_core::data::DataRequest = qf_core::data::views::bounded_json(request)?;
             let source = qf_core::data::views::bounded_json(&format!("\"{source_frequency}\""))?;
+            self.view.adjust(request.adjustment, request.end_ns)?;
             self.view.resample(
                 source,
                 request.frequency,
@@ -276,7 +280,6 @@ impl PythonReadView {
                     calendar,
                 )?,
             )?;
-            self.view.adjust(request.adjustment, request.end_ns)?;
             research_json(&self.view.prices(&request)?)
         }))
     }

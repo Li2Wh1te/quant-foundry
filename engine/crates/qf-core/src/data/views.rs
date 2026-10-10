@@ -116,6 +116,13 @@ pub struct ResearchRow {
     pub effective_from_ns: Nanoseconds,
     pub effective_until_ns: Option<Nanoseconds>,
 }
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactorAnchor {
+    factor: String,
+    effective_ns: Nanoseconds,
+    public_ns: Nanoseconds,
+}
 impl ResearchRow {
     fn validate(&self) -> QfResult<()> {
         for s in [
@@ -298,6 +305,7 @@ pub struct ReadView {
     lease: ViewLease,
     prices: Vec<PriceRow>,
     research: Vec<ResearchRow>,
+    factor_anchors: BTreeMap<String, FactorAnchor>,
     max_rows: usize,
     max_bytes: usize,
     bytes: usize,
@@ -313,6 +321,7 @@ impl ReadView {
             lease: ViewLease::default(),
             prices: vec![],
             research: vec![],
+            factor_anchors: BTreeMap::new(),
             max_rows,
             max_bytes,
             bytes: 0,
@@ -329,17 +338,27 @@ impl ReadView {
         Ok(self.visibility.contains_market(key))
     }
     pub fn expire(&mut self) {
-        self.prices.clear();
-        self.research.clear();
+        self.prices = Vec::new();
+        self.research = Vec::new();
+        self.factor_anchors.clear();
         self.bytes = 0;
         self.lease.expire();
     }
     pub fn reset(&mut self) -> QfResult<()> {
         self.check()?;
-        self.prices.clear();
-        self.research.clear();
+        self.prices = Vec::new();
+        self.research = Vec::new();
+        self.factor_anchors.clear();
         self.bytes = 0;
         Ok(())
+    }
+    pub fn resources(&self) -> QfResult<Value> {
+        self.check()?;
+        Ok(
+            json!({"working_set_bytes":self.bytes,"max_bytes":self.max_bytes,
+            "price_rows":self.prices.len(),"research_rows":self.research.len(),
+            "price_capacity":self.prices.capacity(),"research_capacity":self.research.capacity()}),
+        )
     }
     fn reservation(&self, rows: usize, bytes: usize) -> QfResult<usize> {
         self.check()?;
@@ -372,11 +391,13 @@ impl ReadView {
         }
         self.reserve(
             input.num_rows(),
-            // Account owned row/maps/strings, not shared transient Arrow
-            // backing storage duplicated by every array's capacity report.
+            // Reserve row/maps plus output maps, decimal/Pandas conversion and
+            // bounded JSON copies. The backing payload is counted six times
+            // as a conservative string-copy allowance, never once per column.
             payload
                 .len()
-                .saturating_add(input.num_rows().saturating_mul(3072)),
+                .saturating_mul(6)
+                .saturating_add(input.num_rows().saturating_mul(4096)),
         )?;
         for row in 0..input.num_rows() {
             let key = EventKey {
@@ -460,7 +481,8 @@ impl ReadView {
             input.num_rows(),
             payload
                 .len()
-                .saturating_add(input.num_rows().saturating_mul(1024)),
+                .saturating_mul(6)
+                .saturating_add(input.num_rows().saturating_mul(2048)),
         )?;
         for i in 0..input.num_rows() {
             let row = ResearchRow {
@@ -482,6 +504,25 @@ impl ReadView {
                 effective_until_ns: integer(&input, "effective_until_ns", i)?.map(Nanoseconds::new),
             };
             row.validate()?;
+            if row.field == "factor" {
+                let anchor: FactorAnchor =
+                    serde_json::from_value(metadata["factor_anchor"].clone())
+                        .map_err(|_| unavailable("缺少明确且已验证的复权原始锚点"))?;
+                if !exact_decimal_text(&anchor.factor)
+                    || !compare_decimal(&anchor.factor, "0").is_gt()
+                {
+                    return Err(unavailable("复权原始锚值必须为正"));
+                }
+                if self
+                    .factor_anchors
+                    .get(&row.instrument_id)
+                    .is_some_and(|a| a != &anchor)
+                {
+                    return Err(invalid("同一稳定身份的复权锚点不一致"));
+                }
+                self.factor_anchors
+                    .insert(row.instrument_id.clone(), anchor);
+            }
             if row.time_ns <= self.visibility.now_ns {
                 self.research.push(row);
             }
@@ -719,11 +760,20 @@ impl ReadView {
             let replace = selected
                 .get(&security)
                 .is_none_or(|(p, t, _)| (&order_period, public) > (p, *t));
+            if selected
+                .get(&security)
+                .is_some_and(|(p, t, _)| (&order_period, public) == (p, *t))
+            {
+                return Err(unavailable("同一公开/报告边界存在无法唯一确定的修订记录"));
+            }
             if replace {
                 selected.insert(security, (order_period, public, value));
             }
         }
         let output: Vec<_> = if request.kind == "index_stocks" {
+            if members.is_empty() {
+                return Err(unavailable("此时点没有可验证的历史完整成员集合"));
+            }
             let latest = members
                 .iter()
                 .map(|(effective, public, _)| (*effective, *public))
@@ -747,6 +797,9 @@ impl ReadView {
             }
         }
         let mut output = filtered;
+        if request.kind == "index_stocks" && output.len() > request.limit {
+            return Err(limit());
+        }
         output.sort_by(|a, b| {
             for key in &request.order_by {
                 let field = key.trim_start_matches('-');
@@ -777,18 +830,17 @@ impl ReadView {
                 "复权锚点晚于模拟时间",
             ));
         }
-        for price in &mut self.prices {
-            let mut factors: Vec<_> = self
-                .research
-                .iter()
-                .filter(|r| {
-                    r.security == price.key.security.as_str()
-                        && r.field == "factor"
-                        && r.time_ns <= anchor
-                        && r.effective_from_ns <= anchor
-                        && r.unit == "verified_cumulative_factor"
-                })
-                .collect();
+        let mut grouped: BTreeMap<&str, Vec<&ResearchRow>> = BTreeMap::new();
+        for row in &self.research {
+            if row.field == "factor"
+                && row.time_ns <= anchor
+                && row.effective_from_ns <= anchor
+                && row.unit == "verified_cumulative_factor"
+            {
+                grouped.entry(&row.security).or_default().push(row);
+            }
+        }
+        for factors in grouped.values_mut() {
             factors.sort_by_key(|r| (r.effective_from_ns, r.time_ns));
             if factors
                 .iter()
@@ -799,16 +851,45 @@ impl ReadView {
             {
                 return Err(unavailable("同显示代码的复权因子不能跨稳定身份串接"));
             }
-            let factor = factors.iter().rev().find(|r| {
-                r.effective_from_ns <= price.key.time_ns
-                    && r.effective_until_ns
-                        .is_none_or(|end| price.key.time_ns < end)
-            });
-            let basis = if adjustment == Adjustment::Pre {
-                factors.last()
+            if factors.windows(2).any(|w| {
+                (w[0].effective_from_ns, w[0].time_ns) == (w[1].effective_from_ns, w[1].time_ns)
+            }) {
+                return Err(unavailable("同复权生效/公开边界存在无法唯一确定的修订"));
+            }
+        }
+        for price in &mut self.prices {
+            let factors = grouped
+                .get(price.key.security.as_str())
+                .ok_or_else(|| unavailable("缺少此标的的已验证因子"))?;
+            let factor_time = if price.kind == "bar" {
+                price.start_ns.unwrap_or(price.key.time_ns)
             } else {
-                factors.first()
+                price.key.time_ns
             };
+            let factor = factors.iter().rev().find(|r| {
+                r.effective_from_ns <= factor_time
+                    && r.effective_until_ns.is_none_or(|end| factor_time < end)
+            });
+            if price.kind == "bar"
+                && price.start_ns.is_some()
+                && (factors.iter().any(|r| {
+                    factor_time < r.effective_from_ns && r.effective_from_ns < price.key.time_ns
+                }) || factor.is_some_and(|r| {
+                    r.effective_until_ns
+                        .is_some_and(|end| end < price.key.time_ns)
+                }))
+            {
+                return Err(unavailable(
+                    "来源 Bar 跨复权生效边界，需要更细且已接受的输入",
+                ));
+            }
+            let origin = factors
+                .first()
+                .and_then(|f| self.factor_anchors.get(&f.instrument_id))
+                .ok_or_else(|| unavailable("缺少明确的复权原始锚点，不能以第一条现存因子替代"))?;
+            if origin.public_ns > anchor || origin.effective_ns > factor_time {
+                return Err(unavailable("复权原始锚点在此时点尚未公开/生效"));
+            }
             let parse = |f: Option<&&ResearchRow>| -> QfResult<ExactDecimal> {
                 let f = f.ok_or_else(|| unavailable("缺少已验证因子/锚点，不能研究复权"))?;
                 let value: ExactDecimal = f
@@ -822,7 +903,16 @@ impl ReadView {
                 Ok(value)
             };
             let factor = parse(factor)?;
-            let basis = parse(basis)?;
+            let basis = if adjustment == Adjustment::Pre {
+                parse(
+                    factors
+                        .iter()
+                        .rev()
+                        .find(|r| r.effective_until_ns.is_none_or(|end| anchor < end)),
+                )?
+            } else {
+                origin.factor.parse()?
+            };
             for field in ["open", "high", "low", "close", "price", "bid", "ask"] {
                 if let Some(value) = price.values.get_mut(field)
                     && let Some(text) = value.as_str()
@@ -875,7 +965,7 @@ impl ReadView {
         }
         let additional = records.len();
         self.bytes =
-            self.reservation(additional, additional.checked_mul(4096).ok_or_else(limit)?)?;
+            self.reservation(additional, additional.checked_mul(8192).ok_or_else(limit)?)?;
         for ((security, _), revisions) in records {
             let ((_, record), rows) = revisions
                 .into_iter()
@@ -993,6 +1083,13 @@ impl ReadView {
                 .ok_or_else(|| unavailable("桶缺失"))?;
             let mut row = rows[0].clone();
             let last = rows.last().ok_or_else(|| invalid("空桶"))?;
+            // At the current ns the bucket is completed only after its final
+            // source bar's complete key has been published. Missing historical
+            // slots can be marked later, but an unpublished final bar is not a
+            // completed empty/missing bucket.
+            if end == self.visibility.now_ns && last.key.time_ns < end {
+                continue;
+            }
             row.key.time_ns = end;
             row.start_ns = Some(bucket.start_ns);
             row.values.insert(

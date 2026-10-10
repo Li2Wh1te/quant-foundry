@@ -121,11 +121,25 @@ class _DataSession:
     D12 supplies Client over the sole _transport, D04/D13 choose accepted routes.
     """
     def __init__(self, client, *, universe, frequency, market_routes, research_routes=None,
-                 calendar=(), max_rows=10000, max_bytes=64*1024*1024, cache_bytes=8*1024*1024):
+                 calendar=(), max_rows=10000, max_bytes=64*1024*1024, cache_bytes=8*1024*1024,
+                 run_data_budget_bytes=None):
         if (type(max_rows) is not int or not 1 <= max_rows <= _native.MAX_VIEW_ROWS
                 or type(max_bytes) is not int or not 1 <= max_bytes <= _native.MAX_VIEW_BYTES
                 or type(cache_bytes) is not int or not 1 <= cache_bytes <= max_bytes):
             raise _error('RESOURCE_LIMIT', '研究会话预算无效')
+        # Native working-set credits cover owned projections and output
+        # conversion. Cache and two IPC buffers must also fit the host's share
+        # of the complete run budget; an enlarged view needs an explicit grant.
+        packet_bytes = min(max_bytes, getattr(getattr(client, 'channel', None), 'arrow_budget', 64*1024*1024))
+        required = max_bytes + cache_bytes + 2*packet_bytes + 2*1024*1024
+        if run_data_budget_bytes is None:
+            if max_bytes > 64*1024*1024:
+                raise _error('RESOURCE_LIMIT', '扩大研究窗口必须明确分配全 run 的数据预算')
+            run_data_budget_bytes = required
+        if type(run_data_budget_bytes) is not int or run_data_budget_bytes < required:
+            raise _error('RESOURCE_LIMIT', '视图、转换、缓存和 IPC 峰值超过已分配 run 数据预算')
+        self.required_data_budget_bytes = required
+        self.run_data_budget_bytes = run_data_budget_bytes
         self.client, self.universe, self.frequency = client, tuple(universe), frequency
         self.allowed_securities = frozenset(universe)
         self.market_routes, self.research_routes = dict(market_routes), dict(research_routes or {})
@@ -245,6 +259,13 @@ def _time(value, active, *, start=False):
         return int(sessions[0]['session']['open_ns' if start else 'close_ns'])
     if not isinstance(value, (str, datetime)) or isinstance(value, bool):
         raise _error('INVALID_CONTRACT', '时间需要 UTC 纳秒整数或有时区 datetime/ISO 字符串')
+    if type(value) is str:
+        match = re.fullmatch(r'[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt ][0-9]{2}:[0-9]{2}'
+            r'(?::[0-9]{2}(?:\.([0-9]+))?)?(?:[Zz]|[+-][0-9]{2}(?::?[0-9]{2})?)', value) if len(value) <= 128 else None
+        if match is None:
+            raise _error('INVALID_CONTRACT', '时间字符串必须是有时区的有界 ISO 时间')
+        if match[1] is not None and len(match[1]) > 9:
+            raise _error('NUMERIC_RANGE_UNSUPPORTED', 'ISO 时间超出纳秒精度，不能无声截断')
     try:
         stamp = pd.Timestamp(value)
         if stamp.tzinfo is None:
@@ -357,8 +378,12 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
             _market_fetch(active, securities, start, end, source_count, source, route, selected)
         if adjustment != 'none':
             _research_fetch(active, 'adjustment', securities, ['factor'], end)
-        rows = json.loads(active.view.prices_json(_json(request), source, _json(active.session.calendar)))
-        encoded = json.dumps(dict(rows=rows, units=active.session.units, limitations=active.session.limitations), ensure_ascii=False)
+        raw = active.view.prices_json(_json(request), source, _json(active.session.calendar))
+        # Serialize metadata around native JSON without first building another
+        # full Python row graph, dumping it and then parsing it a second time.
+        encoded = '{{"rows":{},"units":{},"limitations":{}}}'.format(
+            raw, _json(active.session.units), _json(active.session.limitations))
+        del raw
         dependencies = active.session.check()
         key = ('price', _json(active.boundary), _json(request), dependencies)
         if len(encoded.encode()) <= active.session.cache_bytes:

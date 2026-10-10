@@ -4,6 +4,7 @@ Bindings are accepted, code-owned facts about an existing CurrentStore layout.
 Current formal observations lack required PIT facts and remain explicit denials.
 """
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -47,6 +48,7 @@ class ResearchBinding:
     selectors: tuple = ()
     guards: tuple = ()
     time_offset_ns: int = 0
+    factor_anchor: Mapping[str, str] | None = None
     identity_fields: frozenset = field(default=frozenset(SCHEMA.names), init=False)
 
     def __post_init__(self):
@@ -57,12 +59,26 @@ class ResearchBinding:
             raise GatewayError('INVALID_CONTRACT', '研究投影字段/口径契约无效')
         for name in ('fields', 'constants', 'field_contract'):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
+        if self.factor_anchor is not None:
+            object.__setattr__(self, 'factor_anchor', MappingProxyType(dict(self.factor_anchor)))
 
     def validate_capability(self):
         if not {'verified_public_time', 'stable_identity', 'verified_effective_dates'} <= set(self.accepted_facts):
             raise GatewayError('CAPABILITY_UNAVAILABLE', '研究公开/生效时间或稳定身份依据缺失')
         if self.kind == 'adjustment' and 'verified_cumulative_anchor' not in self.accepted_facts:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '研究复权因子公式和锚点尚未验证')
+        if self.kind == 'adjustment':
+            anchor = self.factor_anchor
+            try:
+                if anchor is None or set(anchor) != {'factor', 'effective_ns', 'public_ns'}:
+                    raise ValueError()
+                value = Decimal(anchor['factor'])
+                if (type(anchor['factor']) is not str or len(anchor['factor']) > 128
+                        or not value.is_finite() or value <= 0):
+                    raise ValueError()
+                _ns(anchor['effective_ns']); _ns(anchor['public_ns'])
+            except (ValueError, TypeError, InvalidOperation):
+                raise GatewayError('CAPABILITY_UNAVAILABLE', '复权原始锚值及真实公开/生效边界尚未明确') from None
         if self.kind == 'index_stocks' and 'verified_complete_sets' not in self.accepted_facts:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '历史成员集合完整性尚未验证')
 
@@ -98,10 +114,13 @@ class ResearchBinding:
 
     def batch_metadata(self, table):
         first, last = (pc.min(table['time_ns']).as_py(), pc.max(table['time_ns']).as_py()) if table.num_rows else (None, None)
-        return dict(schema_id='qf.research.v1', time_unit='utc_nanoseconds', rows=table.num_rows,
+        metadata = dict(schema_id='qf.research.v1', time_unit='utc_nanoseconds', rows=table.num_rows,
             actual_scope=dict(start_ns=None if first is None else str(first), end_ns=None if last is None else str(last),
                               securities=pc.unique(table['security']).to_pylist()),
             limitations=list(self.limitations), fields={k: list(v) for k, v in self.field_contract.items()})
+        if self.kind == 'adjustment':
+            metadata['factor_anchor'] = dict(self.factor_anchor)
+        return metadata
 
 
 class ResearchDataGateway(RunDataGateway):

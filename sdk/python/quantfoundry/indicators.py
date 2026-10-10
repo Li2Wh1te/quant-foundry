@@ -24,7 +24,10 @@ def _values(values):
         if value is None or value is pd.NA or isinstance(value, (float, np.floating)) and math.isnan(value):
             result.append(None)
         elif isinstance(value, (Real, Decimal)) and not isinstance(value, (bool, np.bool_)):
-            number = float(value)
+            try:
+                number = float(value)
+            except (ValueError, OverflowError):
+                raise _error('NUMERIC_RANGE_UNSUPPORTED', '指标输入不能表示为有限 float64', 'indicator') from None
             if not math.isfinite(number):
                 raise _error('NUMERIC_RANGE_UNSUPPORTED', '指标只接受有限数值和明确缺失', 'indicator')
             result.append(number)
@@ -49,6 +52,8 @@ def _calculate(kind, values=(), **parameters):
             data[name] = [p['value'] for p in points]
             data[name+'_status'] = [p['status'] for p in points]
         frame = DataFrame(data, index=index)
+        for name in rows:
+            frame[name] = frame[name].astype('float64')
     else:
         frame = DataFrame(rows, columns=['value', 'status'], index=index)
         frame['value'] = frame['value'].astype('float64')
