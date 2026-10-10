@@ -51,6 +51,15 @@ pub trait ExecutionPort: AccountPort {
     /// D06/D09 recheck GTC, apply due corporate actions/rules, release cancelled
     /// orders and return notifications. Called after AccountPort::settle.
     fn session_start(&mut self, session: &CalendarSession) -> QfResult<Vec<Order>>;
+    /// D09 registers close-date entitlements/payments after the last market
+    /// event, including halted securities with no event. D06 stages any order
+    /// notifications atomically with the account. Default preserves source
+    /// compatibility; it does not certify runtime accounting integration.
+    /// A D09-backed adapter must also forward AccountPort::check_session_end;
+    /// the driver checks it before any closing-boundary callback can run.
+    fn session_end(&mut self, _session: &CalendarSession) -> QfResult<Vec<Order>> {
+        Ok(Vec::new())
+    }
 }
 pub trait RulesPort<R> {
     /// D02 facts/catalogue are consumed by the concrete matcher, never replaced
@@ -903,6 +912,35 @@ where
         }
         Ok(())
     }
+    fn close_accounts(&mut self, session: &CalendarSession, config: &EngineConfig) -> QfResult<()> {
+        self.ports.control.check()?;
+        self.clock.advance(session.session.close_ns)?;
+        self.progress.now_ns = session.session.close_ns;
+        let closing_orders = self.ports.execution.session_end(session)?;
+        // A concrete D09 postcondition rejects a forgotten/no-op closing hook
+        // even when there are no market events or strategy account queries.
+        self.ports
+            .execution
+            .check_session_end(&session.session.key)?;
+        if closing_orders.len() > config.limits.max_notifications_per_boundary {
+            return Err(error(
+                ErrorCode::ResourceLimit,
+                "session_end",
+                "会话关闭通知超过预算",
+            ));
+        }
+        for order in closing_orders {
+            self.ports.control.check()?;
+            enqueue(
+                Notification::Order(order),
+                &mut self.pending,
+                &mut self.output,
+                &mut self.budget,
+                &config.limits,
+            )?;
+        }
+        Ok(())
+    }
     fn match_event(
         &mut self,
         event: &MarketEvent,
@@ -1077,6 +1115,17 @@ where
         }
         for fill in outcome.fills {
             self.ports.control.check()?;
+            let assessed = self.ports.execution.assess_fill(&fill)?;
+            let mut expected = fill;
+            expected.fee = assessed.fee;
+            if assessed != expected || assessed.fee.is_negative() {
+                return Err(error(
+                    ErrorCode::InvalidContract,
+                    "account_fill",
+                    "账户费用核定不能改变成交身份、价格、数量或时间",
+                ));
+            }
+            let fill = assessed;
             self.ports.execution.apply_fill(&fill)?;
             enqueue(
                 Notification::Trade(fill),
@@ -1182,6 +1231,7 @@ where
                 (index, false),
             )?;
             let mut timer_cursor = 0;
+            let mut session_closed = false;
             loop {
                 self.ports.control.check()?;
                 let next_time = engine
@@ -1205,6 +1255,11 @@ where
                     // belong to the next session even with an empty source.
                     let closing = timer.time_ns >= session.session.close_ns;
                     self.budget = BoundaryBudget::new();
+                    if closing && !session_closed {
+                        self.close_accounts(session, config)?;
+                        session_closed = true;
+                        self.drain(config, calendar, index, true)?;
+                    }
                     self.timers(
                         &intraday,
                         &mut timer_cursor,
@@ -1247,6 +1302,10 @@ where
                     }
                     // ALL accounts and market publications at this Bar end are
                     // complete before notifications, timers, or handle_data.
+                    if time >= session.session.close_ns && !session_closed {
+                        self.close_accounts(session, config)?;
+                        session_closed = true;
+                    }
                     self.drain(config, calendar, index, time >= session.session.close_ns)?;
                     self.timers(
                         &intraday,
@@ -1278,6 +1337,10 @@ where
                             .merge
                             .peek(self.ports.control)?
                             .is_none_or(|next| next.key().time_ns > session.session.close_ns);
+                    if closing && !session_closed {
+                        self.close_accounts(session, config)?;
+                        session_closed = true;
+                    }
                     self.drain(config, calendar, index, closing)?;
                     if self.ports.strategy.handlers().ticks
                         && self
@@ -1303,10 +1366,13 @@ where
                     }
                 }
             }
-            // Last market event is matched first, then DAY expires, then all
-            // after_close callbacks. Expiry notifications also belong next DAY.
-            self.budget = BoundaryBudget::new();
-            self.clock.advance(session.session.close_ns)?;
+            // Close actions run once after the last market event, before any
+            // closing-boundary callback. An empty closing boundary still runs.
+            // DAY expires before after_close; new closing DAY orders are next.
+            if !session_closed {
+                self.budget = BoundaryBudget::new();
+                self.close_accounts(session, config)?;
+            }
             let expired = self.ports.execution.expire_day(&session.session.key)?;
             if expired.len() > config.limits.max_notifications_per_boundary {
                 return Err(error(

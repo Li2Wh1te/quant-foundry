@@ -416,7 +416,7 @@ impl TradingRule {
         let upper = upper.max(reference.get().checked_add(tick)?);
         Ok((Price::new(lower)?, Price::new(upper)?))
     }
-    fn price_on_grid(&self, price: Price) -> QfResult<bool> {
+    pub(crate) fn price_on_grid(&self, price: Price) -> QfResult<bool> {
         let units =
             price
                 .get()
