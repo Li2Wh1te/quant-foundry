@@ -2,6 +2,12 @@ use crate::types::{ExactDecimal, Money};
 use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 
+pub mod catalog;
+pub mod date;
+pub mod dividends;
+pub mod fees;
+pub mod market;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct CostOverrides {
@@ -42,6 +48,7 @@ pub enum FeeComponentKind {
     StampDuty,
     TransferFee,
     RegulatoryFee,
+    HandlingFee,
 }
 /// D02 supplies dated applicability/evidence. Explicit zero is allowed; missing
 /// facts have no Default implementation and cannot silently become zero.
@@ -85,6 +92,7 @@ impl FeeConfig {
             || self.commission_rate > ExactDecimal::ONE
             || self.minimum_commission.is_negative()
             || self.settlement_scale > 28
+            || self.components.len() > 256
         {
             return Err(bad());
         }
