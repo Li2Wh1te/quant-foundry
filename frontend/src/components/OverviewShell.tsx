@@ -81,7 +81,10 @@ export function OverviewShell({ children, title = "数据运营总览", section 
   }
   function navItem(item: typeof toolItems[number], tool = false) {
     const Icon = item.icon;
-    const active=item.to === location.pathname || (workspace && item.to === "/admin/strategies" && location.pathname.startsWith("/admin/strategies/"));
+    // A persistent data detail is still inside the data-assets module.
+    const active=item.to === location.pathname
+      || (item.to === "/admin/data-assets" && location.pathname.startsWith("/admin/data-assets/"))
+      || (workspace && item.to === "/admin/strategies" && location.pathname.startsWith("/admin/strategies/"));
     const className = `qfo-nav-item${tool ? " qfo-tool-link" : ""}${active ? " qfo-active" : ""}${!item.to ? " qfo-nav-disabled" : ""}`;
     const label = item.to ? item.label : `${item.label}（尚未开放）`;
     const content = <><Icon aria-hidden="true" /><span>{item.label}</span></>;
