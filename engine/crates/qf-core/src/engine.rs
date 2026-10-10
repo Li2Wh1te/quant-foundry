@@ -7,15 +7,15 @@ use crate::clock::{
     SessionCalendar, SimClock, Visibility,
 };
 use crate::data::{DataRequest, DependencyCheck};
-use crate::matching::{Fill, Matcher};
+use crate::matching::{Fill, FillAllowance, FillBudget, MatchOutcome, Matcher};
 use crate::orders::{Order, OrderIntent, OrderResult, OrderStatus, TimeInForce};
 use crate::results::{ResultBatch, ResultRecord, ResultSink};
 use crate::run::{ExecutionModel, Frequency, RunConfig, RunOutcome};
 use crate::strategy::{CommandSink, ReadView, StrategyHost};
 use crate::types::keys::ChannelKey;
 use crate::types::{
-    EventIdentity, EventKey, EventPhase, MarketEvent, Nanoseconds, SecurityKey, Sequence,
-    SessionKey,
+    EventIdentity, EventKey, EventPhase, MarketEvent, Nanoseconds, Price, Quantity, QuantityStep,
+    SecurityKey, Sequence, SessionKey,
 };
 use crate::{ErrorCode, QfError, QfResult};
 use std::cell::RefCell;
@@ -38,6 +38,80 @@ pub trait ExecutionPort: AccountPort {
         activation: &OrderActivation,
     ) -> QfResult<OrderResult>;
     fn cancel_order(&mut self, order_id: &str) -> QfResult<OrderResult>;
+    fn cancel_order_at(&mut self, order_id: &str, _at: &EventKey) -> QfResult<OrderResult> {
+        self.cancel_order(order_id)
+    }
+    /// D06 returns ALL atomic command changes (old target cancellations too).
+    /// None preserves the one-result notification behavior of older adapters.
+    fn command_changes(&mut self) -> Option<Vec<Order>> {
+        None
+    }
+    fn corporate_effects(&mut self) -> Vec<crate::results::CorporateActionEvent> {
+        Vec::new()
+    }
+    fn fill_allowance(
+        &self,
+        _id: &str,
+        _requested: Quantity,
+        _price: Price,
+        _step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        Err(error(
+            ErrorCode::CapabilityUnavailable,
+            "fill_budget",
+            "真实账户候选价格预算未接入",
+        ))
+    }
+    fn next_trade_id(&self, _offset: usize) -> QfResult<String> {
+        Err(error(
+            ErrorCode::CapabilityUnavailable,
+            "fill_budget",
+            "全运行有序成交 ID 未接入",
+        ))
+    }
+    fn fill_allowance_after(
+        &self,
+        prior: &[Fill],
+        id: &str,
+        requested: Quantity,
+        price: Price,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        if !prior.is_empty() {
+            return Err(error(
+                ErrorCode::CapabilityUnavailable,
+                "fill_budget",
+                "累计候选账户预算未接入",
+            ));
+        }
+        self.fill_allowance(id, requested, price, step)
+    }
+    /// Concrete D06 overrides with one revision-bound account/order commit.
+    fn apply_match_outcome(
+        &mut self,
+        _event: &MarketEvent,
+        _eligible: &[Order],
+        mut outcome: MatchOutcome,
+    ) -> QfResult<MatchOutcome> {
+        for fill in &mut outcome.fills {
+            let assessed = self.assess_fill(fill)?;
+            let mut expected = fill.clone();
+            expected.fee = assessed.fee;
+            if assessed != expected || assessed.fee.is_negative() {
+                return Err(error(
+                    ErrorCode::InvalidContract,
+                    "account_fill",
+                    "账户费用核定不能改变成交身份、价格、数量或时间",
+                ));
+            }
+            self.apply_fill(&assessed)?;
+            *fill = assessed;
+        }
+        for order in &outcome.orders {
+            self.transition(order)?;
+        }
+        Ok(outcome)
+    }
     fn order(&self, order_id: &str) -> QfResult<Order>;
     /// Return only this security, in D06's stable order priority, bounded by
     /// limit. Do not scan/clone the entire portfolio for every market event.
@@ -59,6 +133,32 @@ pub trait ExecutionPort: AccountPort {
     /// the driver checks it before any closing-boundary callback can run.
     fn session_end(&mut self, _session: &CalendarSession) -> QfResult<Vec<Order>> {
         Ok(Vec::new())
+    }
+}
+struct ExecutionBudget<'a, E>(&'a E);
+impl<E: ExecutionPort> FillBudget for ExecutionBudget<'_, E> {
+    fn allowance(
+        &self,
+        id: &str,
+        requested: Quantity,
+        price: Price,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0.fill_allowance(id, requested, price, step)
+    }
+    fn trade_id(&self, offset: usize) -> QfResult<String> {
+        self.0.next_trade_id(offset)
+    }
+    fn allowance_after(
+        &self,
+        prior: &[Fill],
+        id: &str,
+        requested: Quantity,
+        price: Price,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0
+            .fill_allowance_after(prior, id, requested, price, step)
     }
 }
 pub trait RulesPort<R> {
@@ -524,7 +624,18 @@ impl<E: ExecutionPort, C: RunControl> ScopedCommands<'_, E, C> {
                 "活动订单超过预算",
             )));
         }
-        if let Some(id) = result.order_id.as_ref().filter(|_| !result.unchanged) {
+        let changes = self.execution.borrow_mut().command_changes();
+        if let Some(changes) = changes {
+            for order in changes {
+                enqueue(
+                    Notification::Order(order),
+                    self.pending,
+                    self.output,
+                    self.budget,
+                    self.limits,
+                )?;
+            }
+        } else if let Some(id) = result.order_id.as_ref().filter(|_| !result.unchanged) {
             let order = self
                 .execution
                 .borrow()
@@ -601,10 +712,41 @@ impl<E: ExecutionPort, C: RunControl> CommandSink for ScopedCommands<'_, E, C> {
     fn cancel(&mut self, order_id: &str) -> QfResult<OrderResult> {
         self.checkpoint()?;
         crate::types::keys::label(order_id, 128)?;
+        let order = { self.execution.borrow().order(order_id) };
+        let security = match order {
+            Ok(order) => order.security,
+            Err(failure)
+                if matches!(
+                    failure.code,
+                    ErrorCode::InvalidOrder | ErrorCode::CapabilityUnavailable
+                ) =>
+            {
+                let terminal = self.execution.borrow_mut().cancel_order(order_id);
+                return match terminal {
+                    Ok(result) => Ok(result),
+                    Err(_) => Ok(rejected(failure)),
+                };
+            }
+            Err(failure) => return Err(self.budget.fail(failure)),
+        };
+        let at = EventKey {
+            time_ns: self.visibility.now_ns,
+            phase: EventPhase::Callback,
+            security,
+            identity: EventIdentity {
+                source_session: self.calendar.sessions()[self.session_index]
+                    .session
+                    .key
+                    .clone(),
+                channel: ChannelKey::new("strategy_commands")?,
+                sequence: Some(Sequence::new(*self.command_sequence)),
+                stable_input_sequence: Sequence::new(*self.command_sequence),
+            },
+        };
         let result = self
             .execution
             .borrow_mut()
-            .cancel_order(order_id)
+            .cancel_order_at(order_id, &at)
             .map_err(|e| self.budget.fail(e))?;
         self.notify_result(&result)?;
         Ok(result)
@@ -922,6 +1064,7 @@ where
         self.ports
             .execution
             .check_session_end(&session.session.key)?;
+        self.write_corporate_effects(config)?;
         if closing_orders.len() > config.limits.max_notifications_per_boundary {
             return Err(error(
                 ErrorCode::ResourceLimit,
@@ -938,6 +1081,14 @@ where
                 &mut self.budget,
                 &config.limits,
             )?;
+        }
+        Ok(())
+    }
+    fn write_corporate_effects(&mut self, config: &EngineConfig) -> QfResult<()> {
+        for effect in self.ports.execution.corporate_effects() {
+            self.ports.control.check()?;
+            self.output
+                .push(ResultRecord::CorporateAction(effect), &config.limits)?;
         }
         Ok(())
     }
@@ -1031,7 +1182,12 @@ where
             })
             .collect();
         let rules = self.ports.rules.for_event(event, session)?;
-        let outcome = self.ports.matcher.consume(event, &eligible, &rules)?;
+        let outcome = self.ports.matcher.consume_with_budget(
+            event,
+            &eligible,
+            &rules,
+            &ExecutionBudget(&*self.ports.execution),
+        )?;
         if outcome.fills.len().saturating_add(outcome.orders.len())
             > config
                 .limits
@@ -1113,20 +1269,13 @@ where
                 "成交必须带有对应订单数量更新",
             ));
         }
+        self.ports.control.check()?;
+        let outcome = self
+            .ports
+            .execution
+            .apply_match_outcome(event, &eligible, outcome)?;
         for fill in outcome.fills {
             self.ports.control.check()?;
-            let assessed = self.ports.execution.assess_fill(&fill)?;
-            let mut expected = fill;
-            expected.fee = assessed.fee;
-            if assessed != expected || assessed.fee.is_negative() {
-                return Err(error(
-                    ErrorCode::InvalidContract,
-                    "account_fill",
-                    "账户费用核定不能改变成交身份、价格、数量或时间",
-                ));
-            }
-            let fill = assessed;
-            self.ports.execution.apply_fill(&fill)?;
             enqueue(
                 Notification::Trade(fill),
                 &mut self.pending,
@@ -1137,7 +1286,6 @@ where
         }
         for order in outcome.orders {
             self.ports.control.check()?;
-            self.ports.execution.transition(&order)?;
             enqueue(
                 Notification::Order(order),
                 &mut self.pending,
@@ -1192,6 +1340,7 @@ where
             self.active_sessions.insert(session.session.key.clone());
             self.ports.execution.settle(&session.session.key)?;
             let opening_orders = self.ports.execution.session_start(session)?;
+            self.write_corporate_effects(config)?;
             if opening_orders.len() > config.limits.max_notifications_per_boundary {
                 return Err(error(
                     ErrorCode::ResourceLimit,

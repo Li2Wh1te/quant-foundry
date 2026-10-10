@@ -28,7 +28,7 @@ def rust_wire_stub() -> str:
                 "AccountView", "RunConfigFields", "CostOverrides", "FeeConfig", "DatedFeeComponent",
                 "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
                 "DependencyState", "DependencyContext", "DataRequest", "ActualScope", "BatchMetadata", "RunScope",
-                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError"}
+                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent"}
     aliases = {"String":"str", "bool":"bool", "u64":"int", "u32":"int", "u16":"int", "i64":"int",
                "Nanoseconds":"str", "Sequence":"str", "SecurityKey":"str", "SessionKey":"str", "ChannelKey":"str",
                "Quantity":"int", "Money":"str", "Price":"str", "ExactDecimal":"str", "Value":"Any", "FiniteStatistic":"float",
@@ -44,6 +44,7 @@ def rust_wire_stub() -> str:
                "TimeInForce":"Literal['day', 'gtc']", "EventPhase":"Literal['settlement', 'market', 'notification', 'callback']",
                "Adjustment":"Literal['none', 'pre', 'post']", "RunStatus":"Literal['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled']",
                "OrderStatus":"Literal['accepted', 'open', 'partially_filled', 'filled', 'cancelled', 'expired', 'rejected']",
+               "CorporateEffectKind":"Literal['registered', 'ex_dividend', 'paid_dividend', 'shares_changed', 'rights_not_participated']",
                "FeeComponentKind":"Literal['stamp_duty', 'transfer_fee', 'regulatory_fee', 'handling_fee']", "LogLevel":"Literal['info', 'warning', 'error']"}
 
     def split(value: str) -> list[str]:
@@ -66,10 +67,11 @@ def rust_wire_stub() -> str:
             return aliases[value]
         if value in selected or value in {"OrderStyle", "IntentValue", "FeeFact", "RecordValue", "ResultRecord", "RuleOrigin"}:
             return value
-        match = re.fullmatch(r"(Option|Vec|Map|BTreeMap)<(.*)>", value)
+        match = re.fullmatch(r"(Option|Vec|Map|BTreeMap|Box)<(.*)>", value)
         if match:
             inner = split(match[2])
             if match[1] == "Option": return convert(inner[0]) + " | None"
+            if match[1] == "Box": return convert(inner[0])
             if match[1] == "Vec": return "list[" + convert(inner[0]) + "]"
             return "dict[" + ", ".join(map(convert, inner)) + "]"
         raise ValueError(f"unmapped Rust wire type: {value}")
@@ -181,13 +183,16 @@ class TradeRecord(TypedDict):
 class PositionRecord(TypedDict):
     kind: Literal['position']
     record: PositionView
+class CorporateActionRecord(TypedDict):
+    kind: Literal['corporate_action']
+    record: CorporateActionEvent
 class UserRecordEnvelope(TypedDict):
     kind: Literal['record']
     record: UserRecord
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
 ''')
     return "\n".join(output)
 

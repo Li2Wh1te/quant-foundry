@@ -385,6 +385,7 @@ impl ExecutionPort for Execution {
         self.orders.insert(
             id.clone(),
             Order {
+                updated_at: None,
                 order_id: id.clone(),
                 security: intent.security.clone(),
                 side: intent.side,

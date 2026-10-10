@@ -137,6 +137,7 @@ impl ExecutionPort for Execution {
         request.limit_price = limit_price;
         self.account.reserve_order(request)?;
         let order = Order {
+            updated_at: None,
             order_id: id.clone(),
             security: intent.security.clone(),
             side: intent.side,

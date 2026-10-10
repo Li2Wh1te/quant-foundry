@@ -184,6 +184,30 @@ impl ExactDecimal {
         Quantity::new(i64::cast_from(result)) // Bounds above prove this cast lossless.
     }
 
+    /// floor(value * proportion / price / step) * step, without rounding an
+    /// intermediate target amount. D06 percent targets use the original rational.
+    pub fn legal_value_quantity(
+        value: Self,
+        proportion: Self,
+        price: Self,
+        step: QuantityStep,
+    ) -> QfResult<Quantity> {
+        if value.is_negative() || proportion.is_negative() || price <= Self::ZERO {
+            return Err(range());
+        }
+        let top = I512::cast_from(value.0.mantissa())
+            * I512::cast_from(proportion.0.mantissa())
+            * power(price.scale());
+        let bottom = I512::cast_from(price.0.mantissa())
+            * power(value.scale() + proportion.scale())
+            * I512::cast_from(step.get());
+        let result = (top / bottom) * I512::cast_from(step.get());
+        if result > I512::cast_from(i64::MAX) {
+            return Err(range());
+        }
+        Quantity::new(i64::cast_from(result))
+    }
+
     /// Cost total is authoritative; the final sale releases all residual cost.
     pub fn release_cost(total: Self, held: Quantity, sold: Quantity) -> QfResult<(Self, Self)> {
         if total.is_negative() || held.get() == 0 || sold > held {

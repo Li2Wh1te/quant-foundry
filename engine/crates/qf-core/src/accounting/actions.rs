@@ -125,7 +125,8 @@ pub struct CorporateAction {
     pub ex_raw_mark: Option<ValuationMark>,
     pub origin: RuleOrigin,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CorporateEffectKind {
     Registered,
     ExDividend,
@@ -133,7 +134,8 @@ pub enum CorporateEffectKind {
     SharesChanged,
     RightsNotParticipated,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorporateEffect {
     pub action_id: String,
     pub security: SecurityKey,
