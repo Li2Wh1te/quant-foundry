@@ -60,5 +60,20 @@ class TransportTests(unittest.TestCase):
             client.call('check',{})
         thread.join(); server.close()
 
+    def test_error_and_wrong_response_phase_close_endpoint_immediately(self):
+        for status,body,code in (
+            ('error',dict(code='DATA_CHANGED',operation='data_gateway',message='changed',scope={}), 'DATA_CHANGED'),
+            ('request',{},'INVALID_CONTRACT'),
+            ('error',dict(code=['invalid'],operation='data_gateway',message='changed',scope={}), 'INVALID_CONTRACT')):
+            a,b=socket.socketpair(); client=ipc.Client(ipc.Channel(a),'run'); server=ipc.Channel(b)
+            def reply():
+                server.receive(); server.send(ipc.Frame('run',1,'check',status,body))
+            thread=threading.Thread(target=reply); thread.start()
+            with self.assertRaises(ipc.TransportError) as caught:
+                client.call('check',{})
+            self.assertEqual(caught.exception.code,code)
+            self.assertTrue(client.channel.closed)
+            thread.join(); server.close()
+
 if __name__=='__main__':
     unittest.main()

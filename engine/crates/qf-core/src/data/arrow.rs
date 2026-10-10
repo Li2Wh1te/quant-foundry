@@ -92,16 +92,35 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
         match message.header_type() {
             MessageHeader::Schema if schemas == 0 && batches == 0 && body == 0 => {
                 let schema = message.header_as_schema().ok_or_else(invalid)?;
+                if schema.endianness() != arrow_ipc::Endianness::Little {
+                    return Err(invalid());
+                }
                 let fields = schema.fields().ok_or_else(invalid)?;
                 if fields.len() != TEXT.len() + INTS.len() + SEQS.len() {
                     return Err(invalid());
                 }
-                for f in fields {
+                for (index, f) in fields.iter().enumerate() {
                     if f.dictionary().is_some() || f.children().is_some_and(|c| !c.is_empty()) {
                         return Err(invalid());
                     }
-                    if !matches!(f.type_type(), arrow_ipc::Type::Utf8 | arrow_ipc::Type::Int) {
+                    let name = TEXT
+                        .get(index)
+                        .or_else(|| INTS.get(index - TEXT.len()))
+                        .or_else(|| SEQS.get(index - TEXT.len() - INTS.len()));
+                    if f.name() != name.copied() {
                         return Err(invalid());
+                    }
+                    if index < TEXT.len() {
+                        if f.type_type() != arrow_ipc::Type::Utf8 {
+                            return Err(invalid());
+                        }
+                    } else {
+                        let integer = f.type_as_int().ok_or_else(invalid)?;
+                        if integer.bitWidth() != 64
+                            || integer.is_signed() != (index < TEXT.len() + INTS.len())
+                        {
+                            return Err(invalid());
+                        }
                     }
                 }
                 schemas += 1;
@@ -109,7 +128,10 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
             MessageHeader::RecordBatch if schemas == 1 && batches == 0 => {
                 let batch = message.header_as_record_batch().ok_or_else(invalid)?;
                 let rows = usize::try_from(batch.length()).map_err(|_| invalid())?;
-                if rows > max_rows || batch.compression().is_some() {
+                if rows > max_rows
+                    || batch.compression().is_some()
+                    || batch.variadicBufferCounts().is_some_and(|v| !v.is_empty())
+                {
                     return Err(limit());
                 }
                 let nodes = batch.nodes().ok_or_else(invalid)?;
@@ -125,14 +147,49 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
                     }
                 }
                 let buffers = batch.buffers().ok_or_else(invalid)?;
-                if buffers.len() > 3 * (TEXT.len() + INTS.len() + SEQS.len()) {
+                if buffers.len() != 3 * TEXT.len() + 2 * (INTS.len() + SEQS.len()) {
                     return Err(invalid());
                 }
+                let mut previous_end = 0;
                 for b in buffers {
                     let offset = usize::try_from(b.offset()).map_err(|_| invalid())?;
                     let length = usize::try_from(b.length()).map_err(|_| invalid())?;
-                    if offset.checked_add(length).is_none_or(|end| end > body) {
+                    let end = offset.checked_add(length).ok_or_else(limit)?;
+                    // Arrow's default reader copies misaligned buffers before
+                    // validating array sizes. Disallow overlap/alignment tricks
+                    // here so one body cannot cause many oversized copies.
+                    if offset % 8 != 0 || offset < previous_end || end > body {
                         return Err(invalid());
+                    }
+                    previous_end = end;
+                }
+                let bitmap = rows.div_ceil(8);
+                let mut buffer = 0;
+                for column in 0..nodes.len() {
+                    let validity =
+                        usize::try_from(buffers.get(buffer).length()).map_err(|_| invalid())?;
+                    if (nodes.get(column).null_count() > 0 && validity < bitmap)
+                        || (validity != 0 && (validity < bitmap || validity > bitmap + 7))
+                    {
+                        return Err(invalid());
+                    }
+                    let values =
+                        usize::try_from(buffers.get(buffer + 1).length()).map_err(|_| invalid())?;
+                    if column < TEXT.len() {
+                        if values != (rows + 1) * 4 {
+                            return Err(invalid());
+                        }
+                        let strings = usize::try_from(buffers.get(buffer + 2).length())
+                            .map_err(|_| invalid())?;
+                        if strings > rows * 128 {
+                            return Err(limit());
+                        }
+                        buffer += 3;
+                    } else {
+                        if values != rows * 8 {
+                            return Err(invalid());
+                        }
+                        buffer += 2;
                     }
                 }
                 batches += 1;

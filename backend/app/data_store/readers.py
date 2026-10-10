@@ -103,11 +103,15 @@ class ArrowPage:
 
 
 def _request(spec, query):
-    return fingerprint({'dataset': spec.name, 'schema': spec.schema_id, 'rule': spec.rule,
-                        'partitions': sorted(query.partitions), 'lower': query.lower,
-                        'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size,
-                        'require_qualified': query.require_qualified,
-                        'descending': query.descending, 'filters': query.filters})
+    request = {'dataset': spec.name, 'schema': spec.schema_id, 'rule': spec.rule,
+               'partitions': sorted(query.partitions), 'lower': query.lower,
+               'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size,
+               'require_qualified': query.require_qualified}
+    # Existing default queries retain their signed cursor identity across this
+    # additive projection change. New variants remain distinct and bound.
+    if query.descending or query.filters:
+        request.update(descending=query.descending, filters=query.filters)
+    return fingerprint(request)
 
 
 def _encode(store, request, generations, last):

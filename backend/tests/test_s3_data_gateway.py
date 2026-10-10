@@ -20,7 +20,7 @@ from app.backtest_service.data_gateway import (AuthorizedRun, GatewayError, MARK
     MarketBinding, RunDataGateway, serve)
 from app.backtest_service.market_projection import current_market_bindings, synthetic_market_binding
 from app.data_store.adapters.registry import SYNTHETIC
-from app.data_store.catalog import SourceUpdate
+from app.data_store.catalog import Issue, SourceUpdate
 from app.data_store.schema import DatasetSpec, fingerprint
 from app.data_store.limits import StoreLimits, MiB
 from app.data_store.tables import entry_status
@@ -192,7 +192,8 @@ def test_permissions_untrusted_controls_and_provider_basis(formal):
     protected=make_gateway(formal,current_market_bindings())
     c=protected.open(dict(run_id='isolated-run',universe=['A.SH']))
     for name in ('E50','E51','E52','E70'):
-        error('CAPABILITY_UNAVAILABLE',lambda:protected.declare(name,c))
+        denied=error('CAPABILITY_UNAVAILABLE',lambda:protected.declare(name,c))
+        assert denied.scope['binding']==name and denied.scope['capability_gap']
 
 @pytest.mark.parametrize('count_rows',[2,40])
 def test_lookback_cache_repeated_and_incremental_quality_checks(formal,count_rows):
@@ -489,3 +490,173 @@ def test_disconnect_during_actual_currentstore_read_interrupts_lock_and_owners(f
         with guard.commit(timeout_ms=100):
             pass
     assert not list((formal.files.root/'.scratch').rglob('*.parquet'))
+
+def test_pre_d04_signed_cursor_remains_valid_for_json_and_arrow(formal):
+    import base64
+    import hmac
+    from app.data_store.readers import Query
+    from app.data_store.values import control_json
+    spec,_,_=setup(formal,count=6)
+    query=Query(columns=('security','time_ns','sequence','price'),page_size=2)
+    first=formal.read(spec,query)
+    body=json.loads(base64.urlsafe_b64decode(first.next_cursor)[:-32])
+    # Independently reconstruct the request that main issued before D04.
+    body['request']=fingerprint(dict(dataset=spec.name,schema=spec.schema_id,rule=spec.rule,
+        partitions=['default'],lower=None,upper=None,columns=query.columns,
+        page_size=2,require_qualified=True))
+    encoded=control_json(body,max_bytes=6144).encode()
+    token=base64.urlsafe_b64encode(encoded+hmac.digest(formal.cursor_key,encoded,'sha256')).decode()
+    following=replace(query,cursor=token)
+    assert [r['sequence'] for r in formal.read(spec,following).rows]==[3,4]
+    assert formal.read_arrow(spec,following).table['sequence'].to_pylist()==[3,4]
+    from app.data_store.errors import DataStoreError
+    for changed in (replace(following,descending=True),replace(following,filters=(('time_ns','>=',BASE),))):
+        with pytest.raises(DataStoreError) as caught:
+            formal.read_arrow(spec,changed)
+        assert caught.value.code=='INVALID_CURSOR'
+
+def test_new_dependency_quality_capture_is_one_snapshot(formal,monkeypatch):
+    spec,gateway,ctx=setup(formal)
+    other=contract('gateway_other'); formal.register(other)
+    gateway.bindings['other']=binding(other,'other')
+    gateway.declare('market',ctx)
+    with gateway._state(('other',)) as (states,_):
+        old_other=states['other']
+    original=formal.catalog.dataset
+    changed=False
+    def dataset(name,c=None):
+        nonlocal changed
+        assert c is not None, 'capture must not open another connection'
+        if name==other.name and not changed:
+            changed=True
+            with formal.catalog.engine.begin() as writer:
+                for target in (spec,other):
+                    issue=Issue('quality','test','QUALITY_CHANGED',fingerprint('changed'),{}, {})
+                    formal.catalog.change_issues(writer,target.name,(issue,),{})
+        return original(name,c)
+    monkeypatch.setattr(formal.catalog,'dataset',dataset)
+    gateway.declare('other',ctx)
+    assert changed and ctx.dependencies['other']==old_other
+    error('DATA_CHANGED',lambda:gateway.check(ctx))
+
+def test_dependency_capture_uses_one_total_time_budget_and_releases_locks(formal,monkeypatch):
+    spec,gateway,ctx=setup(formal)
+    other=contract('gateway_other'); formal.register(other)
+    gateway.bindings['other']=binding(other,'other')
+    formal.limits=replace(formal.limits,query_timeout_ms=250)
+    original=formal.catalog.dataset
+    def slow(name,c=None):
+        c.execute(text('SELECT pg_sleep(0.15)'))
+        return original(name,c)
+    monkeypatch.setattr(formal.catalog,'dataset',slow)
+    def capture():
+        with gateway._state(('market','other')):
+            pytest.fail('two individually short queries cannot reset the total budget')
+    error('RESOURCE_LIMIT',capture,'QUERY_TIMEOUT')
+    for target in (spec,other):
+        with formal.locks.writer(target.name,timeout_ms=100) as guard:
+            with guard.commit(timeout_ms=100):
+                pass
+
+def test_operational_status_is_not_quality_but_overflow_is(formal):
+    from app.data_store.adapters.registry import BY_ID
+    from app.data_store.pipeline import _status
+    spec=replace(contract(),semantics={**contract().semantics,'entry_id':'E50'})
+    formal.register(spec); put(formal,spec,rows(4))
+    gateway=make_gateway(formal,(binding(spec),)); ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
+    gateway.declare('market',ctx)
+    _status(formal,BY_ID['E50'],dict(refresh={'state':'running'},rows_seen=100))
+    assert gateway.check(ctx)=='unchanged'
+    _status(formal,BY_ID['E50'],dict(overflow_restriction={'partition':'default','blocking_objects':1}))
+    error('DATA_CHANGED',lambda:gateway.check(ctx))
+
+@pytest.mark.parametrize('generation_changes',[False,True])
+def test_changed_used_schema_is_data_changed_not_rebuild_unavailable(formal,generation_changes):
+    spec,gateway,ctx=setup(formal); gateway.declare('market',ctx)
+    # Isolated incompatible rebuild receipt, without interpreting old files.
+    with formal.catalog.engine.begin() as c:
+        c.execute(text('UPDATE data_store_datasets SET generation=generation+:increment,rule=:r WHERE name=:d'),
+                  {'r':'replacement-contract','d':spec.name,'increment':int(generation_changes)})
+    error('DATA_CHANGED',lambda:gateway.check(ctx))
+
+@pytest.mark.parametrize('writer_kind',['publish','issue','status','maintenance'])
+def test_final_guard_coordinates_real_store_and_metadata_writers(formal,writer_kind):
+    from app.data_store.adapters.registry import BY_ID
+    from app.data_store.pipeline import _status
+    spec=replace(contract(),semantics={**contract().semantics,'entry_id':'E50'})
+    formal.register(spec); put(formal,spec,rows(4))
+    gateway=make_gateway(formal,(binding(spec),)); ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
+    gateway.declare('market',ctx)
+    attempted,completed=threading.Event(),threading.Event()
+    failures=[]; worker=None
+    def write():
+        try:
+            attempted.set()
+            if writer_kind=='publish':
+                put(formal,spec,rows(4,price='2'),token='real-publisher')
+            elif writer_kind=='status':
+                _status(formal,BY_ID['E50'],dict(overflow_restriction={'partition':'default','blocking_objects':1}))
+            else:
+                with formal.catalog.engine.begin() as c:
+                    if writer_kind=='issue':
+                        issue=Issue('quality','test','QUALITY_CHANGED',fingerprint('changed'),{}, {})
+                        formal.catalog.change_issues(c,spec.name,(issue,),{})
+                    else:
+                        c.execute(text("UPDATE data_store_legacy_maintenance SET phase='rebuilding'"))
+            completed.set()
+        except BaseException as caught:
+            failures.append(caught)
+    def commit(c):
+        nonlocal worker
+        worker=threading.Thread(target=write); worker.start()
+        assert attempted.wait(1) and not completed.wait(.1)
+        # A result write must use the connection whose final guard is held.
+        c.execute(text('CREATE TEMP TABLE guarded_result_probe(ok boolean)'))
+        return 'committed'
+    try:
+        assert gateway.finalize(ctx,commit)=='committed'
+    finally:
+        if worker:
+            worker.join(3)
+    assert completed.is_set() and not worker.is_alive() and not failures,failures
+    error('CAPABILITY_UNAVAILABLE' if writer_kind=='maintenance' else 'DATA_CHANGED',lambda:gateway.check(ctx))
+
+@pytest.mark.parametrize('abort',['cancel','timeout'])
+def test_final_result_transaction_rolls_back_when_guard_aborts(formal,abort):
+    _,gateway,ctx=setup(formal); gateway.declare('market',ctx)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text('CREATE TABLE guarded_result_probe(ok boolean)'))
+    cancelled=threading.Event(); gateway.cancelled=cancelled.is_set
+    formal.limits=replace(formal.limits,query_timeout_ms=250)
+    def commit(c):
+        c.execute(text('INSERT INTO guarded_result_probe VALUES(true)'))
+        if abort=='cancel':
+            cancelled.set()
+        else:
+            c.execute(text('SELECT pg_sleep(1)'))
+        return 'would_succeed'
+    error('CANCELLED' if abort=='cancel' else 'RESOURCE_LIMIT',lambda:gateway.finalize(ctx,commit))
+    with formal.catalog.engine.begin() as c:
+        assert c.execute(text('SELECT count(*) FROM guarded_result_probe')).scalar_one()==0
+
+def test_lookback_enforces_bytes_during_loading_and_counts_empty_cache_entries(formal):
+    spec,_,_=setup(formal,count=500)
+    gateway=make_gateway(formal,(binding(spec),),cache_bytes=16385)
+    gateway.batch_rows=20
+    ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
+    error('RESOURCE_LIMIT',lambda:gateway.lookback('market',request(end=BASE+300,count=500),ctx))
+    assert gateway.stats['storage_rows']<500 and not gateway.cache
+    empty=contract('gateway_empty'); formal.register(empty)
+    gateway=make_gateway(formal,(binding(empty),),cache_entries=2)
+    ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
+    for fields in (('price',),('quantity',)):
+        assert gateway.lookback('market',request(count=4,fields=fields),ctx).table.num_rows==0
+    assert len(gateway.cache)==2
+    error('RESOURCE_LIMIT',lambda:gateway.lookback('market',request(count=4),ctx))
+    assert not gateway.cache
+
+def test_empty_currentstore_arrow_batch_is_accepted_by_real_rust(formal,tmp_path):
+    _,gateway,ctx=setup(formal,count=0)
+    result,output=rust_probe(gateway,ctx,tmp_path,request())
+    assert result.returncode==0 and output['count']==0,output
+    assert ctx.closed

@@ -6,7 +6,23 @@ import pyarrow as pa
 import pyarrow.compute as pc
 
 from app.data_store.adapters.registry import BY_ID, SYNTHETIC
-from .data_gateway import MarketBinding
+from .data_gateway import GatewayError, MarketBinding
+
+# These are specific execution gaps, not claims that the provider's documented
+# units or E50's unadjusted price basis are unknown. See the D04 seam README.
+FORMAL_EXECUTION_GAPS = {
+    'E50': 'price_currency_and_integer_share_quantity_unverified',
+    'E51': 'forward_unanchored_price_not_raw_execution',
+    'E52': 'index_research_not_share_execution',
+    'E70': 'provider_reported_raw_basis_and_lot_to_share_conversion_unverified',
+}
+
+
+def _unavailable_formal_bounds(security, start, end):
+    # Formal nodes have (representation,subject,object_key,member_key), not a
+    # security/time key. Enabling them requires a real accepted node/session
+    # projection; removing only unavailable_reason must never enable a stub.
+    raise GatewayError('CAPABILITY_UNAVAILABLE', '正式节点的标识、日期和会话投影尚未接入')
 
 
 def _date(ns):
@@ -15,7 +31,11 @@ def _date(ns):
 
 
 def current_market_bindings():
-    """Provider reported prices are never promoted to raw execution input."""
+    """Explicit formal capability denials; these are not enable-ready mappings.
+
+    E50 already declares unadjusted prices. E70 documents yuan/lots/thousand
+    yuan; neither statement supplies its missing exact execution conversion.
+    """
     result = []
     for entry_id in ('E50', 'E51', 'E52', 'E70'):
         entry = BY_ID[entry_id]
@@ -24,8 +44,8 @@ def current_market_bindings():
         fields = {f: entry.layout.columns[model, f if entry_id == 'E70' else 'reported_'+f][0]
                   for f in ('open', 'high', 'low', 'close')}
         result.append(MarketBinding(entry_id, entry.spec, '1d', fields, {},
-            lambda security, start, end: ((security,), (security+'\0',)), date_col,
-            unavailable_reason='raw_execution_basis_or_units_unverified',
+            _unavailable_formal_bounds, date_col,
+            unavailable_reason=FORMAL_EXECUTION_GAPS[entry_id],
             limitations=tuple(entry.describe_capability()['limitations'])))
     return tuple(result)
 

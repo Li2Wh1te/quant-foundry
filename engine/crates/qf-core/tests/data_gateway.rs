@@ -153,6 +153,55 @@ fn malicious_arrow_metadata_length_rejected_before_arrow_reader() {
         ErrorCode::ResourceLimit
     );
 }
+
+fn rewrite_buffer(
+    input: &DataBatch,
+    index: usize,
+    change: impl Fn(i64, i64) -> (i64, i64),
+) -> DataBatch {
+    let payload = input.payload();
+    let mut position = 0;
+    loop {
+        let mut size = u32::from_le_bytes(payload[position..position + 4].try_into().unwrap());
+        position += 4;
+        if size == u32::MAX {
+            size = u32::from_le_bytes(payload[position..position + 4].try_into().unwrap());
+            position += 4;
+        }
+        assert_ne!(size, 0);
+        let message =
+            arrow_ipc::root_as_message(&payload[position..position + size as usize]).unwrap();
+        if let Some(record) = message.header_as_record_batch() {
+            let buffer = record.buffers().unwrap().get(index);
+            let location = buffer.0.as_ptr() as usize - payload.as_ptr() as usize;
+            let (offset, length) = change(buffer.offset(), buffer.length());
+            let mut rewritten = payload.to_vec();
+            rewritten[location..location + 16]
+                .copy_from_slice(&arrow_ipc::Buffer::new(offset, length).0);
+            return DataBatch::new(input.metadata.clone(), rewritten, 64 * 1024 * 1024).unwrap();
+        }
+        position += size as usize + message.bodyLength() as usize;
+    }
+}
+
+#[test]
+fn overlapping_unaligned_and_inflated_arrow_buffers_fail_before_decoding() {
+    let good = batch("1", vec![1]);
+    assert!(decode_market(&good, 2, 64 * 1024 * 1024).is_ok());
+    for bad in [
+        rewrite_buffer(&good, 1, |offset, length| (offset + 1, length)),
+        rewrite_buffer(&good, 4, |_, length| (0, length)),
+        // Still fits the IPC body/padding; not a valid (rows+1)*4 offset array.
+        rewrite_buffer(&good, 1, |offset, length| (offset, length + 1)),
+        // A tiny row count cannot advertise an oversized fixed-width buffer.
+        rewrite_buffer(&good, 37, |offset, _| (offset, 256)),
+    ] {
+        assert_eq!(
+            decode_market(&bad, 2, 64 * 1024 * 1024).unwrap_err().code,
+            ErrorCode::InvalidContract
+        );
+    }
+}
 struct Source {
     queue: VecDeque<DataBatch>,
     closed: Arc<AtomicBool>,

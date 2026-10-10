@@ -1,7 +1,7 @@
 # S3-D04 RESULT
 
 实现完成；真实隔离 CurrentStore → Arrow IPC → 独立 Rust → D03 StreamingMerge 验证通过。
-正式生产联调未做，未部署、未合并、未请求供应商、未访问内网或执行 R01 reset。
+正式生产联调未做，未部署、未合并、未调用供应商行情接口、未访问内网或执行 R01 reset。
 
 基线：main ce15a6d1b6ec8e923e677f672c2ea8585526edb7。
 独立分支：codex/s3-d04-currentstore-arrow。实际接缝见同目录 README.md。
@@ -21,15 +21,19 @@
 实际验证：
 
 1. scripts/test_s3_engine.sh：rustfmt、clippy -D warnings、workspace Rust 测试、
-   公共合同/版本检查、独立 Python 3.12 wheel 构建和安装测试全部通过。
+   公共合同/版本检查、独立 Python 3.12 wheel 构建和安装测试全部通过（安装测试 23 项）。
+   D04 Rust 回归 7 项，含重叠/未对齐/膨胀缓冲在 reader 创建前拒绝。
 2. cargo build -p qf-core --locked --example consume_gateway；隔离 PostgreSQL 下
-   python -m pytest -q tests/test_s3_data_gateway.py：29 passed。
+   python -m pytest -q tests/test_s3_data_gateway.py：43 passed（17.01 秒）。
    包括真实既有 B05/B05-M 节点投影、成交/报价/1m/60m、混合存储频率选择、
    同 ns 合法序号、精确 Decimal、三种批次大小、跨块变化、质量不变 generation、
    新依赖、最终事务协调、维护 503/限制/empty/missing、增量 lookback、
    实际 IPC 背压/取消/断管/读取中断管与 Arrow 释放。Rust 消费缺席在 S3 CI 明确失败。
+   复查新增旧签名游标兼容、依赖统一快照/总时限、真实发布器及问题/入口/维护写者
+   与最终事务竞争、入口进度不误中止、每页缓存预算/空窗口条目预算、真实 Rust 空批，
+   以及取消/总时限使同连接结果事务回滚；schema/rule 变化不依赖 generation 增长。
 3. 同一隔离 PostgreSQL 运行 CurrentStore kernel/local_pipeline/API 与 D04 回归：
-   103 passed（当时 D04 为 25 项；后续新增的通道窗口/精度/断管回归另随最终 D04 执行）。
+   118 passed（101.45 秒，当时 D04 为 40 项；最后 3 项另随最终 D04 执行）。
    原 JSON/分页和底座消费保持兼容。
 4. 本地为 overlay，使用已有 LF_D01_ALLOW_OVERLAY_TEST=1 测试 probe；
    实际文件、PostgreSQL、DuckDB、flock 与 IPC 均运行，不能冒充受支持生产挂载验收。
@@ -37,7 +41,9 @@
 
 保留边界：
 
-- E50/E51/E52/E70 的 raw 成交口径/单位缺口继续 CAPABILITY_UNAVAILABLE，不猜测；
+- 正式映射逐入口证据与最小 R01 衔接见 README：E50 已知未复权但缺单位接受；
+  E51 是未锚定前复权；E52 属指数研究；E70 单位已知但缺 raw/份额换算接受。
+  四项尚未形成可启用正式成交映射，继续 CAPABILITY_UNAVAILABLE；不得只解除拒绝。
   当前生产 D94 固定范围验收不等于所有频率、全域或本模块生产联调通过。
 - D05/D10 接公开策略 Visibility/完整 Tick 键裁剪；D12 接容器、私有端点认证及资源；
   D13 接 finalize 的真实 run/claim 事务。本模块不声称完整 Rust 回测产品已经上线。

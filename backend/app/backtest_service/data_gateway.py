@@ -7,10 +7,11 @@ D05 applies simulation visibility again after this resource/permission gate.
 """
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass, field, replace
 import hashlib
 import json
+import time
 from types import MappingProxyType
 from typing import Callable, Mapping
 from uuid import uuid4
@@ -69,9 +70,12 @@ def store_errors():
                 'RESOURCE_LIMIT' if error.code.endswith('BUDGET_EXCEEDED') or error.code in
                     {'QUERY_TIMEOUT', 'MEMORY_PRESSURE'} else 'CAPABILITY_UNAVAILABLE')
         raise GatewayError(code, str(error), store_code=error.code) from None
-    except SQLAlchemyError:
+    except SQLAlchemyError as error:
+        state = getattr(getattr(error, 'orig', None), 'sqlstate', None)
+        if state == '57014':
+            raise GatewayError('RESOURCE_LIMIT', '依赖检查达到时间预算', store_code='QUERY_TIMEOUT') from None
         raise GatewayError('CAPABILITY_UNAVAILABLE', '当前目录暂不可访问',
-                           store_code='CATALOG_UNAVAILABLE') from None
+                           store_code='LOCK_TIMEOUT' if state == '55P03' else 'CATALOG_UNAVAILABLE') from None
     except (pa.ArrowException, OverflowError):
         raise GatewayError('NUMERIC_RANGE_UNSUPPORTED', '输入数值不能无损转换为引擎类型') from None
 
@@ -203,12 +207,13 @@ class RunDataGateway:
     def __init__(self, store, principal: AuthenticatedPrincipal, grant: AuthorizedRun,
                  bindings: tuple[MarketBinding, ...], *, cancelled=None,
                  batch_rows=1024, batch_bytes=64*1024*1024, cache_rows=10000,
-                 cache_bytes=16*1024*1024):
+                 cache_bytes=16*1024*1024, cache_entries=1024):
         if principal.owner_scope != grant.owner_scope:
             raise GatewayError('DATA_RESTRICTED', '运行所有者与认证身份不一致')
         if (not 1 <= batch_rows <= min(10000, store.limits.query_rows)
                 or not 16384 < batch_bytes <= 64*1024*1024
                 or not 1 <= cache_rows <= 100000 or not 16384 < cache_bytes <= 64*1024*1024
+                or type(cache_entries) is not int or not 1 <= cache_entries <= 10000
                 or not 1 <= len(bindings) <= 64 or len({b.name for b in bindings}) != len(bindings)):
             raise GatewayError('RESOURCE_LIMIT', '数据网关预算无效')
         self.store, self.grant = store, grant
@@ -216,6 +221,7 @@ class RunDataGateway:
         self.cancelled = cancelled or (lambda: False)
         self.batch_rows, self.batch_bytes = batch_rows, batch_bytes
         self.cache_rows, self.cache_bytes = cache_rows, cache_bytes
+        self.cache_entries = cache_entries
         self.context = None
         self.cache = {}
         self.stats = dict(storage_reads=0, storage_rows=0, cache_rows=0)
@@ -226,14 +232,26 @@ class RunDataGateway:
         if self.cancelled():
             raise GatewayError('CANCELLED', '数据读取已取消')
 
-    def _capture(self, names, connection):
+    def _capture(self, names, connection, checkpoint):
+        checkpoint(query=True)
         with Session(bind=connection) as session:
             require_ready(session)
         result = {}
         for name in sorted(names):
+            checkpoint(query=True)
             binding = self.bindings[name]
-            state = self.store.catalog.dataset(binding.spec.name)
+            previous = self.context.dependencies.get(name) if self.context else None
+            try:
+                state = self.store.catalog.dataset(binding.spec.name, connection)
+            except DataStoreError as error:
+                if previous is not None and error.code == 'DATASET_MISSING':
+                    raise DataStoreError('DATA_CHANGED') from None
+                raise
+            if previous is not None and (previous['generation'] != str(state['generation'])
+                    or state['schema_id'] != binding.spec.schema_id or state['rule'] != binding.spec.rule):
+                raise DataStoreError('DATA_CHANGED')
             self.store._spec_current(binding.spec, state)
+            checkpoint(query=True)
             legacy = connection.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
                     'WHERE dataset=:d OR dataset IS NULL)'), {'d': binding.spec.name}).scalar_one()
             if legacy:
@@ -243,14 +261,14 @@ class RunDataGateway:
             # Conservative dataset-wide readability token; no permanent row ledger.
             issue_digest = hashlib.sha256()
             issue_bytes = 0
+            checkpoint(query=True)
             issues = connection.execution_options(stream_results=True, max_row_buffer=1).execute(
                     text('SELECT issue_key,reason,evidence_token,target_json,resolution_json '
                     'FROM data_store_issues WHERE dataset=:d ORDER BY issue_key LIMIT :n'),
                     {'d': binding.spec.name, 'n': self.store.limits.issue_count+1})
             try:
                 for i, issue in enumerate(issues.mappings()):
-                    if self.cancelled():
-                        raise DataStoreError('OPERATION_CANCELLED')
+                    checkpoint()
                     if i >= self.store.limits.issue_count:
                         raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
                     encoded = json.dumps(dict(issue), ensure_ascii=False, sort_keys=True,
@@ -264,21 +282,39 @@ class RunDataGateway:
                 issues.close()
                 connection.execution_options(stream_results=False)
             entry_id = binding.spec.semantics.get('entry_id')
+            checkpoint(query=True)
             summary = connection.execute(text('SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e'),
                                          {'e': entry_id}).scalar_one_or_none()
+            # Only this part of entry status participates in the formal reader
+            # gate. Refresh progress/counters are operational, not quality.
+            restriction = json.loads(summary).get('overflow_restriction', {}) if summary else {}
             result[name] = dict(dataset=binding.spec.name, generation=str(state['generation']),
                 readability=fingerprint({'schema': state['schema_id'], 'rule': state['rule'],
                     'issues': issue_digest.hexdigest(),
-                    'summary': hashlib.sha256((summary or '').encode()).hexdigest()}))
+                    'overflow_restriction': restriction}))
+        checkpoint()
         return result
 
     @contextmanager
     def _state(self, names, *, final=False):
         with store_errors(), self.store.locks.read_many([self.bindings[n].spec.name for n in names],
                 timeout_ms=self.store.limits.lock_timeout_ms, cancelled=self.cancelled):
-            with self.store.catalog.engine.begin() as connection:
-                connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
-                                   {'v': str(self.store.limits.query_timeout_ms)})
+            deadline = time.monotonic()+min(5000, self.store.limits.query_timeout_ms)/1000
+            # Captures use one coherent snapshot. Finalization uses fresh
+            # READ COMMITTED statements AFTER acquiring writer-excluding locks,
+            # so waiting for a writer cannot leave a pre-lock stale snapshot.
+            isolation = 'READ COMMITTED' if final else 'REPEATABLE READ'
+            with self.store.catalog.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
+                def checkpoint(*, query=False):
+                    if self.cancelled():
+                        raise DataStoreError('OPERATION_CANCELLED')
+                    remaining = int((deadline-time.monotonic())*1000)
+                    if remaining <= 0:
+                        raise DataStoreError('QUERY_TIMEOUT')
+                    if query:
+                        connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
+                                           {'v': str(remaining)})
+                checkpoint(query=True)
                 if final:
                     # Also coordinates quality-only/catalog updates, even writers
                     # which do not acquire the filesystem commit lock. Short final
@@ -287,7 +323,10 @@ class RunDataGateway:
                     connection.execute(text('LOCK TABLE data_store_datasets,data_store_issues,'
                         'data_store_entry_status,data_store_legacy_restrictions,'
                         'data_store_legacy_maintenance IN SHARE MODE'))
-                yield self._capture(names, connection), connection
+                states = self._capture(names, connection, checkpoint)
+                checkpoint(query=True)
+                yield states, connection
+                checkpoint()
 
     def open(self, scope, *, dependencies=()):
         if self.context is not None or scope != dict(run_id=self.grant.run_id, universe=list(self.grant.universe)):
@@ -308,8 +347,12 @@ class RunDataGateway:
         if type(name) is not str or not name or len(name.encode()) > 128:
             raise GatewayError('INVALID_CONTRACT', '数据绑定标识无效')
         binding = self.bindings.get(name)
-        if binding is None or binding.unavailable_reason:
+        if binding is None:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '所需频率、字段或口径尚未具备正式读取能力')
+        if binding.unavailable_reason:
+            error = GatewayError('CAPABILITY_UNAVAILABLE', '正式数据尚不满足所需成交能力，请核对入口口径缺口')
+            error.scope.update(binding=name, capability_gap=binding.unavailable_reason)
+            raise error
         names = set(context.dependencies) | {name}
         with self._state(names) as (states, _):
             if any(states[n] != old for n, old in context.dependencies.items()):
@@ -464,22 +507,37 @@ class RunDataGateway:
         for security in request['securities']:
             key = (name, security, tuple(request['fields']))
             cached = self.cache.get(key)
+            if cached is None and len(self.cache) >= self.cache_entries:
+                self.cache.clear()
+                raise GatewayError('RESOURCE_LIMIT', '历史窗口缓存条目超过预算')
             lower = start
             if cached is not None and cached[0] <= end and cached[2] >= count:
                 previous_end, previous, _ = cached
                 lower = previous_end+1
             else:
                 previous = pa.Table.from_batches([], schema=MARKET_SCHEMA)
-            fresh = [] if lower > end else [b.table for b in self._pages(binding, security, lower, end,
-                context, request['fields'], count=count)]
-            joined = pa.concat_tables([previous, *fresh])
-            if joined.num_rows:
-                joined = joined.take(pc.sort_indices(joined, sort_keys=[('time_ns','ascending'),
+            joined = previous
+            def compact(table):
+                indices = pc.sort_indices(table, sort_keys=[('time_ns','ascending'),
                     ('source_session','ascending'),('channel','ascending'),('sequence','ascending'),
-                    ('stable_input_sequence','ascending')]))
-            # Compact copies release parent buffers of trimmed windows.
-            begin = max(0, joined.num_rows-count)
-            joined = joined.take(pa.array(range(begin, joined.num_rows), type=pa.int64())).combine_chunks()
+                    ('stable_input_sequence','ascending')])
+                indices = indices.slice(max(0, len(indices)-count))
+                return table.take(indices).combine_chunks()
+            if lower <= end:
+                # Compact/check each page rather than retaining an entire
+                # lookback before finding out that its byte budget was exceeded.
+                with closing(self._pages(binding, security, lower, end,
+                        context, request['fields'], count=count)) as pages:
+                    for batch in pages:
+                        joined = compact(pa.concat_tables([joined, batch.table]))
+                        other_bytes = sum(t.nbytes for k, (_, t, _) in self.cache.items() if k != key)
+                        other_rows = sum(t.num_rows for k, (_, t, _) in self.cache.items() if k != key)
+                        if (other_bytes+joined.nbytes > self.cache_bytes
+                                or other_rows+joined.num_rows > self.cache_rows):
+                            self.cache.clear()
+                            raise GatewayError('RESOURCE_LIMIT', '历史窗口超过缓存内存预算')
+            elif joined.num_rows > count:
+                joined = compact(joined)
             self.cache[key] = (end, joined, count)
             parts.append(joined)
         if (sum(t.num_rows for _, t, _ in self.cache.values()) > self.cache_rows

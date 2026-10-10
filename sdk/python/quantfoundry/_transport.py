@@ -173,9 +173,19 @@ class Client:
         if (response.run_id, response.request_id, response.op) != (self.run_id, self.sequence, op):
             self.channel.close()
             raise TransportError()
+        allowed = {'batch', 'eof', 'error'} if op == 'next' else {'ok', 'error'}
+        if response.status not in allowed:
+            self.channel.close()
+            raise TransportError()
         if response.status == "error":
+            # Gateway errors are terminal; do not retain our endpoint while
+            # waiting for the peer's already initiated shutdown or caller GC.
+            self.channel.close()
             if set(response.body) != {'code', 'message', 'operation', 'scope'}:
-                self.channel.close()
+                raise TransportError()
+            if (any(type(response.body[k]) is not str for k in ('code','message','operation'))
+                    or type(response.body['scope']) is not dict
+                    or any(type(v) is not str for v in response.body['scope'].values())):
                 raise TransportError()
             error = TransportError(response.body["code"], response.body["message"])
             error.operation, error.scope = response.body["operation"], response.body["scope"]
