@@ -2,6 +2,7 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
+const path = require('node:path');
 const ts = require('typescript');
 require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 }, fileName: filename
@@ -22,6 +23,45 @@ async function withHttp(fetch, work) {
   finally { data.invalidateDataAssetsSession(); global.fetch = previousFetch; global.window = previousWindow; }
 }
 const invalid = field => error => error instanceof data.DataStoreApiError && error.code === 'INVALID_RESPONSE' && (!field || error.field === field);
+
+test('D02 can consume the shared barrel and compatible legacy DTO imports with strict types', () => {
+  const filename = path.resolve(__dirname, 'd02-contract.ts');
+  const source = `
+    import { dataAssetsClient, createRequestScope, createPreviewSession, buildPreviewRequest,
+      currentStatus, updateStatus, datasetPresentation, invalidateDataAssetsSession,
+      type DataAssetsClient, type RequestScope, type PreviewSession, type CatalogSnapshot,
+      type PreviewRequest, type PreviewResult } from '../index';
+    import { dataStoreApi, DataStoreApiError, type CurrentDataset, type DatasetList,
+      type StatusList, type IssueList } from '../../../../api/dataStore';
+    export async function page(dataset: CurrentDataset, signal: AbortSignal) {
+      const client: DataAssetsClient = dataAssetsClient;
+      const scope: RequestScope = createRequestScope();
+      const session: PreviewSession = createPreviewSession(client);
+      const catalog: CatalogSnapshot = await scope.run(signal => client.loadCatalog({ signal }));
+      const request: PreviewRequest = buildPreviewRequest(dataset);
+      const preview: PreviewResult = await session.read(request, { signal, page: 0 });
+      const statuses: StatusList = await client.listStatus({ signal, limit: 20, state: 'failed' });
+      const issues: IssueList = await client.listIssues(dataset.dataset, { signal, offset: 20 });
+      const legacy: DatasetList = await dataStoreApi('/datasets?limit=100', signal);
+      session.reset(); session.dispose(); scope.dispose(); invalidateDataAssetsSession();
+      return { catalog, preview, statuses, issues, legacy,
+        current: currentStatus(dataset.status), update: updateStatus(dataset.last_update),
+        display: datasetPresentation(dataset), members: issues.affected_objects,
+        authenticationFailure: new DataStoreApiError(401, 'AUTH_REQUIRED', 'safe').status };
+    }
+  `;
+  const options = { strict: true, noEmit: true, skipLibCheck: true,
+    target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext, moduleResolution: ts.ModuleResolutionKind.Bundler };
+  const host = ts.createCompilerHost(options), original = host.getSourceFile;
+  host.getSourceFile = (file, languageVersion, ...rest) => file === filename
+    ? ts.createSourceFile(file, source, languageVersion, true) : original(file, languageVersion, ...rest);
+  const program = ts.createProgram([filename], options, host);
+  const errors = ts.getPreEmitDiagnostics(program).filter(item => item.category === ts.DiagnosticCategory.Error);
+  assert.equal(errors.length, 0, ts.formatDiagnosticsWithColorAndContext(errors, {
+    getCanonicalFileName: file => file, getCurrentDirectory: () => process.cwd(), getNewLine: () => '\n'
+  }));
+  assert.equal(require('../../../../api/dataStore.ts').DataStoreApiError, data.DataStoreApiError);
+});
 
 test('all fixture current states remain distinct from the most recent update result', () => {
   for (const [name, label] of [['normal', '当前可用（按服务端声明）'], ['empty', '当前为空'], ['notChecked', '尚未检查'],
@@ -219,6 +259,25 @@ test('401/403 surface safe distinct errors and clear all preview session caches'
   }
 });
 
+test('401/403 revoke cached previews without waiting for an unreadable error body', async () => {
+  for (const status of [401, 403]) {
+    let deny = false, bodyReads = 0;
+    await withHttp(async () => deny ? {
+      ok: false, status,
+      text() { bodyReads++; return new Promise(() => {}); }
+    } : response(preview({ next_cursor: 'isolated-cursor' })), async () => {
+      const session = data.createPreviewSession();
+      try {
+        await session.read(request()); deny = true;
+        await assert.rejects(data.dataAssetsClient.listDatasets({ timeoutMs: 10 }), error => error.status === status);
+        assert.equal(bodyReads, 0);
+        assert.equal(session.getSnapshot().result, null);
+        assert.deepEqual(session.getSnapshot().cursors, [null]);
+      } finally { session.dispose(); }
+    });
+  }
+});
+
 test('unknown errors never expose server messages, SQL, credentials or raw network details', async () => {
   await withHttp(async () => response({ detail: { code: 'NEW_SAFE_REASON', message: 'secret DSN SQL' } }, 409), async () => {
     await assert.rejects(data.dataAssetsClient.listDatasets(), error => error.code === 'NEW_SAFE_REASON' && !/secret|DSN|SQL/.test(error.message));
@@ -258,6 +317,32 @@ test('latest request scopes reject late results, caller aborts and disposed scop
   const controller = new AbortController(); controller.abort();
   await assert.rejects(scope.run(async () => 'never', { signal: controller.signal }), { name: 'AbortError' });
   scope.dispose(); await assert.rejects(scope.run(async () => 'never'), { name: 'AbortError' });
+});
+
+test('explicit logout cancels page scopes even when the operation ignores its signal', async () => {
+  const scope = data.createRequestScope(), late = deferred();
+  let signal;
+  try {
+    const pending = scope.run(async current => { signal = current; return late.promise; });
+    const outcome = pending.then(value => ({ value }), error => ({ error }));
+    await Promise.resolve();
+    data.invalidateDataAssetsSession();
+    assert.equal(signal.aborted, true);
+    late.resolve('stale isolated value');
+    assert.equal((await outcome).error?.name, 'AbortError');
+    assert.equal(await scope.run(async () => 'new isolated value'), 'new isolated value');
+  } finally { late.resolve('cleanup'); scope.dispose(); }
+});
+
+test('page scopes preserve the originating authentication or permission error', async () => {
+  for (const status of [401, 403]) {
+    await withHttp(async () => response({ detail: {} }, status), async () => {
+      const scope = data.createRequestScope();
+      try {
+        await assert.rejects(scope.run(signal => data.dataAssetsClient.listDatasets({ signal })), error => error.status === status);
+      } finally { scope.dispose(); }
+    });
+  }
 });
 
 test('preview paging uses only obtained cursors and never concatenates pages or asserts coverage', async () => {

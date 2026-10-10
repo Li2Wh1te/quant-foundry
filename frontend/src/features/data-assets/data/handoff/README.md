@@ -97,3 +97,21 @@ necessary batch UI constraints.
   exact business-date coverage, units, price basis and identity search are not inferred.
 - No PR was created, merged, or deployed during the handoff. Resume through the cloud
   task created by the parent, without simultaneous local implementation.
+
+## Cloud continuation verified, 2026-10-10
+
+- Fetched and checked out the exact checkpoint `2de105b6be519d7bd3581503c3d8094bbfc41e76`
+  on the same branch. The original ZIP SHA256 and all 71 manifest entries were verified.
+  No repository AGENTS.md or .agents/skills files exist in this cloud checkout.
+- Fixed two reproduced cleanup edges: 401/403 now invalidate immediately without
+  waiting for an error body; explicit session invalidation cancels page request scopes
+  even when an operation ignores AbortSignal. Originating 401/403 errors remain intact.
+- Reviewed D02 checkpoint `6369d6955b34a615323f9fde00dde930821eaeb3`; the shared
+  exports and legacy DTO imports are compatible. `data/README.md` contains the calling
+  seam and cleanup requirements. No D02 UI, backend, R01 gate or other package was edited.
+- Actually ran in the cloud: explicit D01 tests **31 passed**; `pnpm --dir frontend test`
+  **85 passed**; `node node_modules/typescript/bin/tsc -b --force` from frontend passed;
+  `pnpm --dir frontend build` passed with the existing large-chunk advisory.
+- Development/isolated D01 verification is complete. Combined UI integration belongs
+  to D02/D07; real `/query` integration still requires R01's actual readiness/readability
+  contract. No real API, supplier, production operation, merge or deployment was run.

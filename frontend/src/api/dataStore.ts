@@ -58,6 +58,9 @@ export async function dataStoreApi<T>(path: string, signal?: AbortSignal, body?:
         ...(route.body === undefined ? {} : { body: JSON.stringify(route.body) })
       });
       fresh();
+      // Authentication and permission decisions are authoritative at the HTTP
+      // status. Do not delay invalidation on an optional or stalled error body.
+      if (response.status === 401 || response.status === 403) throw apiError(response.status, undefined);
       if (!response.ok) {
         let code: unknown;
         try {

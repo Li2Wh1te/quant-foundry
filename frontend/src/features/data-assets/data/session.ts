@@ -30,6 +30,12 @@ export function createRequestScope(): RequestScope {
         rejectAbort = () => reject(cancellation());
         controller.signal.addEventListener("abort", rejectAbort, { once: true });
       });
+      // Explicit logout also cancels page-owned operations outside the HTTP
+      // transport. Auth failures stay with their originating transport so a
+      // caller still receives its 401/403 rather than a masking AbortError.
+      const stopListening = onDataAssetsInvalidation(reason => {
+        if (reason === "session") abort();
+      });
       try {
         const result = await Promise.race([Promise.resolve().then(() => {
           if (controller.signal.aborted) throw cancellation();
@@ -38,6 +44,7 @@ export function createRequestScope(): RequestScope {
         if (disposed || version !== sequence || controller.signal.aborted || token !== readApiToken()) throw cancellation();
         return result;
       } finally {
+        stopListening();
         if (active === controller) active = null;
         options.signal?.removeEventListener("abort", abort);
         if (rejectAbort) controller.signal.removeEventListener("abort", rejectAbort);
