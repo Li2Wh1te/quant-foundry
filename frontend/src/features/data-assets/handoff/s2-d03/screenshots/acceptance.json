@@ -1,0 +1,117 @@
+{
+  "isolated": true,
+  "results": [
+    "1440px: stable catalog, separate facts, 20-item pages, detail and return context",
+    "1024px: stable catalog, separate facts, 20-item pages, detail and return context",
+    "390px: stable catalog, separate facts, 20-item pages, detail and return context",
+    "0/1 registrations: honest empty directory and single-page recovery",
+    "121 registrations: bounded completion and all seven pages without duplicates or omissions",
+    "Chinese aliases, original names and encoded identifiers remain searchable",
+    "source/frequency/status filters intersect, reset page, and survive refresh plus back/forward",
+    "no match differs from an empty directory and offers filter recovery",
+    "invalid and disappeared pages are corrected in the URL after refresh",
+    "initial failure exposes retry and safe error text without inventing an empty directory",
+    "loading keeps the controls, four pending metrics, and a readable status",
+    "ordinary refresh failure retains the old directory and exact observation time",
+    "partial load displays loaded-scope filtering, pending global metrics, and retry completion",
+    "mid-refresh failure preserves the complete previous catalog instead of replacing it with 100 rows",
+    "budget: incomplete metadata cannot advertise whole-directory counts",
+    "changed: incomplete metadata cannot advertise whole-directory counts",
+    "pagination: incomplete metadata cannot advertise whole-directory counts",
+    "partial-empty: incomplete metadata cannot advertise whole-directory counts",
+    "unknown states, frequencies, storage layout and values remain explicit; vanished options keep URL selections",
+    "technical identifiers expand/copy with keyboard and preserve timestamp precision",
+    "rapid repeated filters and refreshes retain the final URL selection and reset pages",
+    "maintenance leaves directory metadata visible and does not claim query readiness",
+    "forbidden: fresh permission denial immediately clears old React metadata and global counts",
+    "forbidden-slow-body: fresh permission denial immediately clears old React metadata and global counts",
+    "partial-forbidden: fresh permission denial immediately clears old React metadata and global counts",
+    "401 returns to the existing login flow and clears the synthetic session",
+    "late directory response after SPA route change cannot overwrite the new detail view"
+  ],
+  "errors": [],
+  "geometry": [
+    {
+      "name": "catalog-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "body": "14px",
+      "label": "14px",
+      "tables": [
+        {
+          "width": 1123,
+          "contentWidth": 1123,
+          "height": 2106,
+          "contentHeight": 2106
+        }
+      ]
+    },
+    {
+      "name": "catalog-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "body": "14px",
+      "label": "14px",
+      "tables": [
+        {
+          "width": 733,
+          "contentWidth": 1020,
+          "height": 2106,
+          "contentHeight": 2106
+        }
+      ]
+    },
+    {
+      "name": "catalog-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "body": "14px",
+      "label": "14px",
+      "tables": [
+        {
+          "width": 275,
+          "contentWidth": 1020,
+          "height": 2106,
+          "contentHeight": 2106
+        }
+      ]
+    },
+    {
+      "name": "technical-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "body": "14px",
+      "label": "14px",
+      "tables": [
+        {
+          "width": 275,
+          "contentWidth": 1020,
+          "height": 766,
+          "contentHeight": 766
+        }
+      ]
+    }
+  ],
+  "denialTimings": [
+    {
+      "scenario": "forbidden-slow-body",
+      "elapsedMs": 167,
+      "bodyDelayMs": 1500
+    }
+  ],
+  "requestMethods": [
+    "GET"
+  ],
+  "paths": [
+    "/api/auth/verify",
+    "/api/system/version",
+    "/api/admin/data-store/datasets",
+    "/api/admin/data-store/datasets/fixture.data_021",
+    "/api/admin/data-store/datasets/fixture.data%20%2F%20%2B%20003",
+    "/api/admin/data-store/datasets/fixture.data_001"
+  ]
+}

@@ -1,0 +1,46 @@
+/* Catalog-only refinements retain the shared shell, controls, and font tokens. */
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-metrics span,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog label,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog small,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog summary,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-asof,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-empty,
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-pager { font-size:14px;line-height:22px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-toolbar { display:grid;grid-template-columns:minmax(240px,1.6fr) repeat(3,minmax(140px,1fr));gap:12px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-toolbar label { width:100% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-toolbar>button { justify-self:start }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-results { color:var(--muted);margin:16px 0 10px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-notice button { display:flex;margin-top:10px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-assets-scroll table { min-width:1020px;table-layout:fixed }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:first-child { width:26% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:nth-child(2) { width:8% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:nth-child(3) { width:17% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:nth-child(4) { width:19% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:nth-child(5) { width:21% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog th:last-child { width:9% }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog td { overflow-wrap:anywhere }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog td small { margin-top:4px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-secondary { color:var(--muted) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-fact { display:flex;align-items:flex-start;gap:6px;font-weight:600 }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-fact>svg { flex:none;margin-top:3px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .tone-success { color:#326543 }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .tone-warning { color:#8c5918 }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .tone-danger { color:#973d36 }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .tone-neutral { color:var(--muted) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical { margin-top:8px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical summary { color:var(--muted) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical dl { margin:10px 0 0 }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical dl>div { padding:6px 0;border-top:1px solid var(--border) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical dt { color:var(--muted) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical dd { margin:2px 0 0;overflow-wrap:anywhere }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical code { font-size:13px;line-height:21px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical button { display:flex;margin-top:6px }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-technical [role=status] { display:block;color:var(--muted) }
+.qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-caption { position:absolute;width:1px;height:1px;padding:0;overflow:hidden;clip-path:inset(50%);white-space:nowrap }
+@media(max-width:1180px) {
+  .qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-toolbar { grid-template-columns:repeat(2,minmax(0,1fr)) }
+}
+@media(max-width:620px) {
+  .qfo-root.qf-assets-root .qf-assets.qf-catalog .qf-catalog-toolbar { grid-template-columns:minmax(0,1fr) }
+}
