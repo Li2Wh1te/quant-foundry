@@ -3,6 +3,9 @@ use crate::types::{Nanoseconds, SecurityKey};
 use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 
+pub mod arrow;
+pub mod ipc;
+
 pub const MAX_ARROW_BATCH_BYTES: usize = 64 * 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

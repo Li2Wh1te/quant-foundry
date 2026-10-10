@@ -37,6 +37,8 @@ class Query:
     release: str | None = None
     snapshot: str | None = None
     require_qualified: bool = True
+    descending: bool = False
+    filters: tuple[tuple[str, str, Any], ...] = ()
 
     def __post_init__(self):
         if self.release is not None or self.snapshot is not None:
@@ -45,6 +47,8 @@ class Query:
                 or type(self.columns) not in (tuple,list) or len(self.columns) > 128
                 or not self.partitions or len(set(self.partitions)) != len(self.partitions)
                 or type(self.require_qualified) is not bool
+                or type(self.descending) is not bool
+                or type(self.filters) is not tuple or len(self.filters) > 16
                 or type(self.page_size) is not int or self.page_size < 1
                 or len(set(self.columns)) != len(self.columns)):
             raise DataStoreError('INVALID_VALUE')
@@ -55,6 +59,10 @@ class Query:
                 raise DataStoreError('INVALID_VALUE')
         for p in self.partitions:
             identifier(p)
+        for item in self.filters:
+            if (type(item) is not tuple or len(item) != 3 or type(item[0]) is not str
+                    or item[1] not in ('=', '>=', '<=', '>', '<')):
+                raise DataStoreError('INVALID_VALUE')
 
 
 @dataclass(frozen=True)
@@ -79,11 +87,31 @@ class Page:
                 'unresolved_issues': self.unresolved_issues}
 
 
+@dataclass(frozen=True)
+class ArrowPage:
+    """Same admitted query as Page; owned buffers, no pinned source handles."""
+    dataset: str
+    generation: int
+    generations: dict[str, int]
+    table: pa.Table
+    next_cursor: str | None
+    schema_id: str
+    semantics: dict[str, str]
+    metrics: Metrics
+    quality_status: str = 'available'
+    unresolved_issues: int = 0
+
+
 def _request(spec, query):
-    return fingerprint({'dataset': spec.name, 'schema': spec.schema_id, 'rule': spec.rule,
-                        'partitions': sorted(query.partitions), 'lower': query.lower,
-                        'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size,
-                        'require_qualified': query.require_qualified})
+    request = {'dataset': spec.name, 'schema': spec.schema_id, 'rule': spec.rule,
+               'partitions': sorted(query.partitions), 'lower': query.lower,
+               'upper': query.upper, 'columns': query.columns, 'page_size': query.page_size,
+               'require_qualified': query.require_qualified}
+    # Existing default queries retain their signed cursor identity across this
+    # additive projection change. New variants remain distinct and bound.
+    if query.descending or query.filters:
+        request.update(descending=query.descending, filters=query.filters)
+    return fingerprint(request)
 
 
 def _encode(store, request, generations, last):
@@ -147,7 +175,7 @@ def _predicate(spec, values, operator):
     return '('+' OR '.join(terms)+')', params
 
 
-def read_many(store, queries, *, expected_generations=None, cancelled=None):
+def read_many(store, queries, *, expected_generations=None, cancelled=None, arrow=False):
     bounded_queries = []
     for i, item in enumerate(queries):
         if i >= 16:
@@ -159,7 +187,8 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
     for spec, query in queries:
         if (query.page_size > store.limits.query_rows
                 or len(query.partitions) > store.limits.query_partitions
-                or any(c not in spec.schema.names for c in query.columns)):
+                or any(c not in spec.schema.names for c in query.columns)
+                or any(c not in spec.schema.names for c, _, _ in query.filters)):
             raise DataStoreError('QUERY_BUDGET_EXCEEDED')
     metrics = Metrics()
     try:
@@ -189,8 +218,10 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                         spec.key_bytes(last)
                     lower = spec.key_bytes(query.lower) if query.lower is not None else None
                     upper = spec.key_bytes(query.upper) if query.upper is not None else None
-                    if last is not None:
+                    if last is not None and not query.descending:
                         lower = max(lower or b'', spec.key_bytes(last))
+                    elif last is not None:
+                        upper = min(upper or b'\xff'*2048, spec.key_bytes(last))
                     if lower is not None and upper is not None and lower >= upper:
                         raise DataStoreError('INVALID_VALUE')
                     refs = []
@@ -203,7 +234,7 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                         raise DataStoreError('QUERY_BUDGET_EXCEEDED')
                     columns = query.columns or tuple(spec.schema.names)
                     selected = tuple(dict.fromkeys((*columns, *spec.key)))
-                    rows, next_cursor = [], None
+                    rows, next_cursor, arrow_parts, row_count = [], None, [], 0
                     with ExitStack() as stack:
                         paths = store._pin_files(spec, refs, stack, space)
                         con = stack.enter_context(space.connection())
@@ -217,14 +248,18 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                         where, params = [], []
                         if spec.semantics.get('tombstones') == 'explicit-current-state' and query.require_qualified:
                             where.append("basis_state='valid'")
-                        for values, operator in ((query.lower, '>='), (query.upper, '<'), (last, '>')):
+                        for values, operator in ((query.lower, '>='), (query.upper, '<'),
+                                                 (last, '<' if query.descending else '>')):
                             if values is not None:
                                 spec.key_bytes(values)
                                 predicate, bound_values = _predicate(spec, values, operator)
                                 where.append(predicate)
                                 params.extend(bound_values)
+                        for column, operator, value in query.filters:
+                            where.append('"'+column+'" '+operator+' ?')
+                            params.append(value)
                         fields = ','.join('"'+f+'"' for f in selected)
-                        order = ','.join('"'+k+'"' for k in spec.key)
+                        order = ','.join('"'+k+'"'+(' DESC' if query.descending else '') for k in spec.key)
                         sql = 'SELECT ' + fields + ' FROM current_data'
                         if where:
                             sql += ' WHERE ' + ' AND '.join(where)
@@ -237,6 +272,21 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                             space.check()
                             if batch.nbytes > store.limits.query_bytes:
                                 raise DataStoreError('QUERY_BUDGET_EXCEEDED')
+                            if arrow:
+                                take = min(batch.num_rows, query.page_size-row_count)
+                                if take:
+                                    part = batch.slice(0, take).select(columns)
+                                    output_bytes += part.nbytes
+                                    if output_bytes > store.limits.query_bytes:
+                                        raise DataStoreError('QUERY_BUDGET_EXCEEDED')
+                                    arrow_parts.append(part)
+                                    row_count += take
+                                    raw_last = tuple(batch.column(batch.schema.get_field_index(k))[take-1].as_py()
+                                                     for k in spec.key)
+                                if take < batch.num_rows:
+                                    next_cursor = _encode(store, request, generations, raw_last)
+                                    break
+                                continue
                             for row in batch.to_pylist():
                                 if len(rows) == query.page_size:
                                     next_cursor = _encode(store, request, generations, raw_last)
@@ -250,12 +300,22 @@ def read_many(store, queries, *, expected_generations=None, cancelled=None):
                             if next_cursor:
                                 break
                     space.check()
+                    if arrow:
+                        schema = pa.schema([spec.schema.field(c) for c in columns], metadata=spec.schema.metadata)
+                        # DuckDB returns its physical schema without field metadata.
+                        table = pa.Table.from_batches(arrow_parts) if arrow_parts else pa.Table.from_batches([], schema=schema)
+                        table = table.cast(schema, safe=True)
+                        pages.append(ArrowPage(spec.name, generations[spec.name], dict(generations), table,
+                                               next_cursor, spec.schema_id, dict(spec.semantics), metrics,
+                                               'restricted' if issue_count else 'available', issue_count))
+                        continue
                     pages.append(Page(spec.name, generations[spec.name], dict(generations), rows,
                                       next_cursor, spec.schema_id, dict(spec.semantics), metrics,
                                       'restricted' if issue_count else 'available', issue_count))
                 # Response construction/serialization remains inside ALL read locks.
-                for page in pages:
-                    json.dumps(page.to_dict(), ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+                if not arrow:
+                    for page in pages:
+                        json.dumps(page.to_dict(), ensure_ascii=False, separators=(',', ':'), allow_nan=False)
                 return pages
     except SQLAlchemyError:
         raise DataStoreError('CATALOG_UNAVAILABLE') from None

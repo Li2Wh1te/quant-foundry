@@ -11,6 +11,9 @@ rust_decimal.workspace = true
 bnum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+arrow-array.workspace = true
+arrow-schema.workspace = true
+arrow-ipc.workspace = true
 
 [lints]
 workspace = true
