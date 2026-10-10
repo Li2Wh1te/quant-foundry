@@ -1,0 +1,773 @@
+{
+  "isolated": true,
+  "passed": 24,
+  "cases": [
+    "1440px: daily, NAV and report overview keep qualifiers and unknown business cutoff",
+    "1440px: field disclosure, local horizontal scrolling and keyboard focus",
+    "1440px: technical identifiers expand and preserve a missing partition endpoint",
+    "1024px: daily, NAV and report overview keep qualifiers and unknown business cutoff",
+    "1024px: field disclosure, local horizontal scrolling and keyboard focus",
+    "1024px: technical identifiers expand and preserve a missing partition endpoint",
+    "390px: daily, NAV and report overview keep qualifiers and unknown business cutoff",
+    "390px: field disclosure, local horizontal scrolling and keyboard focus",
+    "390px: technical identifiers expand and preserve a missing partition endpoint",
+    "field searches, no matches, paging and repeated tab switches never request business data",
+    "same-object refresh clamps a reduced field list without a false empty page",
+    "copy success, repeated operations and clipboard failure stay local to technical information",
+    "restricted: descriptor explanation remains separate from actual read permission",
+    "empty: descriptor explanation remains separate from actual read permission",
+    "not-checked: descriptor explanation remains separate from actual read permission",
+    "maintenance: descriptor explanation remains separate from actual read permission",
+    "rebuild-required: descriptor explanation remains separate from actual read permission",
+    "unknown: descriptor explanation remains separate from actual read permission",
+    "absent fields, limits and preview keys remain undeclared rather than empty data",
+    "loading and dataset changes withdraw A immediately, cancel delayed requests and reject late responses",
+    "ordinary issues failure and detail refresh failure preserve already acquired explanations",
+    "missing: failed metadata never becomes an empty or valid descriptor",
+    "malformed: failed metadata never becomes an empty or valid descriptor",
+    "403 withdraws all descriptor metadata and 401 follows the existing login flow"
+  ],
+  "pageErrors": [],
+  "geometry": [
+    {
+      "kind": "daily-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 380,
+          "contentHeight": 380
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "nav-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 301,
+          "contentHeight": 301
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "report-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 1746,
+          "contentHeight": 1746
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "technical-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "copy": [
+        {
+          "width": 46,
+          "right": 612.625
+        },
+        {
+          "width": 46,
+          "right": 569.421875
+        },
+        {
+          "width": 46,
+          "right": 641.421875
+        },
+        {
+          "width": 46,
+          "right": 670.234375
+        },
+        {
+          "width": 46,
+          "right": 526.203125
+        },
+        {
+          "width": 46,
+          "right": 670.234375
+        },
+        {
+          "width": 46,
+          "right": 857.46875
+        },
+        {
+          "width": 46,
+          "right": 677.4375
+        },
+        {
+          "width": 46,
+          "right": 634.21875
+        },
+        {
+          "width": 46,
+          "right": 591.015625
+        },
+        {
+          "width": 46,
+          "right": 598.21875
+        },
+        {
+          "width": 46,
+          "right": 583.8125
+        }
+      ],
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 535,
+          "contentHeight": 535
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "daily-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 380,
+          "contentHeight": 380
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "nav-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 301,
+          "contentHeight": 301
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "report-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 1746,
+          "contentHeight": 1746
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "technical-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "copy": [
+        {
+          "width": 46,
+          "right": 586.625
+        },
+        {
+          "width": 46,
+          "right": 543.421875
+        },
+        {
+          "width": 46,
+          "right": 615.421875
+        },
+        {
+          "width": 46,
+          "right": 644.234375
+        },
+        {
+          "width": 46,
+          "right": 500.203125
+        },
+        {
+          "width": 46,
+          "right": 644.234375
+        },
+        {
+          "width": 46,
+          "right": 831.46875
+        },
+        {
+          "width": 46,
+          "right": 651.4375
+        },
+        {
+          "width": 46,
+          "right": 608.21875
+        },
+        {
+          "width": 46,
+          "right": 565.015625
+        },
+        {
+          "width": 46,
+          "right": 572.21875
+        },
+        {
+          "width": 46,
+          "right": 557.8125
+        }
+      ],
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 558,
+          "contentHeight": 558
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "daily-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 380,
+          "contentHeight": 380
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "nav-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 301,
+          "contentHeight": 301
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "report-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "copy": [],
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 1746,
+          "contentHeight": 1746
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    },
+    {
+      "kind": "technical-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "copy": [
+        {
+          "width": 46,
+          "right": 254.625
+        },
+        {
+          "width": 46,
+          "right": 211.421875
+        },
+        {
+          "width": 46,
+          "right": 283.421875
+        },
+        {
+          "width": 46,
+          "right": 312.234375
+        },
+        {
+          "width": 46,
+          "right": 168.203125
+        },
+        {
+          "width": 46,
+          "right": 312.234375
+        },
+        {
+          "width": 46,
+          "right": 157
+        },
+        {
+          "width": 46,
+          "right": 319.4375
+        },
+        {
+          "width": 46,
+          "right": 276.21875
+        },
+        {
+          "width": 46,
+          "right": 233.015625
+        },
+        {
+          "width": 46,
+          "right": 240.21875
+        },
+        {
+          "width": 46,
+          "right": 225.8125
+        }
+      ],
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 558,
+          "contentHeight": 558
+        }
+      ],
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ]
+    }
+  ],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily"
+    }
+  ],
+  "realApiVerified": false,
+  "productionOperations": false
+}
