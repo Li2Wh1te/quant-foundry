@@ -1,0 +1,16 @@
+[package]
+name = "qf-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Quant Foundry shared contracts and checked numeric primitives"
+
+[dependencies]
+rust_decimal.workspace = true
+bnum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

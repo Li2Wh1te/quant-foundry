@@ -1,0 +1,50 @@
+name: S3 Rust contracts
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    name: Core without Python or database client
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install locked Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Test public core contract independently
+        working-directory: engine
+        env:
+          PYO3_PYTHON: /nonexistent-python-core-must-not-use
+        run: |
+          cargo test -p qf-core --locked
+          cargo run -p qf-core --locked --example public_contract
+          if cargo tree -p qf-core --locked | rg 'pyo3|postgres|sqlx'; then exit 1; fi
+
+  wheel:
+    name: Python 3.12 wheel, numerics, contracts and shared tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.2"
+      - name: Install locked Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+      - name: Build and test installed wheel
+        run: bash scripts/test_s3_engine.sh
+      # Existing Validate workflow continues full backend/frontend testing.
+      - uses: astral-sh/setup-uv@v5
+      - name: Verify protected account, strategy and historical result consumers
+        working-directory: backend
+        env:
+          QF_ENVIRONMENT: test
+          QF_API_TOKEN: ci-api-token-at-least-thirty-two-characters
+          QF_CURSOR_SIGNING_KEY: ci-cursor-signing-key-at-least-thirty-two
+        run: |
+          uv sync --locked
+          uv run --locked python -m pytest -q tests/test_account_workspace.py tests/test_backtesting_account_profiles.py tests/test_backtesting_account_profile_storage.py tests/test_strategy_storage.py tests/test_backtesting_result_api.py tests/test_backtesting_pagination.py
