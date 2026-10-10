@@ -75,6 +75,18 @@ class BatchMetadata(TypedDict):
     actual_scope: ActualScope
     limitations: list[str]
 
+class ExecutionModelDescription(TypedDict):
+    model: Literal['bar_next_interval_v1', 'trade_tick_v1', 'quote_tick_v1']
+    frequency: Literal['1d', '1m', '5m', '15m', '30m', '60m', 'tick']
+    participation_rate: str
+    slippage_bps: str
+    fill_unit: int
+    price_reference: str
+    confirmation: str
+    price_rounding: str
+    liquidity: str
+    assumptions: list[str]
+
 class Fill(TypedDict):
     trade_id: str
     order_id: str
@@ -368,10 +380,13 @@ class PositionRecord(TypedDict):
 class CorporateActionRecord(TypedDict):
     kind: Literal['corporate_action']
     record: CorporateActionEvent
+class ExecutionModelRecord(TypedDict):
+    kind: Literal['execution_model']
+    record: ExecutionModelDescription
 class UserRecordEnvelope(TypedDict):
     kind: Literal['record']
     record: UserRecord
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope

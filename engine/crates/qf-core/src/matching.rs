@@ -5,6 +5,24 @@ use crate::types::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod bar;
+
+/// Small result metadata, emitted once through the existing bounded sink.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionModelDescription {
+    pub model: crate::run::ExecutionModel,
+    pub frequency: crate::run::Frequency,
+    pub participation_rate: ExactDecimal,
+    pub slippage_bps: ExactDecimal,
+    pub fill_unit: QuantityStep,
+    pub price_reference: String,
+    pub confirmation: String,
+    pub price_rounding: String,
+    pub liquidity: String,
+    pub assumptions: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fill {
@@ -74,6 +92,9 @@ pub struct FillAllowance {
 /// D07/D08 own matching; this port neither fetches data nor persists results.
 pub trait Matcher {
     type Rules;
+    fn model_description(&self) -> Option<ExecutionModelDescription> {
+        None
+    }
     fn consume(
         &mut self,
         event: &MarketEvent,

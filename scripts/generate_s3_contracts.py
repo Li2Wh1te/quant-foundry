@@ -28,10 +28,10 @@ def rust_wire_stub() -> str:
                 "AccountView", "RunConfigFields", "CostOverrides", "FeeConfig", "DatedFeeComponent",
                 "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
                 "DependencyState", "DependencyContext", "DataRequest", "ActualScope", "BatchMetadata", "RunScope",
-                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent"}
+                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent", "ExecutionModelDescription"}
     aliases = {"String":"str", "bool":"bool", "u64":"int", "u32":"int", "u16":"int", "i64":"int",
                "Nanoseconds":"str", "Sequence":"str", "SecurityKey":"str", "SessionKey":"str", "ChannelKey":"str",
-               "Quantity":"int", "Money":"str", "Price":"str", "ExactDecimal":"str", "Value":"Any", "FiniteStatistic":"float",
+               "Quantity":"int", "QuantityStep":"int", "Money":"str", "Price":"str", "ExactDecimal":"str", "Value":"Any", "FiniteStatistic":"float",
                "RuleDate":"str", "Exchange":"Literal['shanghai', 'shenzhen', 'beijing', 'unknown']",
                "Product":"Literal['main_board_stock', 'star_stock', 'chi_next_stock', 'beijing_stock', 'equity_etf', 'bond_etf', 'money_etf', 'gold_etf', 'commodity_etf', 'cross_border_etf', 'index', 'unknown']",
                "InvestorKind":"Literal['resident_individual', 'resident_enterprise', 'other', 'unknown']",
@@ -186,13 +186,16 @@ class PositionRecord(TypedDict):
 class CorporateActionRecord(TypedDict):
     kind: Literal['corporate_action']
     record: CorporateActionEvent
+class ExecutionModelRecord(TypedDict):
+    kind: Literal['execution_model']
+    record: ExecutionModelDescription
 class UserRecordEnvelope(TypedDict):
     kind: Literal['record']
     record: UserRecord
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
 ''')
     return "\n".join(output)
 

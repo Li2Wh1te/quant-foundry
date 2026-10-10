@@ -1,0 +1,23 @@
+{
+  "kind":"synthetic_business_oracles", "production_executed":false,
+  "price_cases":[
+    {"id":"buy_open_better", "side":"buy", "ohlc":["10","12","9","10"], "limit":"11", "bps":"50", "tick":"0.01", "expected":"10.05"},
+    {"id":"sell_open_better", "side":"sell", "ohlc":["10","12","9","10"], "limit":"9", "bps":"50", "tick":"0.01", "expected":"9.95"},
+    {"id":"buy_touch_cap", "side":"buy", "ohlc":["11","12","9.5","11"], "limit":"10", "bps":"50", "tick":"0.01", "expected":"10"},
+    {"id":"sell_touch_cap", "side":"sell", "ohlc":["9","11","8","9"], "limit":"10", "bps":"50", "tick":"0.01", "expected":"10"},
+    {"id":"buy_miss", "side":"buy", "ohlc":["11","12","10.01","11"], "limit":"10", "bps":"0", "tick":"0.01", "expected":null},
+    {"id":"sell_miss", "side":"sell", "ohlc":["9","9.99","8","9"], "limit":"10", "bps":"0", "tick":"0.01", "expected":null},
+    {"id":"buy_adverse_tick", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"5", "tick":"0.01", "expected":"10.01"},
+    {"id":"sell_adverse_tick", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"5", "tick":"0.01", "expected":"9.99"},
+    {"id":"buy_cap_high", "side":"buy", "ohlc":["10","10.02","9","10"], "limit":null, "bps":"50", "tick":"0.01", "expected":"10.02"},
+    {"id":"sell_cap_low", "side":"sell", "ohlc":["10","12","9.98","10"], "limit":null, "bps":"50", "tick":"0.01", "expected":"9.98"},
+    {"id":"buy_five_cent_tick", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"1", "tick":"0.05", "expected":"10.05"},
+    {"id":"sell_five_cent_tick", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"1", "tick":"0.05", "expected":"9.95"},
+    {"id":"buy_tiny_bps", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"0.0000000000000000000000000001", "tick":"0.01", "expected":"10.01"},
+    {"id":"sell_tiny_bps", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"0.0000000000000000000000000001", "tick":"0.01", "expected":"9.99"}
+  ],
+  "shared_volume":{"volume":101,"participation":"0.5","orders":[30,30],"fills":[30,20],"fees":["1","1"],"cash":"9498","quantity":50},
+  "gap_budget":{"initial_cash":"350","estimate":"10","orders":[10,10],"open":"20","fills":[10,7],"fees":["1","1"],"cash":"8","quantity":17},
+  "partial_minimum":{"quantity":5,"per_bar":2,"fills":[2,2,1],"fees":["1","0","0"],"cash":"9949"},
+  "mixed_sides":{"seed_quantity":10,"sell":6,"buy":6,"bar_quantity":8,"expected_fills":[6,2],"cash":"9937","quantity":6}
+}
