@@ -18,7 +18,7 @@ fs.mkdirSync(output, { recursive: true });
         localStorage.setItem('qfo-sidebar', innerWidth > 980 ? 'expanded' : 'collapsed');
         addEventListener('DOMContentLoaded', () => {
           const badge = document.createElement('div'); badge.textContent = '原生 HTTP · 隔离维护门禁 · 无业务数据';
-          badge.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:9999;pointer-events:none;padding:4px 8px;background:#fffaf2;border:1px solid #d3b9a1;border-radius:5px;font:14px/22px sans-serif';
+          badge.style.cssText = 'position:fixed;right:8px;bottom:8px;z-index:9999;pointer-events:none;padding:4px 8px;background:#fffaf2;color:#77511f;border:1px solid #d3b9a1;border-radius:5px;font:14px/22px sans-serif';
           document.body.append(badge);
         });
       }, process.env.QF_API_TOKEN);
