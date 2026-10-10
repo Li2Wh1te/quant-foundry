@@ -14,7 +14,7 @@ use arrow_schema::{DataType, Schema};
 use std::io::Cursor;
 
 pub const SCHEMA_ID: &str = "qf.market.v1";
-const TEXT: &[&str] = &[
+pub(crate) const TEXT: &[&str] = &[
     "kind",
     "security",
     "session",
@@ -28,7 +28,7 @@ const TEXT: &[&str] = &[
     "bid",
     "ask",
 ];
-const INTS: &[&str] = &[
+pub(crate) const INTS: &[&str] = &[
     "time_ns",
     "interval_start_ns",
     "interval_end_ns",
@@ -36,7 +36,7 @@ const INTS: &[&str] = &[
     "bid_quantity",
     "ask_quantity",
 ];
-const SEQS: &[&str] = &["sequence", "stable_input_sequence"];
+pub(crate) const SEQS: &[&str] = &["sequence", "stable_input_sequence"];
 fn invalid() -> QfError {
     QfError::new(
         ErrorCode::InvalidContract,
@@ -54,7 +54,13 @@ fn limit() -> QfError {
 
 /// Bound flatbuffer lengths/body BEFORE Arrow allocates. No compression,
 /// dictionaries or nested types; one schema and one data batch per credit.
-fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
+pub(crate) fn preflight_flat(
+    payload: &[u8],
+    max_rows: usize,
+    text: &[&str],
+    ints: &[&str],
+    seqs: &[&str],
+) -> QfResult<()> {
     let mut position = 0_usize;
     let mut schemas = 0;
     let mut batches = 0;
@@ -96,28 +102,25 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
                     return Err(invalid());
                 }
                 let fields = schema.fields().ok_or_else(invalid)?;
-                if fields.len() != TEXT.len() + INTS.len() + SEQS.len() {
+                if fields.len() != text.len() + ints.len() + seqs.len() {
                     return Err(invalid());
                 }
                 for (index, f) in fields.iter().enumerate() {
                     if f.dictionary().is_some() || f.children().is_some_and(|c| !c.is_empty()) {
                         return Err(invalid());
                     }
-                    let name = TEXT
-                        .get(index)
-                        .or_else(|| INTS.get(index - TEXT.len()))
-                        .or_else(|| SEQS.get(index - TEXT.len() - INTS.len()));
+                    let name = text.iter().chain(ints).chain(seqs).nth(index);
                     if f.name() != name.copied() {
                         return Err(invalid());
                     }
-                    if index < TEXT.len() {
+                    if index < text.len() {
                         if f.type_type() != arrow_ipc::Type::Utf8 {
                             return Err(invalid());
                         }
                     } else {
                         let integer = f.type_as_int().ok_or_else(invalid)?;
                         if integer.bitWidth() != 64
-                            || integer.is_signed() != (index < TEXT.len() + INTS.len())
+                            || integer.is_signed() != (index < text.len() + ints.len())
                         {
                             return Err(invalid());
                         }
@@ -135,7 +138,7 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
                     return Err(limit());
                 }
                 let nodes = batch.nodes().ok_or_else(invalid)?;
-                if nodes.len() != TEXT.len() + INTS.len() + SEQS.len() {
+                if nodes.len() != text.len() + ints.len() + seqs.len() {
                     return Err(invalid());
                 }
                 for node in nodes {
@@ -147,7 +150,7 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
                     }
                 }
                 let buffers = batch.buffers().ok_or_else(invalid)?;
-                if buffers.len() != 3 * TEXT.len() + 2 * (INTS.len() + SEQS.len()) {
+                if buffers.len() != 3 * text.len() + 2 * (ints.len() + seqs.len()) {
                     return Err(invalid());
                 }
                 let mut previous_end = 0;
@@ -175,7 +178,7 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
                     }
                     let values =
                         usize::try_from(buffers.get(buffer + 1).length()).map_err(|_| invalid())?;
-                    if column < TEXT.len() {
+                    if column < text.len() {
                         if values != (rows + 1) * 4 {
                             return Err(invalid());
                         }
@@ -199,7 +202,7 @@ fn preflight(payload: &[u8], max_rows: usize) -> QfResult<()> {
         position = position.checked_add(body).ok_or_else(limit)?;
     }
 }
-fn schema_valid(schema: &Schema) -> bool {
+pub(crate) fn schema_valid(schema: &Schema) -> bool {
     let meta = schema.metadata();
     for (key, value) in [
         ("schema_id", SCHEMA_ID),
@@ -230,7 +233,11 @@ fn schema_valid(schema: &Schema) -> bool {
                 .is_ok_and(|f| f.data_type() == &DataType::UInt64)
         })
 }
-fn string<'a>(batch: &'a RecordBatch, name: &str, row: usize) -> QfResult<Option<&'a str>> {
+pub(crate) fn string<'a>(
+    batch: &'a RecordBatch,
+    name: &str,
+    row: usize,
+) -> QfResult<Option<&'a str>> {
     let array = batch
         .column_by_name(name)
         .ok_or_else(invalid)?
@@ -246,10 +253,10 @@ fn string<'a>(batch: &'a RecordBatch, name: &str, row: usize) -> QfResult<Option
     }
     Ok(Some(value))
 }
-fn required<'a>(batch: &'a RecordBatch, name: &str, row: usize) -> QfResult<&'a str> {
+pub(crate) fn required<'a>(batch: &'a RecordBatch, name: &str, row: usize) -> QfResult<&'a str> {
     string(batch, name, row)?.ok_or_else(invalid)
 }
-fn integer(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<i64>> {
+pub(crate) fn integer(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<i64>> {
     let a = batch
         .column_by_name(name)
         .ok_or_else(invalid)?
@@ -258,7 +265,7 @@ fn integer(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<i64>>
         .ok_or_else(invalid)?;
     Ok((!a.is_null(row)).then(|| a.value(row)))
 }
-fn sequence(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<Sequence>> {
+pub(crate) fn sequence(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<Sequence>> {
     let a = batch
         .column_by_name(name)
         .ok_or_else(invalid)?
@@ -266,6 +273,33 @@ fn sequence(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<Sequ
         .downcast_ref::<UInt64Array>()
         .ok_or_else(invalid)?;
     Ok((!a.is_null(row)).then(|| Sequence::new(a.value(row))))
+}
+pub(crate) fn decode_flat(
+    payload: &[u8],
+    max_rows: usize,
+    byte_budget: usize,
+    text: &[&str],
+    ints: &[&str],
+    seqs: &[&str],
+) -> QfResult<RecordBatch> {
+    if max_rows == 0
+        || max_rows > 10000
+        || byte_budget == 0
+        || byte_budget > MAX_ARROW_BATCH_BYTES
+        || payload.len() > byte_budget
+    {
+        return Err(limit());
+    }
+    preflight_flat(payload, max_rows, text, ints, seqs)?;
+    let mut reader = StreamReader::try_new(Cursor::new(payload), None).map_err(|_| invalid())?;
+    let input = reader.next().ok_or_else(invalid)?.map_err(|_| invalid())?;
+    if reader.next().is_some() {
+        return Err(invalid());
+    }
+    if input.get_array_memory_size() > byte_budget {
+        return Err(limit());
+    }
+    Ok(input)
 }
 fn price(batch: &RecordBatch, name: &str, row: usize) -> QfResult<Option<Price>> {
     string(batch, name, row)?.map(str::parse).transpose()
@@ -291,7 +325,7 @@ pub fn decode_market(
     if batch.metadata.schema_id != SCHEMA_ID {
         return Err(invalid());
     }
-    preflight(batch.payload(), max_rows)?;
+    preflight_flat(batch.payload(), max_rows, TEXT, INTS, SEQS)?;
     let mut reader =
         StreamReader::try_new(Cursor::new(batch.payload()), None).map_err(|_| invalid())?;
     if !schema_valid(reader.schema().as_ref()) {

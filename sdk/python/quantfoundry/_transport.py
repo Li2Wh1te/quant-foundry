@@ -80,6 +80,8 @@ class Channel:
     def _io(self, value, *, sending, deadline):
         position = 0
         while position < len(value):
+            if self.closed or self.sock.fileno() < 0:
+                raise TransportError('CANCELLED', '数据通道已断开')
             if self.cancelled():
                 raise TransportError("CANCELLED", "数据通道已取消")
             remaining = deadline-time.monotonic()

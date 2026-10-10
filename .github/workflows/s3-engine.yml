@@ -51,6 +51,7 @@ jobs:
       QF_DATABASE_NAME: quant_foundry_test
       POSTGRES_TEST_ENABLED: "1"
       QF_S3_INTEGRATION_REQUIRED: "1"
+      QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-build
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -77,4 +78,6 @@ jobs:
         run: cargo build -p qf-core --locked --example consume_gateway
       - name: CurrentStore to Arrow to Rust, consistency and release regressions
         working-directory: backend
-        run: uv run --locked python -m pytest -q tests/test_s3_data_gateway.py
+        run: |
+          uv pip install --python .venv/bin/python --no-deps "$QF_S3_BUILD_ROOT"/wheels/quantfoundry_sdk-*.whl
+          uv run --locked --no-sync python -m pytest -q tests/test_s3_data_gateway.py tests/test_s3_research_api.py

@@ -79,24 +79,6 @@ class Trade:
     fee: Decimal
     execution_time_ns: int
 
-class CurrentQuote:
-    security: str
-    time_ns: int
-    last_price: Decimal | None
-    price_time_ns: int | None
-    is_stale: bool
-    halted: bool | None
-
-class Tick(CurrentQuote):
-    channel: str
-    sequence: int | str
-    kind: Literal['trade', 'quote']
-    bid: Decimal | None
-    ask: Decimal | None
-    quantity: int | None
-    bid_quantity: int | None
-    ask_quantity: int | None
-
 class TradePage:
     items: Sequence[Trade]
     next_cursor: str | None
@@ -104,11 +86,6 @@ class TradePage:
 class BarData:
     time_ns: int
     securities: Sequence[str]
-
-class Filter:
-
-    def __init__(self, field: str, op: Literal['eq', 'ne', 'lt', 'le', 'gt', 'ge', 'in'], value: Any) -> None:
-        _unavailable()
 StrategyError = ContractError
 
 class _Logger:
@@ -130,27 +107,6 @@ def run_weekly(func: Callable[[Context], None], *, trading_day: int=1, time: str
     _unavailable()
 
 def run_monthly(func: Callable[[Context], None], *, trading_day: int=1, time: str='after_close') -> None:
-    _unavailable()
-
-def get_price(securities: str | Sequence[str], *, start: TimeLike | None=None, end: TimeLike | None=None, count: int | None=None, frequency: Frequency | None=None, fields: Sequence[str]=('close',), adjustment: Literal['none', 'pre', 'post']='none') -> DataFrame:
-    _unavailable()
-
-def get_current_data(securities: Sequence[str] | None=None) -> Mapping[str, CurrentQuote]:
-    _unavailable()
-
-def get_fundamentals(securities: Sequence[str], *, fields: Sequence[str], as_of: TimeLike | None=None, filters: Sequence[Filter]=(), order_by: Sequence[str]=(), limit: int=10000) -> DataFrame:
-    _unavailable()
-
-def get_valuation(securities: Sequence[str], *, fields: Sequence[str], as_of: TimeLike | None=None) -> DataFrame:
-    _unavailable()
-
-def get_index_stocks(index: str, *, as_of: TimeLike | None=None) -> Sequence[str]:
-    _unavailable()
-
-def get_industry(securities: Sequence[str], *, as_of: TimeLike | None=None) -> DataFrame:
-    _unavailable()
-
-def get_instruments(securities: Sequence[str] | None=None, *, as_of: TimeLike | None=None) -> DataFrame:
     _unavailable()
 
 def order(security: str, quantity: int, *, style: MarketOrder | LimitOrder | None=None, tif: Literal['day', 'gtc']='day') -> OrderResult:
@@ -206,3 +162,4 @@ def on_trade(context: Context, trade: Trade) -> None:
 
 def subscribe(securities: Sequence[str], *, events: Literal['bar', 'tick']='bar') -> None:
     _unavailable()
+from .data import CurrentQuote, Filter, Tick, get_current_data, get_fundamentals, get_index_stocks, get_industry, get_instruments, get_price, get_valuation

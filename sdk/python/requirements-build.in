@@ -1,3 +1,5 @@
-# D01 build/test tools only; production SDK has no Python runtime dependencies.
+# Locked build/test tools and D05 NumPy/Pandas runtime cooperation.
 maturin==1.15.0
 jsonschema==4.26.0
+numpy==2.5.2
+pandas==3.0.5

@@ -193,6 +193,117 @@ fn validate_market_event_json(input: &str) -> PyResult<String> {
     })())
 }
 
+fn research_json(value: &impl serde::Serialize) -> qf_core::QfResult<String> {
+    serde_json::to_string(value).map_err(|_| {
+        QfError::new(
+            qf_core::ErrorCode::InvalidContract,
+            "research_view",
+            "研究输出序列化失败",
+        )
+    })
+}
+#[pyfunction]
+fn indicator_json(py: Python<'_>, input: &str) -> PyResult<String> {
+    convert(py.detach(|| {
+        research_json(&qf_core::analysis::indicators::calculate(
+            qf_core::data::views::bounded_json(input)?,
+        )?)
+    }))
+}
+/// D10 enters one of these per callback and ALWAYS expires it on exit, including
+/// exceptions. This narrow binding does not drive callbacks or import strategies.
+#[pyclass(name = "ReadView")]
+struct PythonReadView {
+    view: qf_core::data::views::ReadView,
+}
+#[pymethods]
+impl PythonReadView {
+    #[new]
+    #[pyo3(signature = (boundary, max_rows=10000, max_bytes=64*1024*1024))]
+    fn new(boundary: &str, max_rows: usize, max_bytes: usize) -> PyResult<Self> {
+        Ok(Self {
+            view: convert((|| {
+                qf_core::data::views::ReadView::new(
+                    qf_core::data::views::bounded_json(boundary)?,
+                    max_rows,
+                    max_bytes,
+                )
+            })())?,
+        })
+    }
+    fn check(&self) -> PyResult<()> {
+        convert(self.view.check())
+    }
+    fn visible_key_json(&self, key: &str) -> PyResult<bool> {
+        convert((|| {
+            self.view
+                .contains_market(&qf_core::data::views::bounded_json(key)?)
+        })())
+    }
+    fn reset(&mut self) -> PyResult<()> {
+        convert(self.view.reset())
+    }
+    fn expire(&mut self) {
+        self.view.expire();
+    }
+    fn push_market(&mut self, py: Python<'_>, metadata: &str, payload: &[u8]) -> PyResult<()> {
+        convert(py.detach(|| {
+            self.view
+                .push_market(payload, &qf_core::data::views::bounded_json(metadata)?)
+        }))
+    }
+    fn push_research(&mut self, py: Python<'_>, metadata: &str, payload: &[u8]) -> PyResult<()> {
+        convert(py.detach(|| {
+            self.view
+                .push_research(payload, &qf_core::data::views::bounded_json(metadata)?)
+        }))
+    }
+    #[pyo3(signature = (request, source_frequency, calendar="[]"))]
+    fn prices_json(
+        &mut self,
+        py: Python<'_>,
+        request: &str,
+        source_frequency: &str,
+        calendar: &str,
+    ) -> PyResult<String> {
+        convert(py.detach(|| {
+            let request: qf_core::data::DataRequest = qf_core::data::views::bounded_json(request)?;
+            let source = qf_core::data::views::bounded_json(&format!("\"{source_frequency}\""))?;
+            self.view.resample(
+                source,
+                request.frequency,
+                &qf_core::data::views::bounded_json::<Vec<qf_core::clock::CalendarSession>>(
+                    calendar,
+                )?,
+            )?;
+            self.view.adjust(request.adjustment, request.end_ns)?;
+            research_json(&self.view.prices(&request)?)
+        }))
+    }
+    fn research_json(&self, py: Python<'_>, request: &str) -> PyResult<String> {
+        convert(py.detach(|| {
+            research_json(
+                &self
+                    .view
+                    .research(&qf_core::data::views::bounded_json(request)?)?,
+            )
+        }))
+    }
+    fn research_prices(&mut self, py: Python<'_>, request: &str) -> PyResult<()> {
+        convert(py.detach(|| {
+            self.view
+                .research_prices(&qf_core::data::views::bounded_json(request)?)
+        }))
+    }
+    fn current_json(&self, py: Python<'_>, securities: &str) -> PyResult<String> {
+        convert(py.detach(|| {
+            research_json(&self.view.current(
+                &qf_core::data::views::bounded_json::<Vec<String>>(securities)?,
+            )?)
+        }))
+    }
+}
+
 #[pymodule]
 fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("ContractError", m.py().get_type::<ContractError>())?;
@@ -208,5 +319,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_market_event_json, m)?)?;
     m.add_function(wrap_pyfunction!(validate_commission_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(compose_official_fee_config_json, m)?)?;
+    m.add_function(wrap_pyfunction!(indicator_json, m)?)?;
+    m.add_class::<PythonReadView>()?;
     Ok(())
 }

@@ -180,7 +180,7 @@ class ContractTests(unittest.TestCase):
 
     def test_honest_capabilities_and_uniform_refusals(self):
         caps = capabilities()
-        self.assertEqual(caps["implemented"], ["checked_numeric", "shared_contracts"])
+        self.assertEqual(caps["implemented"], ["checked_numeric", "shared_contracts", "research_views", "technical_indicators"])
         self.assertEqual(caps["execution_models"], [])
         self.assertEqual(caps["frequencies"], [])
         self.assertFalse(caps["production_data_available"])
