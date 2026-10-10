@@ -1,0 +1,31 @@
+/* D05 styles stay inside the existing data-assets surface and its own panel. */
+.qfo-root.qf-assets-root .qf-preview p,
+.qfo-root.qf-assets-root .qf-preview summary,
+.qfo-root.qf-assets-root .qf-preview label,
+.qfo-root.qf-assets-root .qf-preview .qf-assets-asof,
+.qfo-root.qf-assets-root .qf-preview .qf-assets-preview-meta{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-preview{overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-preview .qf-preview-object code{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-preview-actions{display:flex;align-items:center;flex-wrap:wrap;gap:12px;margin:16px 0}
+.qfo-root.qf-assets-root .qf-preview-actions span,
+.qfo-root.qf-assets-root .qf-preview-note{color:var(--muted)}
+.qfo-root.qf-assets-root .qf-preview-adjust{border-top:1px solid var(--border);padding-top:12px}
+.qfo-root.qf-assets-root .qf-preview select{width:100%;min-width:0;height:40px;padding:8px 12px;border:1px solid var(--border);border-radius:8px;background:var(--surface);color:var(--text);font:400 14px/22px var(--qf-font-ui)}
+.qfo-root.qf-assets-root .qf-preview select:focus-visible,
+.qfo-root.qf-assets-root .qf-preview input[type=checkbox]:focus-visible{outline:2px solid var(--orange);outline-offset:2px}
+.qfo-root.qf-assets-root .qf-preview-columns{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;border:1px solid var(--border);border-radius:8px;padding:16px;margin:12px 0}
+.qfo-root.qf-assets-root .qf-preview-columns label{flex-direction:row;align-items:flex-start;font-weight:400;gap:8px}
+.qfo-root.qf-assets-root .qf-preview-columns input{accent-color:var(--orange);width:16px;height:16px;flex:none;margin:3px 0}
+.qfo-root.qf-assets-root .qf-preview-columns span{min-width:0;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-preview-result{border-top:1px solid var(--border);margin-top:20px;padding-top:12px}
+.qfo-root.qf-assets-root .qf-preview-scroll th,
+.qfo-root.qf-assets-root .qf-preview-scroll td{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums;font-family:var(--qf-font-mono)}
+.qfo-root.qf-assets-root .qf-preview-scroll td{max-width:none}
+.qfo-root.qf-assets-root .qf-preview-scroll table{min-width:100%;width:max-content}
+.qfo-root.qf-assets-root .qf-preview-scroll{margin-top:16px}
+.qfo-root.qf-assets-root .qf-preview-empty{background:var(--surface-2);padding:16px;border:1px dashed var(--border-strong);border-radius:8px}
+.qfo-root.qf-assets-root .qf-preview-technical{border-top:1px solid var(--border);padding-top:12px;color:var(--muted)}
+@media(max-width:620px){
+  .qfo-root.qf-assets-root .qf-preview-columns{grid-template-columns:1fr;padding:12px}
+  .qfo-root.qf-assets-root .qf-preview-actions span{flex-basis:100%}
+}
