@@ -1,5 +1,6 @@
 """Regression coverage for UUID strategy revisions joined to textual run bindings."""
 import os
+import hashlib
 from uuid import uuid4
 
 import pytest
@@ -30,7 +31,8 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
                 name="Other strategy", source_code="def run(context, parameters):\n    return {'mode': 'hold'}\n"
             )
             other_revision = service.publish_revision(other.id, expected_draft_version=1)
-            owner = "test:" + uuid4().hex
+            api_token = "test-api-token-at-least-thirty-two-characters"
+            owner = "token:" + hashlib.sha256(api_token.encode()).hexdigest()
             matching = []
             for binding, scope in [
                 (str(revision.id), owner), (str(revision.id), owner),
@@ -62,9 +64,11 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
             import asyncio
             import json
             from app.strategies.router import router
+            from app.core.auth import require_api_token
+            from fastapi import Depends
             from app.db.session import get_db_session
             app = FastAPI()
-            app.include_router(router)
+            app.include_router(router, dependencies=[Depends(require_api_token)])
             from app.core.config import Settings
             app.state.settings = Settings(cursor_signing_key=args["signing_key"], api_token="test-api-token-at-least-thirty-two-characters")
             app.dependency_overrides[get_db_session] = lambda: session
@@ -78,7 +82,7 @@ def test_strategy_run_queries_preserve_scope_and_cursor_with_text_bindings():
                     "type": "http", "asgi": {"version": "3.0"},
                     "http_version": "1.1", "method": "GET", "scheme": "http",
                     "path": f"/api/admin/strategies/{strategy.id}/backtests",
-                    "root_path": "", "query_string": b"", "headers": [],
+                    "root_path": "", "query_string": b"", "headers": [(b"authorization", ("Bearer "+api_token).encode())],
                     "server": ("test", 80), "client": ("127.0.0.1", 1234),
                 }, receive, send)
                 assert next(m for m in messages if m["type"] == "http.response.start")["status"] == 200

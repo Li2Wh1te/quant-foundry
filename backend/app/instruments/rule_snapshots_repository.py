@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.instruments.domain import VersionedReference
 from app.instruments.rule_snapshots import (
     InstrumentRuleSnapshotSegment,

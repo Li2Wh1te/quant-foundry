@@ -772,11 +772,17 @@ def initialize(c):
 
 
 if __name__ == "__main__":
-    result = unittest.TextTestRunner(verbosity=2).run(
-        unittest.defaultTestLoader.loadTestsFromTestCase(RuntimeTests)
-    )
+    from s3_runservice_suite import D13Tests
+    assert os.environ.get("QF_D13_REAL_WORKER_REQUIRED") == "1", "D13 real DB integration is mandatory"
+    suite = unittest.TestSuite([
+        unittest.defaultTestLoader.loadTestsFromTestCase(RuntimeTests),
+        unittest.defaultTestLoader.loadTestsFromTestCase(D13Tests),
+    ])
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    EVIDENCE["d13_database_http_gateway_result_commit"] = True
+    EVIDENCE["skipped"] = len(result.skipped)
     EVIDENCE["success"] = result.wasSuccessful()
     EVIDENCE["test_count"] = result.testsRun
     # Samples are bounded by the test workload, not per market event.
     (ROOT / "isolation-evidence.json").write_text(json.dumps(EVIDENCE, indent=2) + "\n")
-    raise SystemExit(0 if result.wasSuccessful() else 1)
+    raise SystemExit(0 if result.wasSuccessful() and not result.skipped else 1)

@@ -20,7 +20,7 @@ import math
 from types import MappingProxyType
 from typing import Mapping
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 
 __all__ = [
     "ERROR_CODES",

@@ -27,7 +27,7 @@ from app.backtesting.data.errors import (
     IdentityMappingEvidenceMissingError,
     IdentityMappingIncompleteError,
 )
-from app.backtesting.domain import DomainValidationError, _aware_datetime
+from app.backtest_service.config_values import DomainValidationError, _aware_datetime
 from app.data_ingestion.models.etf import EtfEntity
 from app.instruments.domain import (
     AuthorityStatus,

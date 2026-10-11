@@ -1,4 +1,4 @@
-from app.backtesting.saved_comparisons import router as saved_comparisons_router
+from app.backtest_service.history.saved_comparisons import router as saved_comparisons_router
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
 
@@ -17,15 +17,14 @@ from app.data_ingestion.watchlist_router import router as etf_watchlist_router
 from app.data_sources.router import router as data_sources_router
 from app.data_store.router import router as data_store_router, legacy_router
 from app.data_sources.service import initialize_sources
-from app.backtesting.router import router as backtesting_router
-from app.backtesting.fee_catalog import router as fee_catalog_router
-from app.backtesting.run_router import router as backtest_run_router, formal_alias_router as formal_backtest_alias_router, internal_router as internal_backtest_run_router
-from app.backtesting.result_router import (
-    router as backtest_result_router,
-    legacy_router as backtest_result_legacy_router,
-    compare_router as backtest_compare_router,
+from app.backtest_service.accounts.router import router as backtesting_router
+from app.backtest_service.accounts.fee_catalog import router as fee_catalog_router
+from app.backtest_service.router import router as backtest_run_router, retired_router
+from app.backtest_service.history.router import (
+    router as backtest_result_router, legacy_router as backtest_result_legacy_router,
     formal_result_alias_router as formal_backtest_result_alias_router,
 )
+from app.backtest_service.history.run_router import router as historical_run_router
 from app.core.version import get_release_version
 from app.db.session import dispose_engine, get_db_session, get_engine
 from app.overview.router import router as overview_router
@@ -84,11 +83,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     protected_router.include_router(backtesting_router)
     protected_router.include_router(fee_catalog_router)
     protected_router.include_router(backtest_run_router)
-    protected_router.include_router(formal_backtest_alias_router)
-    protected_router.include_router(internal_backtest_run_router)
+    protected_router.include_router(retired_router)
+    protected_router.include_router(historical_run_router)
     protected_router.include_router(backtest_result_router)
     protected_router.include_router(backtest_result_legacy_router)
-    protected_router.include_router(backtest_compare_router)
     protected_router.include_router(saved_comparisons_router)
     protected_router.include_router(formal_backtest_result_alias_router)
 

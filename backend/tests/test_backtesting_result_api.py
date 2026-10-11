@@ -12,7 +12,8 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from sqlalchemy import create_engine
+from sqlalchemy import Column, JSON, MetaData, Table, create_engine
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from app.backtesting.accounting import OrderSide
@@ -64,6 +65,18 @@ class ResultApiTestCase(unittest.TestCase):
             self.session, cursor_signing_key=SIGNING_KEY
         )
         self.run_id = uuid4()
+        # History now fails closed without an authoritative owner-bound root.
+        # This old portable fixture predates the production PostgreSQL root;
+        # create its full column projection instead of bypassing that guard.
+        from app.backtest_service.history.storage_models import BacktestRunRecord
+        root = Table("backtest_runs", MetaData(), *[
+            Column(c.name, JSON() if isinstance(c.type, JSONB) else c.type,
+                   primary_key=c.primary_key, nullable=True)
+            for c in BacktestRunRecord.__table__.columns])
+        root.create(self.engine)
+        with self.engine.begin() as connection:
+            connection.execute(root.insert().values(id=self.run_id, run_kind="backtest_run",
+                profile="formal@1", status="succeeded", idempotency_scope="default"))
 
     def tearDown(self) -> None:
         self.session.close()

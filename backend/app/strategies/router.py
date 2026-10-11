@@ -24,11 +24,10 @@ from app.strategies.schemas import (
     StrategyValidationIssueResponse,
     StrategyBacktestWorkspaceResponse,
 )
-from app.backtesting.registry import SLIPPAGE_MODEL_KIND, build_default_component_registry
-from app.backtesting.run_repository import DatabaseRunRepository, FORMAL_KIND
-from app.backtesting.run_router import _owner_scope, _response as _run_response
-from app.backtesting.pagination import CursorError
-from app.backtesting.result_router import _cursor_signing_key
+from app.backtest_service.history.router import _cursor_signing_key
+from app.backtest_service.router import owner as _owner_scope, service as run_service
+from app.backtest_service.listing import list_page
+from app.backtest_service.runtime_contracts import RuntimeFault
 from app.strategies.service import (
     StrategyAlreadyArchivedError,
     StrategyArchivedError,
@@ -67,23 +66,13 @@ def strategy_backtest_workspace(
     repository = StrategyRepository(session)
     revisions = repository.list_revisions(strategy_id)
     draft = repository.get_draft(strategy_id)
+    s3 = run_service(request)
     try:
-        page = DatabaseRunRepository(session).list_page(
-            queue_kind=FORMAL_KIND,
-            strategy_id=str(strategy_id),
-            owner_scope=_owner_scope(request),
-            limit=limit,
-            cursor=cursor,
-            signing_key=signing_key,
-            strategy_revision_id=strategy_revision_id, status=status,
-            created_after=created_after, created_before=created_before, config_summary=config_summary,
-        )
-    except CursorError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail={"code": "invalid_cursor", "message": str(exc)},
-        ) from exc
-    rows = page.items
+        page = list_page(s3.repository, _owner_scope(request), limit, cursor, signing_key, strategy_id=strategy_id,
+                         session=session, strategy_revision_id=strategy_revision_id, status=status,
+                         created_after=created_after, created_before=created_before)
+    except RuntimeFault as exc:
+        raise HTTPException(400, detail={"code": exc.code, "message": exc.message}) from None
     current = next((r for r in revisions if r.id == strategy.current_revision_id), None)
     formal_gate: dict[str, object] = {
         "status": "待配置" if current is None else "待预检",
@@ -92,8 +81,6 @@ def strategy_backtest_workspace(
         "metric_decisions": [],
         "checked_at": None,
     }
-    from app.backtesting.component_config import resolve_components
-    components = resolve_components()
     return StrategyBacktestWorkspaceResponse(
         strategy={
             "id": strategy.id, "name": strategy.name, "state": strategy.state,
@@ -106,18 +93,13 @@ def strategy_backtest_workspace(
             "parameter_schema": r.parameter_schema, "default_parameters": r.default_parameters,
             "runtime_manifest": r.runtime_manifest, "published_at": r.published_at,
         } for r in revisions],
-        slippage_models=[
-            entry.describe()
-            for entry in build_default_component_registry().entries(
-                component_kind=SLIPPAGE_MODEL_KIND
-            )
-        ],
+        slippage_models=[{"key": "slippage_bps", "parameter_schema": {"type": "string"}}],
         formal_gate=formal_gate,
-        component_options={kind: [value] for kind, value in components.items() if kind not in ("analyzer", "slippage_model")},
-        runs={"items": [_run_response(r) for r in rows],
-              "next_cursor": page.next_cursor,
-              "has_more": page.has_more,
-              "query_summary": {"strategy_id": str(strategy_id), "run_kind": FORMAL_KIND}},
+        component_options={"execution_model": [
+            {"key": model, "parameter_schema": {"type": "object", "properties": {
+                "participation_rate": {"type": "string"}, "slippage_bps": {"type": "string"}}}}
+            for model in s3.capabilities()["engine"]["execution_models"]]},
+        runs={**page, "query_summary": {"strategy_id": str(strategy_id), "run_kind": "mixed_history"}},
     )
 
 

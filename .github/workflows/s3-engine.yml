@@ -89,3 +89,8 @@ jobs:
       - name: D12 shared claim, batch and runner composition ports
         working-directory: backend
         run: uv run --locked --no-sync python -m pytest -q tests/test_s3_runtime_queue.py
+      - name: D13 private database migration, HTTP, ownership and fenced results
+        working-directory: backend
+        env:
+          QF_S3_D13_REQUIRED: "1"
+        run: uv run --locked --no-sync python -m pytest -q tests/test_s3_run_service.py

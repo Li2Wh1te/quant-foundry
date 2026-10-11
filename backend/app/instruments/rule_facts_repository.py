@@ -17,7 +17,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.backtesting.domain import DomainValidationError, _aware_datetime
+from app.backtest_service.config_values import DomainValidationError, _aware_datetime
 from app.instruments.domain import VersionedReference
 from app.instruments.rule_facts_models import InstrumentRuleFactRecord
 from app.instruments.rules.contracts import (

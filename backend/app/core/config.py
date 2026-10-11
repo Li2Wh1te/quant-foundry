@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     # Both API and runner resolve this to the same host bind mount. The old
     # foundation settings are accepted only for existing .env compatibility.
     data_store_root: Path = PROJECT_ROOT / "data" / "current-store"
+    # Trusted D12 topology only. Never accepted from a RunConfig/strategy.
+    s3_result_root: Path = PROJECT_ROOT / "data" / "s3-results"
+    s3_work_root: Path | None = None
+    s3_daemon_work_root: Path | None = None
+    s3_worker_image: str | None = None
     foundation_worker_enabled: bool = False
     foundation_runtime_image_digest: str = ""
     foundation_archive_gid: int = Field(default=1000, ge=1)

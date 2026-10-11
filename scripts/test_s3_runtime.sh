@@ -8,12 +8,14 @@ export DOCKER_CONFIG="$qf_test_root/docker-config"
 mkdir -p "$DOCKER_CONFIG"
 qf_suffix=${qf_test_root##*.}
 qf_runner=qf-s3-d12-runner-${qf_suffix,,}
+qf_database=qf-s3-d13-db-${qf_suffix,,}
 qf_worker_tag=qf-s3-d12-worker:${qf_suffix,,}
 qf_runner_tag=qf-s3-d12-runner:${qf_suffix,,}
 qf_worker_id=''
 qf_runner_id=''
 cleanup() {
     docker rm -f "$qf_runner" >/dev/null 2>&1 || true
+    docker rm -f "$qf_database" >/dev/null 2>&1 || true
     # Recover interrupted tests by exact claim AND this newly allocated mount
     # root. No label/name alone authorizes touching any other test/production.
     PYTHONPATH="$qf_root/backend" python3 - "$qf_test_root/work" <<'PY'
@@ -48,12 +50,13 @@ import os,pathlib,sys
 root=pathlib.Path(sys.argv[1])
 for directory,children,files in os.walk(root,followlinks=False):
     path=pathlib.Path(directory)
-    if not path.is_symlink():os.chmod(path,0o700)
+    if not path.is_symlink() and path.stat().st_uid==os.getuid():os.chmod(path,0o700)
 PY
     rm -rf -- "$qf_test_root"
 }
 trap cleanup EXIT
-mkdir -p "$qf_test_root/build" "$qf_test_root/work" "$qf_build/runtime-deps"
+mkdir -p "$qf_test_root/build" "$qf_test_root/work" "$qf_test_root/db-socket" "$qf_build/runtime-deps"
+chmod 777 "$qf_test_root/db-socket"
 # Resolve/download on the build host from existing hashes. Both Docker builds
 # run with network=none; runtime dependency installation never needs networking.
 UV_CACHE_DIR=${UV_CACHE_DIR:-$qf_build/uv-cache} uv export -q --project "$qf_root/backend" --locked --no-dev --no-emit-project \
@@ -68,8 +71,8 @@ cp -r "$qf_build/runtime-deps/wheels" "$qf_test_root/build/dependencies"
 python3 - "$qf_root" "$qf_build" "$qf_test_root/build" <<'PY'
 import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
-for p in ['backend/app','backend/pyproject.toml','backend/uv.lock','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
-          'sdk/python/tests/support_sdk.py','ops/s3-d12','tests/s3_runtime_suite.py']:
+for p in ['VERSION','backend/app','backend/pyproject.toml','backend/uv.lock','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
+          'sdk/python/tests/support_sdk.py','ops/s3-d12','tests/s3_runtime_suite.py','tests/s3_runservice_suite.py']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)
@@ -79,14 +82,36 @@ docker build --network none -f "$qf_test_root/build/ops/s3-d12/worker.Dockerfile
 qf_worker_id=$(docker image inspect --format '{{.Id}}' "$qf_worker_tag")
 docker build --network none -f "$qf_test_root/build/ops/s3-d12/runner-test.Dockerfile" -t "$qf_runner_tag" "$qf_test_root/build"
 qf_runner_id=$(docker image inspect --format '{{.Id}}' "$qf_runner_tag")
+# A freshly allocated private PG has no network or persistent volume. Only the
+# trusted test runner mounts its socket; sibling strategy workers never do.
+docker pull postgres:17
+docker run -d --name "$qf_database" --network none --cpus 1 --memory 512m --memory-swap 512m \
+    --label "io.quantfoundry.s3.private-test-root=$qf_test_root/work" \
+    --mount "type=bind,src=$qf_test_root/db-socket,dst=/var/run/postgresql" \
+    --env POSTGRES_DB=qf_d13_test --env POSTGRES_PASSWORD=private-d13-test postgres:17 >/dev/null
+qf_pg_ready=0
+for qf_try in $(seq 1 60); do
+    if docker exec "$qf_database" pg_isready -U postgres -d qf_d13_test >/dev/null 2>&1; then
+        qf_pg_ready=1
+        break
+    fi
+    sleep 1
+done
+[[ $qf_pg_ready == 1 ]]
 # This root is a newly created test-only daemon path. The runner sees /qf-work,
 # and its sibling workers bind daemon-host paths beneath this exact directory.
 docker run --name "$qf_runner" --network none --cpus 1 --memory 1g --memory-swap 1g --pids-limit 64 \
     --user "$(id -u):$(id -g)" --group-add "$(stat -c %g /var/run/docker.sock)" \
     --mount type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     --mount "type=bind,src=$qf_test_root/work,dst=/qf-work" \
+    --mount "type=bind,src=$qf_test_root/db-socket,dst=/qf-db,readonly" \
     --env "QF_TEST_DAEMON_ROOT=$qf_test_root/work" --env "QF_TEST_WORKER_IMAGE=$qf_worker_id" \
     --env "QF_TEST_RUNNER_NAME=$qf_runner" \
+    --env QF_ENVIRONMENT=test --env QF_DATABASE_HOST=/qf-db --env QF_DATABASE_USER=postgres \
+    --env QF_DATABASE_PASSWORD=private-d13-test --env QF_DATABASE_NAME=qf_d13_test \
+    --env QF_API_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    --env QF_CURSOR_SIGNING_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
+    --env QF_D13_REAL_WORKER_REQUIRED=1 --env QF_D13_TEST_ROOT=/qf-work/d13-service \
     "$qf_runner_id"
 mkdir -p "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}"
 cp "$qf_test_root/work/isolation-evidence.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"

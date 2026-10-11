@@ -794,6 +794,8 @@ class PreflightPersistenceTestCase(unittest.TestCase):
         )
         session = Session(engine)
         run_id = uuid4()
+        from tests.history_fixtures import history_root
+        history_root(engine, run_id, kind="internal_link_acceptance", profile="internal_link_acceptance@1")
         now = datetime(2026, 8, 30, 9, tzinfo=timezone.utc)
         repository = BacktestResultRepository(session, cursor_signing_key="test-key")
         try:

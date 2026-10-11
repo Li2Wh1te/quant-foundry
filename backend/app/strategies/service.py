@@ -21,7 +21,8 @@ from app.strategies.validation import (
     StrategyValidationResult,
     validate_strategy_draft,
 )
-from app.strategy_protocol.contract import STRATEGY_CONTRACT_VERSION
+# Historical metadata is preserved without importing the retired page executor.
+STRATEGY_CONTRACT_VERSION = 1
 
 
 MAX_STRATEGY_SOURCE_BYTES = 1_048_576
