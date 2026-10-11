@@ -210,13 +210,16 @@ class RunDataGateway:
     def __init__(self, store, principal: AuthenticatedPrincipal, grant: AuthorizedRun,
                  bindings: tuple[MarketBinding, ...], *, cancelled=None,
                  batch_rows=1024, batch_bytes=64*1024*1024, cache_rows=10000,
-                 cache_bytes=16*1024*1024, cache_entries=1024):
+                 cache_bytes=16*1024*1024, cache_entries=1024, replay_window_ns=None,
+                 replay_cache_rows=0):
         if principal.owner_scope != grant.owner_scope:
             raise GatewayError('DATA_RESTRICTED', '运行所有者与认证身份不一致')
         if (not 1 <= batch_rows <= min(10000, store.limits.query_rows)
                 or not 16384 < batch_bytes <= 64*1024*1024
                 or not 1 <= cache_rows <= 100000 or not 16384 < cache_bytes <= 64*1024*1024
                 or type(cache_entries) is not int or not 1 <= cache_entries <= 10000
+                or replay_window_ns is not None and (type(replay_window_ns) is not int or not 1 <= replay_window_ns <= 366*86400*10**9)
+                or type(replay_cache_rows) is not int or not 0 <= replay_cache_rows <= 2*batch_rows
                 or not 1 <= len(bindings) <= 64 or len({b.name for b in bindings}) != len(bindings)):
             raise GatewayError('RESOURCE_LIMIT', '数据网关预算无效')
         self.store, self.grant = store, grant
@@ -225,9 +228,13 @@ class RunDataGateway:
         self.batch_rows, self.batch_bytes = batch_rows, batch_bytes
         self.cache_rows, self.cache_bytes = cache_rows, cache_bytes
         self.cache_entries = cache_entries
+        self.replay_window_ns = replay_window_ns
+        self.replay_cache_rows = replay_cache_rows
+        self.replay_cache = None
         self.context = None
         self.cache = {}
-        self.stats = dict(storage_reads=0, storage_rows=0, cache_rows=0)
+        self.stats = dict(storage_reads=0, storage_rows=0, cache_rows=0,
+                          selected_file_bytes=0, files_read=0, storage_scratch_peak_bytes=0)
 
     def _active(self, context):
         if context is not self.context or context is None or context.closed:
@@ -407,6 +414,25 @@ class RunDataGateway:
 
     def _pages(self, binding, security, start, end, context, fields, *, count=None, page_rows=None):
         securities = security if type(security) is tuple else (security,)
+        self.check(context)
+        cached=self.replay_cache
+        if cached is not None and cached[0]==binding.name and set(fields)<=cached[1]:
+            table=cached[2]
+            # Strict interior bounds exclude partially buffered same-ns groups.
+            # The buffer always originated from an admitted full-universe read.
+            if table.num_rows and int(table['time_ns'][0].as_py())<start<=end<int(table['time_ns'][-1].as_py()):
+                mask=pc.and_(pc.and_(pc.greater_equal(table['time_ns'],start),pc.less_equal(table['time_ns'],end)),
+                    pc.is_in(table['security'],value_set=pa.array(securities,type=pa.string())))
+                table=table.filter(mask)
+                wanted=set(fields)|IDENTITY_FIELDS
+                table=pa.Table.from_arrays([table[f.name] if f.name in wanted else pa.nulls(table.num_rows,f.type)
+                    for f in MARKET_SCHEMA],schema=MARKET_SCHEMA)
+                rows=min(page_rows or self.batch_rows,self.batch_rows)
+                for offset in range(0,max(1,table.num_rows),rows):
+                    self.check(context)
+                    yield self._batch(table.slice(offset,rows),binding)
+                self.check(context)
+                return
         bounds = [binding.bounds(s, start, end) for s in securities]
         lower = min((b[0] for b in bounds), key=binding.spec.key_bytes)
         upper = max((b[1] for b in bounds), key=binding.spec.key_bytes)
@@ -477,6 +503,10 @@ class RunDataGateway:
                     expected_generation=int(context.dependencies[binding.name]['generation']), cancelled=self.cancelled)
             self.stats['storage_reads'] += 1
             self.stats['storage_rows'] += page.table.num_rows
+            self.stats['selected_file_bytes'] += page.metrics.current_read_bytes
+            self.stats['files_read'] += page.metrics.files_read
+            self.stats['storage_scratch_peak_bytes'] = max(
+                self.stats['storage_scratch_peak_bytes'], page.metrics.scratch_peak_bytes)
             self.check(context)  # quality may change without generation during read
             with store_errors():
                 table = binding.project(page.table, set(fields) | identity)
@@ -487,11 +517,30 @@ class RunDataGateway:
                 table = table.slice(0, remaining)
                 remaining -= table.num_rows
             if table.num_rows or not page.next_cursor:
-                yield self._batch(table, binding)
+                result=self._batch(table, binding)
+                if (self.replay_cache_rows and count is None and start<end
+                        and set(securities)==set(self.grant.universe) and not hasattr(binding,'batch_metadata')):
+                    self._remember_replay(binding.name,set(fields),result.table)
+                yield result
             if not page.next_cursor or remaining == 0:
                 break
             query = replace(query, cursor=page.next_cursor)
         self.check(context)
+
+    def _remember_replay(self, name, fields, table):
+        if not table.num_rows:
+            return
+        cached=self.replay_cache
+        identity=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+        if (cached is not None and cached[0]==name and cached[1]==fields
+                and tuple(cached[2][k][-1].as_py() for k in identity)<tuple(table[k][0].as_py() for k in identity)):
+            table=pa.concat_tables([cached[2],table])
+        if table.num_rows>self.replay_cache_rows:
+            table=table.take(pa.array(range(table.num_rows-self.replay_cache_rows,table.num_rows),type=pa.uint64()))
+        table=table.combine_chunks()
+        if table.nbytes>2*self.batch_bytes:
+            raise GatewayError('RESOURCE_LIMIT','回放缓冲超过两批次预算')
+        self.replay_cache=(name,fields,table)
 
     def _batch(self, table, binding):
         if table.nbytes+16384 > self.batch_bytes:
@@ -539,8 +588,35 @@ class RunDataGateway:
             yield self._batch(pa.Table.from_batches([], schema=MARKET_SCHEMA), binding)
         if request['securities']:
             security = tuple(sorted(request['securities'])) if len(request['securities']) > 1 else request['securities'][0]
-            yield from self._pages(binding, security, start, end, context, request['fields'],
-                                   count=count, page_rows=page_rows)
+            if (self.replay_window_ns is not None and count is None and start < end
+                    and binding.spec.key[0] == binding.fields.get('time_ns')
+                    and pa.types.is_int64(binding.spec.schema.field(binding.spec.key[0]).type)):
+                # Time-first replay uses finite ranges through the SAME reader,
+                # locks, issues and generation gate. It does not repeatedly sort
+                # every future file to produce one page. File bounds are hints,
+                # never coverage or permission evidence.
+                with store_errors(), self.store.catalog.transaction() as c:
+                    bounds = c.execute(text('SELECT '
+                        '(SELECT key_min FROM data_store_files WHERE dataset=:d ORDER BY key_min LIMIT 1),'
+                        '(SELECT key_max FROM data_store_files WHERE dataset=:d ORDER BY key_max DESC LIMIT 1)'),
+                        {'d':binding.spec.name}).one()
+                if bounds[0] is not None:
+                    first = int.from_bytes(bytes(bounds[0])[:8],'big')-2**63+binding.time_offset_ns
+                    last = int.from_bytes(bytes(bounds[1])[:8],'big')-2**63+binding.time_offset_ns
+                    begin, finish = max(start,first), min(end,last)
+                    if begin <= finish:
+                        while begin <= finish:
+                            stop = min(finish,begin+self.replay_window_ns-1)
+                            yield from self._pages(binding, security, begin, stop, context, request['fields'],
+                                                   count=count, page_rows=page_rows)
+                            begin = stop+1
+                    else:
+                        yield from self._pages(binding,security,start,end,context,request['fields'],page_rows=page_rows)
+                else:
+                    yield from self._pages(binding,security,start,end,context,request['fields'],page_rows=page_rows)
+            else:
+                yield from self._pages(binding, security, start, end, context, request['fields'],
+                                       count=count, page_rows=page_rows)
         self.check(context)
 
     def lookback(self, name, request, context):
@@ -605,13 +681,14 @@ class RunDataGateway:
         return self._batch(pa.concat_tables(parts) if parts else pa.Table.from_batches([], schema=MARKET_SCHEMA), binding)
 
     def close(self, context):
+        self.replay_cache=None
         if context is self.context and context is not None:
             context.closed = True
             context.dependencies.clear()
             self.cache.clear()
 
 
-def serve(channel, gateway, context, *, close_context=True):
+def serve(channel, gateway, context, *, close_context=True, session_facts=None):
     """Run-private source/query streams; one credited response at a time.
 
     At most two generators retain buffers, with each emitted batch bounded by
@@ -664,6 +741,20 @@ def serve(channel, gateway, context, *, close_context=True):
                             streams.pop(stream_id)[0].close()
                             gateway.check(context)
                             status = 'eof'
+                elif frame.op == 'session_facts':
+                    if (session_facts is None or set(frame.body) != {'session', 'offset'}
+                            or type(frame.body['session']) is not str
+                            or not 1 <= len(frame.body['session'].encode()) <= 128
+                            or type(frame.body['offset']) is not int or not 0 <= frame.body['offset'] < 10000):
+                        raise GatewayError('INVALID_CONTRACT', '会话事实请求无效')
+                    gateway.check(context)
+                    body = session_facts(frame.body['session'], frame.body['offset'], 256)
+                    if (type(body) is not dict or set(body) != {'session', 'facts', 'next_offset'}
+                            or body['session'] != frame.body['session'] or type(body['facts']) is not list
+                            or not 1 <= len(body['facts']) <= 256
+                            or body['next_offset'] is not None and body['next_offset'] != frame.body['offset'] + len(body['facts'])):
+                        raise GatewayError('INVALID_CONTRACT', '会话事实信用或身份无效')
+                    gateway.check(context)
                 elif frame.op == 'check':
                     if frame.body:
                         raise GatewayError('INVALID_CONTRACT', '依赖检查不接受额外控制')

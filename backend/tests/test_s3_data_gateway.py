@@ -123,6 +123,58 @@ def test_real_arrow_exact_selective_projection(formal,monkeypatch):
     assert all(b.table.num_rows<=2 for b in batches)
     assert not list((formal.files.root/'.scratch').rglob('*.parquet'))
 
+def test_time_range_replay_keeps_same_ns_events_and_quality_gate(formal):
+    base=contract('gateway_time_first')
+    keys=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+    spec=replace(base,key=keys,schema=pa.schema([
+        pa.field(f.name,f.type,nullable=f.name not in keys,metadata=f.metadata)
+        for f in base.schema],metadata=base.schema.metadata))
+    formal.register(spec)
+    data=rows(40)
+    formal.upsert(spec,'default',[pa.RecordBatch.from_pylist(data,schema=spec.schema)],
+        SourceUpdate('test',fingerprint('time-first'),fingerprint('isolated-d18'),0),
+        lower=(BASE,),upper=(BASE+21,),source_check=lambda _:True)
+    route=MarketBinding('market',spec,'tick',{n:n for n in spec.schema.names},{},
+        lambda s,a,b:((a,),(b+1,)),'time_ns')
+    reference=make_gateway(formal,(route,))
+    bounded=make_gateway(formal,(route,),replay_window_ns=3)
+    scope=dict(run_id='isolated-run',universe=['A.SH'])
+    left=reference.open(scope);right=bounded.open(scope)
+    expected=pa.concat_tables([b.table for b in reference.read('market',request(),left)])
+    actual=pa.concat_tables([b.table for b in bounded.read('market',request(),right)])
+    assert expected.equals(actual) and actual.num_rows==40
+    assert actual['sequence'].to_pylist()==list(range(1,41))
+    stream=bounded.read('market',request(),right)
+    assert next(stream).table.num_rows==2
+    quality(formal,spec)
+    error('DATA_CHANGED',lambda:next(stream))
+
+def test_replay_buffer_reuses_only_complete_interior_and_never_skips_changed_gate(formal):
+    base=contract('gateway_replay_buffer')
+    keys=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+    spec=replace(base,key=keys,schema=pa.schema([
+        pa.field(f.name,f.type,nullable=f.name not in keys,metadata=f.metadata)
+        for f in base.schema],metadata=base.schema.metadata))
+    formal.register(spec)
+    formal.upsert(spec,'default',[pa.RecordBatch.from_pylist(rows(40),schema=spec.schema)],
+        SourceUpdate('test',fingerprint('buffer'),fingerprint('isolated-d18'),0),
+        lower=(BASE,),upper=(BASE+21,),source_check=lambda _:True)
+    route=MarketBinding('market',spec,'tick',{n:n for n in spec.schema.names},{},
+        lambda s,a,b:((a,),(b+1,)),'time_ns')
+    grant=AuthorizedRun('isolated-run','isolated-owner',('A.SH',),BASE-100,BASE+1000)
+    gateway=RunDataGateway(formal,AuthenticatedPrincipal('isolated-owner'),grant,(route,),
+        batch_rows=10,replay_cache_rows=20)
+    context=gateway.open(dict(run_id=grant.run_id,universe=['A.SH']))
+    assert sum(b.table.num_rows for b in gateway.read('market',request(),context))==40
+    calls=gateway.stats['storage_reads']
+    query=request(BASE+18,BASE+18,fields=('price',))
+    result=pa.concat_tables([b.table for b in gateway.read('market',query,context)])
+    assert result['sequence'].to_pylist()==[37,38] and result['quantity'].null_count==2
+    assert gateway.stats['storage_reads']==calls
+    assert gateway.replay_cache[2].num_rows<=20
+    quality(formal,spec)
+    error('DATA_CHANGED',lambda:list(gateway.read('market',query,context)))
+
 @pytest.mark.parametrize('quality_only',[False,True])
 def test_two_blocks_changed_never_commit_mixed_success(formal,quality_only):
     spec,gateway,ctx=setup(formal)

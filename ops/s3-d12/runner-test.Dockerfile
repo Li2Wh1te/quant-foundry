@@ -8,11 +8,14 @@ COPY tests/s3_runtime_suite.py /app/s3_runtime_suite.py
 COPY tests/s3_runservice_suite.py /app/s3_runservice_suite.py
 COPY tests/s3_cli_suite.py /app/s3_cli_suite.py
 COPY tests/s3_cli_fixtures.py /app/s3_cli_fixtures.py
+COPY tests/s3_final_suite.py /app/s3_final_suite.py
+COPY ops/s3-d18 /app/d18
 COPY examples/strategies /app/examples/strategies
 COPY examples/http_workflow.py /app/examples/http_workflow.py
 COPY docs/backtesting /app/docs/backtesting
 COPY backend/alembic.ini /app/alembic.ini
 COPY VERSION /app/VERSION
+COPY s3-source.json /app/s3-source.json
 FROM python:3.12.2-slim@sha256:5dc6f84b5e97bfb0c90abfb7c55f3cacc2cb6687c8f920b64a833a2219875997
 COPY sdk/python/requirements-build.lock /install/requirements.lock
 COPY dependencies/ /install/dependencies/

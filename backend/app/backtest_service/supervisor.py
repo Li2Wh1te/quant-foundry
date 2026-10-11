@@ -31,6 +31,8 @@ class Binding:
     channel: object = None
     listener: object = None
     error: BaseException | None = None
+    session_facts: object = None
+    telemetry: object = None
 
 
 class DataRunServices:
@@ -68,6 +70,7 @@ class DataRunServices:
                     binding.gateway,
                     binding.context,
                     close_context=False,
+                    session_facts=binding.session_facts,
                 )
             except BaseException as error:
                 if not stopped.is_set() and getattr(error, "code", None) != "CANCELLED":
@@ -210,7 +213,8 @@ class RunnerSupervisor:
                             "RESOURCE_LIMIT", "数据预算超过worker内存分配"
                         )
                     body = dict(
-                        spec=spec,
+                        spec=dict(spec, calendar=[]),
+                        calendar_rows=len(spec['calendar']),
                         strategy_sha256=hashlib.sha256(
                             task.work.strategy_source.encode()
                         ).hexdigest(),
@@ -218,6 +222,18 @@ class RunnerSupervisor:
                         research_routes=task.binding.research_routes,
                         output_bytes=task.work.limits.output_bytes,
                     )
+                elif frame.op == "calendar" and booted and set(frame.body) == {"offset"}:
+                    offset = frame.body['offset']
+                    calendar = task.binding.spec['calendar']
+                    if (type(offset) is not int or not 0 <= offset < len(calendar)
+                            or not 1 <= len(calendar) <= 10000):
+                        raise RuntimeFault('RESOURCE_LIMIT', '日历信用或范围无效')
+                    body = dict(rows=calendar[offset:offset+128])
+                elif frame.op == "metrics" and booted and set(frame.body) == {"metrics"}:
+                    if type(frame.body['metrics']) is not dict or len(encoded(frame.body)) > 64*1024:
+                        raise RuntimeFault('RESOURCE_LIMIT', '运行测量摘要超过预算')
+                    if task.binding.telemetry is not None:
+                        task.binding.telemetry(frame.body['metrics'])
                 elif frame.op == "result" and booted and set(frame.body) == {"records"}:
                     records = frame.body["records"]
                     if type(records) is not list or not 1 <= len(records) <= 64:
@@ -454,6 +470,9 @@ class RunnerSupervisor:
         path.rmdir()
 
     def _finish(self, task, outcome):
+        if (task.binding.error is not None and not self.stopping
+                and not self.repository.cancelled(task.claim)):
+            outcome=self._failure(task.binding.error)
         if outcome["status"] != "succeeded":
             task.stopped.set()
         task.listener.close()

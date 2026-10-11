@@ -51,6 +51,7 @@ class Settings(BaseSettings):
     s3_work_root: Path | None = None
     s3_daemon_work_root: Path | None = None
     s3_worker_image: str | None = None
+    s3_accept_new_runs: bool = True
     foundation_worker_enabled: bool = False
     foundation_runtime_image_digest: str = ""
     foundation_archive_gid: int = Field(default=1000, ge=1)

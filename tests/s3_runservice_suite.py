@@ -334,6 +334,20 @@ main(sys.argv[1:])
         row = response.json(); self.runs.append(row["run_id"])
         return row, config
 
+    def test_admission_pause_preserves_status_cancel_and_authenticated_reads(self):
+        row,config=self.submit()
+        self.app.state.settings=self.settings.model_copy(update={'s3_accept_new_runs':False})
+        paused=self.http('POST',payload=config,key=uuid4().hex)
+        self.assertEqual(paused.status_code,503,paused.text)
+        self.assertEqual(self.http('POST','/batches',payload={'configs':[config]},key=uuid4().hex).status_code,503)
+        self.assertEqual(self.http('POST','/batches/'+str(uuid4())+'/retry-failed',key=uuid4().hex).status_code,503)
+        preview=self.http('POST','/preflight',payload=config).json()
+        self.assertFalse(preview['errors'])
+        self.assertIn('new_run_admission_paused',preview['warnings'])
+        self.assertEqual(self.http('GET','/'+row['run_id']).status_code,200)
+        self.assertEqual(self.http('POST','/'+row['run_id']+'/cancel').status_code,200)
+        self.assertEqual(self.http('GET','/capabilities',token=None).status_code,401)
+
     def test_http_schema_idempotency_parameter_and_owner_boundaries(self):
         from app.backtest_service.openapi import RUN_SCHEMA
         if (self.repo_root/"contracts/run_request.schema.json").exists():

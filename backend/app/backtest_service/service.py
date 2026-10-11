@@ -74,9 +74,14 @@ class FormalProvider:
 
 
 class RunService:
-    def __init__(self, repository, provider, *, limits=None):
+    def __init__(self, repository, provider, *, limits=None, accepting=True):
         self.repository, self.provider = repository, provider
         self.limits = limits or WorkerLimits()
+        self.accepting = accepting
+
+    def require_admission(self):
+        if not self.accepting:
+            raise RuntimeFault("CAPABILITY_UNAVAILABLE", "新运行接单已暂停；状态、取消和历史结果仍可访问")
 
     def capabilities(self):
         try:
@@ -130,7 +135,9 @@ class RunService:
                 raise RuntimeFault("RESOURCE_LIMIT", "账户配置超过运行控制预算")
             return AcceptedWork(owner, deepcopy(config), revision.source_code, self.limits, accepted)
 
-    def accepted_work(self, owner, config):
+    def accepted_work(self, owner, config, *, for_submission=True):
+        if for_submission:
+            self.require_admission()
         work = self._capture(owner, config)
         # Recheck actual dependencies and sandbox/resources at every admission.
         # check never imports user code and creates no task. Runtime binding
@@ -158,8 +165,11 @@ class RunService:
 
     def preflight(self, owner, config):
         try:
-            work = self.accepted_work(owner, config)
-            return dict(errors=[], warnings=["current_revision_not_historical_snapshot"], normalized_config=work.config)
+            work = self.accepted_work(owner, config, for_submission=False)
+            warnings=["current_revision_not_historical_snapshot"]
+            if not self.accepting:
+                warnings.append("new_run_admission_paused")
+            return dict(errors=[], warnings=warnings, normalized_config=work.config)
         except RuntimeFault as error:
             return dict(errors=[error.diagnostic()], warnings=[], normalized_config=config)
 

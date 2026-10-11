@@ -306,33 +306,60 @@ impl ResultSink for CheckedWriter {
     }
 }
 fn execute(
-    spec: Spec,
+    mut spec: Spec,
     handlers: Handlers,
     callbacks: SyncSender<host::Callback>,
     cancelled: Arc<AtomicBool>,
     spool: spool::SharedSpool,
 ) -> QfResult<Value> {
-    let facts = Facts::new(&spec)?;
+    let mut facts = Facts::new(&spec)?;
     let calendar = SessionCalendar::new(
         spec.calendar_reference.clone(),
         spec.calendar.clone(),
         spec.next_session.clone(),
     )?;
     let start = spec.calendar[0].before_open_ns;
+    let mut account_calendar = spec.calendar.clone();
+    if let Some(next) = spec.following_session.clone() {
+        if spec.next_session.as_ref() != Some(&next.session.key) {
+            return Err(invalid("后续账户会话与已接受日历不一致"));
+        }
+        account_calendar.push(next);
+        // Validate its actual date and boundaries, without admitting another
+        // market event or callback outside this run's simulation calendar.
+        SessionCalendar::new(
+            spec.calendar_reference.clone(),
+            account_calendar.clone(),
+            None,
+        )?;
+    }
     let account = Account::new(
         spec.config.initial_cash,
-        spec.calendar.clone(),
+        account_calendar,
         facts.usage.clone(),
         AccountLimits {
             max_active_orders: spec.max_active_orders,
             ..AccountLimits::default()
         },
     )?;
-    let mut rules = Rules(Facts {
-        book: facts.book.clone(),
-        usage: facts.usage.clone(),
-        rows: facts.rows.clone(),
-    });
+    let deadline = Instant::now() + Duration::from_secs(spec.wall_time_seconds);
+    let budget = (spec.data_budget_bytes / 8).min(qf_core::data::MAX_ARROW_BATCH_BYTES);
+    let (events, mut data) = source::connect(
+        std::mem::replace(&mut spec.source, spec::Source::Fixture { events: vec![] }),
+        qf_core::data::RunScope {
+            run_id: spec.run_id.clone(),
+            universe: spec.config.universe.clone(),
+        },
+        cancelled.clone(),
+        budget,
+        deadline,
+    )?;
+    data.benchmark_origin = spec.benchmark_origin.clone();
+    data.benchmark_security = spec.config.benchmark.clone();
+    let gateway = data.gateway.clone();
+    let context = data.context.clone();
+    facts.gateway = gateway.clone();
+    let mut rules = Rules(facts.clone());
     let mut execution = OrderManager::new(
         account,
         facts,
@@ -348,22 +375,6 @@ fn execute(
     for action in spec.corporate_actions {
         execution.add_corporate_action(action, start)?;
     }
-    let deadline = Instant::now() + Duration::from_secs(spec.wall_time_seconds);
-    let budget = (spec.data_budget_bytes / 8).min(qf_core::data::MAX_ARROW_BATCH_BYTES);
-    let (events, mut data) = source::connect(
-        spec.source,
-        qf_core::data::RunScope {
-            run_id: spec.run_id.clone(),
-            universe: spec.config.universe.clone(),
-        },
-        cancelled.clone(),
-        budget,
-        deadline,
-    )?;
-    data.benchmark_origin = spec.benchmark_origin.clone();
-    data.benchmark_security = spec.config.benchmark.clone();
-    let gateway = data.gateway.clone();
-    let context = data.context.clone();
     let mut host = host::Host::new(
         callbacks,
         handlers,
@@ -402,6 +413,7 @@ fn execute(
         gateway,
         context,
     };
+    let engine_started = Instant::now();
     let report = engine.run(EnginePorts {
         data: &mut data,
         execution: &mut execution,
@@ -411,6 +423,28 @@ fn execute(
         control: &mut control,
         results: &mut writer,
     });
+    let driver_seconds = engine_started.elapsed().as_secs_f64();
+    let ipc_metrics = data.gateway.as_ref().and_then(|g| g.lock().ok()).map(|g|
+        json!({"exchange_seconds":g.exchange_seconds,"exchange_count":g.exchange_count,"payload_bytes":g.payload_bytes}));
+    let ipc_seconds = data
+        .gateway
+        .as_ref()
+        .and_then(|g| g.lock().ok())
+        .map_or(0.0, |g| g.exchange_seconds);
+    let conversion_seconds = *data
+        .conversion_seconds
+        .lock()
+        .map_err(|_| invalid("数据转换测量锁失败"))?;
+    let spool_seconds = spool
+        .lock()
+        .map_err(|_| invalid("结果测量锁失败"))?
+        .write_seconds;
+    let exclusive_seconds = (driver_seconds
+        - host.callback_seconds
+        - (ipc_seconds - host.callback_gateway_seconds)
+        - conversion_seconds
+        - spool_seconds)
+        .max(0.0);
     // The terminal control message must not contain the full position map.
     // D11 already persisted final positions as bounded business shards.
     let portfolio = execution.value(report.progress.now_ns).ok().map(|view| {
@@ -422,7 +456,7 @@ fn execute(
     Ok(
         json!({"outcome":report.outcome,"progress":{"completed_events":report.progress.completed_events,"completed_sessions":report.progress.completed_sessions,"now_ns":report.progress.now_ns},
         "merge":{"peak_buffered_events":report.merge.peak_buffered_events,"peak_buffered_bytes":report.merge.peak_buffered_bytes,"source_reads":report.merge.source_reads},
-        "callback_count":host.callback_count,"logs_truncated":host.logs_truncated,"portfolio":portfolio,"cleanup_errors":report.cleanup_errors,"production_executed":false}),
+        "callback_count":host.callback_count,"timing":{"driver_including_wait_seconds":driver_seconds,"callback_including_sdk_seconds":host.callback_seconds,"gateway_inside_callbacks_seconds":host.callback_gateway_seconds,"rust_driver_exclusive_seconds":exclusive_seconds,"source_arrow_conversion_seconds":conversion_seconds,"worker_result_spool_write_seconds":spool_seconds,"ipc":ipc_metrics},"logs_truncated":host.logs_truncated,"portfolio":portfolio,"cleanup_errors":report.cleanup_errors,"production_executed":false}),
     )
 }
 fn exception(py: Python<'_>, error: &PyErr) -> QfError {
@@ -538,14 +572,23 @@ impl Drop for EngineThread {
     }
 }
 #[pyfunction]
+#[pyo3(signature=(input, handlers, dispatch, cancellation, calendar_input=None))]
 pub fn run_strategy(
     py: Python<'_>,
     input: &str,
     handlers: &str,
     dispatch: Py<PyAny>,
     cancellation: PyRef<'_, CancellationToken>,
+    calendar_input: Option<&str>,
 ) -> PyResult<RunResult> {
-    let spec: Spec = convert(bounded_json(input))?;
+    let mut spec: Spec = convert(bounded_json(input))?;
+    if let Some(calendar_input) = calendar_input {
+        if !spec.calendar.is_empty() || calendar_input.len() > 16 * 1024 * 1024 {
+            return Err(python_error(invalid("运行日历超过元数据预算或重复声明")));
+        }
+        spec.calendar =
+            convert(serde_json::from_str(calendar_input).map_err(|_| invalid("运行日历无效")))?;
+    }
     convert(Facts::new(&spec))?;
     let flags: Value = convert(bounded_json(handlers))?;
     let flag = |name| flags[name].as_bool().unwrap_or(false);

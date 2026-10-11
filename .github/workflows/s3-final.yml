@@ -1,0 +1,131 @@
+name: S3 full integration and release
+on:
+  pull_request:
+    paths:
+      - engine/**
+      - sdk/python/**
+      - backend/app/backtest_service/**
+      - backend/app/data_store/**
+      - backend/app/core/config.py
+      - contracts/**
+      - scripts/s3_release.py
+      - scripts/build_s3_images.sh
+      - scripts/test_s3_images.py
+      - scripts/test_s3_startup.py
+      - scripts/test_s3_runtime.sh
+      - ops/s3-d12/**
+      - ops/s3-d18/*.py
+      - ops/s3-d18/*.Dockerfile
+      - tests/s3_final_suite.py
+      - .github/workflows/s3-final.yml
+permissions:
+  contents: read
+concurrency:
+  group: s3-final-${{ github.head_ref || github.ref }}
+  cancel-in-progress: false
+jobs:
+  full:
+    name: Full B1-B4 in 4 CPU and 8 GiB group
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.2'
+      - uses: astral-sh/setup-uv@v5
+      - name: Check resources and construct locked release wheel
+        run: |
+          test "$(nproc)" -ge 4
+          df -h "$RUNNER_TEMP"
+          test "$(df -B1 --output=avail "$RUNNER_TEMP" | tail -1)" -ge 8589934592
+          rustup toolchain install 1.90.0 --profile minimal
+          python -m venv "$RUNNER_TEMP/s3-final/build"
+          "$RUNNER_TEMP/s3-final/build/bin/python" -m pip install --require-hashes -r sdk/python/requirements-build.lock
+          cd sdk/python
+          python ../../scripts/s3_release.py snapshot --out "$RUNNER_TEMP/s3-final/native-before.json"
+          "$RUNNER_TEMP/s3-final/build/bin/maturin" build --release --locked --interpreter "$RUNNER_TEMP/s3-final/build/bin/python" --out "$RUNNER_TEMP/s3-final/wheels"
+          python ../../scripts/s3_release.py seal --manifest "$RUNNER_TEMP/s3-final/native-before.json" --wheel "$RUNNER_TEMP"/s3-final/wheels/*.whl --out "$RUNNER_TEMP/s3-final/release.json"
+      - name: Offline release images and independent installed import
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-final
+          QF_S3_RELEASE_ROOT: ${{ runner.temp }}/s3-final-release
+        run: |
+          bash scripts/build_s3_images.sh
+          python scripts/test_s3_images.py "$QF_S3_RELEASE_ROOT/images.json"
+          python scripts/test_s3_startup.py "$QF_S3_RELEASE_ROOT/images.json"
+      - name: Key completed evidence by all measurement code and native binary
+        id: source
+        run: |
+          python scripts/s3_release.py context --manifest "$RUNNER_TEMP/s3-final/release.json" --wheel "$RUNNER_TEMP"/s3-final/wheels/*.whl --out "$RUNNER_TEMP/s3-current-source.json"
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, os
+          data = json.load(open(os.environ['RUNNER_TEMP'] + '/s3-current-source.json'))
+          print('key=' + data['measurement_source']['sha256'] + '-' + data['build']['wheel']['native_sha256'])
+          PY
+      - uses: actions/cache@v4
+        id: completed
+        with:
+          # A small result only. No source data, database or fixture is cached.
+          path: ${{ runner.temp }}/s3-final-evidence/final-result.json
+          key: s3-full-x86_64-${{ steps.source.outputs.key }}
+      - name: Verify unchanged-source full evidence after documentation changes
+        if: steps.completed.outputs.cache-hit == 'true'
+        run: |
+          python scripts/s3_release.py reuse --manifest "$RUNNER_TEMP/s3-current-source.json" --record "$RUNNER_TEMP/s3-final-evidence/final-result.json" --out "$RUNNER_TEMP/s3-final-evidence/reuse.json"
+      - name: Real CurrentStore, PostgreSQL, runner container and sibling workers
+        if: steps.completed.outputs.cache-hit != 'true'
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-final
+          QF_S3_RUNTIME_EVIDENCE: ${{ runner.temp }}/s3-final-evidence
+          QF_S3_FINAL: '1'
+          QF_S3_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: bash scripts/test_s3_runtime.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s3-full-integration-x86_64
+          path: |
+            ${{ runner.temp }}/s3-final-evidence/
+            ${{ runner.temp }}/s3-final/wheels/
+            ${{ runner.temp }}/s3-final/release.json
+            ${{ runner.temp }}/s3-final-release/
+          if-no-files-found: error
+  arm:
+    name: Native Linux arm64 wheel install and smoke
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.2'
+      - uses: astral-sh/setup-uv@v5
+      - name: Native build and independent installation
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-arm
+        run: |
+          test "$(uname -m)" = aarch64
+          rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
+          bash scripts/test_s3_engine.sh
+      - name: Native arm64 offline release images and installation
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-arm
+          QF_S3_RELEASE_ROOT: ${{ runner.temp }}/s3-arm-release
+        run: |
+          bash scripts/build_s3_images.sh
+          python scripts/test_s3_images.py "$QF_S3_RELEASE_ROOT/images.json"
+          python scripts/test_s3_startup.py "$QF_S3_RELEASE_ROOT/images.json"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s3-release-arm64
+          path: |
+            ${{ runner.temp }}/s3-arm/wheels/
+            ${{ runner.temp }}/s3-arm/release.json
+            ${{ runner.temp }}/s3-arm-release/
+          if-no-files-found: error

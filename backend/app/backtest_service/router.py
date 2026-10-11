@@ -32,7 +32,7 @@ def service(request: Request):
     provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings)
     repository = getattr(request.app.state, "s3_repository", None) or DatabaseRunRepository(
         get_engine(), result_root=settings.s3_result_root)
-    return RunService(repository, provider)
+    return RunService(repository, provider, accepting=settings.s3_accept_new_runs)
 
 
 def fault(error):
@@ -150,6 +150,7 @@ def cancel_batch(batch_id: str, request: Request, s: RunService = Depends(servic
 @router.post("/batches/{batch_id}/retry-failed", status_code=202)
 def retry_batch(batch_id: str, request: Request, s: RunService = Depends(service), key: str | None = Header(None, alias="Idempotency-Key")):
     try:
+        s.require_admission()
         ids = s.repository.retry_failed(owner(request), batch_id, key)
         return dict(batch_id=batch_id, run_ids=ids)
     except RuntimeFault as error:

@@ -473,6 +473,13 @@ class D14Tests(unittest.TestCase):
                         self.assertEqual(result["performance"],python_result["performance"])
                         self.assertEqual(result["execution_model"],python_result["execution_model"])
                         self.assertFalse(result["partial"])
+                        verifier=ROOT/'ops/s3-d18/verify_result.py'
+                        if not verifier.exists():verifier=Path('/app/d18/verify_result.py')
+                        verified=subprocess.run([sys.executable,'-I',str(verifier),row['run_id']],
+                            env=dict(os.environ,QF_BASE_URL=self.url,QF_API_TOKEN=TOKEN),
+                            capture_output=True,text=True,timeout=60)
+                        self.assertEqual(verified.returncode,0,verified.stdout+verified.stderr)
+                        self.assertTrue(json.loads(verified.stdout)['verified'])
                         trades=self.cli("result",row["run_id"],"--kind","trades","--limit","1000")["items"]
                         self.assertTrue(trades)
                         orders=self.client.result(row["run_id"],kind="orders",limit=1000)["items"]

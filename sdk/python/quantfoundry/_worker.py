@@ -13,6 +13,8 @@ import random
 import sys
 from threading import Lock
 from types import SimpleNamespace
+from copy import deepcopy
+import time
 import numpy as np
 from . import _native
 from .context import Context, BarData, _ACTIVE, _binding, _request, _order, _trade
@@ -64,12 +66,13 @@ class _Host:
         self.module, self.spec = module, spec
         self.context = Context(spec['config']['parameters'], spec['calendar'][0]['session']['exchange_timezone'])
         self.callbacks = {}
+        self.callback_metrics = dict(count=0, seconds=0.0, by_kind={})
         total = spec['data_budget_bytes']
         self.packet_bytes = min(total // 8, 64*1024*1024)
         self.session = _DataSession(SimpleNamespace(channel=SimpleNamespace(arrow_budget=self.packet_bytes)),
             universe=spec['config']['universe'], frequency=spec['config']['frequency'],
             market_routes=routes, research_routes=research_routes, calendar=spec['calendar'],
-            max_bytes=self.packet_bytes, cache_bytes=max(1,self.packet_bytes//8),
+            max_rows=spec.get('data_max_rows', 10000), max_bytes=self.packet_bytes, cache_bytes=max(1,self.packet_bytes//8),
             run_data_budget_bytes=total-3*self.packet_bytes)
         self.handlers = {name: callable(getattr(module, method, None)) for name, method in (
             ('bars','handle_data'), ('ticks','handle_tick'), ('before_open','before_trading_start'),
@@ -83,6 +86,7 @@ class _Host:
         self.callbacks[key] = func
 
     def dispatch(self, kind, encoded, bridge):
+        callback_started = time.monotonic()
         if _ACTIVE.get() is not None:
             raise _error('INVALID_CONTRACT', '策略不能递归进入回调')
         payload = json.loads(encoded)
@@ -107,6 +111,12 @@ class _Host:
                 else:
                     func(self.context)
         finally:
+            elapsed = time.monotonic()-callback_started
+            self.callback_metrics['count'] += 1
+            self.callback_metrics['seconds'] += elapsed
+            item = self.callback_metrics['by_kind'].setdefault(kind, dict(count=0, seconds=0.0))
+            item['count'] += 1
+            item['seconds'] += elapsed
             self.session.client = None
             _HOST.reset(host_token)
             _ACTIVE.reset(token)
@@ -126,7 +136,10 @@ def _run_module(module, spec, *, market_routes=None, research_routes=None, cance
     token = _RUNNING.set(True)
     host = None
     try:
+        spec = deepcopy(spec)
+        calendar = spec.pop('calendar')
         spec = json.loads(_json(spec))
+        spec['calendar'] = calendar
         spec['config'] = json.loads(_native.validate_run_config_json(_json(spec['config'])))
         if not _seeded:
             random.seed(spec['config']['seed'])
@@ -135,8 +148,14 @@ def _run_module(module, spec, *, market_routes=None, research_routes=None, cance
             raise _error('RULE_UNAVAILABLE', '缺少已接受运行日历')
         host = _Host(module, spec, market_routes or {}, research_routes or {})
         from ._results import RunResults
-        return RunResults(_native.run_strategy(_json(spec), _json(host.handlers), host.dispatch,
-            cancellation if cancellation is not None else _native.CancellationToken()))
+        compact_spec = dict(spec, calendar=[])
+        calendar_input = json.dumps(calendar, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+        if len(calendar_input.encode()) > 16*1024*1024 or not 1 <= len(calendar) <= 10000:
+            raise _error('RESOURCE_LIMIT', '运行日历超过有界元数据预算')
+        result = RunResults(_native.run_strategy(_json(compact_spec), _json(host.handlers), host.dispatch,
+            cancellation if cancellation is not None else _native.CancellationToken(), calendar_input))
+        result._callback_metrics = host.callback_metrics
+        return result
     finally:
         if host is not None:
             host.close()

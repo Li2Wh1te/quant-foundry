@@ -24,6 +24,7 @@ enum Operation {
     CloseStream,
     Cancel,
     Close,
+    SessionFacts,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -64,6 +65,9 @@ fn disconnected() -> QfError {
 }
 
 pub struct IpcGateway {
+    pub exchange_seconds: f64,
+    pub exchange_count: u64,
+    pub payload_bytes: u64,
     socket: UnixStream,
     scope: RunScope,
     sequence: u64,
@@ -88,7 +92,11 @@ impl IpcGateway {
             serde_json::from_value(Value::String(operation.into())).map_err(|_| invalid())?;
         if !matches!(
             op,
-            Operation::Check | Operation::OpenStream | Operation::Next | Operation::CloseStream
+            Operation::Check
+                | Operation::OpenStream
+                | Operation::Next
+                | Operation::CloseStream
+                | Operation::SessionFacts
         ) || !body.is_object()
         {
             return Err(invalid());
@@ -125,6 +133,9 @@ impl IpcGateway {
             .set_write_timeout(Some(Duration::from_millis(50)))
             .map_err(|_| disconnected())?;
         Ok(Self {
+            exchange_seconds: 0.0,
+            exchange_count: 0,
+            payload_bytes: 0,
             socket,
             scope,
             sequence: 0,
@@ -262,7 +273,13 @@ impl IpcGateway {
         if let Some(error) = &self.failure {
             return Err(error.clone());
         }
+        let started = Instant::now();
         let result = self.exchange(op, body);
+        self.exchange_seconds += started.elapsed().as_secs_f64();
+        self.exchange_count += 1;
+        if let Ok((_, bytes)) = &result {
+            self.payload_bytes += bytes.len() as u64;
+        }
         if let Err(error) = &result {
             self.failure = Some(error.clone());
             self.disconnect();

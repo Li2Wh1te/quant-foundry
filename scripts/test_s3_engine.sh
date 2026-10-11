@@ -22,7 +22,10 @@ cd "$qf_root"
 "$qf_python" -m venv "$qf_build_root/build"
 "$qf_build_root/build/bin/python" -m pip install --index-url https://pypi.org/simple --require-hashes -r sdk/python/requirements-build.lock
 cd "$qf_root/sdk/python"
+"$qf_python" "$qf_root/scripts/s3_release.py" snapshot --out "$qf_build_root/native-before.json"
 "$qf_build_root/build/bin/maturin" build --release --locked --interpreter "$qf_build_root/build/bin/python" --out "$qf_build_root/wheels"
+"$qf_python" "$qf_root/scripts/s3_release.py" seal --manifest "$qf_build_root/native-before.json" \
+    --wheel "$qf_build_root"/wheels/quantfoundry_sdk-*.whl --out "$qf_build_root/release.json"
 "$qf_python" -m venv "$qf_build_root/consumer"
 "$qf_build_root/consumer/bin/python" -m pip install --force-reinstall --no-deps "$qf_build_root"/wheels/quantfoundry_sdk-*.whl
 "$qf_build_root/consumer/bin/python" -m pip install --index-url https://pypi.org/simple --require-hashes -r requirements-build.lock

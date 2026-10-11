@@ -15,7 +15,9 @@ use qf_core::run::RunConfig;
 use qf_core::types::*;
 use qf_core::{ErrorCode, QfError, QfResult};
 use serde::Deserialize;
-use std::collections::BTreeMap;
+use serde_json::json;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,8 +27,12 @@ pub struct Spec {
     pub calendar: Vec<CalendarSession>,
     pub calendar_reference: String,
     pub next_session: Option<SessionKey>,
+    #[serde(default)]
+    pub following_session: Option<CalendarSession>,
     pub rules: Vec<TradingRule>,
     pub facts: Vec<Fact>,
+    #[serde(default)]
+    pub stream_session_facts: bool,
     pub corporate_actions: Vec<CorporateAction>,
     pub initial_marks: BTreeMap<SecurityKey, ValuationMark>,
     pub source: Source,
@@ -35,10 +41,15 @@ pub struct Spec {
     pub benchmark_origin: Option<qf_core::analysis::BenchmarkPoint>,
     pub result_budget_bytes: u64,
     pub data_budget_bytes: usize,
+    #[serde(default = "default_data_max_rows")]
+    pub data_max_rows: usize,
     pub max_active_orders: usize,
     pub max_commands_per_boundary: usize,
     pub chunk_events: usize,
     pub wall_time_seconds: u64,
+}
+fn default_data_max_rows() -> usize {
+    10000
 }
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -67,10 +78,14 @@ pub struct Fact {
     pub disposal_settlement_date: Option<RuleDate>,
     pub holding_bands: BTreeMap<RuleDate, qf_core::rules::dividends::HoldingBand>,
 }
+#[derive(Clone)]
 pub struct Facts {
     pub book: RuleBook,
     pub usage: RuleUse,
-    pub rows: BTreeMap<(SessionKey, SecurityKey), Fact>,
+    pub rows: Arc<Mutex<BTreeMap<(SessionKey, SecurityKey), Fact>>>,
+    pub gateway: Option<super::source::Gateway>,
+    streamed: bool,
+    universe: BTreeSet<SecurityKey>,
 }
 pub fn invalid(message: &str) -> QfError {
     QfError::new(ErrorCode::InvalidContract, "strategy_worker", message)
@@ -78,12 +93,18 @@ pub fn invalid(message: &str) -> QfError {
 impl Facts {
     pub fn new(spec: &Spec) -> QfResult<Self> {
         if spec.facts.len() > 10_000
+            || spec.calendar.is_empty()
+            || spec.calendar.len() > 10000
+            || spec.stream_session_facts
+                && (!spec.facts.is_empty() || !matches!(spec.source, Source::Ipc { .. }))
             || spec.rules.len() > 1024
             || spec.corporate_actions.len() > 10_000
             || spec.wall_time_seconds == 0
             || spec.wall_time_seconds > 3600
             || spec.data_budget_bytes < 16 * 1024 * 1024
             || spec.data_budget_bytes > 1024 * 1024 * 1024
+            || spec.data_max_rows == 0
+            || spec.data_max_rows > 1000000
             || spec.chunk_events == 0
             || spec.chunk_events > 10_000
         {
@@ -125,12 +146,18 @@ impl Facts {
         Ok(Self {
             book: RuleBook::new(spec.rules.clone())?,
             usage,
-            rows,
+            rows: Arc::new(Mutex::new(rows)),
+            gateway: None,
+            streamed: spec.stream_session_facts,
+            universe: spec.config.universe.iter().cloned().collect(),
         })
     }
-    pub fn row(&self, security: &SecurityKey, session: &SessionKey) -> QfResult<&Fact> {
+    pub fn row(&self, security: &SecurityKey, session: &SessionKey) -> QfResult<Fact> {
         self.rows
+            .lock()
+            .map_err(|_| invalid("会话事实锁失败"))?
             .get(&(session.clone(), security.clone()))
+            .cloned()
             .ok_or_else(|| {
                 QfError::new(
                     ErrorCode::RuleUnavailable,
@@ -139,10 +166,82 @@ impl Facts {
                 )
             })
     }
+    fn load_session(&self, session: &CalendarSession) -> QfResult<()> {
+        if !self.streamed {
+            return Ok(());
+        }
+        let gateway = self
+            .gateway
+            .as_ref()
+            .ok_or_else(|| invalid("会话事实通道未绑定"))?;
+        let mut rows = BTreeMap::new();
+        let mut offset = 0;
+        loop {
+            let (status, body, payload) = gateway
+                .lock()
+                .map_err(|_| invalid("事实通道锁失败"))?
+                .callback_request(
+                    "session_facts",
+                    json!({"session":session.session.key,"offset":offset}),
+                )?;
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Page {
+                session: SessionKey,
+                facts: Vec<Fact>,
+                next_offset: Option<usize>,
+            }
+            let page: Page = serde_json::from_value(body).map_err(|_| invalid("会话事实页无效"))?;
+            if status != "ok"
+                || !payload.is_empty()
+                || page.session != session.session.key
+                || page.facts.is_empty()
+                || page.facts.len() > 256
+                || offset + page.facts.len() > self.universe.len()
+                || page
+                    .next_offset
+                    .is_some_and(|n| n != offset + page.facts.len())
+            {
+                return Err(invalid("会话事实身份或信用无效"));
+            }
+            offset += page.facts.len();
+            for row in page.facts {
+                if row.day.session != session.session.key
+                    || row.day.date != session.date
+                    || row.instrument.security != row.day.security
+                    || !self.universe.contains(&row.instrument.security)
+                    || rows
+                        .insert(
+                            (row.day.session.clone(), row.instrument.security.clone()),
+                            row,
+                        )
+                        .is_some()
+                {
+                    return Err(invalid("会话事实身份、日期、重复或授权无效"));
+                }
+            }
+            if page.next_offset.is_none() {
+                break;
+            }
+        }
+        if rows.len() != self.universe.len() {
+            return Err(QfError::new(
+                ErrorCode::RuleUnavailable,
+                "account_terms",
+                "会话事实未覆盖授权标的，不能猜测缺失规则",
+            ));
+        }
+        // One complete admitted session replaces the previous cache atomically.
+        *self.rows.lock().map_err(|_| invalid("会话事实锁失败"))? = rows;
+        Ok(())
+    }
 }
 impl OrderFacts for Facts {
     fn session_terms(&mut self, session: &CalendarSession) -> QfResult<Vec<AccountTerms>> {
+        self.load_session(session)?;
         self.rows
+            .lock()
+            .map_err(|_| invalid("会话事实锁失败"))?
             .iter()
             .filter(|((s, _), _)| s == &session.session.key)
             .map(|(_, row)| {

@@ -143,7 +143,10 @@ class _DataSession:
         self.client, self.universe, self.frequency = client, tuple(universe), frequency
         self.allowed_securities = frozenset(universe)
         self.market_routes, self.research_routes = dict(market_routes), dict(research_routes or {})
-        self.calendar = json.loads(_json(calendar))
+        calendar_text = json.dumps(calendar, ensure_ascii=False, allow_nan=False, separators=(',', ':'))
+        if len(calendar_text.encode()) > 16*1024*1024 or not 0 <= len(calendar) <= 10000:
+            raise _error('RESOURCE_LIMIT', '研究日历超过元数据预算')
+        self.calendar = json.loads(calendar_text)
         self.max_rows, self.max_bytes, self.cache_bytes = max_rows, max_bytes, cache_bytes
         self.cache, self.cache_size = {}, 0
         self.batch_rows = 1024
@@ -379,7 +382,11 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
             _market_fetch(active, securities, start, end, source_count, source, route, selected)
         if adjustment != 'none':
             _research_fetch(active, 'adjustment', securities, ['factor'], end)
-        raw = active.view.prices_json(_json(request), source, _json(active.session.calendar))
+        # Same-frequency queries need no resampling calendar. A cross-frequency
+        # lookback receives only its actual bounded date interval.
+        sessions = ([] if source == frequency else [s for s in active.session.calendar
+            if int(s['before_open_ns']) <= end and (start is None or int(s['after_close_ns']) >= start)])
+        raw = active.view.prices_json(_json(request), source, _json(sessions))
         # Serialize metadata around native JSON without first building another
         # full Python row graph, dumping it and then parsing it a second time.
         encoded = '{{"rows":{},"units":{},"limitations":{}}}'.format(

@@ -18,7 +18,7 @@ PROTOCOL = "qf.ipc.v1"
 MAX_CONTROL_BYTES = 1024 * 1024
 MAX_ARROW_BYTES = 64 * 1024 * 1024
 PREFIX = struct.Struct("!4sIQ")
-OPS = frozenset({"open_stream", "next", "check", "close_stream", "cancel", "close"})
+OPS = frozenset({"open_stream", "next", "check", "close_stream", "cancel", "close", "session_facts"})
 STATUSES = frozenset({"request", "ok", "batch", "eof", "error"})
 
 

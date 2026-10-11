@@ -4,7 +4,7 @@ from ._transport import Channel, Client
 
 
 class RuntimeChannel(Channel):
-    operations = frozenset(("boot", "result", "finished", "output", "notices"))
+    operations = frozenset(("boot", "calendar", "result", "finished", "output", "notices", "metrics"))
 
 
 class RuntimeClient(Client):

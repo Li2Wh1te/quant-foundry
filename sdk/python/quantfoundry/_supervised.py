@@ -6,8 +6,11 @@ import hashlib
 import importlib.util
 import json
 import random
+import resource
+import os
 import socket
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -102,6 +105,15 @@ def main():
         client = RuntimeClient(channel, run_id)
         packet = client.call("boot", {}).body
         spec = packet["spec"]
+        calendar_rows = packet['calendar_rows']
+        if type(calendar_rows) is not int or not 1 <= calendar_rows <= 10000 or spec['calendar']:
+            raise _error('INVALID_CONTRACT', '日历范围无效')
+        while len(spec['calendar']) < calendar_rows:
+            page = client.call('calendar', dict(offset=len(spec['calendar']))).body
+            if (set(page) != {'rows'} or type(page['rows']) is not list
+                    or not 1 <= len(page['rows']) <= min(128, calendar_rows-len(spec['calendar']))):
+                raise _error('INVALID_CONTRACT', '日历页信用无效')
+            spec['calendar'].extend(page['rows'])
         if spec["run_id"] != run_id or spec["source"].get("socket_path") not in (
             None,
             "/run/qf/ipc/data.sock",
@@ -124,6 +136,7 @@ def main():
             name: _MarketRoute(row["binding"], tuple(row["fields"]))
             for name, row in packet["market_routes"].items()
         }
+        computation_started = time.monotonic()
         result = _run_module(
             module,
             spec,
@@ -131,7 +144,20 @@ def main():
             research_routes=packet["research_routes"],
             _seeded=True,
         )
+        computation_seconds = time.monotonic() - computation_started
+        transfer_started = time.monotonic()
         summary = _transfer(result, client)
+        temporary = os.statvfs('/tmp')
+        cgroup_peak_path = Path('/sys/fs/cgroup/memory.peak')
+        worker_resources = dict(peak_rss_bytes=resource.getrusage(resource.RUSAGE_SELF).ru_maxrss*1024,
+            cgroup_peak_bytes=int(cgroup_peak_path.read_text()) if cgroup_peak_path.is_file() else None,
+            tmp_bytes_before_release=(temporary.f_blocks-temporary.f_bfree)*temporary.f_frsize)
+        client.call('metrics', dict(metrics=dict(worker_computation_seconds=computation_seconds,
+            result_transfer_seconds=time.monotonic()-transfer_started,
+            resources=worker_resources,
+            portfolio=summary.get('portfolio'),
+            engine={k:v for k,v in summary.items() if k not in ('results','portfolio','outcome')},
+            python_callbacks=getattr(result, '_callback_metrics', {}))))
         notices = summary.get("results", {}).get("notices")
         if notices is not None:
             client.call("notices", dict(notices=notices))

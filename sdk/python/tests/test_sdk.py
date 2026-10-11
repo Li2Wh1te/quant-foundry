@@ -34,6 +34,55 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(report['cleanup_errors'],[])
         return report
 
+    def test_streamed_session_facts_cover_more_than_one_control_page(self):
+        source=spec(days=2,securities=tuple(f'S{i:04}.SH' for i in range(257)))
+        seen=[]
+        with ipc_spec(source,batch_rows=257) as (wired,gateway,routes):
+            wired.update(facts=[],stream_session_facts=True)
+            result=self.run_strategy(SimpleNamespace(handle_data=lambda c,d:seen.append(len(d.securities))),wired,market_routes=routes)
+            report=self.assertSucceeded(result)
+            self.assertEqual(report['progress']['completed_events'],514)
+            self.assertEqual(gateway.calls['session_facts'],4)
+            self.assertEqual(seen,[257,257])
+
+    def test_last_after_close_day_order_uses_admitted_next_session(self):
+        submitted=[]
+        source=spec(days=1,securities=('A.SH',))
+        accepted=spec(days=2,securities=('A.SH',))['calendar']
+        source['calendar']=accepted[:1]
+        source['following_session']=accepted[1]
+        source['next_session']='S2'
+        def after_close(c):
+            result=order_target('A.SH',10)
+            self.assertTrue(result.accepted,result)
+            submitted.append(get_order(result.order_id))
+        result=self.run_strategy(SimpleNamespace(after_trading_end=after_close),source)
+        report=self.assertSucceeded(result)
+        self.assertEqual(submitted[0].effective_session,'S2')
+        self.assertEqual(submitted[0].filled_quantity,0)
+        self.assertEqual(report['progress']['completed_events'],1)
+        self.assertEqual(page(result,'trades')['items'],[])
+
+    def test_bad_streamed_session_facts_never_publish_success(self):
+        from copy import deepcopy
+        for fault in ('duplicate','missing','future_date','universe','offset'):
+            with self.subTest(fault=fault):
+                source=spec(days=2,securities=('A.SH','B.SH'))
+                def malformed(page):
+                    page=deepcopy(page)
+                    if fault=='duplicate':page['facts'][1]=deepcopy(page['facts'][0])
+                    elif fault=='missing':page['facts'].pop()
+                    elif fault=='future_date':page['facts'][0]['day']['date']='2099-01-01'
+                    elif fault=='universe':page['facts'][0]['instrument']['security']='UNKNOWN.SH'
+                    else:page['next_offset']=99
+                    return page
+                with ipc_spec(source,facts_transform=malformed) as (wired,gateway,routes):
+                    wired.update(facts=[],stream_session_facts=True)
+                    result=self.run_strategy(SimpleNamespace(handle_data=lambda c,d:None),wired,market_routes=routes)
+                    report=summary(result)
+                    self.assertEqual(report['outcome']['status'],'failed',report)
+                    self.assertEqual(report['progress']['completed_events'],0)
+
     def test_callbacks_query_submit_cancel_real_account_and_nonrecursive_notifications(self):
         calls=[]; depth=0; leases=[]; snapshots=[]
         def initialize(c):
@@ -264,6 +313,30 @@ class SDKTests(unittest.TestCase):
             self.assertEqual(get_current_data()['A.SH'].ask,Decimal('10.01'));seen.append(t.sequence)
         self.assertSucceeded(self.run_strategy(SimpleNamespace(handle_tick=tick),source))
         self.assertEqual(seen,[1,2])
+
+    def test_quote_costs_and_equity_use_explicit_current_raw_mark(self):
+        from support_sdk import MODEL
+        source=spec(days=1,securities=('A.SH',),frequency='tick',ticks=2)
+        source['config']['execution_model']='quote_tick_v1'
+        for event in source['source']['events']:
+            event['kind']='quote_tick'
+            row=event['event'];row.pop('price');row.pop('quantity')
+            row.update(bid='9.99',ask='10.01',bid_quantity=100,ask_quantity=100)
+        stamp=source['calendar'][0]['before_open_ns']
+        source['initial_marks']={'A.SH':dict(price='10',price_time_ns=stamp,known_ns=stamp,
+            session='S1',basis='raw',source='synthetic accepted session print',
+            origin=dict(kind='synthetic',reference=MODEL))}
+        def tick(c,t):
+            self.assertIsNone(t.last_price)
+            if t.sequence==1:
+                self.assertTrue(order_target('A.SH',10,style=LimitOrder('10.01')).accepted)
+        result=self.run_strategy(SimpleNamespace(handle_tick=tick),source)
+        report=self.assertSucceeded(result)
+        trades=page(result,'trades')['items']
+        self.assertEqual(len(trades),1)
+        fee=Decimal(trades[0]['fee']);self.assertGreater(fee,0)
+        self.assertEqual(Decimal(report['portfolio']['cash']),Decimal('10000')-Decimal('100.1')-fee)
+        self.assertEqual(Decimal(report['portfolio']['total_value']),Decimal('9999.9')-fee)
 
     def test_record_and_logs_are_bounded_and_keep_exact_types(self):
         def bars(c,d):
