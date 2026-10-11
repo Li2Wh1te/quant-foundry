@@ -343,7 +343,11 @@ fn batch_context_is_fixed_and_capabilities_are_honest() {
     let caps = capabilities();
     assert_eq!(
         caps.execution_models,
-        vec![ExecutionModel::BarNextIntervalV1]
+        vec![
+            ExecutionModel::BarNextIntervalV1,
+            ExecutionModel::TradeTickV1,
+            ExecutionModel::QuoteTickV1
+        ]
     );
     assert!(
         caps.implemented
@@ -351,7 +355,8 @@ fn batch_context_is_fixed_and_capabilities_are_honest() {
             .any(|name| name == "python_strategy_sdk")
     );
     assert!(caps.implemented.iter().any(|name| name == "tick_callbacks"));
-    assert!(!caps.frequencies.contains(&Frequency::Tick));
+    assert!(caps.frequencies.contains(&Frequency::Tick));
+    assert!(caps.implemented.iter().any(|name| name == "tick_matching"));
     assert_eq!(
         caps.frequencies,
         vec![
@@ -360,7 +365,8 @@ fn batch_context_is_fixed_and_capabilities_are_honest() {
             Frequency::FiveMinutes,
             Frequency::FifteenMinutes,
             Frequency::ThirtyMinutes,
-            Frequency::Hour
+            Frequency::Hour,
+            Frequency::Tick
         ]
     );
     assert!(!caps.production_data_available);

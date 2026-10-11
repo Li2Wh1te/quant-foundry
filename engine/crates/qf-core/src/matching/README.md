@@ -1,5 +1,7 @@
 # S3-D07 Bar 撮合
 
+基础 Tick 见 [D08 模型](TICK.md) 与 [D08 结果](D08_RESULT.md)。
+
 `bar::BarMatcher::from_run(&RunConfig)` 实现 `bar_next_interval_v1`，直接读取
 D01 已归一化、只读的参与率和滑点；没有另设默认值。支持日线、1/5/15/30
 分钟与 60 分钟，频率和实际日历桶由 D03 校验。

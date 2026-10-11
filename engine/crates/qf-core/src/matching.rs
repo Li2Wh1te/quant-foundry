@@ -6,6 +6,7 @@ use crate::types::{
 use serde::{Deserialize, Serialize};
 
 pub mod bar;
+pub mod tick;
 
 /// Small result metadata, emitted once through the existing bounded sink.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

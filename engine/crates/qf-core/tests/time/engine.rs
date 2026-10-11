@@ -222,7 +222,7 @@ fn close_nanosecond_tick_successor_can_fill_before_day_expiry() {
     assert_eq!(h.execution.orders["o2"].status, OrderStatus::Open);
 }
 #[test]
-fn quote_tick_path_uses_shared_identity_without_enabling_trade_model() {
+fn quote_tick_path_preserves_identity_and_other_stream_cannot_supply_fills() {
     let session = row(0);
     let time = local(&session, 600);
     let mut h = Harness::default();
@@ -253,7 +253,31 @@ fn quote_tick_path_uses_shared_identity_without_enabling_trade_model() {
         calendar(1),
         vec![Source::new(vec![quote(&session, "A", time, 1)], 1)],
     );
+    assert_eq!(code(&report), None);
+    assert_eq!(report.progress.completed_events, 1);
+    assert!(mixed.execution.fills.is_empty());
+
+    // A port that accidentally matches the research-only stream is refused
+    // before account commit, even if its returned fill otherwise looks valid.
+    let mut wrong = Harness::default();
+    let mut submitted = false;
+    wrong.host.ticks = Some(Box::new(move |_, _, commands| {
+        if !submitted {
+            submitted = true;
+            commands.submit(&intent("A", TimeInForce::Gtc))?;
+        }
+        Ok(())
+    }));
+    let report = wrong.run(
+        config(Frequency::Tick),
+        calendar(1),
+        vec![Source::new(
+            vec![quote(&session, "A", time, 1), quote(&session, "A", time, 2)],
+            1,
+        )],
+    );
     assert_eq!(code(&report), Some(ErrorCode::InvalidContract));
+    assert!(wrong.execution.fills.is_empty());
 }
 #[test]
 fn explicit_subscriptions_deduplicate_and_matching_still_consumes_universe() {

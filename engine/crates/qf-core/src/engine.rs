@@ -1200,18 +1200,26 @@ where
         }
         self.check_data()?;
         session.validate_event(event, config.frequency)?;
-        let correct = matches!(
+        let selected = matches!(
             (event, config.execution_model),
             (MarketEvent::Bar(_), ExecutionModel::BarNextIntervalV1)
                 | (MarketEvent::TradeTick(_), ExecutionModel::TradeTickV1)
                 | (MarketEvent::QuoteTick(_), ExecutionModel::QuoteTickV1)
         );
+        let compatible = matches!(
+            (event, config.execution_model),
+            (MarketEvent::Bar(_), ExecutionModel::BarNextIntervalV1)
+                | (
+                    MarketEvent::TradeTick(_) | MarketEvent::QuoteTick(_),
+                    ExecutionModel::TradeTickV1 | ExecutionModel::QuoteTickV1
+                )
+        );
         let key = event.key();
-        if !correct || !self.registration.authorized(&key.security) {
+        if !compatible || !self.registration.authorized(&key.security) {
             return Err(error(
                 ErrorCode::InvalidContract,
                 "market_source",
-                "回放事件不在run撮合源或授权集合内",
+                "回放事件不在run频率或授权集合内",
             ));
         }
         if self.ports.execution.active_order_count() > config.limits.max_active_orders {
@@ -1281,6 +1289,13 @@ where
             &rules,
             &ExecutionBudget(&*self.ports.execution),
         )?;
+        if !selected && (!outcome.fills.is_empty() || !outcome.orders.is_empty()) {
+            return Err(error(
+                ErrorCode::InvalidContract,
+                "matcher",
+                "未选择的Tick流只能发布研究事件，不能产生撮合结果",
+            ));
+        }
         if outcome.fills.len().saturating_add(outcome.orders.len())
             > config
                 .limits
