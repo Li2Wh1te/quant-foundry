@@ -6,7 +6,7 @@
 
 - 父线程提供的 S2 授权：线程 `1791617175.720449`，申请 `1791703008.381739`，用户在 `1791703354.196029` 回复“同意”。范围为请求依赖的正式读取准入、显式有界目录续读及当前问题清单的一致性标识；不包括 S2 合并/部署、角色体系、认证存储、供应商调用或生产操作。
 - 原 `/issues` CAST 及两项 PostgreSQL 测试继续原样保留。S3 的合并授权没有用于 S2。R01 Mac 和生产资源没有触碰。
-- 隔离工作树 `/workspace/s2-review`。上一轮冻结 head 为 `df488ec859218b0df93f3a937aae9bec630e71e2`；其 CI 只代表上一轮。此次同步最新主干的 S3 D10 / PR #167 后重新冻结并验证，精确 SHA、主干 SHA、各工作流实际 SHA 及结果记录在 [PR #158](https://github.com/Li2Wh1te/quant-foundry/pull/158)。仓库没有 `AGENTS.md` 或 `.agents/skills`。
+- 隔离工作树 `/workspace/s2-review`。上一轮冻结 head 为 `df488ec859218b0df93f3a937aae9bec630e71e2`；其 CI 只代表上一轮。此次先同步 S3 D10 / PR #167，再同步验证期间独立合入的 S3 D08 / PR #168（main `e2c1f0f0c77ac5d28cbc27d88de79bd57bec72ac`），均无冲突；重新冻结并验证。精确 SHA、主干 SHA、各工作流实际 SHA 及结果记录在 [PR #158](https://github.com/Li2Wh1te/quant-foundry/pull/158)。仓库没有 `AGENTS.md` 或 `.agents/skills`。
 
 ## 实际实现与拒绝边界
 
