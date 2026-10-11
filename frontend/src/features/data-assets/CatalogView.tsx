@@ -196,9 +196,11 @@ export function CatalogView() {
   }, [catalog, busy, context, params, visiblePage]);
 
   function navigateCatalog(next: URLSearchParams) {
-    latestParams.current = next; issuedContexts.current.add(next.toString());
+    // Match the canonical order used by rendered contexts and restored URLs.
+    const target = catalogParams(next);
+    latestParams.current = target; issuedContexts.current.add(target.toString());
     // A controlled text input must update outside the router's transition.
-    setSearchInput(next.get("search") ?? ""); setParams(next);
+    setSearchInput(target.get("search") ?? ""); setParams(target);
   }
   function update(key: string, value: string) {
     saveCatalogScroll(latestParams.current);
