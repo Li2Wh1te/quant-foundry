@@ -141,6 +141,20 @@ pub struct RunResult {
 }
 #[pymethods]
 impl RunResult {
+    // Container transfer only; SDK public result kinds remain unchanged.
+    fn metadata_page_json(&self, after: Option<&str>, limit: usize) -> PyResult<String> {
+        let spool = self
+            .spool
+            .as_ref()
+            .ok_or_else(|| python_error(invalid("运行结果已关闭")))?;
+        convert(encode(
+            &spool
+                .lock()
+                .map_err(|_| python_error(invalid("结果读取锁失败")))?
+                .page("metadata", after, limit)
+                .map_err(python_error)?,
+        ))
+    }
     fn summary_json(&self) -> PyResult<String> {
         let mut result = self.report.clone();
         if let Some(spool) = &self.spool {

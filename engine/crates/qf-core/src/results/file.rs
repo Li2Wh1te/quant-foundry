@@ -539,6 +539,26 @@ impl FileResultSink {
             Sequence::new(self.notices.logs_dropped.get().saturating_add(1));
         self.notices.logs_truncated = true;
     }
+    /// Retain upstream truncation when D12 transfers an already bounded spool.
+    /// Transferred truncated records already count locally; do not count twice.
+    pub fn merge_notices(&mut self, upstream: OutputNotices) -> QfResult<()> {
+        self.check()?;
+        self.notices.logs_dropped = Sequence::new(
+            self.notices
+                .logs_dropped
+                .get()
+                .checked_add(upstream.logs_dropped.get())
+                .ok_or_else(failure)?,
+        );
+        self.notices.log_messages_truncated = Sequence::new(
+            self.notices
+                .log_messages_truncated
+                .get()
+                .max(upstream.log_messages_truncated.get()),
+        );
+        self.notices.logs_truncated |= upstream.logs_truncated;
+        Ok(())
+    }
     pub fn overview(&self) -> Value {
         json!({"schema_id":FORMAT,"outcome":self.outcome,"partial":!matches!(self.outcome,Some(RunOutcome::Succeeded{..})),
             "counts":self.counts,"result_bytes":self.bytes,"max_page_read":self.max_page_read,

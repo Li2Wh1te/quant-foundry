@@ -144,6 +144,9 @@ def _run_module(module, spec, *, market_routes=None, research_routes=None, cance
         _RUN_LOCK.release()
 
 def main():
+    if sys.argv[1:] == ['--supervised']:
+        from ._supervised import main as supervised_main
+        return supervised_main()
     import argparse
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--strategy', required=True)
