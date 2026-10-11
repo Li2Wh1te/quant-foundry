@@ -44,6 +44,9 @@ IDENTITY_FIELDS = frozenset({'kind', 'security', 'session', 'source_session', 'c
                            'interval_start_ns', 'interval_end_ns'})
 PUBLIC_FIELDS = frozenset({'open', 'high', 'low', 'close', 'price', 'bid', 'ask',
                          'quantity', 'bid_quantity', 'ask_quantity'})
+# One retained event source and one synchronous callback query. This is a
+# channel limit, not a strategy-selected option or a pool of prefetched streams.
+MAX_ACTIVE_STREAMS = 2
 
 
 class GatewayError(ValueError):
@@ -598,7 +601,13 @@ class RunDataGateway:
 
 
 def serve(channel, gateway, context):
-    """D12 calls with a connected run-private socket; at most one active pull."""
+    """Run-private source/query streams; one credited response at a time.
+
+    At most two generators retain buffers, with each emitted batch bounded by
+    batch_rows/batch_bytes and the unchanged aggregate window-cache budget. The channel
+    never queues Arrow responses or reads either stream without explicit credit.
+    D12 must include these two stream allocations in its parent memory grant.
+    """
     Frame, TransportError = channel.frame_type, channel.error_type
     streams = {}
     last_id = 0
@@ -615,28 +624,33 @@ def serve(channel, gateway, context):
             try:
                 body, payload, status = {}, b'', 'ok'
                 if frame.op == 'open_stream':
-                    if set(frame.body) != {'binding','request','max_rows'} or streams:
-                        raise GatewayError('RESOURCE_LIMIT', '每通道只允许一个有界数据流')
+                    if set(frame.body) != {'binding','request','max_rows'}:
+                        raise GatewayError('INVALID_CONTRACT', '数据流参数无效')
                     max_rows = frame.body['max_rows']
-                    if type(max_rows) is not int or not 1 <= max_rows <= gateway.batch_rows:
+                    if (type(max_rows) is not int or not 1 <= max_rows <= gateway.batch_rows
+                            or len(streams) >= MAX_ACTIVE_STREAMS
+                            or sum(credit for _, credit in streams.values())+max_rows
+                                > MAX_ACTIVE_STREAMS*gateway.batch_rows):
                         raise GatewayError('RESOURCE_LIMIT', '流信用超过预算')
                     name = frame.body['binding']
                     gateway._request(name, frame.body['request'], context)
                     stream_id = uuid4().hex
-                    streams[stream_id] = gateway.read(name, frame.body['request'], context, page_rows=max_rows)
+                    streams[stream_id] = (gateway.read(name, frame.body['request'], context,
+                                                     page_rows=max_rows), max_rows)
                     body = dict(stream_id=stream_id)
                 elif frame.op in {'next', 'close_stream'}:
                     if set(frame.body) != {'stream_id'} or frame.body['stream_id'] not in streams:
                         raise GatewayError('INVALID_CONTRACT', '数据流不属于本运行')
                     stream_id = frame.body['stream_id']
                     if frame.op == 'close_stream':
-                        streams.pop(stream_id).close()
+                        streams.pop(stream_id)[0].close()
                     else:
                         try:
-                            batch = next(streams[stream_id])
+                            batch = next(streams[stream_id][0])
                             body, payload, status = batch.metadata, batch.ipc(gateway.batch_bytes), 'batch'
+                            del batch
                         except StopIteration:
-                            streams.pop(stream_id).close()
+                            streams.pop(stream_id)[0].close()
                             gateway.check(context)
                             status = 'eof'
                 elif frame.op == 'check':
@@ -644,7 +658,10 @@ def serve(channel, gateway, context):
                         raise GatewayError('INVALID_CONTRACT', '依赖检查不接受额外控制')
                     gateway.check(context)
                     body = dict(check='unchanged', context=context.to_dict(),
-                                limits=dict(batch_rows=gateway.batch_rows, batch_bytes=gateway.batch_bytes))
+                                limits=dict(batch_rows=gateway.batch_rows, batch_bytes=gateway.batch_bytes,
+                                    max_active_streams=MAX_ACTIVE_STREAMS,
+                                    stream_row_credits=MAX_ACTIVE_STREAMS*gateway.batch_rows,
+                                    stream_batch_bytes=MAX_ACTIVE_STREAMS*gateway.batch_bytes))
                 elif frame.op in {'cancel','close'}:
                     if frame.body:
                         raise GatewayError('INVALID_CONTRACT', '关闭不接受额外控制')
@@ -657,7 +674,7 @@ def serve(channel, gateway, context):
                 channel.send(Frame(frame.run_id, frame.request_id, frame.op, 'error', error.to_dict()))
                 break  # errors are terminal; cannot ignore changes and keep reading
     finally:
-        for stream in streams.values():
+        for stream, _ in streams.values():
             stream.close()
         gateway.close(context)
         channel.close()

@@ -1,4 +1,4 @@
-"""D01 shared contract boundary. Backtesting execution is not yet available."""
+"""S3 contracts and strategy SDK; production submission still needs D12/D13."""
 import json
 from . import _native
 from .client import BacktestClient, RunConfig

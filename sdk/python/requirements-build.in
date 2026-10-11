@@ -3,3 +3,6 @@ maturin==1.15.0
 jsonschema==4.26.0
 numpy==2.5.2
 pandas==3.0.5
+
+# D10 isolated Arrow gateway fixtures; not a new production dependency.
+pyarrow==23.0.1

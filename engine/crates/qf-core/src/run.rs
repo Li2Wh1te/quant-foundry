@@ -402,9 +402,18 @@ pub fn capabilities() -> Capabilities {
             "shared_contracts".into(),
             "research_views".into(),
             "technical_indicators".into(),
+            "python_strategy_sdk".into(),
+            "tick_callbacks".into(),
         ],
-        execution_models: vec![],
-        frequencies: vec![],
+        execution_models: vec![ExecutionModel::BarNextIntervalV1],
+        frequencies: vec![
+            Frequency::Day,
+            Frequency::Minute,
+            Frequency::FiveMinutes,
+            Frequency::FifteenMinutes,
+            Frequency::ThirtyMinutes,
+            Frequency::Hour,
+        ],
         production_data_available: false,
     }
 }

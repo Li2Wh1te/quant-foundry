@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Generate installed strategy declarations/runtime refusal and client hints.
+"""Generate installed strategy declarations, wire types and client hints.
 
 The strategy .pyi is the canonical public signature; client.py is authoritative
 for the executable RunConfig. --check rejects drift without rewriting files.
-This does not generate or advertise a strategy engine implementation.
+D10 owns executable api.py; this generator never replaces its implementation.
 """
 from __future__ import annotations
 import argparse
@@ -211,49 +211,11 @@ def client_stub() -> str:
             output.append(item)
     return "# Generated from SDK client.py; run scripts/generate_s3_contracts.py.\n" + ast.unparse(ast.Module(body=output, type_ignores=[])) + "\n"
 
-def strategy_runtime() -> str:
-    tree = ast.parse((ROOT / "contracts/strategy_api.pyi").read_text())
-    # Return annotations use forward references; pandas is only a type dependency.
-    output = ast.parse('''from __future__ import annotations
-from typing import TYPE_CHECKING
-from .client import _unavailable
-from ._native import ContractError
-if TYPE_CHECKING:
-    from pandas import DataFrame
-''').body
-    data_names = {'Filter', 'CurrentQuote', 'Tick', 'get_price', 'get_current_data', 'get_fundamentals',
-                  'get_valuation', 'get_index_stocks', 'get_industry', 'get_instruments'}
-    for item in tree.body:
-        if isinstance(item, (ast.FunctionDef, ast.ClassDef)) and item.name in data_names:
-            continue
-        if isinstance(item, ast.ImportFrom) and item.module == "pandas":
-            continue
-        item = copy.deepcopy(item)
-        if isinstance(item, ast.FunctionDef):
-            item.body = ast.parse("_unavailable()").body
-        elif isinstance(item, ast.ClassDef):
-            if item.name == "StrategyError":
-                output.extend(ast.parse("StrategyError = ContractError").body)
-                continue
-            for method in item.body:
-                if isinstance(method, ast.FunctionDef):
-                    method.body = ast.parse("_unavailable()").body
-            if item.name == "MarketOrder":
-                item.body = ast.parse("pass").body
-            if item.name == "LimitOrder":
-                # Precision conversion is implemented; no trading action occurs.
-                item.body[-1].body = ast.parse("from .numeric import price_input\nself.price = price_input(price)").body
-        elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name) and item.target.id == "log":
-            item.value = ast.Call(func=ast.Name(id="_Logger", ctx=ast.Load()), args=[], keywords=[])
-        output.append(item)
-    output.append(ast.ImportFrom(module='data', names=[ast.alias(name=n) for n in sorted(data_names)], level=1))
-    return "# Generated from contracts/strategy_api.pyi. D01 runtime functions explicitly refuse.\n" + ast.unparse(ast.Module(body=output, type_ignores=[])) + "\n"
-
 def outputs() -> dict[Path, str]:
     declarations = (ROOT / "contracts/strategy_api.pyi").read_text()
     wire = rust_wire_stub()
     return {ROOT / "contracts/client.pyi": client_stub(), SDK / "client.pyi": client_stub(),
-            SDK / "api.pyi": declarations, SDK / "api.py": strategy_runtime(),
+            SDK / "api.pyi": declarations,
             ROOT / "contracts/shared_types.pyi": wire, SDK / "contracts.pyi": wire,
             SDK / "contracts.py": "from __future__ import annotations\n" + wire}
 
