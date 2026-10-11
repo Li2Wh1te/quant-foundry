@@ -1,7 +1,10 @@
-"""RunConfig is executable; transport belongs to D14 and fails explicitly here."""
+"""HTTP submission SDK using the single D13 service and native RunConfig policy."""
 import json
 from typing import Any, Mapping, Sequence
+from urllib.parse import urlencode
+from uuid import UUID
 from . import _native
+from ._http import BacktestError, HttpTransport
 
 def _json_value(value: Any, parent_depth: int = 0) -> Any:
     if isinstance(value, Mapping):
@@ -56,35 +59,74 @@ class RunConfig:
     def to_dict(self) -> dict[str, Any]:
         return json.loads(self._json)
 
-def _unavailable() -> None:
-    error = _native.ContractError("CAPABILITY_UNAVAILABLE: D01仅提供共享契约，运行服务与客户端传输尚未实现")
-    error.code = "CAPABILITY_UNAVAILABLE"
-    error.operation = "client"
-    error.scope = {}
-    raise error
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> "RunConfig":
+        """Validate a complete wire config, including schema and unknown fields."""
+        return cls(**json.loads(_native.validate_run_config_json(_json(value))))
+
+
+def _identity(value: str) -> str:
+    try:
+        if not isinstance(value, str):
+            raise ValueError()
+        return str(UUID(value))
+    except ValueError:
+        raise BacktestError("INVALID_RUN_CONFIG", "运行/批次标识须为有效 UUID") from None
+
+
+def _page(limit: int, cursor: str | None, maximum: int) -> str:
+    from ._results import validate_result_request
+    validate_result_request("orders", limit, cursor)
+    if limit > maximum:
+        raise BacktestError("INVALID_RUN_CONFIG", f"此分页最多 {maximum} 项")
+    return "?" + urlencode(dict(limit=limit, **({"cursor": cursor} if cursor else {})))
 
 class BacktestClient:
-    def __init__(self, *, base_url: str, token: str) -> None:
-        self.base_url = base_url
-        # This boundary does not persist, log or transmit the supplied token.
+    def __init__(self, *, base_url: str, token: str, timeout: float = 30) -> None:
+        self._http = HttpTransport(base_url, token, timeout)
+        self.base_url = self._http.origin
+
+    def capabilities(self) -> Mapping[str, Any]:
+        return self._http.request("GET", "/capabilities", "capabilities")
 
     def preflight(self, config: RunConfig) -> Mapping[str, Any]:
-        _unavailable()
+        return self._http.request("POST", "/preflight", "preflight", payload=config.to_dict())
     def submit(self, config: RunConfig, *, idempotency_key: str) -> Mapping[str, Any]:
-        _unavailable()
+        return self._http.request("POST", "", "submit", payload=config.to_dict(), idempotency_key=idempotency_key)
     def status(self, run_id: str) -> Mapping[str, Any]:
-        _unavailable()
+        return self._http.request("GET", "/" + _identity(run_id), "status")
     def cancel(self, run_id: str) -> Mapping[str, Any]:
-        _unavailable()
+        return self._http.request("POST", "/" + _identity(run_id) + "/cancel", "cancel")
     def result(self, run_id: str, *, kind: str = "summary", limit: int = 100,
                cursor: str | None = None) -> Mapping[str, Any]:
         from ._results import validate_result_request
         validate_result_request(kind, limit, cursor)
-        _unavailable()
+        if kind == "summary" and cursor is not None:
+            raise BacktestError("INVALID_RUN_CONFIG", "summary 不接受分页游标")
+        value = self._http.request("GET", "/" + _identity(run_id) + "/results/" + kind + _page(limit, cursor, 10000), "result")
+        if "items" in value and (not isinstance(value["items"], list) or len(value["items"]) > limit):
+            raise BacktestError("INVALID_RESPONSE", "结果页超过请求条数")
+        return value
     def batch(self, configs: Sequence[RunConfig], *, idempotency_key: str) -> Mapping[str, Any]:
-        _unavailable()
+        if not isinstance(configs, Sequence) or not 1 <= len(configs) <= 256 or any(not isinstance(c, RunConfig) for c in configs):
+            raise BacktestError("INVALID_RUN_CONFIG", "批次需要 1..256 个 RunConfig；参数网格请显式展开")
+        return self._http.request("POST", "/batches", "batch", payload={"configs": [c.to_dict() for c in configs]}, idempotency_key=idempotency_key)
     def batch_status(self, batch_id: str, *, limit: int = 100,
                      cursor: str | None = None) -> Mapping[str, Any]:
-        _unavailable()
+        value = self._http.request("GET", "/batches/" + _identity(batch_id) + _page(limit, cursor, 256), "batch_status")
+        if not isinstance(value.get("items"), list) or len(value["items"]) > limit:
+            raise BacktestError("INVALID_RESPONSE", "批次页超过请求条数")
+        return value
     def cancel_batch(self, batch_id: str) -> Mapping[str, Any]:
-        _unavailable()
+        return self._http.request("POST", "/batches/" + _identity(batch_id) + "/cancel", "cancel_batch")
+
+    def retry_failed(self, batch_id: str, *, idempotency_key: str) -> Mapping[str, Any]:
+        return self._http.request("POST", "/batches/" + _identity(batch_id) + "/retry-failed", "retry_failed", idempotency_key=idempotency_key)
+
+    def compare(self, run_ids: Sequence[str]) -> Mapping[str, Any]:
+        if isinstance(run_ids, (str, bytes)) or not isinstance(run_ids, Sequence) or not 2 <= len(run_ids) <= 16:
+            raise BacktestError("INVALID_RUN_CONFIG", "比较需要 2..16 个不同运行")
+        ids = [_identity(value) for value in run_ids]
+        if len(set(ids)) != len(ids):
+            raise BacktestError("INVALID_RUN_CONFIG", "比较运行不能重复")
+        return self._http.request("POST", "/compare", "compare", payload={"run_ids": ids})

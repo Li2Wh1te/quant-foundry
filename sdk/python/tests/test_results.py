@@ -3,7 +3,7 @@ import json
 from decimal import Decimal
 from types import SimpleNamespace
 import unittest
-from quantfoundry import BacktestClient, ContractError, RunResults
+from quantfoundry import BacktestClient, BacktestError, ContractError, RunResults
 from quantfoundry.api import order, LimitOrder, log, record
 from quantfoundry._worker import _run_module
 from support_sdk import spec
@@ -104,7 +104,7 @@ class ResultsTests(unittest.TestCase):
         with self.assertRaises(ContractError):fake.summary()
         client=BacktestClient(base_url='http://localhost',token='fixture')
         with self.assertRaises(ContractError):client.result('fixture',limit=True)
-        with self.assertRaises(ContractError):client.batch_status('fixture')
+        with self.assertRaises(BacktestError):client.batch_status('fixture')
     def test_user_record_names_do_not_reinterpret_values_as_account_fields(self):
         def bars(c,d): record(time_ns=0.25, price=Decimal('0.333333333333'), cash='label')
         result=self.run_strategy(SimpleNamespace(handle_data=bars),spec(days=1))

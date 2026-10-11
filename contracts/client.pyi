@@ -1,5 +1,6 @@
 # Generated from SDK client.py; run scripts/generate_s3_contracts.py.
 from typing import Any, Mapping, Sequence
+from quantfoundry._http import BacktestError
 
 class RunConfig:
 
@@ -9,9 +10,16 @@ class RunConfig:
     def to_dict(self) -> dict[str, Any]:
         ...
 
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> 'RunConfig':
+        ...
+
 class BacktestClient:
 
-    def __init__(self, *, base_url: str, token: str) -> None:
+    def __init__(self, *, base_url: str, token: str, timeout: float=30) -> None:
+        ...
+
+    def capabilities(self) -> Mapping[str, Any]:
         ...
 
     def preflight(self, config: RunConfig) -> Mapping[str, Any]:
@@ -36,4 +44,10 @@ class BacktestClient:
         ...
 
     def cancel_batch(self, batch_id: str) -> Mapping[str, Any]:
+        ...
+
+    def retry_failed(self, batch_id: str, *, idempotency_key: str) -> Mapping[str, Any]:
+        ...
+
+    def compare(self, run_ids: Sequence[str]) -> Mapping[str, Any]:
         ...

@@ -213,6 +213,7 @@ ResultRecord = SummaryRecord | ExecutionModelRecord | EquityRecord | OrderRecord
 def client_stub() -> str:
     tree = ast.parse((SDK / "client.py").read_text())
     output = [ast.ImportFrom(module="typing", names=[ast.alias(name=v) for v in ("Any", "Mapping", "Sequence")], level=0)]
+    output.append(ast.ImportFrom(module="quantfoundry._http", names=[ast.alias(name="BacktestError")], level=0))
     for item in tree.body:
         if isinstance(item, ast.ClassDef) and item.name in {"RunConfig", "BacktestClient"}:
             item = copy.deepcopy(item)

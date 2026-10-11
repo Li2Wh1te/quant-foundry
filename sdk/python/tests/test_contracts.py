@@ -184,9 +184,7 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(caps["execution_models"], ["bar_next_interval_v1", "trade_tick_v1", "quote_tick_v1"])
         self.assertEqual(caps["frequencies"], ["1d", "1m", "5m", "15m", "30m", "60m", "tick"])
         self.assertFalse(caps["production_data_available"])
-        client = BacktestClient(base_url="https://synthetic.invalid", token="fixture")
-        for action in [lambda:client.submit(RunConfig(**base()), idempotency_key="fixture"),
-                       lambda:get_price("510300.SH", count=20), lambda:get_trades(limit=10),
+        for action in [lambda:get_price("510300.SH", count=20), lambda:get_trades(limit=10),
                        lambda:order("510300.SH", 100)]:
             with self.assertRaises(StrategyError) as error: action()
             self.assertEqual(error.exception.code, "CAPABILITY_UNAVAILABLE")

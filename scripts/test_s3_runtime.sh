@@ -77,7 +77,8 @@ python3 - "$qf_root" "$qf_build" "$qf_test_root/build" <<'PY'
 import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
 for p in ['VERSION','backend/app','backend/pyproject.toml','backend/uv.lock','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
-          'sdk/python/tests/support_sdk.py','ops/s3-d12','tests/s3_runtime_suite.py','tests/s3_runservice_suite.py']:
+          'sdk/python/tests/support_sdk.py','ops/s3-d12','tests/s3_runtime_suite.py','tests/s3_runservice_suite.py',
+          'tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','examples/strategies','examples/http_workflow.py','docs/backtesting']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)
@@ -117,7 +118,8 @@ docker run --name "$qf_runner" --network none --cpus 1 --memory 1g --memory-swap
     --env QF_DATABASE_PASSWORD=private-d13-test --env QF_DATABASE_NAME=qf_d13_test \
     --env QF_API_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     --env QF_CURSOR_SIGNING_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb \
-    --env QF_D13_REAL_WORKER_REQUIRED=1 --env QF_D13_TEST_ROOT=/qf-work/d13-service \
+    --env QF_D13_REAL_WORKER_REQUIRED=1 --env QF_D14_REAL_WORKER_REQUIRED=1 --env QF_D13_TEST_ROOT=/qf-work/d13-service \
     "$qf_runner_id"
 mkdir -p "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}"
 cp "$qf_test_root/work/isolation-evidence.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"
+cp "$qf_test_root/work/d14-service/d14-examples.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"
