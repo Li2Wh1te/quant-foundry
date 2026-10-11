@@ -25,9 +25,13 @@ scope.dispose();
 - `listDatasets(options?)`, `getDataset(dataset, options?)`, `listStatus(options?)`,
   `listIssues(dataset?, options?)`, `queryPreview(request, options?)`, `loadCatalog(options?)`.
 - Request options: `signal?`, `timeoutMs?`; page options: `limit?`, `offset?`;
-  status additionally accepts `state?`. Catalog defaults: 100/page, 10 pages, 1000 items.
-- `CatalogSnapshot`: `items,total,phase,next_offset,complete,incompleteReason,counts,readAt,error`.
+  datasets/issues additionally accept the server's current `revision?`, status accepts `state?`.
+  Catalog defaults per explicit action: 100/page, 10 pages, 1000 new items. Continue only
+  a budget-stopped catalog with `loadCatalog({ previous: catalog, signal })`.
+- `CatalogSnapshot`: `items,total,phase,revision,next_offset,complete,incompleteReason,counts,readAt,error`.
   The server total and loaded item count are distinct; incomplete snapshots have `counts=null`.
+  Every continuation binds the same current revision. DATA_CHANGED discards the old sequence
+  and requires an explicit fresh read; revisions cannot retrieve historical snapshots.
 - `currentStatus`, `updateStatus`, `issueReason`, `frequencyLabel`, `datasetName`, `datasetPresentation`,
   `formatCount`, `formatValue`, `formatTimestamp`, `errorPresentation` return display-only values.
   Formatters preserve precise text. `representation` is the descriptor layout; queries use
@@ -68,6 +72,8 @@ into invented business facts. D02 owns adopting these exports in its extracted p
 The isolated D01 suite compiles a strict TypeScript consumer of both import surfaces;
 combined UI integration remains a separate D02/D07 check.
 
-No production endpoint was exercised by the fixtures. Current `/query` still requires the
-server's global readiness gate. Per-domain readability and exact request coverage await R01's
-actual contract; no frontend field, HTTP success, full page or cursor proves those capabilities.
+No production endpoint was exercised by the fixtures. Current `/query` uses the approved
+server request admission and existing formal input/quality checks; the global readiness
+receipt is unchanged. See [the approved contract boundaries](../handoff/s2-d07/approved-contracts-2026-10-11.md).
+Real-data acceptance remains pending; no frontend field, HTTP success, full page or cursor
+proves exact business-date coverage.

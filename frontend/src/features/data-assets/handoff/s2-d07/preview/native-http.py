@@ -94,7 +94,10 @@ def main():
                 connection.execute(text("INSERT INTO data_store_legacy_maintenance(singleton,phase) VALUES (1,'rebuilding')"))
             first = record('actual catalog under closed isolated maintenance gate', client.get(prefix + '/datasets?limit=1&offset=0', headers=headers), 200)
             assert first['items'][0]['status'] == 'rebuilding' and first['next_offset'] == 1
-            second = record('actual registry pagination under closed gate', client.get(prefix + '/datasets?limit=1&offset=1', headers=headers), 200)
+            assert len(first['revision']) == 64
+            second = record('actual registry pagination under closed gate', client.get(prefix + '/datasets',
+                params={'limit': 1, 'offset': 1, 'revision': first['revision']}, headers=headers), 200)
+            assert second['revision'] == first['revision']
             assert second['items'][0]['dataset'] != first['items'][0]['dataset']
             from urllib.parse import quote
             detail = record('actual registry descriptor/schema under closed gate', client.get(prefix + '/datasets/' + quote(entry.spec.name, safe=''), headers=headers), 200)
@@ -126,7 +129,7 @@ def main():
                 except subprocess.TimeoutExpired: frontend.kill(); frontend.wait()
         blocked.extend([
             'No authorized real development/production read route or session was supplied to this task.',
-            'require_ready remains global; healthy-A plus restricted-B domain separation is not delivered in this checkout.',
+            'This isolated rebuilding receipt tests a closed gate only; reset_done request admission and healthy-A/restricted-B require supported-filesystem coverage tests and real-data acceptance.',
             'Real business pagination, cursor DATA_CHANGED and role-based 403 are unverified; the current API has one authenticated credential.'
         ])
         (output / 'native-http.json').write_text(json.dumps({'source': 'Actual FastAPI HTTP + migrated disposable PostgreSQL',
