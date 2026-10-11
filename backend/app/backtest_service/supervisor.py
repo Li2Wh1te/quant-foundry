@@ -60,7 +60,7 @@ class DataRunServices:
                 binding.channel = Channel(
                     peer,
                     arrow_budget=binding.gateway.batch_bytes,
-                    timeout=30,
+                    timeout=work.limits.wall_seconds,
                     cancelled=stopped.is_set,
                 )
                 serve(
@@ -174,7 +174,10 @@ class RunnerSupervisor:
         try:
             peer = _accept(task.listener, task.stopped)
             channel = RuntimeChannel(
-                peer, arrow_budget=1, timeout=30, cancelled=task.stopped.is_set
+                peer,
+                arrow_budget=1,
+                timeout=task.work.limits.wall_seconds,
+                cancelled=task.stopped.is_set,
             )
             task.channel = channel
             last_id = 0

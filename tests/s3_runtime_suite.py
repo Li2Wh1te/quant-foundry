@@ -27,7 +27,7 @@ from app.backtest_service.runtime_contracts import (
     RuntimeFault,
     WorkerLimits,
 )
-from app.backtest_service.supervisor import Binding, DataRunServices
+from app.backtest_service.supervisor import Binding, DataRunServices, RunnerSupervisor
 from app.runner.__main__ import build_supervisor
 from quantfoundry import _native
 from support_sdk import batch, event_key, spec
@@ -666,6 +666,26 @@ def initialize(c):
             self.assertTrue(self.daemon.inspect(replacement[0])["State"]["Running"])
         finally:
             self.daemon.stop_remove(name, new if replacement else old)
+
+    def test_busy_callback_keeps_claim_alive_without_scheduler_polling(self):
+        self.supervisors = [
+            RunnerSupervisor(
+                self.repository, self.process, self.services, lease_seconds=2
+            )
+        ]
+        run_id = self.enqueue(
+            self.work("import time\ndef initialize(c): time.sleep(3)")
+        )
+        self.tick()
+        task = self.supervisors[0].tasks[run_id]
+        # The scheduler is deliberately idle beyond its claim lease. Renewal
+        # must come from the activity thread, without a Python callback heartbeat.
+        Event().wait(2.5)
+        self.assertTrue(self.repository.heartbeat(task.claim, time.time(), 2))
+        row = self.wait_runs([run_id])[0]
+        self.assertEqual(row["status"], "succeeded", row)
+        self.assertEqual(row["fence"], 1)
+        self.assertEqual(list(self.supervisors[0].started_runs), [run_id])
 
     def test_worker_stop_leaves_private_publisher_running(self):
         name = "qf-s3-d12-publisher-" + self.base.name
