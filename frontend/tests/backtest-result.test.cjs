@@ -1,10 +1,36 @@
-const {test}=require('node:test');const assert=require('node:assert/strict');const fs=require('node:fs');const ts=require('typescript');
-require.extensions['.ts']=(module,filename)=>module._compile(ts.transpileModule(fs.readFileSync(filename,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022},fileName:filename}).outputText,filename);
-const {monthlyResults,readAllResults,displayNumber,localDay}=require('../src/pages/backtests/resultData.ts');
-const row=(day,r,status='complete')=>({as_of:day+'T07:00:00Z',period_return:r,valuation_status:status});
-test('monthly compounds preserve zero, signs and partial boundaries',()=>{const m=monthlyResults([row('2026-01-05','.1'),row('2026-01-30','-.1'),row('2026-02-02','0')],'2026-01-05','2026-02-02');assert.ok(Math.abs(m[0].value+.01)<1e-12);assert.equal(m[0].partial,true);assert.equal(m[1].value,0);assert.equal(displayNumber(0,true),'0.00%');assert.equal(displayNumber(null),'—');});
-test('missing valuation crossing month blocks both affected monthly returns',()=>{const m=monthlyResults([row('2026-01-29','.1'),row('2026-01-30',null,'blocked'),row('2026-02-02','.2')],'2026-01-01','2026-02-28');assert.equal(m[0].value,null);assert.equal(m[1].value,null);assert.match(m[1].reason,/跨越月界/);});
-test('duplicate dates and missing returns are never silently compounded',()=>{for(const rows of [[row('2026-01-02',null)],[row('2026-01-02','.1'),row('2026-01-02','.2')]])assert.equal(monthlyResults(rows,'2026-01-01','2026-01-31')[0].value,null);assert.equal(localDay('2026-01-31T20:00:00Z'),'2026-02-01');assert.equal(localDay(Date.parse('2026-01-31T20:00:00Z')),'2026-02-01');});
-test('reader follows opaque cursors and returns all records',async()=>{const seen=[];const reader=async(id,kind,cursor)=>{seen.push(cursor);return cursor?{items:[{n:2}]}:{items:[{n:1}],next_cursor:'opaque',has_more:true,truncated:true}};assert.deepEqual(await readAllResults('r','fills',new AbortController().signal,undefined,reader),[{n:1},{n:2}]);assert.deepEqual(seen,[undefined,'opaque']);});
-test('reader rejects truncated, missing and repeated cursors and cancellation',async()=>{for(const page of [{items:[],truncated:true},{items:[],has_more:true},{items:[],next_cursor:'same',has_more:true}])await assert.rejects(readAllResults('r','fills',new AbortController().signal,undefined,async()=>page));const c=new AbortController();c.abort();await assert.rejects(readAllResults('r','fills',c.signal));});
-test('equity queries use the canonical backend route',async()=>{const {fetchBacktestResult}=require('../src/api/backtestRuns.ts');const old=global.fetch;global.fetch=async url=>{assert.match(url,/\/results\/equity-curve\?/);return{ok:true,json:async()=>({items:[]})}};try{await fetchBacktestResult('run','equity')}finally{global.fetch=old}});
+const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),ts=require('typescript');
+require.extensions['.ts']=(m,f)=>m._compile(ts.transpileModule(fs.readFileSync(f,'utf8'),{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022},fileName:f}).outputText,f);
+const data=require('../src/pages/backtests/resultData.ts'),api=require('../src/api/backtestResults.ts');
+const response=v=>({ok:true,status:200,json:async()=>v});
+const page=(items=[],cursor=null)=>({schema_id:'qf.results.v1',run_id:'r',partial:false,items,next_cursor:cursor});
+test('Decimal original values, tiny differences and NA survive display and JSON',()=>{
+ const amount='7922816251426433759.123456789012345678',tiny='0.000000000000000001';
+ assert.equal(data.displayNumber(amount),amount);assert.equal(data.displayNumber(tiny),tiny);assert.equal(data.exactDifference(amount,'7922816251426433759.123456789012345677'),tiny);
+ assert.equal(data.displayNumber('.123456789012345678',true),'+12.3456789012345678%');assert.equal(data.displayNumber(0,true),'0.00%');
+ for(const v of [null,undefined,'NA','NaN','Infinity',true,false,{status:'unavailable',reason:'MISSING_EQUITY'}])assert.equal(data.displayNumber(v),'—');
+ assert.equal(data.metricValue({status:'available',value:0}),0);assert.equal(data.reason({status:'unavailable',reason:'MISSING_EQUITY'}),'MISSING_EQUITY');
+});
+test('chart projection keeps missing equity and exact nanoseconds; no recomputation of old metrics',()=>{
+ const row={time_ns:'1767225600000000123',equity:null,session_return:{status:'unavailable',reason:'MISSING_EQUITY'}};
+ const result=data.chartRows([row])[0];assert.equal(result.time_ns,row.time_ns);assert.equal(result.valuation_status,'blocked');assert.equal(result.as_of,'2026-01-01T00:00:00.000Z');
+ const metrics=[{metric_key:'total_return',value:'.123456789012345678',formula_version:'legacy'}];assert.equal(data.summaryMetrics({schema_id:'legacy',metrics}),metrics);
+ assert.equal(data.summaryMetrics({schema_id:'qf.results.v1',performance:null}).length,0);
+ assert.equal(data.localDay('2026-01-31T20:00:00Z'),'2026-02-01');
+});
+test('reader fetches one bounded page, preserves strings, cursor and partial/truncation notices',async()=>{
+ const old=global.fetch;let calls=0;global.fetch=async(path,init)=>{calls++;assert.match(path,/\/backtests\/r\/results\/trades\?limit=100&cursor=a%2Bb/);assert.equal(init.cache,'no-store');return response({...page([{result_sequence:'9007199254740993',execution_time_ns:'1767225600000000123',price:'123456789.123456789012345678',fee:'1.000000000000000001'}],'next'),partial:true,notices:{logs_truncated:true}})};
+ try{const value=await api.resultPage('r','trades','a+b');assert.equal(calls,1);assert.equal(value.items[0].price,'123456789.123456789012345678');assert.equal(value.partial,true);assert.equal(value.notices.logs_truncated,true);}finally{global.fetch=old;}
+});
+test('reader rejects loss of precision, bad identity, sequence and overflowing/repeated pages',async()=>{
+ const old=global.fetch;try{for(const v of [{...page(),run_id:'other'},page(Array(101).fill({})),page([{result_sequence:'1',price:1.1}]),page([{result_sequence:'2'},{result_sequence:'1'}]),page([{result_sequence:9007199254740993}]),page([], 'same'),{...page(),has_more:true}]){global.fetch=async()=>response(v);await assert.rejects(api.resultPage('r','orders','same'),e=>e.code==='INVALID_CONTRACT');}}finally{global.fetch=old;}
+});
+test('hidden 404 invalidates the selected result identity; late aborted success is discarded',async()=>{
+ const old=global.fetch,hidden=[];const off=api.onResultHidden(ids=>hidden.push(ids));
+ try{global.fetch=async()=>({ok:false,status:404,json:async()=>({detail:{code:'DATA_RESTRICTED'}})});await assert.rejects(api.resultPage('r','equity'));assert.deepEqual(hidden,[['r']]);
+ const c=new AbortController();global.fetch=async()=>{c.abort();return response(page())};await assert.rejects(api.resultPage('r','equity',undefined,c.signal),e=>e.name==='AbortError');}finally{off();global.fetch=old;}
+});
+test('2..16 comparison uses baseline ordering only and refuses fake rankings and unexpected members',async()=>{
+ const ids=Array.from({length:16},(_,i)=>'r'+i),items=ids.map(run_id=>({run_id,engine_kind:'rust',status:'succeeded',partial:false,config:{}}));const old=global.fetch;
+ try{global.fetch=async(path,init)=>{assert.equal(path,'/api/admin/backtests/compare');const body=JSON.parse(init.body);assert.deepEqual(Object.keys(body),['run_ids']);assert.equal(body.run_ids[0],'r15');return response({items,ranking:null,warnings:[]})};assert.equal((await api.compareResults(ids,'r15')).items.length,16);
+ await assert.rejects(api.compareResults([...ids,'r16'],'r15'));global.fetch=async()=>response({items,ranking:['r0'],warnings:[]});await assert.rejects(api.compareResults(ids,'r15'));}finally{global.fetch=old;}
+});

@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { ComparisonRow } from "../../api/backtestComparisons";
-import { displayNumber, localDay } from "./resultData";
-import { finite } from "./workbench";
+import { displayNumber, localDay, numeric as finite } from "./resultData";
 export interface DisplayRun { id: string; label: string; color: string; slot: string; }
 function useWidth() {
   const ref = useRef<HTMLDivElement>(null), [width, setWidth] = useState(700);
@@ -22,7 +21,7 @@ export function ComparisonChart({ runs, series, field, title }: { runs: DisplayR
   return <div className="qcmp-plot" ref={ref}>
     <div className="qcmp-legend">{runs.map(run => <span key={run.id}><i style={{ background: run.color }}/>{run.slot} · {run.label}</span>)}</div>
     {!values.length ? <div className="qcmp-empty">暂无可绘制的{title}数据。</div> : <>
-      <div className="qcmp-readout" aria-live="polite"><strong>{localDay(times[index])}</strong>{parsed.map(s => <span key={s.id} title={`${s.slot} ${displayNumber(s.points[index]?.y, true)}${s.points[index]?.y === null ? ` · ${s.points[index].reason}` : ""}`}>{s.slot} {displayNumber(s.points[index]?.y, true)}{s.points[index]?.y === null && <small>（{s.points[index].reason}）</small>}</span>)}</div>
+      <div className="qcmp-readout" aria-live="polite"><strong>{localDay(times[index])}</strong>{parsed.map(s => <span key={s.id}>{s.slot} {displayNumber(series.find(row => row.run_id === s.id)?.points.find(row => Date.parse(row.as_of) === times[index])?.[field], true)}{s.points[index]?.y === null && <small>（{s.points[index].reason}）</small>}</span>)}</div>
       <svg viewBox={`0 0 ${width} 286`} role="img" aria-label={`${title}，下方日期滑块支持键盘查看`} onPointerMove={e => { const rect = e.currentTarget.getBoundingClientRect(); const target = times[0] + ((e.clientX - rect.left) / rect.width * width - 70) / (width - 88) * (times.at(-1)! - times[0]); let distance = Infinity, nearest = 0; times.forEach((time, i) => { if (Math.abs(time - target) < distance) { distance = Math.abs(time - target); nearest = i; } }); setChosen(nearest); }}>
         {[0, .25, .5, .75, 1].map(f => <g key={f}><line x1="70" x2={width - 18} y1={30 + f * 218} y2={30 + f * 218} stroke="var(--border)" strokeDasharray="3 5"/><text x="62" y={34 + f * 218} textAnchor="end">{displayNumber(top - f * (top - bottom), true)}</text></g>)}
         <line x1="70" x2={width - 18} y1={y(0)} y2={y(0)} stroke="var(--muted)" strokeOpacity=".5"/>

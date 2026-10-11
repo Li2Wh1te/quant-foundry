@@ -1,5 +1,6 @@
 import type { ComparisonRow } from "../../api/backtestComparisons";
 import { finite } from "./workbench";
+import { displayNumber, exactDifference } from "./resultData";
 export const COMPARISON_METRICS = [
   { key: "total_return", name: "总收益", percent: true, direction: "max" },
   { key: "annualized_return", name: "年化收益", percent: true, direction: "max" },
@@ -14,7 +15,7 @@ export function canonical(value: unknown): string {
   if (value && typeof value === "object") return `{${Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => `${JSON.stringify(k)}:${canonical(v)}`).join(",")}}`;
   return JSON.stringify(value) ?? "undefined";
 }
-export const comparisonConfig = (run: ComparisonRow) => run.backtest_config?.spec || run.backtest_config || {};
+export const comparisonConfig = (run: ComparisonRow) => run.config?.spec || run.config || run.backtest_config?.spec || run.backtest_config || {};
 export function selectedMetric(metrics: ComparisonRow[], id: string, key: string): ComparisonRow | undefined {
   const rows = metrics.filter(row => row.run_id === id && row.metric_key === key);
   return rows.length === 1 ? rows[0] : undefined;
@@ -23,6 +24,17 @@ export function selectedMetric(metrics: ComparisonRow[], id: string, key: string
  * establish equality, and full-run metrics must never imply a clipped period. */
 export function comparisonReason(a: ComparisonRow, b: ComparisonRow, left?: ComparisonRow, right?: ComparisonRow): string {
   const ac = comparisonConfig(a), bc = comparisonConfig(b);
+  if (a.partial || b.partial || a.status && a.status !== "succeeded" || b.status && b.status !== "succeeded") return "部分结果，不可比较完整收益";
+  if (a.engine_kind !== b.engine_kind) return "新旧引擎或公式不同";
+  if (a.engine_kind === "rust") {
+    if (!left || !right || left.value == null || right.value == null) return "指标不可计算";
+    const keys = ["start", "end", "frequency", "currency", "execution_model", "benchmark", "participation_rate", "slippage_bps", "annualization_sessions", "risk_free_rate", "universe", "reference_calendar", "result_sampling", "cost_overrides"];
+    if (keys.some(k => canonical(ac[k]) !== canonical(bc[k]))) return "日期、频率、基准、费用或模型口径不同";
+    if (!a.policy?.formula_id || !b.policy?.formula_id || canonical(a.policy) !== canonical(b.policy)) return "统计公式或口径未记录 / 不同";
+    if (!a.cost_configuration || !b.cost_configuration || canonical(a.cost_configuration) !== canonical(b.cost_configuration)) return "费用配置未记录 / 不同";
+    if (a.summary?.valid_return_samples !== b.summary?.valid_return_samples || a.summary?.missing_equity_sessions !== b.summary?.missing_equity_sessions) return "有效样本或缺价口径不同";
+    return "";
+  }
   if (!ac.start_date || !ac.end_date || !bc.start_date || !bc.end_date) return "回测区间未记录";
   if (ac.start_date !== bc.start_date || ac.end_date !== bc.end_date) return "回测区间不同";
   if (!left || !right) return "指标未产出或存在多个计算版本";
@@ -39,9 +51,8 @@ export function comparisonReason(a: ComparisonRow, b: ComparisonRow, left?: Comp
   return "";
 }
 export function metricDifference(a: unknown, b: unknown, percent: boolean): string {
-  const left = finite(a), right = finite(b); if (left === null || right === null) return "—";
-  const delta = (left - right) * (percent ? 100 : 1);
-  return `${delta > 0 ? "+" : ""}${delta.toFixed(percent ? 2 : 4)}${percent ? " 个百分点" : ""}`;
+  const delta = exactDifference(a, b); if (delta === null) return "—";
+  return percent ? `${displayNumber(delta, true).replace(/%$/, "")} 个百分点` : `${Number(delta) > 0 ? "+" : ""}${delta}`;
 }
 export function comparisonUrl(ids: string[], baseline = ids[0] || "", saved = "") {
   const query = new URLSearchParams(); if (ids.length || saved) query.set("runs", ids.join(",")); if (baseline) query.set("baseline", baseline); if (saved) query.set("saved", saved);
@@ -51,6 +62,6 @@ export const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 export function parseSelection(query: URLSearchParams) {
   const raw = query.get("runs"); const ids = raw ? raw.split(",") : [];
   const baseline = query.get("baseline") || ids[0] || "";
-  const error = ids.length > 10 || new Set(ids).size !== ids.length || ids.some(id => !UUID_PATTERN.test(id)) || baseline && !ids.includes(baseline) ? "对比链接包含无效、重复或超过10个运行，请重新选择。" : "";
+  const error = ids.length > 16 || new Set(ids).size !== ids.length || ids.some(id => !UUID_PATTERN.test(id)) || baseline && !ids.includes(baseline) ? "对比链接包含无效、重复或超过16个运行，请重新选择。" : "";
   return { ids, baseline, error };
 }

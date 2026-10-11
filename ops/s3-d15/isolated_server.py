@@ -48,7 +48,8 @@ def handle_data(context, data):
         if not result.accepted:
             log.warning(f"Rejected target: {result.reason_code}")
         context.state.sent = True
-    record(available_cash=context.portfolio.available_cash)
+    for sample in range(context.params.get("records_per_bar", 1)):
+        record(available_cash=context.portfolio.available_cash, sample=sample)
 '''
 
 
@@ -127,6 +128,10 @@ def main():
                     retry_of=str(r["retry_of"]) if r["retry_of"] else None,outcome=r["outcome"],config=r["config"]) for r in rows],
                 legacy_run_id=str(fixture.old_run),worker_image=image)
         manifest = dict(url=fixture.url,token=TOKEN,strategy_id=strategy_id,account_id=str(account),revision_id=str(revision),legacy_strategy_id=legacy_strategy_id,legacy_revision_id=str(fixture.old_revision),legacy_account_id=str(fixture.old_account),legacy_run_id=str(fixture.old_run),config=entry["config"],production_executed=False)
+        if os.environ.get("QF_D16_UI") == "1":
+            sys.path.insert(0, str(ROOT / "ops/s3-d16"))
+            from fixtures import seed
+            manifest.update(seed(fixture))
         path = Path(os.environ["QF_D15_MANIFEST"]);path.parent.mkdir(parents=True,exist_ok=True)
         path.write_text(json.dumps(manifest,ensure_ascii=False));os.chmod(path,0o600)
         print(json.dumps(dict(ready=True,url=fixture.url,manifest=str(path),production_executed=False)),flush=True)
