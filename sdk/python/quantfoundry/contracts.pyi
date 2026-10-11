@@ -230,6 +230,7 @@ class ResultManifest(TypedDict):
     result_bytes: str
     notices: OutputNotices
     performance: PerformanceSummary | None
+    execution_model: ExecutionModelDescription | None
 
 class UserRecord(TypedDict):
     time_ns: str

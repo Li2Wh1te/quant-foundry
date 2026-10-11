@@ -397,7 +397,14 @@ fn execute(
         control: &mut control,
         results: &mut writer,
     });
-    let portfolio = execution.value(report.progress.now_ns).ok();
+    // The terminal control message must not contain the full position map.
+    // D11 already persisted final positions as bounded business shards.
+    let portfolio = execution.value(report.progress.now_ns).ok().map(|view| {
+        json!({"cash":view.cash,"available_cash":view.available_cash,
+            "frozen_cash":view.frozen_cash,"receivables":view.receivables,
+            "total_value":view.total_value,"positions_count":view.positions.len(),
+            "positions_result_kind":"positions"})
+    });
     Ok(
         json!({"outcome":report.outcome,"progress":{"completed_events":report.progress.completed_events,"completed_sessions":report.progress.completed_sessions,"now_ns":report.progress.now_ns},
         "merge":{"peak_buffered_events":report.merge.peak_buffered_events,"peak_buffered_bytes":report.merge.peak_buffered_bytes,"source_reads":report.merge.source_reads},

@@ -113,6 +113,7 @@ pub struct ResultManifest {
     pub result_bytes: Sequence,
     pub notices: OutputNotices,
     pub performance: Option<PerformanceSummary>,
+    pub execution_model: Option<crate::matching::ExecutionModelDescription>,
 }
 impl Default for OutputNotices {
     fn default() -> Self {
@@ -245,6 +246,7 @@ pub struct FileResultSink {
     log_bytes: u64,
     notices: OutputNotices,
     performance: Option<PerformanceSummary>,
+    execution_model: Option<crate::matching::ExecutionModelDescription>,
     outcome: Option<RunOutcome>,
     fault: Option<QfError>,
     credit_issued: bool,
@@ -292,6 +294,7 @@ impl FileResultSink {
             log_bytes: 0,
             notices: OutputNotices::default(),
             performance: None,
+            execution_model: None,
             outcome: None,
             fault: None,
             credit_issued: false,
@@ -464,6 +467,13 @@ impl FileResultSink {
                 self.performance = Some(summary.as_ref().clone());
                 Ok(Some(record.clone()))
             }
+            ResultRecord::ExecutionModel(model) => {
+                if self.execution_model.is_some() {
+                    return Err(invalid());
+                }
+                self.execution_model = Some(model.clone());
+                Ok(Some(record.clone()))
+            }
             _ => Ok(Some(record.clone())),
         }
     }
@@ -532,7 +542,7 @@ impl FileResultSink {
     pub fn overview(&self) -> Value {
         json!({"schema_id":FORMAT,"outcome":self.outcome,"partial":!matches!(self.outcome,Some(RunOutcome::Succeeded{..})),
             "counts":self.counts,"result_bytes":self.bytes,"max_page_read":self.max_page_read,
-            "notices":self.notices,"performance":self.performance})
+            "notices":self.notices,"performance":self.performance,"execution_model":self.execution_model})
     }
     pub fn manifest(&self) -> Option<ResultManifest> {
         self.outcome.clone().map(|outcome| ResultManifest {
@@ -549,6 +559,7 @@ impl FileResultSink {
             result_bytes: Sequence::new(self.bytes),
             notices: self.notices.clone(),
             performance: self.performance.clone(),
+            execution_model: self.execution_model.clone(),
         })
     }
     /// D12/D13 explicitly take retained lifetime after a terminal commit.
@@ -627,6 +638,7 @@ impl FileResultSink {
             result_bytes: Sequence::new(self.bytes),
             notices: self.notices.clone(),
             performance: self.performance.clone(),
+            execution_model: self.execution_model.clone(),
         };
         let mut bytes = encode_bounded(&manifest, MAX_CONTROL_BYTES)?;
         // Account the metadata itself without recursively hashing its size.
@@ -978,6 +990,7 @@ impl FileResultReader {
             log_bytes: 0,
             notices: manifest.notices,
             performance: manifest.performance,
+            execution_model: manifest.execution_model,
             outcome: Some(manifest.outcome),
             fault: None,
             credit_issued: false,

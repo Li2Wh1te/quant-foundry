@@ -22,9 +22,9 @@
         3
       ],
       "virtual_memory_limit_bytes": 134217728,
-      "peak_child_rss_kib": 8884,
-      "cpu_seconds": 0.14421499999999998,
-      "wall_seconds": 0.14460924300010447,
+      "peak_child_rss_kib": 8784,
+      "cpu_seconds": 0.140134,
+      "wall_seconds": 0.14059848699980648,
       "packet": {
         "checksum": 1000000,
         "events": 1000000,
@@ -38,6 +38,7 @@
             "summary": 1,
             "trades": 1000
           },
+          "execution_model": null,
           "max_page_read": 0,
           "notices": {
             "log_messages_truncated": "0",
@@ -127,7 +128,7 @@
               "value": 1.5306780218620668
             }
           },
-          "result_bytes": 231933,
+          "result_bytes": 231956,
           "schema_id": "qf.results.v1"
         },
         "shards": 3
@@ -143,9 +144,9 @@
         3
       ],
       "virtual_memory_limit_bytes": 134217728,
-      "peak_child_rss_kib": 8892,
-      "cpu_seconds": 1.40204,
-      "wall_seconds": 1.402354159999959,
+      "peak_child_rss_kib": 8792,
+      "cpu_seconds": 1.9007079999999998,
+      "wall_seconds": 1.9014731249999386,
       "packet": {
         "checksum": 10000000,
         "events": 10000000,
@@ -159,6 +160,7 @@
             "summary": 1,
             "trades": 10000
           },
+          "execution_model": null,
           "max_page_read": 0,
           "notices": {
             "log_messages_truncated": "0",
@@ -248,7 +250,7 @@
               "value": 1.5168115033691056
             }
           },
-          "result_bytes": 2292960,
+          "result_bytes": 2292983,
           "schema_id": "qf.results.v1"
         },
         "shards": 3
@@ -265,9 +267,9 @@
       3
     ],
     "virtual_memory_limit_bytes": 134217728,
-    "peak_child_rss_kib": 8904,
-    "cpu_seconds": 0.004164999999999999,
-    "wall_seconds": 0.004810717000054865,
+    "peak_child_rss_kib": 8800,
+    "cpu_seconds": 0.0041259999999999995,
+    "wall_seconds": 0.008668758000112575,
     "packet": {
       "failure": {
         "code": "RESULT_BUDGET_EXCEEDED",

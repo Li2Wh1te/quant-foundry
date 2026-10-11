@@ -29,6 +29,11 @@ class ResultsTests(unittest.TestCase):
             if count==1: bars(c,d)
         result=self.run_strategy(SimpleNamespace(before_trading_start=before,handle_data=once),source)
         summary=result.summary();self.assertEqual(summary['outcome']['status'],'succeeded')
+        self.assertNotIn('positions', summary['portfolio'])
+        self.assertEqual(summary['portfolio']['positions_count'],1)
+        self.assertEqual(summary['portfolio']['positions_result_kind'],'positions')
+        self.assertEqual(summary['results']['execution_model']['model'],'bar_next_interval_v1')
+        self.assertTrue(summary['results']['execution_model']['assumptions'])
         p=summary['results']['performance']
         self.assertEqual(p['terminal_equity'],Decimal('10198'))
         self.assertAlmostEqual(p['cumulative_return']['value'],.0198,places=14)

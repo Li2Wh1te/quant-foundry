@@ -95,7 +95,7 @@ class SDKTests(unittest.TestCase):
             result=self.run_strategy(SimpleNamespace(initialize=initialize,handle_data=bars,on_order=notify,on_trade=on_trade),wired,market_routes=routes)
             report=self.assertSucceeded(result)
             self.assertEqual(report['portfolio']['cash'],'9899.00')
-            self.assertEqual(report['portfolio']['positions']['A.SH']['quantity'],10)
+            self.assertEqual(page(result,'positions',limit=1)['items'][0]['quantity'],10)
             self.assertEqual(len([c for c in calls if c[0]=='bar']),3)
             self.assertEqual(len([c for c in calls if c[0]=='daily']),3)
             self.assertEqual(len(page(result,'trades')['items']),1)
@@ -161,7 +161,7 @@ class SDKTests(unittest.TestCase):
         trades=page(result,'trades')['items']
         self.assertTrue(trades)
         self.assertTrue(all(int(t['execution_time_ns'])>close for t in trades))
-        self.assertGreaterEqual(int(report['portfolio']['positions']['A.SH']['quantity']),2)
+        self.assertGreaterEqual(int(page(result,'positions',limit=1)['items'][0]['quantity']),2)
 
     def test_exception_source_location_expiration_and_cancel_release(self):
         saved=[]

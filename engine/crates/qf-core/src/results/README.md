@@ -26,7 +26,7 @@ kind, per-kind start/count, global first/last sequence, exact file byte counts,
 and SHA256 for data and index. Gaps in global sequence can represent visibly
 dropped optional logs; required business rows never disappear this way.
 The small `manifest.json` contains schema, run/outcome/partial, descriptors,
-counts, byte accounting, output notices and the summary. JSON money/time/sequence
+counts, byte accounting, output notices, execution-model assumptions and the summary. JSON money/time/sequence
 are strings; statistical floats are explicitly finite.
 
 Required output exceeding capacity, order/fill write failure, digest mismatch,
@@ -63,6 +63,9 @@ across service/data state. No deployment or full process isolation is claimed.
 Installed `RunResults.summary()` and `.page(kind=..., limit=100, cursor=...)`
 return immutable bounded data with Decimal money and integer ns. There is no
 implicit all-pages iterator or stored page cache. SDKs do not receive shard
-paths, DSNs, vendor keys or mounts. D14's HTTP transport remains a separate task;
-`BacktestClient.result` validates the same kinds/limits but cannot submit/read
+paths, DSNs, vendor keys or mounts.
+The terminal portfolio contains scalar balances and a position count/page kind;
+it never embeds all held positions in the control summary.
+D14's HTTP transport remains a separate task; `BacktestClient.result`
+validates the same kinds/limits but cannot submit/read
 an unimplemented service.
