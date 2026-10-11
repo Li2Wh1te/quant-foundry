@@ -1164,7 +1164,8 @@ def _main():
                                     }
                                     for result in case.get("results", [])
                                 ],
-                            )
+                            ),
+                            default=str,
                         ),
                         flush=True,
                     )
