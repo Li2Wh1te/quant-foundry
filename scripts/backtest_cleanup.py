@@ -224,8 +224,26 @@ def _references(c, tables, root, candidates):
                     _fail('REFERENCE_SCAN_BUDGET')
                 if any(needle in value for needle in needles):
                     _fail('BUSINESS_REFERENCE')
-    # Stored functions can contain dynamic SQL without catalog dependencies.
-    for (source,) in c.execute(text("SELECT p.prosrc FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='public'")):
+    # Catalog dependencies do not expose arbitrary dynamic SQL. Only exact
+    # repository migration trigger bodies and the shared btree_gist C extension
+    # are classified; a new/changed routine is retained and blocks cleanup.
+    declarations = json.loads(Path(__file__).with_name('backtest_cleanup_routines.json').read_text())
+    if declarations.get('kind') != 'qf.cleanup-known-trigger-definitions.v1':
+        _fail('ROUTINE_CLASSIFICATION_UNKNOWN')
+    definitions = declarations['definitions']
+    routines = c.execute(text("SELECT p.proname,p.prosrc,p.probin,pg_get_function_identity_arguments(p.oid) AS arguments,"
+        "p.prorettype='trigger'::regtype AS trigger,l.lanname,e.extname FROM pg_proc p "
+        "JOIN pg_namespace n ON n.oid=p.pronamespace JOIN pg_language l ON l.oid=p.prolang "
+        "LEFT JOIN pg_depend d ON d.classid='pg_proc'::regclass AND d.objid=p.oid AND d.refclassid='pg_extension'::regclass AND d.deptype='e' "
+        "LEFT JOIN pg_extension e ON e.oid=d.refobjid WHERE n.nspname='public'")).mappings()
+    for routine in routines:
+        source = routine['prosrc']
+        if routine['extname'] is not None:
+            if (routine['extname'],routine['lanname'],routine['probin']) != ('btree_gist','c','$libdir/btree_gist'):
+                _fail('UNKNOWN_DATABASE_ROUTINE')
+        elif not (routine['trigger'] and routine['lanname']=='plpgsql' and routine['arguments']==''
+                  and definitions.get(routine['proname'])==hashlib.sha256(source.encode('utf8')).hexdigest()):
+            _fail('UNKNOWN_DATABASE_ROUTINE')
         used_bytes += len(source.encode('utf8'))
         if used_bytes > MAX_REFERENCE_BYTES:
             _fail('REFERENCE_SCAN_BUDGET')
@@ -237,10 +255,10 @@ def _references(c, tables, root, candidates):
     table_words = [name.split('.')[-1] for name in candidates]
     for directory in source_roots:
         for p in directory.rglob('*'):
-            if p.suffix not in {'.py','.pyi','.ts','.tsx','.sh','.sql','.json','.toml'} or '__pycache__' in p.parts:
-                continue
             if p.is_symlink():
                 _fail('SOURCE_REFERENCE_UNKNOWN')
+            if p.suffix not in {'.py','.pyi','.ts','.tsx','.sh','.sql','.json','.toml'} or '__pycache__' in p.parts:
+                continue
             body = p.read_text()
             if str(root) in body or any(re.search(r'\b'+re.escape(n)+r'\b', body) for n in table_words):
                 _fail('SOURCE_REFERENCE')

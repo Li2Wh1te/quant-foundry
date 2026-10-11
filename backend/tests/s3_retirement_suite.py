@@ -186,7 +186,7 @@ def test_default_dry_run_is_read_only_and_apply_removes_exact_isolated_objects(o
             dry_run_files_unchanged=True),ensure_ascii=False,indent=2,default=str)+'\n')
 
 
-@pytest.mark.parametrize('case',['wrong_database','wrong_root','soft_link','hard_link','unknown_file','shared_root','business_reference','active_run','indeterminate_run','table_nonempty','table_fk','table_trigger','unknown_table','unknown_namespace','table_view','protected_table'])
+@pytest.mark.parametrize('case',['wrong_database','wrong_root','soft_link','hard_link','unknown_file','shared_root','business_reference','active_run','indeterminate_run','table_nonempty','table_fk','table_trigger','unknown_table','unknown_namespace','table_view','protected_table','unknown_routine','changed_routine'])
 def test_cleanup_refuses_unsafe_or_unknown_objects(objects,case):
     engine,name,root,table,run=objects
     extra=None
@@ -217,9 +217,7 @@ def test_cleanup_refuses_unsafe_or_unknown_objects(objects,case):
             c.execute(text('ALTER TABLE "'+table+'" ADD PRIMARY KEY(scratch)'))
             c.execute(text('ALTER TABLE "'+table+'" ADD FOREIGN KEY(scratch) REFERENCES "'+table+'"(scratch)'))
         elif case=='table_trigger':
-            c.execute(text('CREATE FUNCTION d17_guard() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$'))
-            c.execute(text('CREATE TRIGGER d17_trigger BEFORE INSERT ON "'+table+'" FOR EACH ROW EXECUTE FUNCTION d17_guard()'))
-            extra='function'
+            c.execute(text('CREATE TRIGGER d17_trigger BEFORE INSERT ON "'+table+'" FOR EACH ROW EXECUTE FUNCTION protect_s3_run()'))
         elif case=='unknown_table':
             c.execute(text('CREATE TABLE d17_unknown_object(scratch integer)'));extra='table'
         elif case=='unknown_namespace':
@@ -228,8 +226,21 @@ def test_cleanup_refuses_unsafe_or_unknown_objects(objects,case):
             c.execute(text('CREATE VIEW d17_unknown_view AS SELECT * FROM "'+table+'"'));extra='view'
         elif case=='protected_table':
             table='backtest_runs'
+        elif case=='unknown_routine':
+            # Split strings evade a literal-reference scan and have no FK.
+            pieces=table.split('_')
+            expression=" || '_' || ".join("'"+p+"'" for p in pieces)
+            body="BEGIN EXECUTE 'SELECT count(*) FROM ' || ("+expression+"); RETURN 1; END"
+            assert table not in body
+            c.execute(text("CREATE FUNCTION d17_unknown_dynamic() RETURNS integer LANGUAGE plpgsql AS $$ "+body+" $$"))
+        elif case=='changed_routine':
+            c.execute(text("CREATE OR REPLACE FUNCTION protect_s3_run() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RETURN NEW; END $$"))
         with pytest.raises((cleanup.Refused,OSError,ValueError)) as denied:
             cleanup.plan(c,root,name,['finished-attempt'],['public.'+table])
+        if case in ('unknown_routine','changed_routine'):
+            assert denied.value.code=='UNKNOWN_DATABASE_ROUTINE'
+        if case=='table_trigger':
+            assert denied.value.code=='TABLE_TRIGGER'
         if os.environ.get('QF_D17_EVIDENCE'):
             evidence=Path(os.environ['QF_D17_EVIDENCE']);evidence.mkdir(parents=True,exist_ok=True)
             with (evidence/'cleanup-refusals.jsonl').open('a') as output:
@@ -238,6 +249,21 @@ def test_cleanup_refuses_unsafe_or_unknown_objects(objects,case):
         c.rollback()
     assert (objects[2]/'finished-attempt').exists()
     assert inspect(engine).has_table(objects[3])
+
+
+def test_cleanup_rejects_source_directory_link(objects,monkeypatch):
+    engine,_,root,table,_=objects
+    repo=root.parent/'private-source-fixture'
+    scripts=repo/'scripts';scripts.mkdir(parents=True)
+    (scripts/'backtest_cleanup_routines.json').write_bytes(Path(cleanup.__file__).with_name('backtest_cleanup_routines.json').read_bytes())
+    source=repo/'backend/app';source.mkdir(parents=True)
+    (source/'unknown-module').symlink_to(root/'finished-attempt',target_is_directory=True)
+    monkeypatch.setattr(cleanup,'__file__',str(scripts/'backtest_cleanup.py'))
+    with engine.begin() as c:
+        known=cleanup._tables(c,['public.'+table])
+        with pytest.raises(cleanup.Refused,match='SOURCE_REFERENCE_UNKNOWN'):
+            cleanup._references(c,known,root,['public.'+table])
+    assert (root/'finished-attempt/scratch.bin').exists()
 
 
 @pytest.mark.parametrize('change',['file_replace','root_replace','table_replace','reference_insert'])
