@@ -26,7 +26,7 @@ S2 已合并的 main `7f18987a86e6311b3367f4d7be6da61406454b80`，无文件冲�
 Rust 1.90.0、Python 3.12.2，原生 Linux 隔离夹具，未访问生产或供应商。
 
 - `QF_S3_PYTHON=backend/.venv/bin/python bash scripts/test_s3_engine.sh`：
-  fmt/clippy、workspace Rust 241 项、公共核心契约、生成 DTO、仓库 Python 18 项、
+  fmt/clippy、workspace Rust 231 项、公共核心契约、生成 DTO、仓库 Python 18 项、
   release wheel 构建/独立安装和 SDK 66 项通过。
 - `cargo test -p qf-core --locked --test analysis_results`：20 项通过。
   收益 `[0.1,-0.2,0.2]` 的样本方差手算 `13/300`，回撤 `0.2`；
