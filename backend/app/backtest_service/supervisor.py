@@ -591,9 +591,14 @@ class RunnerSupervisor:
                         task.outcome["status"] == "succeeded" and state["ExitCode"] != 0
                     )
                 ):
-                    error = task.error or RuntimeFault(
-                        "STRATEGY_ERROR", "worker崩溃或FFI异常退出"
-                    )
+                    error = task.error
+                    # EOF after a segfault/kill is a broken transport, not an
+                    # authoritative user cancellation. Cancel requests already
+                    # win above; preserve specific malformed-message failures.
+                    if error is None or getattr(error, "code", None) == "CANCELLED":
+                        error = RuntimeFault(
+                            "STRATEGY_ERROR", "worker崩溃或FFI异常退出"
+                        )
                     self._finish(task, self._failure(error))
                 else:
                     self._finish(task, task.outcome)

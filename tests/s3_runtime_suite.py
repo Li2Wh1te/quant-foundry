@@ -9,6 +9,7 @@ import os
 import time
 import unittest
 from copy import deepcopy
+from decimal import Decimal
 from pathlib import Path
 from threading import Event, Thread
 
@@ -358,6 +359,8 @@ def initialize(c):
                 for _ in range(24):f.write(b'x'*1024*1024)
         except OSError:full=True;break
     assert full, 'tmpfs quota not enforced'
+    for name in ['oversize','block-0','block-1','block-2']:
+        pathlib.Path('/tmp',name).unlink(missing_ok=True)
     import signal,time
     children=[]
     try:
@@ -404,8 +407,12 @@ def handle_data(c,d):
         self.assertEqual(row["status"], "succeeded", row)
         reader = self.reader(row)
         summary = json.loads(reader.summary_json())
-        self.assertEqual(summary["performance"]["terminal_equity"], "10198")
-        self.assertEqual(summary["performance"]["trades"]["fill_fees"], "2")
+        self.assertEqual(
+            Decimal(summary["performance"]["terminal_equity"]), Decimal("10198")
+        )
+        self.assertEqual(
+            Decimal(summary["performance"]["trades"]["fill_fees"]), Decimal("2")
+        )
         self.assertEqual(
             len(json.loads(reader.page_json("trades", None, 10))["items"]), 2
         )
