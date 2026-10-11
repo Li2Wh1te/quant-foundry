@@ -1,0 +1,41 @@
+name: S3 worker isolation
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  isolation:
+    name: Real runner to sibling worker and bounded parameter queue
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.2"
+      - uses: astral-sh/setup-uv@v5
+      - name: Install locked Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - name: Build the immutable worker wheel
+        run: |
+          python -m venv "$RUNNER_TEMP/s3-build/build"
+          "$RUNNER_TEMP/s3-build/build/bin/python" -m pip install --require-hashes -r sdk/python/requirements-build.lock
+          cd sdk/python
+          "$RUNNER_TEMP/s3-build/build/bin/maturin" build --release --locked --out "$RUNNER_TEMP/s3-build/wheels"
+      - name: Actual restricted runner and sibling workers, no Docker mocks or skips
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-build
+          QF_S3_RUNTIME_EVIDENCE: ${{ runner.temp }}/s3-isolation-evidence
+        run: bash scripts/test_s3_runtime.sh
+      - name: Retain actual isolation and group-resource evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-worker-isolation
+          path: ${{ runner.temp }}/s3-isolation-evidence/
+          if-no-files-found: error

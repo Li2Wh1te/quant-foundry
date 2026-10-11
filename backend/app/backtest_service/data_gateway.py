@@ -600,7 +600,7 @@ class RunDataGateway:
             self.cache.clear()
 
 
-def serve(channel, gateway, context):
+def serve(channel, gateway, context, *, close_context=True):
     """Run-private source/query streams; one credited response at a time.
 
     At most two generators retain buffers, with each emitted batch bounded by
@@ -676,6 +676,7 @@ def serve(channel, gateway, context):
     finally:
         for stream, _ in streams.values():
             stream.close()
-        gateway.close(context)
+        if close_context:
+            gateway.close(context)
         channel.close()
         gateway.cancelled = original_cancelled

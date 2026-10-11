@@ -52,12 +52,12 @@ def _object(pairs):
     return result
 
 
-def _validate(item, payload_size):
+def _validate(item, payload_size, operations=OPS):
     if (type(item) is not dict or set(item) !=
             {"protocol", "run_id", "request_id", "op", "status", "body", "payload_bytes"}
             or item["protocol"] != PROTOCOL or not _label(item["run_id"])
             or type(item["request_id"]) is not int or not 0 <= item["request_id"] < 2**53
-            or item["op"] not in OPS or item["status"] not in STATUSES
+            or item["op"] not in operations or item["status"] not in STATUSES
             or type(item["body"]) is not dict or type(item["payload_bytes"]) is not int
             or item["payload_bytes"] != payload_size
             or (payload_size and item["status"] != "batch")):
@@ -68,6 +68,7 @@ class Channel:
     """One in-flight request, finite wall time, cooperative cancellation."""
     frame_type = Frame
     error_type = TransportError
+    operations = OPS
     def __init__(self, sock: socket.socket, *, arrow_budget=MAX_ARROW_BYTES,
                  timeout=30.0, cancelled: Callable[[], bool] | None = None):
         if (type(arrow_budget) is not int or not 1 <= arrow_budget <= MAX_ARROW_BYTES
@@ -109,7 +110,7 @@ class Channel:
         try:
             item = dict(protocol=PROTOCOL, run_id=frame.run_id, request_id=frame.request_id,
                         op=frame.op, status=frame.status, body=frame.body, payload_bytes=len(frame.payload))
-            _validate(item, len(frame.payload))
+            _validate(item, len(frame.payload), self.operations)
             encoded = json.dumps(item, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode()
             if len(encoded) > MAX_CONTROL_BYTES or len(frame.payload) > self.arrow_budget:
                 raise TransportError("RESOURCE_LIMIT")
@@ -134,7 +135,7 @@ class Channel:
             self._io(memoryview(encoded), sending=False, deadline=deadline)
             item = json.loads(encoded, object_pairs_hook=_object,
                               parse_constant=lambda _: (_ for _ in ()).throw(TransportError()))
-            _validate(item, payload_len)
+            _validate(item, payload_len, self.operations)
             payload = bytearray(payload_len)
             self._io(memoryview(payload), sending=False, deadline=deadline)
             return Frame(item["run_id"], item["request_id"], item["op"], item["status"], item["body"], bytes(payload))
