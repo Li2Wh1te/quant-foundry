@@ -1,0 +1,205 @@
+[
+  {
+    "example": "etf_rotation.py",
+    "synthetic_configuration": true,
+    "requires": [
+      "raw_1d",
+      "dated_instrument_rules",
+      "dated_costs",
+      "verified_sessions",
+      "authorized_universe"
+    ],
+    "config": {
+      "api_schema": "qf.backtest.v2",
+      "strategy_revision_id": "7b7e6241-17d0-5b51-9a70-28bc2baa4937",
+      "account_id": "4f4b8a8b-3854-5bf8-9c44-6aa78f239847",
+      "initial_cash": "10000",
+      "currency": "CNY",
+      "start": "2026-01-26",
+      "end": "2026-02-06",
+      "frequency": "1d",
+      "universe": [
+        "510300.SH",
+        "510500.SH"
+      ],
+      "parameters": {
+        "securities": [
+          "510300.SH",
+          "510500.SH"
+        ],
+        "weight": "0.6",
+        "window": 3,
+        "end_date": "2026-02-06"
+      },
+      "execution_model": "bar_next_interval_v1",
+      "reference_calendar": "synthetic-d14-calendar",
+      "participation_rate": "1",
+      "slippage_bps": "0",
+      "risk_free_rate": "0",
+      "annualization_sessions": 252,
+      "seed": 23,
+      "result_sampling": "session_close"
+    }
+  },
+  {
+    "example": "stock_momentum.py",
+    "synthetic_configuration": true,
+    "requires": [
+      "raw_1d",
+      "dated_instrument_rules",
+      "dated_costs",
+      "verified_sessions",
+      "authorized_universe"
+    ],
+    "config": {
+      "api_schema": "qf.backtest.v2",
+      "strategy_revision_id": "95509eb4-665e-5bcc-acaf-2e0bcf3c2b91",
+      "account_id": "4f4b8a8b-3854-5bf8-9c44-6aa78f239847",
+      "initial_cash": "10000",
+      "currency": "CNY",
+      "start": "2026-01-26",
+      "end": "2026-02-06",
+      "frequency": "1d",
+      "universe": [
+        "600000.SH",
+        "000001.SZ"
+      ],
+      "parameters": {
+        "securities": [
+          "600000.SH",
+          "000001.SZ"
+        ],
+        "weight": "0.6",
+        "window": 3,
+        "decision_day": 3,
+        "top_n": 1,
+        "end_date": "2026-02-06"
+      },
+      "execution_model": "bar_next_interval_v1",
+      "reference_calendar": "synthetic-d14-calendar",
+      "participation_rate": "1",
+      "slippage_bps": "0",
+      "risk_free_rate": "0",
+      "annualization_sessions": 252,
+      "seed": 23,
+      "result_sampling": "session_close"
+    }
+  },
+  {
+    "example": "fundamental_selection.py",
+    "synthetic_configuration": true,
+    "requires": [
+      "raw_1d",
+      "dated_instrument_rules",
+      "dated_costs",
+      "verified_sessions",
+      "authorized_universe",
+      "net_profit_verified_public_and_effective_times"
+    ],
+    "config": {
+      "api_schema": "qf.backtest.v2",
+      "strategy_revision_id": "f5af97e6-d26c-513d-b707-6b3609984d0d",
+      "account_id": "4f4b8a8b-3854-5bf8-9c44-6aa78f239847",
+      "initial_cash": "10000",
+      "currency": "CNY",
+      "start": "2026-01-26",
+      "end": "2026-02-06",
+      "frequency": "1d",
+      "universe": [
+        "600000.SH",
+        "000001.SZ"
+      ],
+      "parameters": {
+        "securities": [
+          "600000.SH",
+          "000001.SZ"
+        ],
+        "weight": "0.6",
+        "fundamental_field": "net_profit",
+        "top_n": 1,
+        "end_date": "2026-02-06"
+      },
+      "execution_model": "bar_next_interval_v1",
+      "reference_calendar": "synthetic-d14-calendar",
+      "participation_rate": "1",
+      "slippage_bps": "0",
+      "risk_free_rate": "0",
+      "annualization_sessions": 252,
+      "seed": 23,
+      "result_sampling": "session_close"
+    }
+  },
+  {
+    "example": "intraday.py",
+    "synthetic_configuration": true,
+    "requires": [
+      "raw_60m",
+      "dated_instrument_rules",
+      "dated_costs",
+      "verified_sessions",
+      "authorized_universe"
+    ],
+    "config": {
+      "api_schema": "qf.backtest.v2",
+      "strategy_revision_id": "6d7dc227-82b5-5d59-b926-838824708143",
+      "account_id": "4f4b8a8b-3854-5bf8-9c44-6aa78f239847",
+      "initial_cash": "10000",
+      "currency": "CNY",
+      "start": "2026-01-26",
+      "end": "2026-02-06",
+      "frequency": "60m",
+      "universe": [
+        "510300.SH"
+      ],
+      "parameters": {
+        "security": "510300.SH",
+        "window": 3,
+        "end_date": "2026-02-06"
+      },
+      "execution_model": "bar_next_interval_v1",
+      "reference_calendar": "synthetic-d14-calendar",
+      "participation_rate": "1",
+      "slippage_bps": "0",
+      "risk_free_rate": "0",
+      "annualization_sessions": 252,
+      "seed": 23,
+      "result_sampling": "session_close"
+    }
+  },
+  {
+    "example": "basic_tick.py",
+    "synthetic_configuration": true,
+    "requires": [
+      "raw_tick",
+      "dated_instrument_rules",
+      "dated_costs",
+      "verified_sessions",
+      "authorized_universe"
+    ],
+    "config": {
+      "api_schema": "qf.backtest.v2",
+      "strategy_revision_id": "1c87ba25-d53e-5d47-9c84-f083247ac15d",
+      "account_id": "4f4b8a8b-3854-5bf8-9c44-6aa78f239847",
+      "initial_cash": "10000",
+      "currency": "CNY",
+      "start": "2026-01-26",
+      "end": "2026-02-06",
+      "frequency": "tick",
+      "universe": [
+        "510300.SH"
+      ],
+      "parameters": {
+        "security": "510300.SH",
+        "threshold": "12"
+      },
+      "execution_model": "trade_tick_v1",
+      "reference_calendar": "synthetic-d14-calendar",
+      "participation_rate": "1",
+      "slippage_bps": "0",
+      "risk_free_rate": "0",
+      "annualization_sessions": 252,
+      "seed": 23,
+      "result_sampling": "session_close"
+    }
+  }
+]

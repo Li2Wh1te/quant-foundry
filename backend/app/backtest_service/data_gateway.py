@@ -450,7 +450,8 @@ class RunDataGateway:
         security_column = binding.fields.get('security')
         if len(securities) > 1 and security_column not in binding.spec.schema.names:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '此身份投影尚不支持集合批量读取')
-        membership = ((security_column, 'in', securities),) if len(securities) > 1 else ()
+        # Time-first keys cannot delimit one security by physical bounds alone.
+        membership = ((security_column, 'in', securities),) if security_column in binding.spec.schema.names else ()
         group_order = []
         if count is not None:
             for field in ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'):
@@ -513,6 +514,14 @@ class RunDataGateway:
 
     def read(self, name, request, context, *, page_rows=None):
         binding, start, end, count = self._request(name, request, context)
+        if count is None and len(request['securities']) > 1:
+            # Single-page sorting cannot repair cross-page replay order. Bounded
+            # research windows still support existing security-first layouts.
+            ordered = tuple(dict.fromkeys(binding.fields[field] for field in
+                ('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+                if field not in binding.constants and field in binding.fields))
+            if tuple(binding.spec.key[:len(ordered)]) != ordered:
+                raise GatewayError('CAPABILITY_UNAVAILABLE', '多标的事件源缺少可验证的跨页时间顺序；不能用单页排序冒充有序回放')
         if count is not None:
             window = self.lookback(name, request, context)
             rows = min(page_rows or self.batch_rows, self.batch_rows)

@@ -10,6 +10,9 @@ description = "Quant Foundry Rust engine bindings and Python strategy SDK"
 license = "Apache-2.0"
 dependencies = ["numpy>=2.3,<3", "pandas>=2.3,<4"]
 
+[project.scripts]
+qf = "quantfoundry.cli:main"
+
 [tool.maturin]
 manifest-path = "../../engine/crates/qf-python/Cargo.toml"
 python-source = "."

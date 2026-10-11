@@ -94,3 +94,8 @@ jobs:
         env:
           QF_S3_D13_REQUIRED: "1"
         run: uv run --locked --no-sync python -m pytest -q tests/test_s3_run_service.py
+      - name: D14 installed CLI and HTTP clients, examples and migration protection
+        working-directory: backend
+        env:
+          QF_S3_D14_REQUIRED: "1"
+        run: uv run --locked --no-sync python -m pytest -q tests/test_s3_cli.py

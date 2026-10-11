@@ -12,6 +12,11 @@ COPY backend/app/runner /app/app/runner
 COPY sdk/python/tests/support_sdk.py /app/support_sdk.py
 COPY tests/s3_runtime_suite.py /app/s3_runtime_suite.py
 COPY tests/s3_runservice_suite.py /app/s3_runservice_suite.py
+COPY tests/s3_cli_suite.py /app/s3_cli_suite.py
+COPY tests/s3_cli_fixtures.py /app/s3_cli_fixtures.py
+COPY examples/strategies /app/examples/strategies
+COPY examples/http_workflow.py /app/examples/http_workflow.py
+COPY docs/backtesting /app/docs/backtesting
 COPY backend/alembic.ini /app/alembic.ini
 COPY VERSION /app/VERSION
 RUN chmod -R a+rX /app

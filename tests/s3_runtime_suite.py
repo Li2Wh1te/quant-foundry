@@ -773,13 +773,17 @@ def initialize(c):
 
 if __name__ == "__main__":
     from s3_runservice_suite import D13Tests
+    from s3_cli_suite import D14Tests
     assert os.environ.get("QF_D13_REAL_WORKER_REQUIRED") == "1", "D13 real DB integration is mandatory"
+    assert os.environ.get("QF_D14_REAL_WORKER_REQUIRED") == "1", "D14 real HTTP/client/examples integration is mandatory"
     suite = unittest.TestSuite([
         unittest.defaultTestLoader.loadTestsFromTestCase(RuntimeTests),
         unittest.defaultTestLoader.loadTestsFromTestCase(D13Tests),
+        unittest.defaultTestLoader.loadTestsFromTestCase(D14Tests),
     ])
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     EVIDENCE["d13_database_http_gateway_result_commit"] = True
+    EVIDENCE["d14_installed_cli_python_five_examples"] = True
     EVIDENCE["skipped"] = len(result.skipped)
     EVIDENCE["success"] = result.wasSuccessful()
     EVIDENCE["test_count"] = result.testsRun
