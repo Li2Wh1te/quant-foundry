@@ -1,4 +1,10 @@
-"""D17: physical retirement, blocked startup/migrations and exact private cleanup."""
+"""Required D17 integration suite, explicitly run by S3 Rust contracts CI.
+
+Actual process inspection must be available: GitHub's nondumpable same-UID
+listener deliberately blocks unprivileged cleanup. The dedicated CI command
+runs this unchanged refusal/apply contract with host inspection permissions;
+ordinary Validate retains its full existing backend/frontend checks.
+"""
 from copy import deepcopy
 import importlib.util
 import json
@@ -284,6 +290,29 @@ def test_cleanup_rejects_real_active_worker_and_parallel_database_writer(objects
         assert (root/'finished-attempt').exists()
     finally:
         transaction.rollback();other.close()
+
+
+def test_cleanup_refuses_unknown_process_visibility(objects,monkeypatch):
+    """An unreadable live process is never ignored to obtain a cleanup plan."""
+    engine,_,root,_,_=objects
+    before=_snapshot(engine)
+    process=subprocess.Popen([sys.executable,'-u','-c',"import time;print('ready',flush=True);time.sleep(30)"],
+                             stdout=subprocess.PIPE,text=True)
+    try:
+        assert process.stdout.readline().strip()=='ready'
+        readlink=cleanup.os.readlink
+        def denied(path,*args,**kwargs):
+            if str(path)==f'/proc/{process.pid}/cwd':
+                raise PermissionError('private unreadable process fixture')
+            return readlink(path,*args,**kwargs)
+        monkeypatch.setattr(cleanup.os,'readlink',denied)
+        with engine.begin() as c:
+            with pytest.raises(cleanup.Refused,match='PROCESS_ACTIVITY_UNKNOWN'):_plan(objects,c)
+        assert (root/'finished-attempt/scratch.bin').exists()
+        assert _snapshot(engine)==before
+    finally:
+        process.terminate();process.wait(timeout=10)
+        process.stdout.close()
 
 
 def test_cleanup_rejects_actual_stopped_container_mount(objects):

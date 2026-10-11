@@ -100,7 +100,11 @@ jobs:
         env:
           QF_D17_EVIDENCE: ${{ runner.temp }}/s3-retirement-evidence
         run: |
-          uv run --locked --no-sync python -m pytest -q tests/test_s3_retirement.py
+          # Keep PROCESS_ACTIVITY_UNKNOWN fail-closed. GitHub's same-UID
+          # nondumpable listener needs a dedicated host-inspection test command;
+          # no ptrace/sysctl, daemon or persistent permission setting is changed.
+          sudo -n --preserve-env=QF_ENVIRONMENT,QF_API_TOKEN,QF_CURSOR_SIGNING_KEY,QF_DATABASE_HOST,QF_DATABASE_PORT,QF_DATABASE_USER,QF_DATABASE_PASSWORD,QF_DATABASE_NAME,POSTGRES_TEST_ENABLED,QF_D17_EVIDENCE \
+            "$PWD/.venv/bin/python" -m pytest -q -p no:cacheprovider tests/s3_retirement_suite.py
           uv run --locked --no-sync python ../scripts/scan_legacy_dependencies.py --repo .. --max-bytes 33554432 --output "$RUNNER_TEMP/s3-retirement-evidence/inventory.json"
       - name: Retain isolated retirement and historical value evidence
         if: always()

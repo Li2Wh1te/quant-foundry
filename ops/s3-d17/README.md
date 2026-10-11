@@ -65,7 +65,7 @@ apply 锁住根目录并以 NOWAIT 锁定引用表/目标表，重扫后逐个�
 
 ```bash
 cd backend
-POSTGRES_TEST_ENABLED=1 uv run --locked --no-sync python -m pytest -q tests/test_s3_retirement.py
+POSTGRES_TEST_ENABLED=1 uv run --locked --no-sync python -m pytest -q tests/s3_retirement_suite.py
 QF_S3_D13_REQUIRED=1 QF_S3_D14_REQUIRED=1 uv run --locked --no-sync python -m pytest -q tests/test_s3_run_service.py tests/test_s3_cli.py
 ```
 
