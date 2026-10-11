@@ -32,7 +32,7 @@ Rust 1.90.0 / Python 3.12.2，开发私有资源和正式 CI，没有生产或�
   上游截断提示、精确金额/ns，以及伪数值对象/未知消息/非法终态拒绝。
 - 本地一次性 PostgreSQL wrapper 下 `python -m pytest -q`：
   `test_s3_runtime_queue`、runner supervisor/process、gateway streams、account workspace、
-  strategy storage、result API、pagination、account profiles/profile storage 共 **109 passed**。
+  strategy storage、result API、pagination、account profiles/profile storage 共 **110 passed**。
   两个独立 spawn 进程竞争 claim；批次拒绝不部分受理、预算/所有权/取消/保留也实际回归。
 - `QF_S3_BUILD_ROOT=... bash scripts/test_s3_runtime.sh` 在
   [正式隔离 CI](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38133671680)
@@ -51,7 +51,8 @@ Rust 1.90.0 / Python 3.12.2，开发私有资源和正式 CI，没有生产或�
 
 复核实际修复：严格 tagged JSON 数值解码、旧容器名替换竞态、创建后旧 claim 拒绝、
 启动期间心跳、过期 attempt 并发回收、合法长回调的 IPC 等待、FFI EOF 终态分类和批次
-拒绝的部分写入。复核为第二遍源码/对抗检查，没有声称额外人员或子代理审批。
+拒绝的部分写入，以及终态已提交但活动索引未同步的崩溃后队列容量回收。
+复核为第二遍源码/对抗检查，没有声称额外人员或子代理审批。
 初版失败如实保留于 Actions；本地完整 Docker 回归被 vfs 构建磁盘满中断，未计为通过，
 随后通过上述正式 CI 路线。仅清除本任务编译缓存/精确私有测试资源，未 general prune。
 

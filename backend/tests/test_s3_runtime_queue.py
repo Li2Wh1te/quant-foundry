@@ -198,3 +198,20 @@ def test_batch_rejections_do_not_partially_enqueue_or_retry(tmp_path):
     assert [
         r["run_id"] for r in repository.batch_status("owner", batch)["items"]
     ] == ids
+
+
+def test_terminal_row_survives_crash_before_roster_sync_without_blocking_admission(
+    tmp_path,
+):
+    repository = LocalRunRepository(tmp_path, queue_limit=1)
+    _, ids = repository.enqueue_batch([work()])
+    claim = repository.claim("a", time.time(), 5)
+    assert repository.commit_outcome(claim, dict(status="failed", partial=True), None)
+    # The terminal row stays authoritative if a process/power interruption leaves
+    # the old active index between the two fsynced replacements.
+    with repository._locked():
+        repository._write("active.json", ids)
+    reopened = LocalRunRepository(tmp_path, queue_limit=1)
+    _, replacement = reopened.enqueue_batch([work()])
+    assert reopened.claim("b", time.time(), 5).run_id == replacement[0]
+    assert reopened.status("owner", ids[0])["status"] == "failed"

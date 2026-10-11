@@ -134,7 +134,13 @@ class LocalRunRepository:
         ids = self._read("active.json", [])
         if len(ids) > self.queue_limit:
             raise RuntimeFault("RESOURCE_LIMIT", "共享队列超过预算")
-        return [self._row(run_id) for run_id in ids]
+        # A crash after the atomic terminal row, before the roster replacement,
+        # must not keep a completed run occupying queue admission capacity.
+        return [
+            row
+            for run_id in ids
+            if (row := self._row(run_id))["status"] not in TERMINAL
+        ]
 
     def _save_active(self, rows):
         self._write(
