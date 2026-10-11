@@ -22,6 +22,12 @@ bash scripts/test_s3_engine.sh` 的 fmt/clippy、Rust workspace/public contract�
 既有 overlay probe 注入，不当作正式文件系统或生产验收。真实 worker 以最终准确 head
 的 [PR #172 checks](https://github.com/Li2Wh1te/quant-foundry/pull/172/checks) 和 artifact 为准。
 
+完整 backend（开发宿主原有 `LF_D01_ALLOW_OVERLAY_TEST=1`）实际为 2974 passed、
+3 skipped、236 子项通过及 3 项环境失败：两项直接 CurrentStore 挂载检查拒绝 overlay，
+另一个既有策略测试遇到 PID 1 不回收孙进程。三项在未修改的 main `5b756511` 工作树
+以相同环境精确重现，未修改 S2/数据底座或放宽正式检查；不将本地全量计作全部通过。
+GitHub Validate 使用正式支持的 CI 挂载/进程环境，仍要求最终 head 与 main 验证。
+
 真实 worker 回归接入现有 `scripts/test_s3_runtime.sh`，强制无跳过：五类 preflight→
 submit→status→result；intraday 1m/60m 都跑；CLI/Python 两次同配置的 performance/模型
 一致；同键重放与网页同一路径；Tick 同纳秒72次；未来请求失败/部分结果、拒单检查、
