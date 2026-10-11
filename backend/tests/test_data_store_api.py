@@ -243,7 +243,8 @@ def test_final_admission_rejects_control_changes_after_kernel_read(api, monkeypa
     run_entry(store, entry, NativeSources(store.catalog.engine))
     headers = {"Authorization": f"Bearer {TOKEN}"}
     key = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()["preview_key"]
-    original = store_router.CurrentStore.read_many
+    store_class = type(store)
+    original = store_class.read_many
     def changed_after_read(current, *args, **kwargs):
         pages = original(current, *args, **kwargs)
         with store.catalog.engine.begin() as c:
@@ -255,7 +256,7 @@ def test_final_admission_rejects_control_changes_after_kernel_read(api, monkeypa
             else:
                 c.execute(text("UPDATE data_store_datasets SET generation=generation+1 WHERE name=:d"), {"d": entry.spec.name})
         return pages
-    monkeypatch.setattr(store_router.CurrentStore, "read_many", changed_after_read)
+    monkeypatch.setattr(store_class, "read_many", changed_after_read)
     response = client.post("/api/admin/data-store/query", headers=headers, json=query_body(entry, key))
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == ("DATA_RESTRICTED" if change == "issue" else "DATA_CHANGED")
