@@ -115,6 +115,10 @@ class Gateway:
                     else:
                         body=dict(check='unchanged',limits=dict(batch_rows=self.batch_rows),context=dict(scope_id='synthetic-d10-scope',dependencies=[]))
                 elif request.op=='open_stream':
+                    if len(self.streams) >= 2:
+                        channel.send(Frame(request.run_id,request.request_id,request.op,'error',
+                            dict(code='RESOURCE_LIMIT',operation='data_gateway',message='synthetic stream credit exceeded',scope={})))
+                        break
                     query=request.body['request']
                     selected=[event for event in self.events if event['event']['security'] in query['securities']
                         and int(event['event'].get('time_ns',event['event'].get('interval_end_ns'))) <= int(query['end_ns'])

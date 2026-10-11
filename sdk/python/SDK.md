@@ -48,7 +48,14 @@ without retaining an Arrow input pointer. Raw prefetched Arrow is never exposed.
 D05 `data/views.rs` and `analysis/indicators.rs` keep their existing roles.
 
 The native event stream and explicit Python research requests share D04's
-run-bound IpcGateway framing and connection. Current quotes use Rust's bounded
+run-bound IpcGateway framing and connection. The server admits at most two
+active streams: the retained source and one
+synchronous query. Their aggregate row/batch-byte credits are explicit; each
+response is pulled serially, and the shared window cache keeps its existing
+budget. EOF, close, cancellation, errors and disconnect release stream owners.
+The supervisor must budget these retained buffers and conversion work along
+with the parent cache; two streams do not imply a process-wide memory sandbox.
+Current quotes use Rust's bounded
 published-event map; they need no parent query per Tick. Dependency checks occur
 around bounded source reads, explicit queries and before success. Result files
 contain business records only, indexed on disk; get_trades reads at most the

@@ -34,6 +34,12 @@ Validation:
   staleness, setup cancellation state and visible run-log truncation.
   Temporary result directories/files explicitly use 0700/0600 and are checked
   in a fresh process with umask 022, including owner-drop cleanup.
+- The real D04 server arbitration initially rejected callback get_price while
+  the market stream was active. It now admits a fixed maximum of two streams,
+  with explicit aggregate credits, serialized Arrow pulls and the unchanged
+  aggregate window-cache budget. Real-server protocol regressions verify
+  source continuation, query credit reuse and both-owner cleanup on excess
+  credit, cancellation and disconnect; the synthetic peer has the same limit.
 - `backend/tests/test_s3_data_gateway.py` adds a required S3-CI CurrentStore →
   bounded Arrow → Rust Engine → Python query/order/cancel/notification test with
   explicit synthetic rules and stored prices. Local execution is honestly
