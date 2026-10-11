@@ -10,6 +10,7 @@ import pytest
 
 try:
     import quantfoundry
+
     assert quantfoundry.__name__ == "quantfoundry"
 except ImportError:
     import os
@@ -174,3 +175,26 @@ def test_runner_entry_has_no_legacy_import_and_production_composition_fails_clos
     with pytest.raises(RuntimeFault) as fault:
         create_services()
     assert fault.value.code == "CAPABILITY_UNAVAILABLE"
+
+
+def test_batch_rejections_do_not_partially_enqueue_or_retry(tmp_path):
+    repository = LocalRunRepository(tmp_path, queue_limit=2)
+    oversized = work()
+    oversized.specification["test_payload"] = "x" * (1024 * 1024)
+    with pytest.raises(RuntimeFault):
+        repository.enqueue_batch([work(), oversized])
+    assert list(tmp_path.glob("*.json")) == [tmp_path / "policy.json"]
+    batch, ids = repository.enqueue_batch([work({"i": i}) for i in range(2)])
+    for _ in ids:
+        claim = repository.claim("a", time.time(), 5)
+        assert repository.commit_outcome(
+            claim, dict(status="failed", partial=True), None
+        )
+    repository.enqueue_batch([work()])
+    files = set(tmp_path.iterdir())
+    with pytest.raises(RuntimeFault):
+        repository.retry_failed("owner", batch)
+    assert set(tmp_path.iterdir()) == files
+    assert [
+        r["run_id"] for r in repository.batch_status("owner", batch)["items"]
+    ] == ids

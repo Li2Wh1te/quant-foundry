@@ -44,7 +44,8 @@ class LocalRunRepository:
         self.root = Path(root)
         self.budget, self.queue_limit = budget, queue_limit
         if (
-            not 1 <= queue_limit <= 1024
+            type(queue_limit) is not int
+            or not 1 <= queue_limit <= 1024
             or not self.root.is_dir()
             or self.root.is_symlink()
         ):
@@ -183,7 +184,7 @@ class LocalRunRepository:
             active = self._active()
             if len(active) + len(items) > self.queue_limit:
                 raise RuntimeFault("RESOURCE_LIMIT", "共享队列已满")
-            batch_id, ids = uuid4().hex, []
+            batch_id, ids, accepted = uuid4().hex, [], []
             for index, work in enumerate(work_rows):
                 run_id = uuid4().hex
                 row = dict(
@@ -200,9 +201,14 @@ class LocalRunRepository:
                     result=None,
                     outcome=None,
                 )
-                self._write(run_id + ".json", row)
-                active.append(row)
+                if len(encoded(row)) > MAX_WORK_BYTES:
+                    raise RuntimeFault("RESOURCE_LIMIT", "单运行控制状态超过预算")
+                accepted.append(row)
                 ids.append(run_id)
+            # Validate every child before writing any of this accepted batch.
+            for row in accepted:
+                self._write(row["run_id"] + ".json", row)
+            active.extend(accepted)
             self._write(batch_id + ".batch", dict(owner=items[0].owner, items=ids))
             self._save_active(active)
             return batch_id, ids
@@ -380,13 +386,17 @@ class LocalRunRepository:
             if batch is None or batch["owner"] != owner:
                 raise RuntimeFault("DATA_RESTRICTED", "无权重跑批次")
             active = self._active()
+            failed = [
+                (index, self._row(run_id))
+                for index, run_id in enumerate(batch["items"])
+            ]
+            failed = [
+                (index, row) for index, row in failed if row["status"] == "failed"
+            ]
+            if len(active) + len(failed) > self.queue_limit:
+                raise RuntimeFault("RESOURCE_LIMIT", "共享队列已满")
             replacements = []
-            for index, run_id in enumerate(batch["items"]):
-                row = self._row(run_id)
-                if row["status"] != "failed":
-                    continue
-                if len(active) >= self.queue_limit:
-                    raise RuntimeFault("RESOURCE_LIMIT", "共享队列已满")
+            for index, row in failed:
                 replacement = dict(
                     row,
                     run_id=uuid4().hex,
@@ -395,7 +405,9 @@ class LocalRunRepository:
                     fence=0,
                     token=None,
                     lease_until=0,
-                    retry_of=run_id,
+                    retry_of=row["run_id"],
+                    attempt_identity=None,
+                    supervisor_id=None,
                     result=None,
                     outcome=None,
                 )

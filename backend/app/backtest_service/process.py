@@ -15,7 +15,7 @@ LABEL = "io.quantfoundry.s3.worker"
 
 class _Connection(http.client.HTTPConnection):
     def __init__(self, path):
-        super().__init__("localhost", timeout=10)
+        super().__init__("localhost", timeout=60)
         self.path = path
 
     def connect(self):
@@ -96,17 +96,20 @@ class DockerDaemon:
         expected = labels(claim)
         if any(row["Config"]["Labels"].get(k) != v for k, v in expected.items()):
             raise RuntimeFault("STALE_CLAIM", "拒绝操作不属于本claim的容器")
+        # Names are reused for a newer fence. Pin every mutation to the identity
+        # just verified, even if another supervisor removes/replaces the name.
+        identity = row["Id"]
         if row["State"]["Running"]:
             self.request(
                 "POST",
-                "/containers/" + name + "/kill?signal=KILL",
+                "/containers/" + identity + "/kill?signal=KILL",
                 missing=True,
                 stopped=True,
             )
-        row = self.inspect(name)
+        row = self.inspect(identity)
         if row is not None and row["State"]["Running"]:
             raise RuntimeFault("CAPABILITY_UNAVAILABLE", "旧worker尚未确认终止")
-        self.request("DELETE", "/containers/" + name, missing=True)
+        self.request("DELETE", "/containers/" + identity, missing=True)
 
 
 def labels(claim):
@@ -158,6 +161,8 @@ class WorkRoot:
             relative.is_absolute()
             or any(p in ("..", ".") for p in relative.parts)
             or len(relative.parts) != 2
+            or not re.fullmatch(r"qf-s3-[0-9a-f]{32}", relative.parts[0])
+            or relative.parts[1] not in ("code", "ipc")
         ):
             raise RuntimeFault("INVALID_CONTRACT", "只允许本attempt代码或IPC子目录")
         path = self.runner
@@ -181,7 +186,7 @@ class WorkerProcess:
         self.daemon, self.root, self.image = daemon, root, image
         daemon.preflight(image)
 
-    def start(self, claim, relative, limits: WorkerLimits):
+    def start(self, claim, relative, limits: WorkerLimits, *, cancelled=lambda: False):
         name = container_name(claim)
         mounts = [
             dict(
@@ -238,8 +243,14 @@ class WorkerProcess:
                 LogConfig=dict(Type="none"),
             ),
         )
-        created = self.daemon.request("POST", "/containers/create?name=" + name, body)
         try:
+            if cancelled():
+                raise RuntimeFault("STALE_CLAIM", "容器创建前claim已失效")
+            created = self.daemon.request(
+                "POST", "/containers/create?name=" + name, body
+            )
+            if cancelled():
+                raise RuntimeFault("STALE_CLAIM", "容器创建后claim已失效")
             self.daemon.request("POST", "/containers/" + created["Id"] + "/start")
         except BaseException:
             self.daemon.stop_remove(name, claim)

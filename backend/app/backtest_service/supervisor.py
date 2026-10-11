@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
+import json
 import os
 import socket
 import stat
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Thread
@@ -161,7 +164,7 @@ class RunnerSupervisor:
         self.tasks = {}
         self.stopping = False
         self.peak_workers = 0
-        self.started_runs = []
+        self.started_runs = deque(maxlen=1024)
 
     def _control(self, task):
         from quantfoundry._runtime_ipc import RuntimeChannel
@@ -265,7 +268,9 @@ class RunnerSupervisor:
                     frame.op == "finished" and booted and set(frame.body) == {"outcome"}
                 ):
                     outcome = frame.body["outcome"]
-                    outcome = json.loads(task.writer.validate_outcome_json(encoded(outcome).decode()))
+                    outcome = json.loads(
+                        task.writer.validate_outcome_json(encoded(outcome).decode())
+                    )
                     if type(outcome) is not dict or outcome.get("status") not in (
                         "succeeded",
                         "failed",
@@ -344,9 +349,14 @@ class RunnerSupervisor:
 
             def heartbeat():
                 while not stopped.wait(self.lease_seconds / 4):
-                    if not self.repository.heartbeat(
-                        claim, time.time(), self.lease_seconds
-                    ):
+                    try:
+                        alive = self.repository.heartbeat(
+                            claim, time.time(), self.lease_seconds
+                        )
+                    except BaseException as error:
+                        task.error = error
+                        alive = False
+                    if not alive:
                         stopped.set()
                         if task.channel is not None:
                             task.channel.close()
@@ -357,7 +367,12 @@ class RunnerSupervisor:
             task.thread.start()
             if self.repository.cancelled(claim):
                 raise RuntimeFault("STALE_CLAIM", "启动前claim已失效")
-            task.name = self.process.start(claim, relative, work.limits)
+            task.name = self.process.start(
+                claim,
+                relative,
+                work.limits,
+                cancelled=lambda: stopped.is_set() or self.repository.cancelled(claim),
+            )
             self.tasks[claim.run_id] = task
             self.started_runs.append(claim.run_id)
             self.peak_workers = max(self.peak_workers, len(self.tasks))
@@ -379,6 +394,23 @@ class RunnerSupervisor:
     def _cleanup(self, path, identity):
         self.process.root.check()
         try:
+            fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            return
+        except OSError:
+            raise RuntimeFault(
+                "INVALID_CONTRACT", "拒绝清理被替换的attempt目录"
+            ) from None
+        try:
+            # Two expired-claim recoveries may reach this inode concurrently.
+            # Lock the directory itself; no extra file or public cleanup target.
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self._cleanup_locked(path, identity)
+        finally:
+            os.close(fd)
+
+    def _cleanup_locked(self, path, identity):
+        try:
             current = path.stat()
         except FileNotFoundError:
             return  # Another fenced recovery already removed this exact attempt.
@@ -397,6 +429,8 @@ class RunnerSupervisor:
             raise RuntimeFault("INVALID_CONTRACT", "attempt含未知对象；拒绝清理")
         for directory, names in expected.items():
             root = path / directory
+            if not root.exists() and not root.is_symlink():
+                continue  # A failed setup may not have created both directories.
             if (
                 root.is_symlink()
                 or not root.is_dir()

@@ -59,7 +59,7 @@ impl<'de> Deserialize<'de> for FiniteStatistic {
         Self::new(f64::deserialize(d)?).map_err(de::Error::custom)
     }
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
     content = "value",
@@ -71,6 +71,31 @@ pub enum RecordValue {
     Integer(i64),
     Text(String),
     Statistic(FiniteStatistic),
+}
+impl<'de> Deserialize<'de> for RecordValue {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: String,
+            value: Box<serde_json::value::RawValue>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        macro_rules! decode {
+            ($variant:ident) => {
+                serde_json::from_str(wire.value.get())
+                    .map(Self::$variant)
+                    .map_err(de::Error::custom)
+            };
+        }
+        match wire.kind.as_str() {
+            "decimal" => decode!(Decimal),
+            "integer" => decode!(Integer),
+            "text" => decode!(Text),
+            "statistic" => decode!(Statistic),
+            _ => Err(de::Error::custom("unknown record value kind")),
+        }
+    }
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -100,7 +125,7 @@ pub struct CorporateActionEvent {
     pub session: crate::types::SessionKey,
     pub effect: crate::accounting::CorporateEffect,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(
     tag = "kind",
     content = "record",
@@ -117,6 +142,40 @@ pub enum ResultRecord {
     CorporateAction(CorporateActionEvent),
     Record(UserRecord),
     Log(LogRecord),
+}
+impl<'de> Deserialize<'de> for ResultRecord {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // serde's buffered adjacently-tagged enum turns arbitrary_precision
+        // JSON numbers into private maps before FiniteStatistic sees them.
+        // Keep the raw bounded record, then decode its typed fields directly.
+        // In particular, a literal private-number map must not become a float.
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            kind: String,
+            record: Box<serde_json::value::RawValue>,
+        }
+        let wire = Wire::deserialize(deserializer)?;
+        macro_rules! decode {
+            ($variant:ident) => {
+                serde_json::from_str(wire.record.get())
+                    .map(Self::$variant)
+                    .map_err(de::Error::custom)
+            };
+        }
+        match wire.kind.as_str() {
+            "summary" => decode!(Summary),
+            "execution_model" => decode!(ExecutionModel),
+            "equity" => decode!(Equity),
+            "order" => decode!(Order),
+            "trade" => decode!(Trade),
+            "position" => decode!(Position),
+            "corporate_action" => decode!(CorporateAction),
+            "record" => decode!(Record),
+            "log" => decode!(Log),
+            _ => Err(de::Error::custom("unknown result record kind")),
+        }
+    }
 }
 
 /// A credit grant comes from the trusted writer. A producer must not send beyond

@@ -14,12 +14,15 @@ from threading import Event, Thread
 
 from app.backtest_service.local_queue import LocalRunRepository
 from app.backtest_service.process import (
+    LABEL,
     DockerDaemon,
     WorkerProcess,
     WorkRoot,
+    labels,
 )
 from app.backtest_service.runtime_contracts import (
     AcceptedWork,
+    Claim,
     RuntimeFault,
     WorkerLimits,
 )
@@ -204,6 +207,9 @@ class RuntimeTests(unittest.TestCase):
     def tearDown(self):
         for supervisor in self.supervisors:
             supervisor.stop()
+        canary = self.base / "work" / "secret"
+        if canary.is_file():
+            canary.unlink()
         self.assertEqual(list((self.base / "work").iterdir()), [])
         EVIDENCE["tests"].append(self._testMethodName)
 
@@ -565,10 +571,11 @@ def initialize(c):
         for bad in ["../x/code", "/tmp/code", "x/../ipc", "x/code/extra"]:
             with self.assertRaises(RuntimeFault):
                 self.process.root.host_path(bad)
-        (self.base / "work" / "alias").symlink_to("/tmp")
+        alias = "qf-s3-" + "a" * 32
+        (self.base / "work" / alias).symlink_to("/tmp")
         with self.assertRaises(RuntimeFault):
-            self.process.root.host_path("alias/code")
-        (self.base / "work" / "alias").unlink()
+            self.process.root.host_path(alias + "/code")
+        (self.base / "work" / alias).unlink()
         run_id = self.enqueue(
             self.work("import time\ndef initialize(c):time.sleep(.4)")
         )
@@ -577,6 +584,142 @@ def initialize(c):
         row = self.wait_runs([run_id])[0]
         self.assertEqual(row["status"], "failed", row)
         self.assertEqual(row["outcome"]["error"]["code"], "DATA_CHANGED")
+
+    def test_raw_unknown_enum_oversize_and_result_path_injection_refused(self):
+        for mode, expected in [
+            ("unknown", "INVALID_CONTRACT"),
+            ("oversize", "RESOURCE_LIMIT"),
+            ("path", "INVALID_CONTRACT"),
+        ]:
+            with self.subTest(mode=mode):
+                code = """import json,sys
+from quantfoundry._transport import PREFIX,PROTOCOL
+def initialize(c):
+    client=sys.stdout.client
+    sock=client.channel.sock
+    mode=c.params['mode']
+    item=dict(protocol=PROTOCOL,run_id=client.run_id,request_id=client.sequence+1,
+              op='unknown' if mode=='unknown' else 'result',status='request',body={},payload_bytes=0)
+    if mode=='path':item['body']={'records':[],'path':'/etc/passwd'}
+    data=json.dumps(item).encode()
+    size=1024*1024+1 if mode=='oversize' else len(data)
+    sock.sendall(PREFIX.pack(b'QFD4',size,0)+data)
+    assert sock.recv(1)==b''
+"""
+                row = self.wait_runs(
+                    [self.enqueue(self.work(code, parameters=dict(mode=mode)))]
+                )[0]
+                self.assertEqual(row["status"], "failed", row)
+                self.assertEqual(row["outcome"]["error"]["code"], expected, row)
+
+    def test_container_replacement_between_inspect_and_stop_is_not_killed(self):
+        name = "qf-s3-d12-name-race-" + self.base.name
+        old, new = Claim(name, "old-test-token", 1), Claim(name, "new-test-token", 2)
+        fixture = dict(
+            Image=IMAGE,
+            User="65532:65532",
+            Entrypoint=["python", "-c"],
+            Cmd=["import time; time.sleep(60)"],
+            HostConfig=dict(
+                NetworkMode="none",
+                ReadonlyRootfs=True,
+                CapDrop=["ALL"],
+                SecurityOpt=["no-new-privileges"],
+                Memory=32 * 1024**2,
+                MemorySwap=32 * 1024**2,
+                NanoCpus=100_000_000,
+                PidsLimit=8,
+                LogConfig=dict(Type="none"),
+            ),
+        )
+
+        def create(claim):
+            identity = self.daemon.request(
+                "POST",
+                "/containers/create?name=" + name,
+                dict(fixture, Labels=labels(claim)),
+            )["Id"]
+            self.daemon.request("POST", "/containers/" + identity + "/start")
+            return identity
+
+        create(old)
+        daemon = self.daemon
+        replacement = []
+
+        class RacingDaemon(DockerDaemon):
+            def inspect(self, identity):
+                row = super().inspect(identity)
+                if identity == name and not replacement:
+                    daemon.stop_remove(name, old)
+                    replacement.append(create(new))
+                return row
+
+        try:
+            RacingDaemon().stop_remove(name, old)
+            self.assertTrue(self.daemon.inspect(replacement[0])["State"]["Running"])
+        finally:
+            self.daemon.stop_remove(name, new if replacement else old)
+
+    def test_worker_stop_leaves_private_publisher_running(self):
+        name = "qf-s3-d12-publisher-" + self.base.name
+        created = self.daemon.request(
+            "POST",
+            "/containers/create?name=" + name,
+            dict(
+                Image=IMAGE,
+                User="65532:65532",
+                Entrypoint=["python", "-c"],
+                Cmd=["import time; n=0\nwhile True:\n n+=1; time.sleep(.01)"],
+                Labels={
+                    "io.quantfoundry.s3.private-publisher": self.base.name,
+                    "io.quantfoundry.s3.private-test-root": HOST,
+                },
+                HostConfig=dict(
+                    NetworkMode="none",
+                    ReadonlyRootfs=True,
+                    CapDrop=["ALL"],
+                    SecurityOpt=["no-new-privileges"],
+                    Memory=32 * 1024**2,
+                    MemorySwap=32 * 1024**2,
+                    NanoCpus=100_000_000,
+                    PidsLimit=8,
+                    LogConfig=dict(Type="none"),
+                ),
+            ),
+        )
+        identity = created["Id"]
+        try:
+            self.daemon.request("POST", "/containers/" + identity + "/start")
+            started = self.daemon.inspect(identity)["State"]["StartedAt"]
+            first = self.daemon.request(
+                "GET", "/containers/" + identity + "/stats?stream=false&one-shot=true"
+            )
+            claim = Claim("different-run", "different-token", 1)
+            with self.assertRaises(RuntimeFault):
+                self.daemon.stop_remove(name, claim)
+            run_id = self.enqueue(self.work("def initialize(c):\n    while True: pass"))
+            self.tick()
+            self.repository.request_cancel("synthetic-owner", run_id)
+            self.wait_runs([run_id])
+            after = self.daemon.inspect(identity)
+            self.assertTrue(after["State"]["Running"])
+            self.assertEqual(after["State"]["StartedAt"], started)
+            second = self.daemon.request(
+                "GET", "/containers/" + identity + "/stats?stream=false&one-shot=true"
+            )
+            self.assertGreater(
+                second["cpu_stats"]["cpu_usage"]["total_usage"],
+                first["cpu_stats"]["cpu_usage"]["total_usage"],
+            )
+            EVIDENCE["private_publisher_survived_worker_stop"] = True
+        finally:
+            self.daemon.request(
+                "POST",
+                "/containers/" + identity + "/kill?signal=KILL",
+                missing=True,
+                stopped=True,
+            )
+            self.daemon.request("DELETE", "/containers/" + identity, missing=True)
 
     def test_actual_cancel_success_competition_has_one_terminal(self):
         ids = [self.enqueue(self.work("def initialize(c): pass")) for _ in range(8)]
