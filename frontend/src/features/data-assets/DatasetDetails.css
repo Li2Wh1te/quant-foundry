@@ -1,0 +1,42 @@
+/* D04 styles are confined to overview and field content; D02 owns the shell. */
+.qfo-root.qf-assets-root .qf-dataset-details{min-width:0}
+.qfo-root.qf-assets-root .qf-dataset-details p,.qfo-root.qf-assets-root .qf-dataset-details li{font-size:14px;line-height:22px;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-name{font-weight:650;margin-top:0}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-assets-properties dt{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-assets-properties>div{grid-template-columns:156px minmax(0,1fr)}
+.qfo-root.qf-assets-root .qf-dataset-note{display:block;color:var(--muted);font-size:14px;line-height:22px;font-weight:400;margin-top:4px;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics span{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics>div{border-top:0}
+.qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics>div+div{border-left:1px solid var(--border)}
+.qfo-root.qf-assets-root .qf-dataset-count{text-align:right;overflow-wrap:anywhere;font-variant-numeric:tabular-nums}
+.qfo-root.qf-assets-root .qf-dataset-boundaries ul{padding-left:20px;margin:12px 0 0}
+.qfo-root.qf-assets-root .qf-dataset-boundaries li+li{margin-top:6px}
+.qfo-root.qf-assets-root .qf-dataset-field-toolbar{display:flex;align-items:end;flex-wrap:wrap;gap:12px;margin:16px 0}
+.qfo-root.qf-assets-root .qf-dataset-field-toolbar label{width:min(360px,100%);font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-field-toolbar>.qf-dataset-note{margin:0 0 8px}
+.qfo-root.qf-assets-root .qf-dataset-fields table{min-width:860px;table-layout:fixed}
+.qfo-root.qf-assets-root .qf-dataset-fields thead th{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-fields thead th:nth-child(1){width:24%}
+.qfo-root.qf-assets-root .qf-dataset-fields thead th:nth-child(2){width:34%}
+.qfo-root.qf-assets-root .qf-dataset-fields thead th:nth-child(3){width:21%}
+.qfo-root.qf-assets-root .qf-dataset-fields tbody th{background:transparent;font-size:14px;line-height:22px;white-space:normal;font-weight:400}
+.qfo-root.qf-assets-root .qf-dataset-fields code,.qfo-root.qf-assets-root .qf-dataset-technical code{font-size:14px;line-height:22px;white-space:pre-wrap;overflow-wrap:anywhere}
+.qfo-root.qf-assets-root .qf-dataset-fields details{margin-top:8px}
+.qfo-root.qf-assets-root .qf-dataset-fields summary,.qfo-root.qf-assets-root .qf-dataset-technical summary{font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-fields dl{margin:8px 0 0}
+.qfo-root.qf-assets-root .qf-dataset-fields dt{color:var(--muted);margin-top:6px;font-size:14px;line-height:22px}
+.qfo-root.qf-assets-root .qf-dataset-fields dd{margin:0}
+.qfo-root.qf-assets-root .qf-dataset-copy{margin-left:10px;border:1px solid var(--border);border-radius:6px;background:var(--surface);color:var(--text-2);padding:2px 8px;cursor:pointer}
+.qfo-root.qf-assets-root .qf-dataset-technical details{margin-top:0}
+.qfo-root.qf-assets-root .qf-dataset-technical .qf-assets-properties dd{display:flex;align-items:start;flex-wrap:wrap;gap:4px}
+.qfo-root.qf-assets-root .qf-dataset-technical .qf-assets-properties dd>.qf-dataset-note{flex-basis:100%}
+@media(max-width:620px){
+  .qfo-root.qf-assets-root .qf-dataset-details .qf-assets-properties>div{grid-template-columns:1fr;gap:4px}
+  .qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics{grid-template-columns:1fr}
+  .qfo-root.qf-assets-root .qf-dataset-details .qf-dataset-metrics>div+div{border-left:0;border-top:1px solid var(--border)}
+  .qfo-root.qf-assets-root .qf-dataset-field-toolbar{align-items:stretch;flex-direction:column}
+  .qfo-root.qf-assets-root .qf-dataset-field-toolbar label{width:100%}
+  .qfo-root.qf-assets-root .qf-dataset-field-toolbar>.qf-dataset-note{margin-bottom:0}
+  .qfo-root.qf-assets-root .qf-dataset-field-toolbar button{align-self:start}
+}

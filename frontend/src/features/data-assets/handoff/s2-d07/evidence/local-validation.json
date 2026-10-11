@@ -1,0 +1,113 @@
+{
+  "scope": "Exact D01–D06 inputs plus D07 changes; counts are not added across suites",
+  "frontendPassed": 140,
+  "d01Passed": 31,
+  "d07IncludedInFrontend": 7,
+  "postgresIssuesPassed": 2,
+  "rootPassed": 17,
+  "typescript": "passed",
+  "build": "passed, existing bundle-size advisory",
+  "fullBackendLocally": "not run; native file-storage acceptance blocked by overlay",
+  "productionOperations": false,
+  "logs": {
+    "frontend": {
+      "sha256": "c9cc76d376b58170013e1c0a09744e4f1b27df129dbbb1716a1e7ebced8241ea",
+      "summary": [
+        "  ---",
+        "  duration_ms: 0.319209",
+        "  type: 'test'",
+        "  ...",
+        "1..140",
+        "# tests 140",
+        "# suites 0",
+        "# pass 140",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 4152.993804"
+      ]
+    },
+    "d01": {
+      "sha256": "d5d7473c12640c3e3c1c72b4177f02277ecbb3787b768d48464dd3971c3c2b2a",
+      "summary": [
+        "  ---",
+        "  duration_ms: 0.587191",
+        "  type: 'test'",
+        "  ...",
+        "1..31",
+        "# tests 31",
+        "# suites 0",
+        "# pass 31",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 1323.144052"
+      ]
+    },
+    "integration": {
+      "sha256": "d620090f6d14ae1222d2592796d28ca90d233d3d346aecfe02d66cff3e75b25a",
+      "summary": [
+        "  ---",
+        "  duration_ms: 3.893553",
+        "  type: 'test'",
+        "  ...",
+        "1..7",
+        "# tests 7",
+        "# suites 0",
+        "# pass 7",
+        "# fail 0",
+        "# cancelled 0",
+        "# skipped 0",
+        "# todo 0",
+        "# duration_ms 816.807161"
+      ]
+    },
+    "build": {
+      "sha256": "5d3b82d0d16955b6b2799471b3a23cda54c977e8af6be044ff56eb78bb239b61",
+      "summary": [
+        "transforming...",
+        "✓ 1705 modules transformed.",
+        "rendering chunks...",
+        "computing gzip size...",
+        "dist/index.html                   0.46 kB │ gzip:   0.29 kB",
+        "dist/assets/index-BrI1hRiB.css  205.86 kB │ gzip:  34.20 kB",
+        "dist/assets/index-5fjeoFVo.js   973.01 kB │ gzip: 294.31 kB",
+        "",
+        "(!) Some chunks are larger than 500 kB after minification. Consider:",
+        "- Using dynamic import() to code-split the application",
+        "- Use build.rollupOptions.output.manualChunks to improve chunking: https://rollupjs.org/configuration-options/#output-manualchunks",
+        "- Adjust chunk size limit for this warning via build.chunkSizeWarningLimit.",
+        "✓ built in 3.24s"
+      ]
+    },
+    "postgresIssues": {
+      "sha256": "6adc6f35cae16106ae71967506b6b2d74c11b34f205026ce3b5245028e9fa1ad",
+      "summary": [
+        "QF disposable DB run: /workspace/.setup/cloud-dev/runs/run-hnc1keqw",
+        "..                                                                       [100%]",
+        "2 passed in 2.64s",
+        "QF disposable DB stopped; receipt: /workspace/.setup/cloud-dev/runs/run-hnc1keqw/receipt.json"
+      ]
+    },
+    "root": {
+      "sha256": "54845236b0f5ade0423dedfe1297e9b9c5ed66e563fa03911c693a66fb5b3d50",
+      "summary": [
+        "test_generates_secrets_and_preserves_them_on_subsequent_runs (test_selfhost_env.SelfhostEnvironmentTestCase.test_generates_secrets_and_preserves_them_on_subsequent_runs) ... ok",
+        "test_invalid_existing_source_key_is_not_replaced (test_selfhost_env.SelfhostEnvironmentTestCase.test_invalid_existing_source_key_is_not_replaced) ... ok",
+        "test_preserves_existing_strong_secrets_on_upgrade (test_selfhost_env.SelfhostEnvironmentTestCase.test_preserves_existing_strong_secrets_on_upgrade) ... ok",
+        "test_replaces_weak_secrets_removes_legacy_url_and_preserves_config (test_selfhost_env.SelfhostEnvironmentTestCase.test_replaces_weak_secrets_removes_legacy_url_and_preserves_config) ... ok",
+        "test_source_encryption_key_first_install_and_upgrade_preserve_existing_values (test_selfhost_env.SelfhostEnvironmentTestCase.test_source_encryption_key_first_install_and_upgrade_preserve_existing_values) ... ok",
+        "test_upgrade_appends_missing_backtest_defaults_and_preserves_values (test_selfhost_env.SelfhostEnvironmentTestCase.test_upgrade_appends_missing_backtest_defaults_and_preserves_values) ... ok",
+        "test_upgrade_generates_missing_cursor_signing_key (test_selfhost_env.SelfhostEnvironmentTestCase.test_upgrade_generates_missing_cursor_signing_key)",
+        "An old .env without the cursor key must be upgraded in place. ... ok",
+        "",
+        "----------------------------------------------------------------------",
+        "Ran 17 tests in 0.014s",
+        "",
+        "OK"
+      ]
+    }
+  }
+}

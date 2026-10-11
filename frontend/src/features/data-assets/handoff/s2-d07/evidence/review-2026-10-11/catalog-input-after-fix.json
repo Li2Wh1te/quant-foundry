@@ -1,0 +1,280 @@
+{
+  "source": "Actual Chromium React catalog with loopback D03 synthetic metadata; no production data",
+  "verifiedCandidateSourceSHA256": "df4e594aac1887bb75ead27d38ca1cb6975997c23a3d42d3acb0102a019a1c36",
+  "sequences": 30,
+  "passed": true,
+  "checks": [
+    {
+      "step": "0:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "1:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "2:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "3:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "4:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "5:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "6:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "7:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "8:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "9:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "10:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "11:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "12:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "13:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "14:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "15:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "16:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "17:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "18:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "19:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "20:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "21:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "22:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "23:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "24:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "25:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "26:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "27:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "28:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "29:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&page=1&frequency=minute",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    }
+  ],
+  "realDataAcceptance": false,
+  "productionOperations": false
+}

@@ -1,7 +1,7 @@
 """Authenticated, current-only data catalog and bounded preview API."""
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime
 import json
 import re
@@ -13,13 +13,15 @@ from anyio.lowlevel import current_token
 from fastapi import APIRouter, Depends, HTTPException, Query as ApiQuery, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings
 from app.db.session import get_db_session, get_engine
 
 from .adapters.registry import ENTRIES, Entry
-from .availability import read_availability, require_ready
+from .availability import read_availability, request_readable, require_request_ready
+from .current_revision import begin_inventory_read, check_revision, inventory_revision
 from .errors import DataStoreError
 from .readers import Query
 from .storage import CurrentStore
@@ -65,7 +67,11 @@ def _title(entry: Entry) -> str:
     return f"{category} · {entry.native}"
 
 
-def _http_error(error: DataStoreError) -> HTTPException:
+def _http_error(error: DataStoreError | SQLAlchemyError) -> HTTPException:
+    if not isinstance(error, DataStoreError):
+        state = getattr(getattr(error, "orig", None), "sqlstate", None)
+        error = DataStoreError("LOCK_TIMEOUT" if state == "55P03" else
+                               "QUERY_TIMEOUT" if state == "57014" else "CATALOG_UNAVAILABLE")
     status = (409 if error.code in {"DATA_CHANGED", "REBUILD_REQUIRED", "DATA_RESTRICTED"}
               else 503 if error.code in {"DATA_STORE_REBUILDING", "DATA_STORE_NOT_INITIALIZED",
                                           "CATALOG_UNAVAILABLE", "STORAGE_UNAVAILABLE", "LOCK_TIMEOUT"}
@@ -108,8 +114,8 @@ def _decode_strings(raw: bytes, count: int = 3) -> list[str] | None:
     return values if len(values) == count else None
 
 
-def _partition_info(store: CurrentStore, dataset: str) -> dict:
-    with store.catalog.transaction() as connection:
+def _partition_info(store: CurrentStore, dataset: str, connection=None) -> dict:
+    with (nullcontext(connection) if connection is not None else store.catalog.transaction()) as connection:
         partitions = connection.execute(text(
             "SELECT DISTINCT ON (partition_key) partition_key, key_min AS first_key "
             "FROM data_store_files WHERE dataset=:dataset "
@@ -167,7 +173,7 @@ def _describe(entry: Entry, store: CurrentStore | None, phase: str, session: Ses
     if store is None:
         return result
     try:
-        current = store.describe_capability(entry.spec)
+        current = store.describe_capability(entry.spec, connection=session.connection())
     except DataStoreError as error:
         if error.code == "DATASET_MISSING":
             return result
@@ -179,7 +185,7 @@ def _describe(entry: Entry, store: CurrentStore | None, phase: str, session: Ses
         updated_at=current["updated_at"],
         issues=current["issues"],
     )
-    result.update(_partition_info(store, entry.spec.name))
+    result.update(_partition_info(store, entry.spec.name, session.connection()))
     status = session.execute(text(
         "SELECT summary_json,updated_at FROM data_store_entry_status WHERE entry_id=:id"
     ), {"id": entry.id}).mappings().first()
@@ -207,19 +213,28 @@ def list_datasets(
     session: Annotated[Session, Depends(get_db_session)],
     limit: Annotated[int, ApiQuery(ge=1, le=100)] = 50,
     offset: Annotated[int, ApiQuery(ge=0)] = 0,
+    revision: Annotated[str | None, ApiQuery(pattern=r"^[0-9a-f]{64}$")] = None,
 ) -> dict:
     try:
+        begin_inventory_read(session)
         availability = read_availability(session)
-        entries = list(BUSINESS.values())
+        entries = sorted(BUSINESS.values(), key=lambda entry: entry.spec.name)
+        current_revision = inventory_revision(session, "datasets", entries=entries)
+        check_revision(current_revision, revision)
         selected = entries[offset:offset + limit]
-        if not availability.ready:
+        readable = {entry.spec.name for entry in selected
+                    if request_readable(session, entry, availability)}
+        if not readable:
             items = [_describe(entry, None, availability.phase, session) for entry in selected]
         else:
             with _store(_settings(request), availability.fresh_install) as store:
-                items = [_describe(entry, store, availability.phase, session) for entry in selected]
+                items = [_describe(entry, store if entry.spec.name in readable else None,
+                                   "ready" if entry.spec.name in readable else availability.phase,
+                                   session) for entry in selected]
         return {"items": items, "total": len(entries), "phase": availability.phase,
+                "revision": current_revision,
                 "next_offset": offset + limit if offset + limit < len(entries) else None}
-    except DataStoreError as error:
+    except (DataStoreError, SQLAlchemyError) as error:
         raise _http_error(error) from None
 
 
@@ -229,12 +244,13 @@ def get_dataset(
 ) -> dict:
     entry = _entry(dataset)
     try:
+        begin_inventory_read(session)
         availability = read_availability(session)
-        if not availability.ready:
+        if not request_readable(session, entry, availability):
             return _describe(entry, None, availability.phase, session)
         with _store(_settings(request), availability.fresh_install) as store:
-            return _describe(entry, store, availability.phase, session)
-    except DataStoreError as error:
+            return _describe(entry, store, "ready", session)
+    except (DataStoreError, SQLAlchemyError) as error:
         raise _http_error(error) from None
 
 
@@ -285,28 +301,45 @@ def get_issues(
     dataset: str | None = None,
     limit: Annotated[int, ApiQuery(ge=1, le=100)] = 50,
     offset: Annotated[int, ApiQuery(ge=0)] = 0,
+    revision: Annotated[str | None, ApiQuery(pattern=r"^[0-9a-f]{64}$")] = None,
 ) -> dict:
     if dataset is not None:
         _entry(dataset)
+    try:
+        return _current_issues(session, dataset, limit, offset, revision)
+    except (DataStoreError, SQLAlchemyError) as error:
+        raise _http_error(error) from None
+
+
+def _current_issues(session: Session, dataset: str | None, limit: int,
+                    offset: int, revision: str | None) -> dict:
+    begin_inventory_read(session)
+    current_revision = inventory_revision(session, "issues", dataset=dataset)
+    check_revision(current_revision, revision)
     params = {"dataset": dataset, "limit": limit, "offset": offset}
-    where = "WHERE (:dataset IS NULL OR dataset=:dataset OR dataset IS NULL)"
+    # psycopg sends an optional parameter with no inferred PostgreSQL type at
+    # its first IS NULL occurrence. Type that occurrence for both filtered and
+    # unfiltered requests; preserve dataset/global-restriction selection.
+    where = "WHERE (CAST(:dataset AS text) IS NULL OR dataset=:dataset OR dataset IS NULL)"
     union = (
-        "SELECT dataset,scope_key,reason,last_seen AS updated_at,'current' AS kind, "
+        "SELECT dataset,scope_key,reason,last_seen AS updated_at,'current' AS kind, issue_key AS record_key, "
         "CASE WHEN target_json::jsonb->>'scope_version'='object-key-set-v1' THEN jsonb_array_length(target_json::jsonb->'members') ELSE 1 END AS affected_objects "
         "FROM data_store_issues " + where + " UNION ALL "
         "SELECT dataset,scope_key,'LEGACY_RESTRICTION' AS reason,"
-        "captured_at AS updated_at,'legacy' AS kind,1 AS affected_objects "
+        "captured_at AS updated_at,'legacy' AS kind,origin_key AS record_key,1 AS affected_objects "
         "FROM data_store_legacy_restrictions " + where
     )
     total = session.execute(text("SELECT count(*) FROM (" + union + ") AS issues"), params).scalar_one()
     affected = session.execute(text("SELECT coalesce(sum(affected_objects),0) FROM (" + union + ") AS issues"), params).scalar_one()
     rows = session.execute(text(
-        "SELECT * FROM (" + union + ") AS issues "
-        "ORDER BY updated_at DESC,dataset,scope_key LIMIT :limit OFFSET :offset"
+        "SELECT dataset,scope_key,reason,updated_at,kind,affected_objects FROM (" + union + ") AS issues "
+        "ORDER BY updated_at DESC NULLS LAST,dataset NULLS LAST,scope_key NULLS LAST,kind,record_key "
+        "LIMIT :limit OFFSET :offset"
     ), params).mappings().all()
     return {
-        "items": [{**dict(row), "updated_at": row["updated_at"].isoformat()} for row in rows],
+        "items": [{**dict(row), "updated_at": row["updated_at"].isoformat() if row["updated_at"] is not None else None} for row in rows],
         "total": total, "affected_objects": affected,
+        "revision": current_revision,
         "next_offset": offset + limit if offset + limit < total else None,
     }
 
@@ -360,12 +393,12 @@ def _matching_partitions(store: CurrentStore, entry: Entry, query: CurrentQuery)
             month += 1
             if month == 13:
                 year, month = year + 1, 1
-        rows = [part for part in rows if part in expected]
+        rows = sorted(expected)
     elif query.from_key == query.to_key:
         expected = entry.spec.partitioner((
             query.representation, query.subject, query.from_key, "root"
         ))
-        rows = [part for part in rows if part == expected]
+        rows = [expected]
     if query.partitions is not None:
         selected = list(dict.fromkeys(query.partitions))
         if len(selected) != len(query.partitions) or not set(selected) <= set(rows):
@@ -376,6 +409,37 @@ def _matching_partitions(store: CurrentStore, entry: Entry, query: CurrentQuery)
     if len(rows) > store.limits.query_partitions:
         raise DataStoreError("QUERY_BUDGET_EXCEEDED")
     return rows
+
+
+def _recheck_query(session: Session, store: CurrentStore, entry: Entry,
+                   generation: int | None, *, query=None, issue_count=0) -> None:
+    """Short final fence; no network/file scan while control writers are held."""
+    if session.execute(text("SELECT to_regclass('data_store_source_ranges') IS NOT NULL")).scalar_one():
+        session.execute(text("LOCK TABLE data_store_source_ranges IN SHARE MODE"))
+    session.execute(text("LOCK TABLE data_store_entry_status,data_store_datasets,"
+                         "data_store_issues,data_store_legacy_restrictions IN SHARE MODE"))
+    require_request_ready(session, entry)
+    if _legacy_restrictions(session, entry.spec.name):
+        raise DataStoreError("DATA_RESTRICTED")
+    try:
+        state = store.catalog.dataset(entry.spec.name, session.connection())
+    except DataStoreError as error:
+        if error.code != "DATASET_MISSING" or generation is not None:
+            raise
+        return
+    store._spec_current(entry.spec, state)
+    if state["generation"] != generation:
+        raise DataStoreError("DATA_CHANGED")
+    if query is not None:
+        from .issue_scope import relevant_issue_count
+        current_issues = relevant_issue_count(store, entry.spec, query)
+        if current_issues and query.require_qualified:
+            raise DataStoreError("DATA_RESTRICTED")
+    else:
+        from .issue_sets import logical_count
+        current_issues = logical_count(session.connection(), entry.spec.name)
+    if current_issues != issue_count:
+        raise DataStoreError("DATA_CHANGED")
 
 
 @router.post("/query")
@@ -390,7 +454,7 @@ def query_current(
         raise HTTPException(422, detail={"code": "FREQUENCY_UNSUPPORTED",
                                          "message": "所选频率与数据集契约不一致。"})
     try:
-        availability = require_ready(session)
+        availability = require_request_ready(session, entry)
         if _legacy_restrictions(session, entry.spec.name):
             raise DataStoreError("DATA_RESTRICTED")
         with _store(_settings(request), availability.fresh_install) as store:
@@ -405,6 +469,11 @@ def query_current(
                 issues = descriptor["issues"] if descriptor else 0
                 if issues and not payload.allow_partial:
                     raise DataStoreError("DATA_RESTRICTED")
+                if payload.cursor:
+                    raise DataStoreError("DATA_CHANGED")
+                _recheck_query(session, store, entry,
+                               descriptor["generation"] if descriptor else None,
+                               issue_count=issues)
                 return {
                     "dataset": entry.spec.name, "rows": [], "next_cursor": None,
                     "status": "restricted" if issues else "empty",
@@ -444,11 +513,13 @@ def query_current(
                 [(entry.spec, query)],
                 cancelled=cancelled,
             )[0]
+            _recheck_query(session, store, entry, page.generation,
+                           query=query, issue_count=page.unresolved_issues)
             rows = page.rows
             keys = [str(row["object_key"]) for row in rows if "object_key" in row]
             return {
                 **page.to_dict(),
-                "status": page.quality_status,
+                "status": page.quality_status if rows or page.unresolved_issues else "empty",
                 # The current catalog proves which rows exist, but it cannot
                 # prove continuous business-date coverage for an arbitrary
                 # requested interval. Keep that claim false even for a clean
@@ -461,7 +532,7 @@ def query_current(
                 "selected_partitions": partitions,
                 "limitations": entry.describe_capability()["limitations"],
             }
-    except DataStoreError as error:
+    except (DataStoreError, SQLAlchemyError) as error:
         raise _http_error(error) from None
 
 

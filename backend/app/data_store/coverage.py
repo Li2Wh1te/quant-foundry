@@ -14,9 +14,16 @@ from sqlalchemy import text
 from .adapters.contracts import digest
 from .schema import DatasetSpec
 
+CAPTURED_RANGE_ENTRIES = frozenset({'E23', 'E44', 'E50', 'E51', 'E52', 'E69', 'E70'})
 
-def check_coverage(connection, entry, status):
-    """Return one fail-closed judgment in the caller's catalog transaction."""
+
+def check_coverage(connection, entry, status, *, require_all_quality=True):
+    """Judge current input evidence; full readiness also requires all quality.
+
+    A bounded object read may delegate quality to the kernel's existing
+    request-scope gate. Reset completion and audit retain the default whole
+    entry judgment. This never substitutes output presence for input proof.
+    """
     status = status or {}
     proof = status.get('full_coverage') or {}
     reason = None
@@ -30,7 +37,7 @@ def check_coverage(connection, entry, status):
         reason = 'FULL_RANGE_PENDING'
     elif status.get('coverage_pending'):
         reason = 'CURRENT_INPUT_PENDING'
-    if reason is None and entry.id in ('E23','E44','E50','E51','E52','E69','E70'):
+    if reason is None and entry.id in CAPTURED_RANGE_ENTRIES:
         if connection.execute(text("SELECT to_regclass('data_store_source_ranges') IS NOT NULL")).scalar_one():
             if connection.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_source_ranges WHERE source=:s AND dataset=:d)'),
                                   {'s':entry.source,'d':entry.native}).scalar_one():
@@ -48,10 +55,10 @@ def check_coverage(connection, entry, status):
                      'SELECT DISTINCT contract_json FROM data_store_files WHERE dataset=:d'),
                      {'d': entry.spec.name})):
             reason = 'FULL_RANGE_CONTRACT_CHANGED'
-        elif connection.execute(text(
+        elif require_all_quality and (connection.execute(text(
                 'SELECT EXISTS(SELECT 1 FROM data_store_issues WHERE dataset=:d)'),
                 {'d': entry.spec.name}).scalar_one() or status.get(
-                    'overflow_restriction', {}).get('blocking_objects'):
+                    'overflow_restriction', {}).get('blocking_objects')):
             reason = 'CURRENT_QUALITY_UNRESOLVED'
     return {'satisfied': reason is None, 'reason': reason, 'evidence': proof,
             'last_complete_evidence': status.get('last_complete_coverage'),

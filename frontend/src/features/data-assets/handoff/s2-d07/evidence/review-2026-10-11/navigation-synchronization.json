@@ -1,0 +1,15 @@
+{
+  "source": "Actual Chromium navigation on the combined React App with loopback synthetic HTTP",
+  "failedHead": "5d3cfd17acb4af5f971202cd6ae68c378a2fa4e9",
+  "passedCasesBeforeFailure": 30,
+  "failedCase": "existing workspace entrances and quick jump remain navigable with scoped styles",
+  "assertion": "No data-assets workspace remains after navigating to another workspace",
+  "expectedAssetWorkspaceCount": 0,
+  "observedBeforeTargetRender": 1,
+  "cause": "waitForURL completes before the target workspace renders; the existing generic main locator still matches the previous workspace",
+  "correction": "Wait for each destination's specific visible heading before checking the old workspace or taking the next navigation action; keep all assertions",
+  "completeSuitePassedOnFailedHead": false,
+  "applicationNavigationCodeModified": false,
+  "realDataAcceptance": false,
+  "productionOperations": false
+}

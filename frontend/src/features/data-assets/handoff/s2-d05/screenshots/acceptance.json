@@ -1,0 +1,6559 @@
+{
+  "isolated": true,
+  "passed": 48,
+  "cases": [
+    "1440px: one header action reads one bounded example using preview_key",
+    "1440px: exact decimal, unquoted huge integer/ns, null, false and zero",
+    "1440px: page stack replaces pages and GET refresh/tab revisits never POST",
+    "1440px: NAV and report pages keep qualifiers and report fragments",
+    "1024px: one header action reads one bounded example using preview_key",
+    "1024px: exact decimal, unquoted huge integer/ns, null, false and zero",
+    "1024px: page stack replaces pages and GET refresh/tab revisits never POST",
+    "1024px: NAV and report pages keep qualifiers and report fragments",
+    "390px: one header action reads one bounded example using preview_key",
+    "390px: exact decimal, unquoted huge integer/ns, null, false and zero",
+    "390px: page stack replaces pages and GET refresh/tab revisits never POST",
+    "390px: NAV and report pages keep qualifiers and report fragments",
+    "condition edits clear old cursors/results; text keys, page size and declared columns are bounded",
+    "invalid lexical range is rejected locally without a request or old page",
+    "cancel loading query and ignore its late completion",
+    "rapid subject changes reject a transport that ignores AbortSignal",
+    "leaving the tab cancels a pending read without automatic retry on return",
+    "unmount/dataset switch cancels old query and rejects late responses",
+    "generation-next: withdraw rows/page stack; no partial-read or retry loop",
+    "query-changed: withdraw rows/page stack; no partial-read or retry loop",
+    "restriction-next: withdraw rows/page stack; no partial-read or retry loop",
+    "query-restricted: withdraw rows/page stack; no partial-read or retry loop",
+    "query-maintenance: withdraw rows/page stack; no partial-read or retry loop",
+    "query-rebuild: withdraw rows/page stack; no partial-read or retry loop",
+    "query-file-invalid: withdraw rows/page stack; no partial-read or retry loop",
+    "query-unknown-error: withdraw rows/page stack; no partial-read or retry loop",
+    "metadata-generation: GET metadata boundary clears old page without auto POST",
+    "metadata-quality: GET metadata boundary clears old page without auto POST",
+    "metadata-schema: GET metadata boundary clears old page without auto POST",
+    "metadata-subject: GET metadata boundary clears old page without auto POST",
+    "metadata generation changes cancel an in-flight query before it can return",
+    "query-network: stale page retains its time and cannot continue pagination",
+    "query-timeout: stale page retains its time and cannot continue pagination",
+    "query-unknown-status: malformed/undeclared permission never displays a new page",
+    "query-schema-mismatch: malformed/undeclared permission never displays a new page",
+    "query-partial: malformed/undeclared permission never displays a new page",
+    "query-malformed: malformed/undeclared permission never displays a new page",
+    "query-dataset-mismatch: malformed/undeclared permission never displays a new page",
+    "no-preview: no invented key/columns/query",
+    "no-columns: no invented key/columns/query",
+    "dataset-empty: no invented key/columns/query",
+    "empty page, query miss, undeclared fields and descriptor restrictions stay distinct",
+    "query-forbidden: 403 clears every mounted preview and its cursors",
+    "metadata-forbidden: 403 clears every mounted preview and its cursors",
+    "issues-forbidden: 403 clears every mounted preview and its cursors",
+    "query-unauthorized: 401 clears data and follows the existing login flow",
+    "metadata-unauthorized: 401 clears data and follows the existing login flow",
+    "issues-unauthorized: 401 clears data and follows the existing login flow"
+  ],
+  "pageErrors": [],
+  "geometry": [
+    {
+      "kind": "daily-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 1087,
+        "content": 1367,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 401
+      }
+    },
+    {
+      "kind": "nav-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 1087,
+        "content": 1350,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 401
+      }
+    },
+    {
+      "kind": "report-1440",
+      "viewport": 1440,
+      "document": 1440,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 1087,
+        "content": 1451,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 401
+      }
+    },
+    {
+      "kind": "daily-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 697,
+        "content": 1367,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 375
+      }
+    },
+    {
+      "kind": "nav-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 697,
+        "content": 1350,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 375
+      }
+    },
+    {
+      "kind": "report-1024",
+      "viewport": 1024,
+      "document": 1024,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 697,
+        "content": 1451,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 375
+      }
+    },
+    {
+      "kind": "daily-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 247,
+        "content": 1367,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 211
+      }
+    },
+    {
+      "kind": "nav-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 247,
+        "content": 1350,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 211
+      }
+    },
+    {
+      "kind": "report-390",
+      "viewport": 390,
+      "document": 390,
+      "mainOverflow": "auto",
+      "table": {
+        "width": 247,
+        "content": 1451,
+        "height": 136,
+        "contentHeight": 136
+      },
+      "prose": [
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px",
+        "14px"
+      ],
+      "action": {
+        "width": 110,
+        "right": 211
+      }
+    }
+  ],
+  "clientRequests": [
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-03",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-03",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero",
+          "f6_text"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero",
+          "representation",
+          "subject",
+          "basis_state",
+          "basis_token",
+          "f6_text",
+          "f7_member",
+          "f8_member",
+          "f9_member",
+          "f10_member",
+          "f11_member",
+          "f12_member",
+          "f13_member",
+          "f14_member",
+          "f15_member",
+          "f16_member",
+          "f17_member",
+          "f18_member",
+          "f19_member",
+          "f20_member",
+          "f21_member",
+          "f22_member",
+          "f23_member",
+          "f24_member",
+          "f25_member"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-ignore-abort",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-ignore-abort",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-default",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "body": null
+    }
+  ],
+  "serverRequests": [
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-report-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-03",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-03",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero",
+          "f6_text"
+        ],
+        "page_size": 100,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.report",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.report",
+        "frequency": "report",
+        "representation": "fixture_report_reported",
+        "subject": "fixture-report-object",
+        "from_key": "fixture-period:2026",
+        "to_key": "fixture-period:2026",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero",
+          "representation",
+          "subject",
+          "basis_state",
+          "basis_token",
+          "f6_text",
+          "f7_member",
+          "f8_member",
+          "f9_member",
+          "f10_member",
+          "f11_member",
+          "f12_member",
+          "f13_member",
+          "f14_member",
+          "f15_member",
+          "f16_member",
+          "f17_member",
+          "f18_member",
+          "f19_member",
+          "f20_member",
+          "f21_member",
+          "f22_member",
+          "f23_member",
+          "f24_member",
+          "f25_member"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "slow",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "slow",
+      "aborted": true,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-ignore-abort",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "slow",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "slow",
+      "aborted": true,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-ignore-abort",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.nav",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.nav",
+        "frequency": "daily",
+        "representation": "fixture_nav_reported",
+        "subject": "fixture-nav-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "generation-next",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-changed",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "restriction-next",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-restricted",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-maintenance",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-rebuild",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-file-invalid",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-unknown-error",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-generation",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "metadata-generation",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-quality",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "scenario": "metadata-quality",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "metadata-quality",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-schema",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "metadata-schema",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-subject",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "metadata-subject",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-new-default",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "slow",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "slow",
+      "aborted": true,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-generation",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-timeout",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-timeout",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-unknown-status",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-schema-mismatch",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-partial",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-malformed",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-dataset-mismatch",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "no-preview",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "no-columns",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "dataset-empty",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "empty-page",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "empty-page",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "empty-page",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": "fixture-cursor:fixture-daily-object:page-2",
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "query-empty",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-empty",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "no-fields",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "no-fields",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-restricted-readable",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "metadata-restricted-readable",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-forbidden",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-forbidden",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "scenario": "issues-forbidden",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "issues-forbidden",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "query-unauthorized",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "normal",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "normal",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "metadata-unauthorized",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "POST",
+      "path": "/api/admin/data-store/query",
+      "scenario": "issues-readable",
+      "aborted": false,
+      "body": {
+        "dataset": "fixture.daily",
+        "frequency": "daily",
+        "representation": "fixture_daily_reported",
+        "subject": "fixture-daily-object",
+        "from_key": "2026-01-02",
+        "to_key": "2026-01-02",
+        "columns": [
+          "object_key",
+          "member_key",
+          "f0_decimal",
+          "f1_integer",
+          "f2_event_ns",
+          "f3_null",
+          "f4_flag",
+          "f5_zero"
+        ],
+        "page_size": 20,
+        "cursor": null,
+        "allow_partial": false
+      }
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues",
+      "scenario": "issues-unauthorized",
+      "aborted": false,
+      "body": null
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/fixture.daily",
+      "scenario": "issues-unauthorized",
+      "aborted": false,
+      "body": null
+    }
+  ],
+  "realApiVerified": false,
+  "productionOperations": false
+}

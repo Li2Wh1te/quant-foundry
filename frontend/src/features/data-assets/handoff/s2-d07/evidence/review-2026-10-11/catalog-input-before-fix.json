@@ -1,0 +1,58 @@
+{
+  "source": "Actual Chromium React catalog with loopback D03 synthetic metadata; no production data",
+  "failedHead": "276649ddbc2ba4448faa6a4a843a6d76f8b8b212",
+  "fullD03SuiteExitCode": 1,
+  "independentProbeExitCode": 1,
+  "firstFailedSequence": 5,
+  "expectedFinalSearch": "隔离示例",
+  "expectedFinalRows": 4,
+  "observed": {
+    "step": "4:refresh",
+    "url": "http://127.0.0.1:5195/admin/data-assets?search=%E6%95%B0%E6%8D%AE%E9%9B%86+001&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&frequency=minute&page=1",
+    "search": "数据集 001",
+    "source": "隔离示例：来源 B",
+    "frequency": "分钟",
+    "busy": "false",
+    "rows": 0
+  },
+  "precedingInputAndNavigation": [
+    {
+      "step": "4:fills",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E6%95%B0%E6%8D%AE%E9%9B%86+001&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&frequency=minute&page=1",
+      "search": "隔离示例",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 4
+    },
+    {
+      "step": "4:source",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E6%95%B0%E6%8D%AE%E9%9B%86+001&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&frequency=minute&page=1",
+      "search": "数据集 001",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 0
+    },
+    {
+      "step": "4:frequency",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E6%95%B0%E6%8D%AE%E9%9B%86+001&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&frequency=minute&page=1",
+      "search": "数据集 001",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 0
+    },
+    {
+      "step": "4:refresh",
+      "url": "http://127.0.0.1:5195/admin/data-assets?search=%E6%95%B0%E6%8D%AE%E9%9B%86+001&source=%E9%9A%94%E7%A6%BB%E7%A4%BA%E4%BE%8B%EF%BC%9A%E6%9D%A5%E6%BA%90+B&frequency=minute&page=1",
+      "search": "数据集 001",
+      "source": "隔离示例：来源 B",
+      "frequency": "分钟",
+      "busy": "false",
+      "rows": 0
+    }
+  ],
+  "realDataAcceptance": false,
+  "productionOperations": false
+}

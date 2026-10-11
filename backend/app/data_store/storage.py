@@ -154,12 +154,13 @@ class CurrentStore:
             raise DataStoreError('REBUILD_REQUIRED')
 
     @_public_errors
-    def describe_capability(self, spec: DatasetSpec) -> dict:
+    def describe_capability(self, spec: DatasetSpec, *, connection=None) -> dict:
         """Small current descriptor; no file paths or old generations accepted."""
         with self.locks.read(spec.name, timeout_ms=self.limits.lock_timeout_ms):
-            state = self.catalog.dataset(spec.name)
+            state = self.catalog.dataset(spec.name, connection)
             self._spec_current(spec, state)
-            with self.catalog.transaction() as c:
+            from contextlib import nullcontext
+            with (nullcontext(connection) if connection is not None else self.catalog.transaction()) as c:
                 from .issue_sets import logical_count
                 issue_count = logical_count(c,spec.name)
                 formats = c.execute(text('SELECT DISTINCT contract_json FROM data_store_files '

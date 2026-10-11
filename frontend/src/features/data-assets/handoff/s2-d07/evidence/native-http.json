@@ -1,0 +1,75 @@
+{
+  "source": "Actual FastAPI HTTP + migrated disposable PostgreSQL",
+  "controlFixture": "isolated non-ready maintenance receipt; no ready writes or business rows",
+  "passed": 14,
+  "checks": [
+    {
+      "name": "actual auth: missing token",
+      "status": 401
+    },
+    {
+      "name": "actual auth: incorrect token",
+      "status": 401
+    },
+    {
+      "name": "actual token verification",
+      "status": 204
+    },
+    {
+      "name": "actual status registry",
+      "status": 200
+    },
+    {
+      "name": "actual filtered empty issue collection",
+      "status": 200
+    },
+    {
+      "name": "natural empty install retains native filesystem refusal",
+      "status": 422,
+      "code": "UNSUPPORTED_FILESYSTEM"
+    },
+    {
+      "name": "actual query retains native filesystem refusal",
+      "status": 422,
+      "code": "UNSUPPORTED_FILESYSTEM"
+    },
+    {
+      "name": "actual catalog under closed isolated maintenance gate",
+      "status": 200
+    },
+    {
+      "name": "actual registry pagination under closed gate",
+      "status": 200
+    },
+    {
+      "name": "actual registry descriptor/schema under closed gate",
+      "status": 200
+    },
+    {
+      "name": "actual query honors closed maintenance gate",
+      "status": 503,
+      "code": "DATA_STORE_REBUILDING"
+    },
+    {
+      "name": "actual unknown dataset refusal",
+      "status": 404,
+      "code": "DATASET_UNKNOWN"
+    },
+    {
+      "name": "actual page-size budget validation",
+      "status": 422
+    },
+    {
+      "name": "actual column budget validation",
+      "status": 422
+    }
+  ],
+  "blocked": [
+    "CurrentStore is blocked by UNSUPPORTED_FILESYSTEM on this executor; no override applied.",
+    "No authorized real development/production read route or session was supplied to this task.",
+    "require_ready remains global; healthy-A plus restricted-B domain separation is not delivered in this checkout.",
+    "Real business pagination, cursor DATA_CHANGED and role-based 403 are unverified; the current API has one authenticated credential."
+  ],
+  "realDataAcceptance": false,
+  "productionOperations": false
+}

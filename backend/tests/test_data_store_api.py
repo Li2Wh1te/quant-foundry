@@ -127,6 +127,141 @@ def query_body(entry, preview_key, **overrides):
     return {**body, **overrides}
 
 
+def test_catalog_revision_and_descriptors_share_the_current_sql_view(api, monkeypatch):
+    client, store = api
+    entry = BY_ID["E07"]
+    run_entry(store, entry, NativeSources(store.catalog.engine))
+    before = store.catalog.dataset(entry.spec.name)["generation"]
+    original = store_router.inventory_revision
+    def changed_after_revision(*args, **kwargs):
+        revision = original(*args, **kwargs)
+        with store.catalog.engine.begin() as c:
+            c.execute(text("UPDATE data_store_datasets SET generation=generation+1 WHERE name=:d"), {"d": entry.spec.name})
+        return revision
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    with monkeypatch.context() as patch:
+        patch.setattr(store_router, "inventory_revision", changed_after_revision)
+        response = client.get("/api/admin/data-store/datasets?limit=100", headers=headers)
+    assert response.status_code == 200
+    body = response.json()
+    assert next(item for item in body["items"] if item["dataset"] == entry.spec.name)["generation"] == before
+    stale = client.get("/api/admin/data-store/datasets?revision=" + body["revision"], headers=headers)
+    assert stale.status_code == 409 and stale.json()["detail"]["code"] == "DATA_CHANGED"
+
+
+def test_request_admission_accepts_proved_A_and_rejects_restricted_B_before_global_ready(api):
+    client, store = api
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    a, b = BY_ID["E07"], BY_ID["E08"]
+    for entry in (a, b):
+        result = run_entry(store, entry, NativeSources(store.catalog.engine))
+        assert result["complete"] and result["qualified"]
+    with store.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        c.execute(text("INSERT INTO data_store_issues "
+            "(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
+            "VALUES (:d,'isolated-block','unknown','FULL_RANGE_UNPROVEN','isolated','{}','{}')"),
+            {"d": b.spec.name})
+    for entry, expected in ((a, 200), (b, 409)):
+        descriptor = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()
+        assert descriptor["preview_key"]
+        body = {**query_body(entry, descriptor["preview_key"]), "frequency": store_router._frequency(entry)}
+        response = client.post("/api/admin/data-store/query", headers=headers, json=body)
+        assert response.status_code == expected
+        if expected == 200:
+            assert response.json()["rows"] and response.json()["business_date_coverage_verified"] is False
+        else:
+            assert response.json()["detail"]["code"] == "DATA_RESTRICTED"
+    assert client.get("/api/admin/data-store/status", headers=headers).json()["phase"] == "reset_done"
+    assert client.post("/api/admin/data-store/query", json=body).status_code == 401
+
+
+def test_request_quality_remains_object_scoped_under_completed_reset(api):
+    client, store = api
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    entry = BY_ID["E07"]
+    run_entry(store, entry, NativeSources(store.catalog.engine))
+    descriptor = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()
+    key = descriptor["preview_key"]
+    target = {"scope_version": "object-key-v1", "partition": key["partition"],
+              "prefix": [key["representation"], key["subject"], "unrelated-object"], "blocking": True}
+    with store.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        c.execute(text("INSERT INTO data_store_issues "
+            "(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
+            "VALUES (:d,'isolated-scope',:s,'FULL_RANGE_UNPROVEN','isolated',:t,'{}')"),
+            {"d": entry.spec.name, "s": "local.partition." + key["partition"], "t": json.dumps(target)})
+    body = query_body(entry, key)
+    assert client.post("/api/admin/data-store/query", headers=headers, json=body).status_code == 200
+    target["prefix"][2] = key["object_key"]
+    with store.catalog.engine.begin() as c:
+        c.execute(text("UPDATE data_store_issues SET target_json=:t WHERE issue_key='isolated-scope'"),
+                  {"t": json.dumps(target)})
+    rejected = client.post("/api/admin/data-store/query", headers=headers, json=body)
+    assert rejected.status_code == 409 and rejected.json()["detail"]["code"] == "DATA_RESTRICTED"
+
+
+@pytest.mark.parametrize("phase", ["rebuilding", "resetting", "unknown"])
+def test_active_or_unknown_maintenance_rejects_even_proved_entries(api, phase):
+    client, store = api
+    entry = BY_ID["E07"]
+    run_entry(store, entry, NativeSources(store.catalog.engine))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    key = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()["preview_key"]
+    with store.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,:phase)"), {"phase": phase})
+    response = client.post("/api/admin/data-store/query", headers=headers, json=query_body(entry, key))
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "DATA_STORE_REBUILDING"
+
+
+@pytest.mark.parametrize("change", ["missing", "flags_only", "pending", "generation"])
+def test_completed_reset_does_not_default_allow_unknown_coverage(api, change):
+    client, store = api
+    entry = BY_ID["E07"]
+    run_entry(store, entry, NativeSources(store.catalog.engine))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    key = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()["preview_key"]
+    with store.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        if change == "missing":
+            c.execute(text("DELETE FROM data_store_entry_status WHERE entry_id=:id"), {"id": entry.id})
+        elif change == "flags_only":
+            c.execute(text("UPDATE data_store_entry_status SET summary_json=:j WHERE entry_id=:id"),
+                      {"id": entry.id, "j": json.dumps({"complete": True, "qualified": True})})
+        elif change == "pending":
+            c.execute(text("UPDATE data_store_entry_status SET summary_json=jsonb_set(summary_json::jsonb,'{coverage_pending}','[\"entry\"]')::text WHERE entry_id=:id"), {"id": entry.id})
+        else:
+            c.execute(text("UPDATE data_store_datasets SET generation=generation+1 WHERE name=:d"), {"d": entry.spec.name})
+    response = client.post("/api/admin/data-store/query", headers=headers, json=query_body(entry, key))
+    assert response.status_code == 503 and response.json()["detail"]["code"] == "DATA_STORE_REBUILDING"
+
+
+@pytest.mark.parametrize("change", ["issue", "generation"])
+def test_final_admission_rejects_control_changes_after_kernel_read(api, monkeypatch, change):
+    client, store = api
+    entry = BY_ID["E07"]
+    run_entry(store, entry, NativeSources(store.catalog.engine))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+    key = client.get(f"/api/admin/data-store/datasets/{entry.spec.name}", headers=headers).json()["preview_key"]
+    store_class = type(store)
+    original = store_class.read_many
+    def changed_after_read(current, *args, **kwargs):
+        pages = original(current, *args, **kwargs)
+        with store.catalog.engine.begin() as c:
+            if change == "issue":
+                c.execute(text("INSERT INTO data_store_issues "
+                    "(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
+                    "VALUES (:d,'after-read','unknown','FULL_RANGE_UNPROVEN','isolated','{}','{}')"),
+                    {"d": entry.spec.name})
+            else:
+                c.execute(text("UPDATE data_store_datasets SET generation=generation+1 WHERE name=:d"), {"d": entry.spec.name})
+        return pages
+    monkeypatch.setattr(store_class, "read_many", changed_after_read)
+    response = client.post("/api/admin/data-store/query", headers=headers, json=query_body(entry, key))
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == ("DATA_RESTRICTED" if change == "issue" else "DATA_CHANGED")
+
+
 def test_auth_legacy_refusal_and_fresh_empty_catalog(api):
     client, _ = api
     assert client.get("/api/admin/data-store/datasets").status_code == 401
