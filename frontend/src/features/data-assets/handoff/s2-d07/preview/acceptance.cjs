@@ -237,6 +237,8 @@ async function storage(p) {
         for (const [label, route] of [['总览', '/admin'], ['数据源', '/admin/data-sources'], ['采集任务', '/admin/tasks'],
           ['A 股市场', '/admin/data/etf-basics'], ['策略工作台', '/admin/strategies'], ['回测工作台', '/admin/backtest-runs']]) {
           await p.locator('.qfo-nav-item').getByText(label, { exact: true }).click(); await p.waitForURL(`${base}${route}`);
+          // A changed URL does not prove React has replaced the old workspace.
+          await p.getByRole('heading', { name: label === '总览' ? '数据运营总览' : label, exact: true }).waitFor();
           await p.locator('.qfo-main').waitFor(); assert.equal(await p.locator('.qf-assets').count(), 0);
         }
         // URL navigation may finish before the previous shell's effects are
