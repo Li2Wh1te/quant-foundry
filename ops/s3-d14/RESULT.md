@@ -11,11 +11,16 @@ RunConfig/金额/ns/资本/费用/幂等沿 D01/D13；周/月选择后每日继�
 
 实际执行的本地检查：`QF_S3_PYTHON=backend/.venv/bin/python QF_S3_BUILD_ROOT=...
 bash scripts/test_s3_engine.sh` 的 fmt/clippy、Rust workspace/public contract、生成签名、
-独立干净 wheel 安装和 SDK/HTTP/CLI 74 项通过。D13/共享账户/策略/历史/runner/队列/IPC
-受影响回归 115 passed、1 skipped（真实 worker 只在隔离 CI 强制执行）。D14 的
+独立干净 wheel 安装通过；第二遍 SDK/HTTP/CLI 为 76 项通过，含畸形 HTTP、连接失败和
+超时的安全错误验证。D13/D14/共享账户/策略/历史/runner/队列/IPC 受影响回归 119 passed、
+2 skipped（真实 worker 只在隔离 CI 强制执行）、6 示例子项通过。D14 的
 `QF_S3_D14_REQUIRED=1 ... pytest -q tests/test_s3_cli.py` 使用私有 PG、实际 HTTP/CurrentStore，
-逐一核对 CLI/Python 幂等和失败提示、新策略/新修订保护旧稿/旧精确结果，以及完整 Rust
-策略回调和跨会话换仓；最终输出与实际 worker 验证以本 PR CI 和 artifact 为准。
+为 4 passed、1 skipped、6 示例子项通过，核对 CLI/Python 幂等和失败提示、新策略/新修订
+保护旧稿/旧精确结果，以及完整 Rust 策略回调和跨会话换仓。另按指南创建只安装 wheel
+及公开依赖的独立 venv，8 个 HTTP 边界检查、五个策略 import 和该真实服务的 CLI 检查
+通过；客户端未安装后端或测试依赖。D04/D05/IPC 的 83 项机制回归通过；开发容器使用
+既有 overlay probe 注入，不当作正式文件系统或生产验收。真实 worker 以最终准确 head
+的 [PR #172 checks](https://github.com/Li2Wh1te/quant-foundry/pull/172/checks) 和 artifact 为准。
 
 真实 worker 回归接入现有 `scripts/test_s3_runtime.sh`，强制无跳过：五类 preflight→
 submit→status→result；intraday 1m/60m 都跑；CLI/Python 两次同配置的 performance/模型
@@ -24,10 +29,13 @@ submit→status→result；intraday 1m/60m 都跑；CLI/Python 两次同配置�
 宿主回调检查不冒充受限 runner 容器拓扑。
 
 发现并先回报 S3 共享数据顺序边界：多标的 security-first 存储不能仅排序单页就声明
-跨页全流有序。S3 gateway 明确拒绝缺少可验证顺序的完整回放，研究 count 窗口仍支持；
+跨页全流有序。S3 gateway 明确拒绝缺少可验证顺序的完整回放，研究 count 窗口与单一
+纳秒查询仍支持；第二遍修复该区别，未改变 ReadView 的模拟时点裁剪。
 补单标的身份谓词，正确消费已有 time-first 布局。合成夹具显式建立按完整事件键有序的
 唯一测试目录，不改 CurrentStore 门禁、不新增生产行情副本。正式 D04 有序映射仍开放。
 示例 `end_date` 与 RunConfig.end 对齐，终点不再下需下一会话的 DAY 单，不强平末仓。
+首轮隔离 CI 的 D14 测试目录过长被 D12 Unix socket 检查拒绝；已缩短私有测试根，
+不放宽路径保护或隔离要求，最终准确 head 重验。
 
 迁移文档只推荐新策略副本 + append-only 修订，旧 draft/revision/账户/历史值与关联保留。
 旧占位 transport 已替换；旧核心物理清理由 D17，未复制/导入 fallback。当前 D13

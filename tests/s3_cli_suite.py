@@ -168,7 +168,10 @@ class D14Tests(unittest.TestCase):
     def cli(self, *args, expected=0):
         # Run the actual installed qf entry point from a directory without source
         # imports. Token is environment-only and never part of argv/output.
-        executable = shutil.which("qf", path=str(Path(sys.executable).parent))
+        # An optional separate wheel-only consumer lets the documented install
+        # be checked without giving that client the server/test dependencies.
+        client_python = os.environ.get("QF_D14_CLIENT_PYTHON", sys.executable)
+        executable = shutil.which("qf", path=str(Path(client_python).parent))
         self.assertIsNotNone(executable, "installed wheel must provide qf")
         env = dict(os.environ, QF_BASE_URL=self.url, QF_API_TOKEN=TOKEN)
         env.pop("PYTHONPATH", None)
@@ -443,7 +446,9 @@ class D14Tests(unittest.TestCase):
                 minute=deepcopy(original); minute["config"]["frequency"]="1m"; variants.append(minute)
             for entry in variants:
                 entry,config=self.seed(entry)
-                work_root=self.base/("work-"+uuid4().hex); work_root.mkdir()
+                # Keep the private root short enough for the unchanged D12
+                # run/claim/control.sock path within Linux's Unix socket limit.
+                work_root=self.base/("w-"+uuid4().hex[:8]); work_root.mkdir()
                 settings=self.settings.model_copy(update=dict(s3_work_root=work_root,
                     s3_daemon_work_root=Path(os.environ["QF_TEST_DAEMON_ROOT"])/work_root.relative_to(Path("/qf-work")),
                     s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"]))

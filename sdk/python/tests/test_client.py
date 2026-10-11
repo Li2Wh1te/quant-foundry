@@ -3,6 +3,7 @@ from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
+from http.client import HTTPException
 from pathlib import Path
 import subprocess
 import sys
@@ -120,6 +121,30 @@ class ClientTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, code)
         with peer(lambda c: (200, {}, b'{"items":[{},{}]}')) as (url, _):
             with self.assertRaises(BacktestError): BacktestClient(base_url=url, token=TOKEN).result(str(uuid4()), kind="orders", limit=1)
+
+    def test_malformed_http_transport_exception_cannot_echo_credential(self):
+        # A malformed chunk can put peer-controlled bytes in http.client's raw
+        # exception. That chain must not escape the public client diagnostic.
+        with peer(lambda c: (200, {"Transfer-Encoding": "chunked"}, TOKEN.encode()+b"\r\n")) as (url, _):
+            with self.assertRaises(BacktestError) as error:
+                BacktestClient(base_url=url, token=TOKEN).capabilities()
+            self.assertEqual(error.exception.code, "HTTP_UNAVAILABLE")
+            self.assertNotIn(TOKEN, "".join(traceback.format_exception(error.exception)))
+            self.assertIsNone(error.exception.__cause__)
+
+    def test_connection_failure_and_timeout_have_safe_actionable_diagnostics(self):
+        from unittest.mock import patch
+        with peer() as (url, calls):
+            client = BacktestClient(base_url=url, token=TOKEN)
+            for failure, code in ((TimeoutError(TOKEN), "HTTP_TIMEOUT"),
+                                  (HTTPException(TOKEN), "HTTP_UNAVAILABLE")):
+                with patch.object(client._http._opener, "open", side_effect=failure):
+                    with self.assertRaises(BacktestError) as error:
+                        client.submit(self.config(), idempotency_key="unknown-state")
+                    self.assertEqual(error.exception.code, code)
+                    self.assertIn("幂等键", error.exception.message)
+                    self.assertNotIn(TOKEN, "".join(traceback.format_exception(error.exception)))
+            self.assertEqual(calls, [])
 
     def test_cli_help_unknown_arguments_and_complete_config_no_token_output(self):
         command = [sys.executable, "-I", "-m", "quantfoundry.cli", "backtest"]

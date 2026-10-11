@@ -514,9 +514,11 @@ class RunDataGateway:
 
     def read(self, name, request, context, *, page_rows=None):
         binding, start, end, count = self._request(name, request, context)
-        if count is None and len(request['securities']) > 1:
+        if count is None and start < end and len(request['securities']) > 1:
             # Single-page sorting cannot repair cross-page replay order. Bounded
-            # research windows still support existing security-first layouts.
+            # count windows and a research query at one exact ns still support
+            # existing security-first layouts. The latter is collected/clipped
+            # by ReadView and does not advance a multi-interval replay clock.
             ordered = tuple(dict.fromkeys(binding.fields[field] for field in
                 ('time_ns','security','source_session','channel','sequence','stable_input_sequence')
                 if field not in binding.constants and field in binding.fields))
