@@ -49,6 +49,8 @@ export interface DatasetList {
   total: number;
   phase: string;
   next_offset: number | null;
+  /** Current inventory identity, never a historical snapshot or permission. */
+  revision: string | null;
 }
 
 export interface CurrentEntryStatus extends CurrentUpdate {
@@ -83,6 +85,7 @@ export interface IssueList {
   total: number;
   affected_objects: number | null;
   next_offset: number | null;
+  revision: string | null;
 }
 
 export interface PreviewRequest {
@@ -120,11 +123,14 @@ export interface PreviewResult {
 
 export interface RequestOptions { signal?: AbortSignal; timeoutMs?: number }
 export interface PageOptions extends RequestOptions { limit?: number; offset?: number }
+export interface ConsistentPageOptions extends PageOptions { revision?: string }
 export interface StatusOptions extends PageOptions { state?: string }
 export interface CatalogOptions extends RequestOptions {
   pageSize?: number;
   maxPages?: number;
   maxItems?: number;
+  /** Explicit continuation of a previously observed current inventory. */
+  previous?: CatalogSnapshot;
 }
 export interface CatalogCounts {
   total: number;

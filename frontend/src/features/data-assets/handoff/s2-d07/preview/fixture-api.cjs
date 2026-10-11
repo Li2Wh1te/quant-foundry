@@ -13,7 +13,7 @@ const refusals = {
   'metadata-file-invalid-error': [422, 'FILE_INVALID'],
   'metadata-unknown-error': [503, 'UNEXPECTED_STORE_FAILURE']
 };
-const localIssues = ['issues-paged', 'issues-paged-changed', 'issues-paged-slow'];
+const localIssues = ['issues-paged', 'issues-paged-changed', 'issues-paged-same-count-changed', 'issues-paged-slow'];
 let scenario = 'normal';
 const requests = [];
 function json(res, status, body) {
@@ -46,12 +46,17 @@ const server = http.createServer(async (req, res) => {
       const offset = Number(url.searchParams.get('offset')), limit = Number(url.searchParams.get('limit'));
       assert.equal(limit, 20); assert.ok(Number.isSafeInteger(offset) && offset >= 0);
       const total = current === 'issues-paged-changed' && offset > 0 ? 46 : 45;
+      const revision = (current === 'issues-paged-same-count-changed' ? 'd' : total === 46 ? 'e' : 'c').repeat(64);
+      if (url.searchParams.has('revision') && url.searchParams.get('revision') !== revision) {
+        return json(res, 409, { detail: { code: 'DATA_CHANGED' } });
+      }
       const items = Array.from({ length: Math.min(limit, total - offset) }, (_, index) => ({
         dataset: url.searchParams.get('dataset'), scope_key: `fixture-scope-${offset + index}`,
         reason: index % 2 ? 'SOURCE_REFRESH_FAILED' : 'FULL_RANGE_UNPROVEN', kind: 'current',
         affected_objects: 2, updated_at: '2026-10-10T08:00:00.123456789Z'
       }));
       const answer = () => { if (!res.destroyed) json(res, 200, { items, total, affected_objects: total * 2,
+        revision,
         next_offset: offset + items.length < total ? offset + items.length : null }); };
       if (current === 'issues-paged-slow') {
         const timer = setTimeout(answer, 1300); res.on('close', () => clearTimeout(timer)); return;

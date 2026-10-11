@@ -147,7 +147,7 @@ export function UpdateIssuesPanel({ dataset, refreshVersion }: UpdateIssuesPanel
     <UpdateSummary dataset={dataset} />
     <DataSheet title="当前问题与限制" className="qf-updates-issues">
       <div className="qf-updates-actions">
-        <p className="qf-updates-note">每页 20 条，按需读取。分页期间问题可能变化，可重新读取第一页。</p>
+        <p className="qf-updates-note">每页 20 条，按需读取。列表变化会清除旧分页，请重新读取第一页。</p>
         <button className="qfo-secondary-btn" type="button" disabled={loading} onClick={() => void load(0, true)}>
           <RefreshCw size={16} aria-hidden="true" />{loading ? "读取问题中…" : "重新读取问题"}
         </button>

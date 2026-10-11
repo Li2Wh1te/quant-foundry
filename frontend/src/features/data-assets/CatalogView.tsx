@@ -119,14 +119,17 @@ export function CatalogView() {
   const [searchInput, setSearchInput] = useState(params.get("search") ?? "");
   const restoredContext = useRef<string | null>(null);
   const latestCatalog = useRef<CatalogSnapshot | null>(null);
+  const continuation = useRef<CatalogSnapshot | null>(null);
   const [catalog, setCatalog] = useState<CatalogSnapshot | null>(null);
   const [error, setError] = useState<{ message: string; retained: boolean; denied?: boolean } | null>(null);
   const [busy, setBusy] = useState(true);
+  const pendingRead = useRef(true);
   const [refresh, setRefresh] = useState(0);
   const active = useRef<RequestScope | null>(null);
   const clear = useCallback(() => {
     active.current?.cancel(); latestCatalog.current = null;
-    setCatalog(null); setBusy(false); restoredContext.current = null;
+    continuation.current = null;
+    pendingRead.current = false; setCatalog(null); setBusy(false); restoredContext.current = null;
   }, []);
   const report = useCallback((message: string) => setError({ message, retained: false, denied: true }), []);
   const failure = useDataAssetsFailure(clear, report);
@@ -147,8 +150,9 @@ export function CatalogView() {
     const scope = createRequestScope();
     active.current = scope;
     let disposed = false;
-    setBusy(true); setError(null);
-    scope.run(signal => dataAssetsClient.loadCatalog({ signal }))
+    const previous = continuation.current; continuation.current = null;
+    pendingRead.current = true; setBusy(true); setError(null);
+    scope.run(signal => dataAssetsClient.loadCatalog({ signal, ...(previous ? { previous } : {}) }))
       .then(result => {
         if (disposed) return;
         if (retainCatalog(latestCatalog.current, result)) {
@@ -162,10 +166,14 @@ export function CatalogView() {
         if (!disposed && !isCancellation(problem)) {
           const message = failure(problem);
           if (problem instanceof DataStoreApiError && [401, 403].includes(problem.status)) return;
+          if (problem instanceof DataStoreApiError && problem.code === "DATA_CHANGED") {
+            latestCatalog.current = null; setCatalog(null); restoredContext.current = null;
+            setError({ message, retained: false }); return;
+          }
           setError({ message, retained: latestCatalog.current !== null });
         }
       })
-      .finally(() => { if (!disposed && active.current === scope) setBusy(false); });
+      .finally(() => { if (!disposed && active.current === scope) { pendingRead.current = false; setBusy(false); } });
     return () => { disposed = true; scope.dispose(); };
   }, [refresh, failure]);
 
@@ -212,7 +220,15 @@ export function CatalogView() {
     const next = catalogParams(latestParams.current); next.set("page", String(page)); navigateCatalog(next);
   }
   function reset() { saveCatalogScroll(latestParams.current); navigateCatalog(new URLSearchParams({ page: "1" })); }
-  function retry() { setRefresh(value => value + 1); }
+  function retry() {
+    if (pendingRead.current) return;
+    pendingRead.current = true; setBusy(true); continuation.current = null; setRefresh(value => value + 1);
+  }
+  function continueLoading() {
+    if (pendingRead.current || !latestCatalog.current || latestCatalog.current.incompleteReason !== "budget") return;
+    pendingRead.current = true; setBusy(true);
+    continuation.current = latestCatalog.current; setRefresh(value => value + 1);
+  }
 
   return <section className="qf-assets qf-catalog" aria-busy={busy}>
     <WorkspaceHeader title="数据资产" eyebrow="CURRENT DATA / 01" description="找到当前数据集，分别查看当前状态与最近更新结果。"
@@ -235,7 +251,10 @@ export function CatalogView() {
     {catalog && !catalog.complete && <LocalNotice tone="warning">
       目录未完整加载：已加载 {count(catalog.items.length)} 个数据集。{incompleteMessage(catalog)}
       筛选仅涵盖已加载范围，全局分组计数待加载。
-      <button className="qfo-secondary-btn" type="button" onClick={retry} disabled={busy}>重试完整加载</button>
+      <button className="qfo-secondary-btn" type="button"
+        onClick={catalog.incompleteReason === "budget" ? continueLoading : retry} disabled={busy}>
+        {catalog.incompleteReason === "budget" ? "继续加载目录" : "重新读取目录"}
+      </button>
     </LocalNotice>}
     <div className="qf-assets-toolbar qf-catalog-toolbar">
       <label>搜索数据集<input value={searchInput} placeholder="中文名称、原名或标识" onChange={event => update("search", event.target.value)} /></label>

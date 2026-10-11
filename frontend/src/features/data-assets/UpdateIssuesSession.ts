@@ -38,13 +38,18 @@ export function createUpdateIssuesSession(dataset: string, client: Pick<DataAsse
       if (!Number.isSafeInteger(target) || target < 0 || target >= offsets.length || (stale && target !== 0)) invalidRequest("issues.page");
       const version = revision, offset = offsets[target];
       try {
-        const next = await scope.run(signal => client.listIssues(dataset, { limit: ISSUE_PAGE_SIZE, offset, signal }));
+        const inventory = restart ? null : result?.revision;
+        if (target > 0 && !inventory) invalidResponse("issues.revision");
+        const next = await scope.run(signal => client.listIssues(dataset, { limit: ISSUE_PAGE_SIZE, offset, signal,
+          ...(inventory ? { revision: inventory } : {}) }));
         if (version !== revision) throw cancellation();
+        if (next.next_offset !== null && !next.revision) invalidResponse("issues.revision");
         const end = offset + next.items.length;
         if (next.items.length > ISSUE_PAGE_SIZE || end > next.total || (next.next_offset === null ? end !== next.total
           : next.next_offset !== end || end <= offset || end >= next.total)) invalidResponse("issues.pagination");
-        // Offset pagination has no snapshot token. Changed inventories cannot join an older page sequence.
-        if (target > 0 && result && (next.total !== result.total || next.affected_objects !== result.affected_objects)) {
+        // The identifier only validates the current inventory; it cannot read history.
+        if (inventory && (next.revision !== inventory || next.total !== result?.total
+          || next.affected_objects !== result?.affected_objects)) {
           throw apiError(409, "DATA_CHANGED");
         }
         result = next; page = target; displayedOffset = offset; readAt = new Date().toISOString(); stale = false;

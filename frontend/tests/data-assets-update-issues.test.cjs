@@ -25,7 +25,8 @@ const issue = overrides => ({ dataset: 'fixture.daily', kind: 'current', reason:
   scope_key: 'fixture-report/member', affected_objects: null, updated_at: null, ...overrides });
 const inventory = (offset = 0, total = 43, overrides = {}) => ({
   items: Array.from({ length: Math.min(20, Math.max(0, total - offset)) }, (_, i) => issue({ scope_key: `fixture-${offset + i}` })),
-  total, affected_objects: 91, next_offset: offset + 20 < total ? offset + 20 : null, ...overrides });
+  total, affected_objects: 91, next_offset: offset + 20 < total ? offset + 20 : null,
+  revision: 'c'.repeat(64), ...overrides });
 const deferred = () => { let resolve; const promise = new Promise(r => { resolve = r; }); return { promise, resolve }; };
 const cancellation = error => error.name === 'AbortError';
 const render = (Component, props) => renderToStaticMarkup(createElement(Component, props));
@@ -79,6 +80,34 @@ test('manual server pagination reaches every page, supports previous pages and p
     await session.read(1); assert.equal(session.getSnapshot().page, 1);
     assert.deepEqual(calls.map(v => v.offset), [0, 20, 40, 20]);
     assert.ok(calls.every(v => v.id === 'fixture.daily' && v.limit === 20));
+  } finally { session.dispose(); }
+});
+
+test('same-count inventory revisions bind next and previous pages and clear changed rows', async () => {
+  let revision = 'c'.repeat(64); const calls = [];
+  const session = createUpdateIssuesSession('fixture.daily', { async listIssues(id, options) {
+    calls.push(options); return inventory(options.offset, 43, { revision });
+  } });
+  try {
+    await session.read(); await session.read(1); await session.read(0);
+    assert.equal(calls[0].revision, undefined);
+    assert.ok(calls.slice(1).every(call => call.revision === revision));
+    revision = 'd'.repeat(64);
+    await assert.rejects(session.read(1), error => error.code === 'DATA_CHANGED');
+    assert.equal(session.getSnapshot().result, null); assert.equal(session.getSnapshot().page, 0);
+    await session.read(0, true); assert.equal(calls.at(-1).revision, undefined);
+    assert.equal(session.getSnapshot().result.revision, revision);
+  } finally { session.dispose(); }
+});
+
+test('unversioned multi-page problems cannot continue under an invented snapshot', async () => {
+  let calls = 0;
+  const session = createUpdateIssuesSession('fixture.daily', { async listIssues(id, options) {
+    calls++; return inventory(options.offset, 43, { revision: null });
+  } });
+  try {
+    await assert.rejects(session.read(), error => error.code === 'INVALID_RESPONSE');
+    assert.equal(calls, 1); assert.equal(session.getSnapshot().result, null);
   } finally { session.dispose(); }
 });
 

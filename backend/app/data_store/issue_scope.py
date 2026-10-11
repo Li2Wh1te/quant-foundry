@@ -18,8 +18,14 @@ def relevant_issue_count(store, spec, query, check=lambda:None):
                         {'i':spec.semantics.get('entry_id')}).scalar_one_or_none()
         if state:
             restriction=json.loads(state).get('overflow_restriction',{})
-            if restriction.get('blocking_objects') and restriction.get('partition') in query.partitions:
+            # An unlocated/older overflow cannot prove it is outside this
+            # request. Keep it conservative like opaque ordinary issues.
+            if not isinstance(restriction,dict):
                 count+=1
+            elif restriction.get('blocking_objects'):
+                partition=restriction.get('partition')
+                if not isinstance(partition,str) or not partition or partition in query.partitions:
+                    count+=1
         result=c.execution_options(stream_results=True,max_row_buffer=1).execute(
             text("SELECT * FROM data_store_issues WHERE dataset=:d AND (scope_key=ANY(:scopes) OR target_json::jsonb->>'partition' IS NULL OR target_json::jsonb->>'scope_version' IS NULL OR target_json::jsonb->>'scope_version' NOT IN ('object-key-v1','object-key-set-v1')) ORDER BY issue_key LIMIT :n"),
             {'d':spec.name,'scopes':['local.partition.'+p for p in query.partitions],'n':store.limits.issue_count+1})

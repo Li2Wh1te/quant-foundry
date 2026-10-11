@@ -220,7 +220,7 @@ async function context(browser, width = 390) {
         await p.getByText(/目录未完整加载：已加载 100/).waitFor(); await screenshot(p, 'catalog-partial-390');
         await p.getByLabel('搜索数据集', { exact: true }).fill('数据集 001');
         await p.getByText('已加载范围内没有符合筛选条件的数据集。', { exact: true }).waitFor();
-        await scenario('large'); await refresh(p, '重试完整加载');
+        await scenario('large'); await refresh(p, '重新读取目录');
         assert.equal((await metrics(p))[0], '121'); await p.getByRole('link', { name: title(1), exact: true }).waitFor();
       });
       await check('mid-refresh failure preserves the complete previous catalog instead of replacing it with 100 rows', async () => {
@@ -229,13 +229,52 @@ async function context(browser, width = 390) {
         assert.equal((await metrics(p))[0], '121'); assert.equal(await p.locator('.qf-catalog .qf-assets-asof').textContent(), before);
         assert.match(await p.locator('.qf-catalog-results').textContent(), /全部目录.*121 个匹配/);
       });
-      for (const name of ['budget', 'changed', 'pagination', 'partial-empty']) {
+      for (const name of ['budget', 'pagination', 'partial-empty']) {
         await check(`${name}: incomplete metadata cannot advertise whole-directory counts`, async () => {
           await scenario(name); await open(p); assert.deepEqual(await metrics(p), ['待加载', '待加载', '待加载', '待加载']);
-          await p.getByRole('button', { name: '重试完整加载', exact: true }).waitFor();
+          await p.getByRole('button', { name: name === 'budget' ? '继续加载目录' : '重新读取目录', exact: true }).waitFor();
           assert.match(await p.locator('.qf-catalog-results').textContent(), /已加载范围内筛选/);
           if (name === 'budget') { assert.match(await p.locator('.qf-catalog-results').textContent(), /1,000 个匹配/); await screenshot(p, 'catalog-budget-390'); }
           if (name === 'partial-empty') { await p.getByText('当前尚无已加载的数据集。', { exact: true }).waitFor(); assert.equal(await p.getByText('当前目录未登记业务数据集。', { exact: true }).count(), 0); }
+        });
+      }
+      await check('explicit bounded continuation reaches beyond 1000 once despite duplicate clicks and keeps filters', async () => {
+        await scenario('budget'); await open(p);
+        assert.match(await p.locator('.qf-catalog-results').textContent(), /1,000 个匹配/);
+        const firstRequests = (await (await fetch(`${fixture}/__requests`)).json()).requests.filter(r => r.path.endsWith('/datasets'));
+        assert.equal(firstRequests.length, 10);
+        await p.getByLabel('搜索数据集', { exact: true }).fill('数据集 001');
+        await p.getByText('已加载范围内没有符合筛选条件的数据集。', { exact: true }).waitFor();
+        const response = p.waitForResponse(res => new URL(res.url()).pathname === '/api/admin/data-store/datasets');
+        await p.getByRole('button', { name: '继续加载目录', exact: true }).evaluate(button => { button.click(); button.click(); });
+        await response; await ready(p);
+        assert.equal((await metrics(p))[0], '1,100');
+        await p.getByRole('link', { name: title(1), exact: true }).waitFor();
+        assert.equal(await p.getByLabel('搜索数据集', { exact: true }).inputValue(), '数据集 001');
+        const allRequests = (await (await fetch(`${fixture}/__requests`)).json()).requests.filter(r => r.path.endsWith('/datasets'));
+        assert.equal(allRequests.length, 11);
+        assert.equal(new URLSearchParams(allRequests.at(-1).query).get('offset'), '1000');
+        assert.equal(new URLSearchParams(allRequests.at(-1).query).get('revision'), new URLSearchParams(allRequests[1].query).get('revision'));
+        assert.equal(await p.getByRole('button', { name: '继续加载目录', exact: true }).count(), 0);
+        await screenshot(p, 'catalog-continued-390');
+      });
+      await check('same-count catalog mutation clears old rows, refuses continuation and needs explicit reread', async () => {
+        await scenario('budget'); await open(p);
+        await scenario('budget-changed'); await refresh(p, '继续加载目录');
+        await p.getByRole('alert').waitFor(); assert.equal(await listRows(p).count(), 0);
+        assert.deepEqual(await metrics(p), ['待加载', '待加载', '待加载', '待加载']);
+        assert.equal(await p.getByRole('button', { name: '继续加载目录', exact: true }).count(), 0);
+        await screenshot(p, 'catalog-continuation-changed-390');
+        await refresh(p, '重试读取目录'); await refresh(p, '继续加载目录');
+        assert.equal((await metrics(p))[0], '1,100');
+      });
+      for (const name of ['changed', 'unversioned']) {
+        await check(`${name}: unverifiable paging refuses old rows and never reports a complete empty catalog`, async () => {
+          await scenario(name); await open(p); await p.getByRole('alert').waitFor();
+          assert.deepEqual(await metrics(p), ['待加载', '待加载', '待加载', '待加载']);
+          assert.equal(await listRows(p).count(), 0);
+          assert.equal(await p.getByText('当前目录未登记业务数据集。', { exact: true }).count(), 0);
+          await p.getByRole('button', { name: '重试读取目录', exact: true }).waitFor();
         });
       }
       await check('unknown states, frequencies, storage layout and values remain explicit; vanished options keep URL selections', async () => {

@@ -47,6 +47,11 @@ function cursor(value: unknown, at: string): string | null {
 function offset(value: unknown, at: string): number | null {
   return value === null ? null : count(value, at);
 }
+function revision(value: unknown, at: string): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !/^[0-9a-f]{64}$/.test(value)) invalidResponse(at);
+  return value;
+}
 function range(value: unknown, at: string): { from: string | null; to: string | null } {
   const raw = object(value, at);
   return { from: nullableText(raw.from, `${at}.from`), to: nullableText(raw.to, `${at}.to`) };
@@ -119,7 +124,8 @@ function list(value: unknown, at: string) {
 export function parseDatasetList(value: unknown): DatasetList {
   const { raw, items, total, next_offset } = list(value, "datasets");
   return { items: items.map((item, i) => parseDataset(item, `datasets.items[${i}]`)),
-    total, next_offset, phase: state(raw.phase, "datasets.phase") };
+    total, next_offset, phase: state(raw.phase, "datasets.phase"),
+    revision: revision(raw.revision, "datasets.revision") };
 }
 export function parseStatusList(value: unknown): StatusList {
   const { raw, items, total, next_offset } = list(value, "status");
@@ -137,6 +143,7 @@ export function parseStatusList(value: unknown): StatusList {
 export function parseIssueList(value: unknown): IssueList {
   const { raw, items, total, next_offset } = list(value, "issues");
   return { total, next_offset, affected_objects: nullableCount(raw.affected_objects, "issues.affected_objects"),
+    revision: revision(raw.revision, "issues.revision"),
     items: items.map((value, i): CurrentIssue => {
       const at = `issues.items[${i}]`, item = object(value, at);
       return { dataset: nullableText(item.dataset, `${at}.dataset`), scope_key: nullableText(item.scope_key, `${at}.scope_key`),

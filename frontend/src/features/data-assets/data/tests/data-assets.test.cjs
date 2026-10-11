@@ -195,6 +195,65 @@ test('catalog follows next_offset beyond 100 items and only then exposes full co
   assert.equal(result.error, null); assert.ok(result.readAt);
 });
 
+test('explicit catalog continuation reaches the tail with a fresh bounded action and one revision', async () => {
+  const items = Array.from({ length: 2305 }, (_, i) => dataset({ dataset: `isolated/item-${i}` }));
+  const calls = [];
+  const client = data.createDataAssetsClient(async path => {
+    const params = new URL(path, 'https://isolated.invalid').searchParams;
+    const offset = Number(params.get('offset')), limit = Number(params.get('limit'));
+    calls.push({ offset, limit, revision: params.get('revision') });
+    return catalog(items.slice(offset, offset + limit), { total: items.length,
+      next_offset: offset + limit < items.length ? offset + limit : null });
+  });
+  const first = await client.loadCatalog();
+  assert.equal(calls.length, 10); assert.equal(first.items.length, 1000); assert.equal(first.counts, null);
+  const second = await client.loadCatalog({ previous: first });
+  assert.equal(calls.length, 20); assert.equal(second.items.length, 2000); assert.equal(second.counts, null);
+  const final = await client.loadCatalog({ previous: second });
+  assert.equal(calls.length, 24); assert.equal(final.items.length, 2305); assert.equal(final.counts.total, 2305);
+  assert.equal(new Set(final.items.map(item => item.dataset)).size, 2305); assert.equal(final.complete, true);
+  assert.ok(calls.slice(1).every(call => call.revision === 'c'.repeat(64) && call.limit <= 100));
+  assert.equal(first.items.length, 1000); assert.equal(second.items.length, 2000);
+  await assert.rejects(client.loadCatalog({ previous: final }), error => error.code === 'INVALID_REQUEST');
+});
+
+test('same-count catalog changes refuse continuation without appending or silently rereading', async () => {
+  let revision = 'c'.repeat(64), calls = 0;
+  const client = data.createDataAssetsClient(async path => {
+    calls++; const offset = Number(new URL(path, 'https://isolated.invalid').searchParams.get('offset'));
+    return catalog(Array.from({ length: Math.min(100, 1100 - offset) }, (_, i) => dataset({ dataset: `isolated/item-${offset + i}` })),
+      { total: 1100, revision, next_offset: offset + 100 < 1100 ? offset + 100 : null });
+  });
+  const first = await client.loadCatalog(); revision = 'd'.repeat(64);
+  await assert.rejects(client.loadCatalog({ previous: first }), error => error.code === 'DATA_CHANGED');
+  assert.equal(calls, 11); assert.equal(first.items.length, 1000); assert.equal(first.revision, 'c'.repeat(64));
+  await assert.rejects(client.loadCatalog({ previous: { ...first, revision: null } }), error => error.code === 'INVALID_REQUEST');
+  assert.equal(calls, 11);
+});
+
+test('missing or invalid consistency identifiers cannot authorize a paginated inventory', async () => {
+  const missing = data.createDataAssetsClient(async () => catalog([dataset()], { total: 101, next_offset: 1, revision: undefined }));
+  await assert.rejects(missing.loadCatalog(), invalid('datasets.revision'));
+  assert.throws(() => validation.parseDatasetList(catalog([], { revision: 'unsafe' })), invalid('datasets.revision'));
+  const client = data.createDataAssetsClient(async () => { throw new Error('request must not run'); });
+  await assert.rejects(client.listIssues(undefined, { revision: 'unsafe' }), error => error.code === 'INVALID_REQUEST');
+});
+
+test('continuation cancellation and authentication refusal never mutate the previous observation', async () => {
+  let refusal = null;
+  const client = data.createDataAssetsClient(async path => {
+    if (refusal) throw refusal;
+    const offset = Number(new URL(path, 'https://isolated.invalid').searchParams.get('offset'));
+    return catalog(Array.from({ length: 100 }, (_, i) => dataset({ dataset: `isolated/item-${offset + i}` })),
+      { total: 1100, next_offset: offset + 100 });
+  });
+  const first = await client.loadCatalog();
+  for (const error of [new data.DataStoreApiError(401, 'AUTH_REQUIRED', 'safe'), new DOMException('Aborted', 'AbortError')]) {
+    refusal = error; await assert.rejects(client.loadCatalog({ previous: first }), failure => failure === error);
+    assert.equal(first.items.length, 1000); assert.equal(first.next_offset, 1000);
+  }
+});
+
 test('first-page failures are errors; mid-catalog failures retain explicit incomplete metadata', async () => {
   const failure = new data.DataStoreApiError(503, 'CATALOG_UNAVAILABLE', 'safe fixture failure');
   const first = data.createDataAssetsClient(async () => { throw failure; });
@@ -219,8 +278,7 @@ test('repeated offsets, duplicate identities, premature last page and changing t
   assert.equal(calls, 2); assert.equal(duplicateResult.items.length, 1); assert.equal(duplicateResult.counts, null);
   calls = 0;
   const changed = data.createDataAssetsClient(async () => catalog([dataset({ dataset: 'isolated/item-' + calls })], { total: ++calls === 1 ? 4 : 5, next_offset: calls }));
-  const changedResult = await changed.loadCatalog();
-  assert.equal(changedResult.incompleteReason, 'changed'); assert.equal(changedResult.items.length, 1);
+  await assert.rejects(changed.loadCatalog(), error => error.code === 'DATA_CHANGED');
 });
 
 test('metadata loading never exceeds ten pages / one thousand items; final exact budget can be complete', async () => {

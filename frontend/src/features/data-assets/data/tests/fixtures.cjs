@@ -13,7 +13,7 @@ function dataset(overrides = {}) {
     ...overrides };
 }
 function catalog(items = [dataset()], overrides = {}) {
-  return { items, total: items.length, next_offset: null, phase: 'ready', ...overrides };
+  return { items, total: items.length, next_offset: null, phase: 'ready', revision: 'c'.repeat(64), ...overrides };
 }
 function preview(overrides = {}) {
   return { dataset: dataset().dataset, status: 'available', request_satisfied: false,

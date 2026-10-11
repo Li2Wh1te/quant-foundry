@@ -47,7 +47,7 @@ before(async () => {
     if (url.pathname.endsWith('/datasets')) {
       const offset = Number(url.searchParams.get('offset')), limit = Number(url.searchParams.get('limit'));
       return send(res, 200, { items: Array.from({ length: Math.min(limit, size - offset) }, (_, i) => item(offset + i)),
-        total: size, phase: 'ready', next_offset: offset + limit < size ? offset + limit : null });
+        total: size, phase: 'ready', revision: 'c'.repeat(64), next_offset: offset + limit < size ? offset + limit : null });
     }
     if (url.pathname.includes('/datasets/')) {
       const id = decodeURIComponent(url.pathname.split('/datasets/')[1]);
@@ -60,7 +60,7 @@ before(async () => {
         const total = mode === 'issues-changed' && offset > 0 ? 46 : 45;
         const items = Array.from({ length: Math.min(limit, total - offset) }, (_, index) => ({ dataset: url.searchParams.get('dataset'),
           scope_key: `scope-${index + offset}`, reason: 'FULL_RANGE_UNPROVEN', kind: 'current', updated_at: null, affected_objects: 2 }));
-        return send(res, 200, { items, total, affected_objects: total * 2, next_offset: offset + items.length < total ? offset + items.length : null });
+        return send(res, 200, { items, total, affected_objects: total * 2, revision: 'c'.repeat(64), next_offset: offset + items.length < total ? offset + items.length : null });
       }
       return send(res, 200, { items: [], total: 0, affected_objects: 0, next_offset: null });
     }

@@ -127,6 +127,22 @@ async function storage(p) {
         else await p.getByText(text, { exact: true }).waitFor();
         await shot(p, `${name}-390`);
       });
+      await check('same-count issue change refuses a previous-page sequence, then explicit recovery succeeds', async () => {
+        await scenario('issues-paged'); await open(p, 'daily', 'updates');
+        const updates = p.locator('.qf-updates');
+        await updates.getByText('第 1 页 · 记录 1–20 / 45', { exact: true }).waitFor();
+        await updates.getByRole('button', { name: '下一页问题', exact: true }).click();
+        await updates.getByText('第 2 页 · 记录 21–40 / 45', { exact: true }).waitFor();
+        await scenario('issues-paged-same-count-changed');
+        await updates.getByRole('button', { name: '上一页问题', exact: true }).click();
+        await updates.getByRole('alert').waitFor(); assert.equal(await updates.locator('.qf-updates-records > li').count(), 0);
+        await updates.getByRole('button', { name: '重新读取问题', exact: true }).click();
+        await updates.getByText('第 1 页 · 记录 1–20 / 45', { exact: true }).waitFor();
+        assert.deepEqual(await updates.locator('.qf-updates-counts dd').allTextContents(), ['45', '90', '20']);
+        await updates.getByRole('button', { name: '下一页问题', exact: true }).click();
+        await updates.getByText('第 2 页 · 记录 21–40 / 45', { exact: true }).waitFor();
+        await shot(p, 'issues-same-count-recovered-390');
+      });
       await check('report pages replace each other and remain explicitly incomplete', async () => {
         await openRead(p, 'report'); await panel(p).getByText(/此页不代表完整报告/).waitFor();
         assert.equal(await table(p).locator('tbody tr').count(), 2);
@@ -247,6 +263,8 @@ async function storage(p) {
         await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await p.keyboard.press('Control+k'); await p.getByRole('combobox', { name: '搜索页面或功能', exact: true }).fill('数据资产');
         await p.keyboard.press('Enter'); await p.waitForURL(`${base}/admin/data-assets`); await p.locator('.qf-catalog').waitFor();
+        // Count polling only after the initial catalog request has settled.
+        await p.waitForFunction(() => document.querySelector('.qf-catalog')?.getAttribute('aria-busy') === 'false');
         const before = requests.filter(r => r.path.includes('/data-store/')).length;
         await p.waitForTimeout(1600); assert.equal(requests.filter(r => r.path.includes('/data-store/')).length, before, 'No new background polling');
         await shot(p, 'navigation-1440');

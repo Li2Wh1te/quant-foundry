@@ -1,5 +1,6 @@
 /* Loopback-only D03 metadata fixtures. No backend, source, or database is called. */
 const http = require('node:http');
+const crypto = require('node:crypto');
 const fs = require('node:fs');
 const path = require('node:path');
 const version = fs.readFileSync(path.resolve(__dirname, '../../../../../../../VERSION'), 'utf8').trim();
@@ -26,7 +27,7 @@ function dataset(index) {
   };
 }
 let currentScenario = 'normal', requests = [];
-const scenarios = ['normal', 'empty', 'one', 'large', 'budget', 'partial', 'partial-empty', 'changed', 'pagination',
+const scenarios = ['normal', 'empty', 'one', 'large', 'budget', 'budget-changed', 'unversioned', 'partial', 'partial-empty', 'changed', 'pagination',
   'error', 'slow', 'forbidden', 'forbidden-slow-body', 'partial-forbidden', 'unauthorized', 'maintenance', 'unknown', 'alias'];
 function send(res, status, value) {
   if (res.destroyed || res.writableEnded) return;
@@ -56,10 +57,11 @@ async function handle(req, res) {
     res.writeHead(403, { 'Content-Type': 'application/json' }); res.flushHeaders(); res.write('{"detail":');
     return setTimeout(() => { if (!res.destroyed) res.end('{"code":"ISOLATED_DENIAL"}}'); }, 1500);
   }
-  const size = scenario === 'empty' ? 0 : ['one', 'alias'].includes(scenario) ? 1 : scenario === 'budget' ? 1100
-    : ['large', 'partial', 'changed', 'pagination', 'partial-forbidden'].includes(scenario) ? 121 : 60;
+  const size = scenario === 'empty' ? 0 : ['one', 'alias'].includes(scenario) ? 1 : ['budget', 'budget-changed'].includes(scenario) ? 1100
+    : ['large', 'partial', 'changed', 'pagination', 'partial-forbidden', 'unversioned'].includes(scenario) ? 121 : 60;
   let items = Array.from({ length: size }, (_, i) => dataset(i + 1));
   if (scenario === 'alias') items = [{ ...dataset(1), dataset: 'market.stock_daily.reported', name: '市场 · stock_daily' }];
+  if (scenario === 'budget-changed') items[0] = { ...items[0], generation: 2 };
   if (scenario === 'maintenance') items = items.map(item => ({ ...item, status: 'rebuilding' }));
   if (scenario === 'unknown') items = items.map(item => ({ ...item, status: 'future_state', frequency: 'future_frequency',
     representation: 'future_layout', row_count: null, last_update: null, updated_at: null }));
@@ -69,9 +71,15 @@ async function handle(req, res) {
     if (scenario === 'partial' && offset) return send(res, 503, { detail: { code: 'DATA_STORE_UNAVAILABLE' } });
     if (scenario === 'partial-forbidden' && offset) return send(res, 403, { detail: { code: 'FORBIDDEN' } });
     if (scenario === 'partial-empty') return send(res, 200, { items: [], total: 1, phase: 'ready', next_offset: null });
+    const total = scenario === 'changed' && offset ? size + 1 : size;
+    const revision = crypto.createHash('sha256').update(JSON.stringify({ items, total })).digest('hex');
+    if (url.searchParams.has('revision') && url.searchParams.get('revision') !== revision) {
+      return send(res, 409, { detail: { code: 'DATA_CHANGED' } });
+    }
     // Reverse server ordering so the browser must perform stable name sorting.
     const selected = items.slice().reverse().slice(offset, offset + limit);
-    return send(res, 200, { items: selected, total: scenario === 'changed' && offset ? size + 1 : size,
+    return send(res, 200, { items: selected, total,
+      ...(scenario === 'unversioned' ? {} : { revision }),
       phase: scenario === 'maintenance' ? 'rebuilding' : 'ready',
       next_offset: scenario === 'pagination' ? 0 : offset + selected.length < size ? offset + selected.length : null });
   }

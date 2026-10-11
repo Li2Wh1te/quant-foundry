@@ -22,7 +22,7 @@ function dataset(index = 1, changes = {}) {
     status: 'available', row_count: 5, generation: 1, updated_at: null, issues: 0, last_update: null, partitions: [], partitions_truncated: false,
     partition_range: { from: null, to: null, precision: 'partition' }, preview_key: null, ...changes };
 }
-const snapshot = (items, changes = {}) => ({ items, total: items.length, phase: 'ready', next_offset: null, complete: true,
+const snapshot = (items, changes = {}) => ({ items, total: items.length, phase: 'ready', revision: 'c'.repeat(64), next_offset: null, complete: true,
   counts: { total: items.length, byStatus: Object.create(null) }, incompleteReason: null, readAt: '2026-10-10T10:00:00Z', error: null, ...changes });
 
 for (const size of [0, 1, 60, 121]) {
@@ -33,7 +33,7 @@ for (const size of [0, 1, 60, 121]) {
       const url = new URL(path, 'http://fixture.invalid');
       const offset = Number(url.searchParams.get('offset')), limit = Number(url.searchParams.get('limit'));
       calls.push({ path: url.pathname, offset, limit });
-      return { items: registered.slice(offset, offset + limit), total: size, phase: 'ready', next_offset: offset + limit < size ? offset + limit : null };
+      return { items: registered.slice(offset, offset + limit), total: size, phase: 'ready', revision: 'c'.repeat(64), next_offset: offset + limit < size ? offset + limit : null };
     });
     const loaded = await client.loadCatalog();
     const sorted = catalogItems(loaded.items, new URLSearchParams());
@@ -96,7 +96,7 @@ test('mid-load error and metadata budget preserve partial rows with pending glob
     const client = createDataAssetsClient(async path => {
       const offset = Number(new URL(path, 'http://fixture.invalid').searchParams.get('offset'));
       if (!budget && offset) throw new DataStoreApiError(503, 'DATA_STORE_UNAVAILABLE', 'fixture failure');
-      return { items: Array.from({ length: 100 }, (_, i) => dataset(offset + i)), total: 1100, phase: 'ready', next_offset: offset + 100 };
+      return { items: Array.from({ length: 100 }, (_, i) => dataset(offset + i)), total: 1100, phase: 'ready', revision: 'c'.repeat(64), next_offset: offset + 100 };
     });
     const loaded = await client.loadCatalog();
     assert.equal(loaded.complete, false);

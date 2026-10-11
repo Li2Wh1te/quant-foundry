@@ -78,3 +78,40 @@ def require_ready(session: Session) -> Availability:
     if not state.ready:
         raise DataStoreError("DATA_STORE_REBUILDING")
     return state
+
+
+def request_readable(session: Session, entry, state: Availability) -> bool:
+    """Use the formal current coverage proof for only this business dependency.
+
+    Active reset/rebuild and unknown phases remain closed. A completed reset
+    may contain independently accepted entries before *all* business entries
+    can earn the global ready receipt. Object quality is still checked by the
+    existing current reader, including opaque and out-of-range restrictions.
+    """
+    if state.ready:
+        return True
+    if state.phase != "reset_done":
+        return False
+    from .coverage import check_coverage
+    raw = session.execute(text(
+        "SELECT summary_json FROM data_store_entry_status WHERE entry_id=:id"
+    ), {"id": entry.id}).scalar_one_or_none()
+    if raw is None:
+        return False
+    import json
+    try:
+        status = json.loads(raw)
+        return bool(check_coverage(session.connection(), entry, status,
+                                  require_all_quality=False)["satisfied"])
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise DataStoreError("CATALOG_UNAVAILABLE") from None
+
+
+def require_request_ready(session: Session, entry) -> Availability:
+    """Fence maintenance transitions without changing the global receipt."""
+    session.execute(text("SET LOCAL lock_timeout='500ms'"))
+    session.execute(text("LOCK TABLE data_store_legacy_maintenance IN SHARE MODE"))
+    state = read_availability(session)
+    if not request_readable(session, entry, state):
+        raise DataStoreError("DATA_STORE_REBUILDING")
+    return state
