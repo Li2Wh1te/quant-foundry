@@ -6,8 +6,11 @@ cancellation, bounded trade pages, record and logs. Rust's D03 Engine is the
 sole driver; D06 OrderManager and D09 Account are the only order/account owners.
 Bar runs consume D07 BarMatcher and the actual cumulative account FillBudget.
 Tick callbacks preserve every event identity, including distinct sequences at
-the same nanosecond. D08 matching remains unavailable: a live Tick order reaching
-a matching event fails with CAPABILITY_UNAVAILABLE, rather than inventing a fill.
+the same nanosecond. D08 `trade_tick_v1` and `quote_tick_v1` use the real cumulative
+account budget. A run chooses one liquidity basis while both Tick kinds may be
+published for research and callbacks. Quote bid/ask balances are independent;
+new sequences with the same price/size cannot restore consumed liquidity.
+See the [Tick model](../../engine/crates/qf-core/src/matching/TICK.md).
 
 `examples/complete_strategy.py` demonstrates initialization, before/after session
 callbacks, subscriptions, a daily timer, history/current queries, a cancelled
@@ -65,6 +68,14 @@ Result.close (or owner drop) releases the private temporary files. This local
 writer is the D10 worker seam; D13 still owns durable trusted result persistence.
 Temporary directories/files explicitly use permissions 0700/0600 regardless of
 the caller's umask. These contain bounded business results, never copied market history.
+
+Trade quantities must be verified incremental shares; cumulative-volume mappings
+remain the gateway's responsibility. Quotes with missing size cannot match that
+side or borrow an earlier/future quote. Quote-only data does not invent a last
+trade for portfolio valuation: a market order still needs a previously known raw
+price for D06's reservation, or an explicit limit price. Price-only target/equity
+queries retain D09's unknown valuation behavior. The isolated quote fixture
+explicitly provides a known prior synthetic print for reservations.
 The summary's `logs_truncated` reports both message clipping and logs omitted
 after the run allowance, including an exact boundary with no clipped message.
 

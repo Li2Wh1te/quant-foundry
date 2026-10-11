@@ -49,7 +49,9 @@ def spec(*, days=3, securities=('A.SH','B.SH'), frequency='1d', ticks=6, run_id=
             base = dict(security=security,session=key,units=dict(price_currency='CNY',quantity_unit='shares'))
             if frequency == 'tick':
                 for i in range(ticks):
-                    events.append(dict(kind='trade_tick',event=dict(**base,time_ns=str(midnight+570*MINUTE+123),price=f'{10+i}.01',quantity=1000,identity=identity(i+1))))
+                    # Long callback fixtures remain within their declared
+                    # price band; repeated values still have distinct identities.
+                    events.append(dict(kind='trade_tick',event=dict(**base,time_ns=str(midnight+570*MINUTE+123),price=f'{10+i%90}.01',quantity=1000,identity=identity(i+1))))
             else:
                 count = 1 if frequency=='1d' else 4
                 for i in range(count):
@@ -165,7 +167,7 @@ def ipc_spec(source_spec, *, batch_rows=4, delay_seconds=0):
     with tempfile.TemporaryDirectory(prefix='qf-d10-fixture-') as directory:
         gateway=Gateway(deepcopy(source_spec),Path(directory)/'data.sock',batch_rows=batch_rows, delay_seconds=delay_seconds)
         wired=deepcopy(source_spec)
-        fields=('price','quantity') if wired['config']['frequency']=='tick' else ('open','high','low','close','quantity')
+        fields=('price','quantity','bid','ask','bid_quantity','ask_quantity') if wired['config']['frequency']=='tick' else ('open','high','low','close','quantity')
         request=dict(securities=wired['config']['universe'],fields=list(fields),frequency=wired['config']['frequency'],
             start_ns=wired['calendar'][0]['before_open_ns'],end_ns=wired['calendar'][-1]['after_close_ns'],count_per_security=None,adjustment='none')
         wired['source']=dict(kind='ipc',socket_path=str(gateway.path),binding='market',request=request)

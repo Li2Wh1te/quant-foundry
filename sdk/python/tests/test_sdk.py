@@ -133,7 +133,7 @@ class SDKTests(unittest.TestCase):
             handle_tick=lambda c,t:subscribed.append(t.security)),source)
         self.assertSucceeded(result); self.assertEqual(subscribed,['A.SH']*3)
 
-    def test_tick_commands_bind_without_claiming_d08_matching(self):
+    def test_tick_commands_cancel_before_matching_and_live_orders_use_d08(self):
         source=spec(days=1,securities=('A.SH',),frequency='tick',ticks=3)
         orders=[]
         def tick(c,t):
@@ -143,8 +143,8 @@ class SDKTests(unittest.TestCase):
         self.assertSucceeded(self.run_strategy(SimpleNamespace(handle_tick=tick),source))
         self.assertEqual(len(orders),3)
         result=self.run_strategy(SimpleNamespace(handle_tick=lambda c,t:order('A.SH',1)),source)
-        self.assertEqual(summary(result)['outcome']['error']['code'],'CAPABILITY_UNAVAILABLE')
-        self.assertEqual(page(result,'trades')['items'],[])
+        self.assertSucceeded(result)
+        self.assertEqual([t['quantity'] for t in page(result,'trades')['items']],[1,1])
 
     def test_bar_barrier_and_all_order_routes_decimal_inputs(self):
         source=spec(days=1,frequency='1m'); close=int(source['source']['events'][0]['event']['interval_end_ns'])

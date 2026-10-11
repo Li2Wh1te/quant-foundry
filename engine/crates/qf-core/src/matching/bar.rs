@@ -17,10 +17,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// facts retain D02's refusal; callers cannot construct an unchecked bundle.
 #[derive(Debug, Clone)]
 pub struct BarRules {
-    instrument: Instrument,
-    book: RuleBook,
-    facts: TradeDayFacts,
-    usage: RuleUse,
+    pub(super) instrument: Instrument,
+    pub(super) book: RuleBook,
+    pub(super) facts: TradeDayFacts,
+    pub(super) usage: RuleUse,
 }
 impl BarRules {
     pub fn new(
