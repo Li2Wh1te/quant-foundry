@@ -2,8 +2,8 @@
 
 接续实际 main `5a14110668f240f183bf3e6a08f638fc4e3fc02f`（D17 PR175 已合并）。
 当前 D18 尚未关单：完整 B1–B4 首次全量正在运行，正式默认 API 映射仍未实现。
-草稿 [PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 的已推送基线为
-`24d1076fa3099a82120fe90582955be91553bf9d`；下述进度修复已完成本地验证，尚待新 head CI。
+草稿 [PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 的首轮基线为
+`24d1076fa3099a82120fe90582955be91553bf9d`；下述进度修复已完成本地验证，新 head CI 待核。
 工作区无 AGENTS.md / .agents skill；原 v1.1 包已完整阅读，未混入未发布 S2/R01 候选。
 
 实现固定完整夹具和真实 Python 策略、CurrentStore → Arrow → Rust、数据库队列、runner
@@ -28,7 +28,11 @@ B4 16 项最多两并发，杀死一项后仅重跑该项，保留原 15 项结�
 worker 随后在实际 runner 容器回归强制执行。`scripts/test_s3_runtime.sh` 最新为
 **25 passed / 0 skipped，333.874 秒**，含运行中真实 HTTP 计数、API/CLI/Python、五示例、
 取消/崩溃/OOM/超时、claim、权限隔离及结果核对。前端 152 项与构建通过。
-此前六个小夹具及两个真实热修正探针通过；`full_B1_B4=false`，不能代替最新全量。
+最新六个小夹具及两个真实热修正探针通过，所有最终 HTTP 计数等于原生计数；
+`mode=smoke, full_B1_B4=false`，不能代替全量。小夹具实际墙钟为日线 6.652 秒、
+分钟 57.546 秒、60m 4.981 秒、成交 Tick 3.880 秒、报价 Tick 4.271 秒；B4 16 项、
+两并发及仅失败项重跑为 79.617 秒。各自行情回调为 25/720/12/1000/1000/每项25。
+日志摘要 Decimal 序列化曾中止一轮，已修复并完整重跑小夹具；失败输出保留。
 本地 Docker VFS 曾耗尽本任务磁盘，失败输出保留；只回收已核对身份/引用的本任务
 可恢复构建缓存后通过，不做全局 prune。受限宿主 cleanup 检查拒绝不能冒充退役通过。
 
@@ -43,7 +47,7 @@ Rust/SDK/网关/共享服务、真实浏览器 16 项批次部分失败与重跑
 原生退役 29 项。其 [发行与全量 CI](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38174415508)
 中的原生 arm64 构建、独立 wheel 安装、离线镜像、空库迁移和正常启停已实际通过；
 [arm64 制品](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38174415508/artifacts/11714848130)
-只证明该精确旧 head，不冒充尚未推送的进度修复。该运行的完整 B1–B4 job 仍在执行，
+只证明该精确首轮 head，不冒充进度修复后的发行结果。该运行的完整 B1–B4 job 仍在执行，
 尚无完整通过结论；不因连接通知重启未知状态作业。
 
 | 族 | 必需的真实检查入口 / 输出 |

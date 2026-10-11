@@ -52,9 +52,12 @@ docker load --input "$QF_S3_RELEASE_ROOT/s3-images.tar"
 ```bash
 export QF_S3_ACCEPT_NEW_RUNS=false
 docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml config --quiet
-docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml up -d --no-build --no-deps --force-recreate backend
 # 旧活动任务核对完成后；不要同时保留旧 runner。
 docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml stop runner
+# 使用已安装制品做正常升级；升级入口的空库和非空旧库路径已隔离验证。
+docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml run --rm --no-deps --entrypoint python backend \
+  -m alembic -c /app/alembic.ini upgrade head
+docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml up -d --no-build --no-deps --force-recreate backend
 docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml up -d --no-build --no-deps --force-recreate runner
 ```
 
