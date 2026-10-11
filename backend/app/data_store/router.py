@@ -289,7 +289,10 @@ def get_issues(
     if dataset is not None:
         _entry(dataset)
     params = {"dataset": dataset, "limit": limit, "offset": offset}
-    where = "WHERE (:dataset IS NULL OR dataset=:dataset OR dataset IS NULL)"
+    # psycopg sends an optional parameter with no inferred PostgreSQL type at
+    # its first IS NULL occurrence. Type that occurrence for both filtered and
+    # unfiltered requests; preserve dataset/global-restriction selection.
+    where = "WHERE (CAST(:dataset AS text) IS NULL OR dataset=:dataset OR dataset IS NULL)"
     union = (
         "SELECT dataset,scope_key,reason,last_seen AS updated_at,'current' AS kind, "
         "CASE WHEN target_json::jsonb->>'scope_version'='object-key-set-v1' THEN jsonb_array_length(target_json::jsonb->'members') ELSE 1 END AS affected_objects "

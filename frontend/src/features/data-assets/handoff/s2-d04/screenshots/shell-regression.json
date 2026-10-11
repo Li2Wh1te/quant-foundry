@@ -1,0 +1,267 @@
+{
+  "isolated": true,
+  "productionIntegration": false,
+  "casesPassed": 27,
+  "results": [
+    "1440px: list context, three views, keyboard, sidebar and quick jump",
+    "1024px: list context, three views, keyboard, sidebar and quick jump",
+    "390px: list context, three views, keyboard, sidebar and quick jump",
+    "narrow layout retains an expanded desktop preference without consuming content width",
+    "browser back and forward keep the same object preview session",
+    "initial catalog failure and later permission revocation never become empty success",
+    "loading and refresh retain structure and local failures retain old observations",
+    "true catalog empty, incomplete catalog and unknown facts remain distinct",
+    "detail loading, missing dataset and true empty preserve usable shell",
+    "detail refresh failure keeps summary; issue failure stays local",
+    "preview exact text, empty and ordinary failure retain truthful page state",
+    "changed: old rows and cursor stack are withdrawn",
+    "invalid-cursor: old rows and cursor stack are withdrawn",
+    "query-restricted: old rows and cursor stack are withdrawn",
+    "query-generation: old rows and cursor stack are withdrawn",
+    "generation: metadata refresh invalidates prior preview",
+    "maintenance: metadata refresh invalidates prior preview",
+    "restricted: metadata refresh invalidates prior preview",
+    "generation: refresh cancels the first pending preview before any page exists",
+    "maintenance: refresh cancels the first pending preview before any page exists",
+    "condition changes cancel delayed preview and keep cursors out of navigation storage",
+    "object change unmounts prior sessions and rejects late preview",
+    "query-forbidden: permission revocation clears the whole detail",
+    "query-forbidden-slow: permission revocation clears the whole detail",
+    "issues-forbidden: permission revocation clears the whole detail",
+    "401 ignores stalled body and keeps the existing login flow",
+    "explicit logout cancels pending preview and removes authentication"
+  ],
+  "geometry": [
+    {
+      "view": "catalog",
+      "viewport": 1440,
+      "document": 1440,
+      "main": {
+        "width": 1181,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 1123,
+          "content": 1123,
+          "height": 1402,
+          "contentHeight": 1402
+        }
+      ]
+    },
+    {
+      "view": "overview",
+      "viewport": 1440,
+      "document": 1440,
+      "main": {
+        "width": 1181,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 284,
+          "contentHeight": 284
+        }
+      ]
+    },
+    {
+      "view": "preview",
+      "viewport": 1440,
+      "document": 1440,
+      "main": {
+        "width": 1181,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 1087,
+          "content": 1087,
+          "height": 89,
+          "contentHeight": 89
+        }
+      ]
+    },
+    {
+      "view": "updates",
+      "viewport": 1440,
+      "document": 1440,
+      "main": {
+        "width": 1181,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": []
+    },
+    {
+      "view": "catalog",
+      "viewport": 1024,
+      "document": 1024,
+      "main": {
+        "width": 791,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 733,
+          "content": 780,
+          "height": 2262,
+          "contentHeight": 2262
+        }
+      ]
+    },
+    {
+      "view": "overview",
+      "viewport": 1024,
+      "document": 1024,
+      "main": {
+        "width": 791,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 284,
+          "contentHeight": 284
+        }
+      ]
+    },
+    {
+      "view": "preview",
+      "viewport": 1024,
+      "document": 1024,
+      "main": {
+        "width": 791,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 697,
+          "content": 780,
+          "height": 89,
+          "contentHeight": 89
+        }
+      ]
+    },
+    {
+      "view": "updates",
+      "viewport": 1024,
+      "document": 1024,
+      "main": {
+        "width": 791,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": []
+    },
+    {
+      "view": "catalog",
+      "viewport": 390,
+      "document": 390,
+      "main": {
+        "width": 301,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 275,
+          "content": 780,
+          "height": 2262,
+          "contentHeight": 2262
+        }
+      ]
+    },
+    {
+      "view": "overview",
+      "viewport": 390,
+      "document": 390,
+      "main": {
+        "width": 301,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 284,
+          "contentHeight": 284
+        }
+      ]
+    },
+    {
+      "view": "preview",
+      "viewport": 390,
+      "document": 390,
+      "main": {
+        "width": 301,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": [
+        {
+          "width": 247,
+          "content": 780,
+          "height": 89,
+          "contentHeight": 89
+        }
+      ]
+    },
+    {
+      "view": "updates",
+      "viewport": 390,
+      "document": 390,
+      "main": {
+        "width": 301,
+        "overflow": "auto"
+      },
+      "title": "32px",
+      "body": "14px",
+      "tables": []
+    }
+  ],
+  "deniedTimings": [
+    {
+      "name": "query-forbidden-slow",
+      "elapsedMs": 81
+    },
+    {
+      "name": "query-unauthorized-slow",
+      "elapsedMs": 51
+    }
+  ],
+  "pageErrors": [],
+  "requestMethods": [
+    "GET /api/auth/verify",
+    "GET /api/system/version",
+    "GET /api/admin/data-store/datasets",
+    "GET /api/admin/data-store/datasets/fixture.daily_21",
+    "POST /api/admin/data-store/query",
+    "GET /api/admin/data-store/datasets/fixture.daily_01",
+    "GET /api/admin/data-store/datasets/fixture.missing",
+    "GET /api/admin/data-store/datasets/fixture.daily_04",
+    "GET /api/admin/data-store/datasets/fixture.daily_03",
+    "GET /api/admin/data-store/datasets/fixture.daily_02",
+    "GET /api/admin/data-store/issues"
+  ]
+}

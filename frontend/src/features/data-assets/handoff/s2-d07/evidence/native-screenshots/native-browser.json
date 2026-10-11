@@ -1,0 +1,121 @@
+{
+  "source": "Actual project HTTP; isolated closed receipt; no business rows",
+  "passed": 3,
+  "cases": [
+    "1440px native catalog/schema, closed preview, D06 empty issue collection",
+    "1024px native catalog/schema, closed preview, D06 empty issue collection",
+    "390px native catalog/schema, closed preview, D06 empty issue collection"
+  ],
+  "errors": [],
+  "requests": [
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/market.stock_daily.reported"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/market.stock_daily.reported"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/auth/verify"
+    },
+    {
+      "method": "GET",
+      "path": "/api/system/version"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/datasets/market.stock_daily.reported"
+    },
+    {
+      "method": "GET",
+      "path": "/api/admin/data-store/issues"
+    }
+  ],
+  "realDataAcceptance": false
+}
