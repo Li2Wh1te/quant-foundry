@@ -801,9 +801,36 @@ fn quantize_sell(
     rule.validate_quantity(Side::Sell, quantity, available, false)?;
     Ok(quantity)
 }
-impl<F: OrderFacts> FillBudget for OrderManager<F> {
-    fn allowance(
+impl<F: OrderFacts> OrderManager<F> {
+    fn with_prior_account<T>(
         &self,
+        prior: &[crate::matching::Fill],
+        quote: impl FnOnce(&Account) -> QfResult<T>,
+    ) -> QfResult<T> {
+        if prior.is_empty() {
+            return quote(&self.account);
+        }
+        if prior.len() > self.limits.max_changes {
+            return Err(failure(ErrorCode::ResourceLimit, "累计候选成交超过预算"));
+        }
+        let (result, _) = self.account.preview(|account| {
+            for (offset, fill) in prior.iter().enumerate() {
+                if fill.trade_id != self.trade_id(offset)? {
+                    return Err(failure(
+                        ErrorCode::StaleClaim,
+                        "累计候选成交 ID 不符合本运行序列",
+                    ));
+                }
+                let assessed = account.assess_fill(fill)?;
+                account.apply_fill(&assessed)?;
+            }
+            quote(account)
+        })?;
+        Ok(result)
+    }
+    fn allowance_in_account(
+        &self,
+        account: &Account,
         id: &str,
         requested: Quantity,
         price: Price,
@@ -814,11 +841,17 @@ impl<F: OrderFacts> FillBudget for OrderManager<F> {
             .get(id)
             .filter(|e| e.order.status.is_active())
             .ok_or_else(|| failure(ErrorCode::InvalidOrder, "活动订单不存在"))?;
-        if requested > entry.order.remaining()? {
-            return Err(failure(ErrorCode::InvalidOrder, "候选成交超过余量"));
+        let reservation = account
+            .reservation(id)
+            .ok_or_else(|| failure(ErrorCode::InvalidOrder, "候选订单余量已用完"))?;
+        if requested > reservation.remaining {
+            return Err(failure(
+                ErrorCode::InvalidOrder,
+                "候选成交超过累计预览后的余量",
+            ));
         }
         let effective = if entry.order.side == Side::Buy {
-            self.account.max_affordable(id, requested, price, step)?
+            account.max_affordable(id, requested, price, step)?
         } else {
             requested
         };
@@ -827,11 +860,25 @@ impl<F: OrderFacts> FillBudget for OrderManager<F> {
             effective_quantity: effective,
             reason_code: (effective < requested).then_some(ErrorCode::InsufficientCash),
             message: if effective < requested {
-                "候选价格与费用下仅可支付 effective_quantity，余量保持活动".into()
+                format!(
+                    "候选价格、此前成交与累计费用下仅可支付 {} 份，余量保持活动",
+                    effective.get()
+                )
             } else {
                 String::new()
             },
         })
+    }
+}
+impl<F: OrderFacts> FillBudget for OrderManager<F> {
+    fn allowance(
+        &self,
+        id: &str,
+        requested: Quantity,
+        price: Price,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.allowance_in_account(&self.account, id, requested, price, step)
     }
     fn trade_id(&self, offset: usize) -> QfResult<String> {
         let offset = u64::try_from(offset)
@@ -848,53 +895,56 @@ impl<F: OrderFacts> FillBudget for OrderManager<F> {
         price: Price,
         step: QuantityStep,
     ) -> QfResult<FillAllowance> {
-        if prior.is_empty() {
-            return self.allowance(id, requested, price, step);
-        }
-        if prior.len() > self.limits.max_changes {
-            return Err(failure(ErrorCode::ResourceLimit, "累计候选成交超过预算"));
-        }
+        self.with_prior_account(prior, |account| {
+            self.allowance_in_account(account, id, requested, price, step)
+        })
+    }
+    fn candidate_allowance_after(
+        &self,
+        prior: &[crate::matching::Fill],
+        candidate: &crate::matching::Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
         let entry = self
             .entries
-            .get(id)
+            .get(&candidate.order_id)
             .filter(|entry| entry.order.status.is_active())
             .ok_or_else(|| failure(ErrorCode::InvalidOrder, "候选活动订单不存在"))?;
-        let (allowance, _) = self.account.preview(|account| {
-            for (offset, fill) in prior.iter().enumerate() {
-                if fill.trade_id != self.trade_id(offset)? {
-                    return Err(failure(
-                        ErrorCode::StaleClaim,
-                        "累计候选成交 ID 不符合本运行序列",
-                    ));
+        if candidate.trade_id != self.trade_id(prior.len())?
+            || candidate.security != entry.order.security
+            || candidate.side != entry.order.side
+            || candidate.quantity == Quantity::ZERO
+        {
+            return Err(failure(
+                ErrorCode::InvalidContract,
+                "候选成交身份或方向无效",
+            ));
+        }
+        self.with_prior_account(prior, |account| {
+            let mut allowance = self.allowance_in_account(
+                account,
+                &candidate.order_id,
+                candidate.quantity,
+                candidate.price,
+                step,
+            )?;
+            if allowance.effective_quantity != Quantity::ZERO {
+                let mut executable = candidate.clone();
+                executable.quantity = allowance.effective_quantity;
+                // D09's existing fill plan owns minimum commission, FIFO tax,
+                // frozen cash and proceeds timing for both sides. No matcher
+                // fee formula or extra state is introduced here.
+                if let Err(error) = account.assess_fill(&executable) {
+                    if error.code != ErrorCode::InsufficientCash {
+                        return Err(error);
+                    }
+                    allowance.effective_quantity = Quantity::ZERO;
+                    allowance.reason_code = Some(ErrorCode::InsufficientCash);
+                    allowance.message =
+                        "候选成交收入与可用现金不足以支付累计费用/税款；余单保持活动".into();
                 }
-                let assessed = account.assess_fill(fill)?;
-                account.apply_fill(&assessed)?;
             }
-            let reservation = account
-                .reservation(id)
-                .ok_or_else(|| failure(ErrorCode::InvalidOrder, "候选订单余量已用完"))?;
-            if requested > reservation.remaining {
-                return Err(failure(
-                    ErrorCode::InvalidOrder,
-                    "候选成交超过累计预览后的余量",
-                ));
-            }
-            let effective = if entry.order.side == Side::Buy {
-                account.max_affordable(id, requested, price, step)?
-            } else {
-                requested
-            };
-            Ok(FillAllowance {
-                requested_quantity: requested,
-                effective_quantity: effective,
-                reason_code: (effective < requested).then_some(ErrorCode::InsufficientCash),
-                message: if effective < requested {
-                    "累计此前候选成交及费用后仅可支付 effective_quantity".into()
-                } else {
-                    String::new()
-                },
-            })
-        })?;
-        Ok(allowance)
+            Ok(allowance)
+        })
     }
 }

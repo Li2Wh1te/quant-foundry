@@ -182,6 +182,37 @@ fn quantity_rationals_do_not_round_targets_up() {
 }
 
 #[test]
+fn slippage_rounds_original_rational_once_at_tick_and_extreme_scales() {
+    assert_eq!(
+        d("10").slipped_price(d("5"), d("0.01"), true).unwrap(),
+        d("10.01")
+    );
+    assert_eq!(
+        d("10").slipped_price(d("5"), d("0.01"), false).unwrap(),
+        d("9.99")
+    );
+    let tiny = d("0.0000000000000000000000000001");
+    assert_eq!(
+        d("10").slipped_price(tiny, d("0.01"), true).unwrap(),
+        d("10.01")
+    );
+    assert_eq!(
+        d("10").slipped_price(tiny, d("0.01"), false).unwrap(),
+        d("9.99")
+    );
+    let maximum = d("79228162514264337593543950335");
+    assert_eq!(maximum.slipped_price(D::ZERO, tiny, true).unwrap(), maximum);
+    assert!(maximum.slipped_price(d("10000"), D::ONE, true).is_err());
+    assert!(D::ONE.slipped_price(d("10001"), D::ONE, true).is_err());
+    assert!(D::ONE.slipped_price(d("-1"), D::ONE, true).is_err());
+    assert!(D::ONE.slipped_price(D::ZERO, D::ZERO, true).is_err());
+    assert_eq!(
+        D::ONE.slipped_price(d("10000"), D::ONE, false).unwrap(),
+        D::ZERO
+    );
+}
+
+#[test]
 fn json_never_uses_float_money_or_time() {
     for invalid in ["0.1", "true", "null", "\"NaN\""] {
         assert!(serde_json::from_str::<D>(invalid).is_err());

@@ -161,6 +161,35 @@ impl ExactDecimal {
         Self::from_parts(rounded, scale)
     }
 
+    /// price * (10000 +/- bps) / 10000, quantized once to a positive tick.
+    /// The original rational stays in the bounded wide intermediate, including
+    /// tiny bps that cannot be added to 10000 in the stored decimal range.
+    pub fn slipped_price(self, bps: Self, tick: Self, increase: bool) -> QfResult<Self> {
+        if self <= Self::ZERO
+            || tick <= Self::ZERO
+            || bps.is_negative()
+            || bps > Self::from_integer(10_000)
+        {
+            return Err(range());
+        }
+        let basis = I512::cast_from(10_000) * power(bps.scale());
+        let adjustment = I512::cast_from(bps.0.mantissa());
+        let factor = if increase {
+            basis + adjustment
+        } else {
+            basis - adjustment
+        };
+        let top = I512::cast_from(self.0.mantissa()) * factor * power(tick.scale());
+        let bottom = basis * I512::cast_from(tick.0.mantissa()) * power(self.scale());
+        let policy = if increase {
+            RoundingPolicy::AwayFromZero
+        } else {
+            RoundingPolicy::TowardZero
+        };
+        let units = Self::rounded_quotient(top, bottom, policy);
+        Self::from_parts(units * I512::cast_from(tick.0.mantissa()), tick.scale())
+    }
+
     /// floor(quantity * numerator / denominator / step) * step; no rounded ratio.
     pub fn legal_quantity(
         quantity: Quantity,

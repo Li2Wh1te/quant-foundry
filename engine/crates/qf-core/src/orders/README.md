@@ -54,7 +54,7 @@ target 的 side 由目标与预计净仓差量决定，目标数量/金额非负
 合法单位量化与资金拒绝不会混成受理。target 替换失败丢弃候选，原订单、冻结量
 和费用累计器保留。未成交卖单不给现金，其他订单的预留不可消费。
 
-## D07/D08 撮合接缝（算法尚待所属包接入）
+## D07/D08 撮合接缝
 
 - `FillBudget::allowance(id, quantity, candidate_price, step)` 使用 D09
   `max_affordable` 返回当前原价/费用下可支付份额和明确原因；fill 的整数单位由
@@ -62,6 +62,11 @@ target 的 side 由目标与预计净仓差量决定，目标数量/金额非负
 - 同事件已选择前序成交时必须用 `allowance_after(prior_fills, ...)`。前序成交
   通过同一账户临时候选核费/预览，不能给多张订单重复分配同一可用现金，也不能
   预支未选择/未成交的卖款。预览不修改活账户或累计最低费用。
+- D07 的 Bar 模型使用 `candidate_allowance_after(prior_fills, candidate, step)`，
+  由 D03 的 `candidate_fill_allowance_after` 转发；它在相同前序账户候选上用
+  D09 `assess_fill` 核验实际时间/ID/价格/份额、最低费用、FIFO 税款及冻结现金。
+  小额部分卖出不能支付当前候选费用/税款时返回零可成交量，保留余单和共享量。
+  其他事实/身份错误继续拒绝，未接入完整核验的适配器明确能力不足。
 - `trade_id(offset)` 给出本次候选的连续全运行 ID。按活动订单稳定委托序输出
   fills；每张发生状态变化的订单只返回一次更新，成交必须有对应份额/状态更新。
   不能为每个未成交 Tick 返回不变订单。流动性、Bar/Tick 价格、滑点、涨停队列
@@ -90,4 +95,5 @@ target 的 side 由目标与预计净仓差量决定，目标数量/金额非负
 测试入口：`cargo test -p qf-core --locked --test orders`。隔离输入明确
 `synthetic_business_oracles / production_executed=false`；订单、账户、费用和
 driver 是真实代码，host/data/显式成交计划及结果收集器是隔离适配。正式数据
-映射、生产联调、D10 SDK 执行绑定与 D07/D08 算法尚未完成，不能用此夹具冒充。
+映射、生产联调、D10 SDK 执行绑定与 D08 算法尚未完成，不能用此夹具冒充。
+D07 的实现及验证见 [matching/README.md](../matching/README.md)。
