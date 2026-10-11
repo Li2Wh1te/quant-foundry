@@ -8,6 +8,9 @@ use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::collections::BTreeMap;
 
+pub mod credit;
+pub mod file;
+
 pub const MAX_PAGE_ITEMS: usize = 10_000;
 pub const MAX_CURSOR_BYTES: usize = 4096;
 pub fn validate_page(count: usize, cursor: Option<&str>) -> QfResult<()> {
@@ -105,6 +108,7 @@ pub struct CorporateActionEvent {
     deny_unknown_fields
 )]
 pub enum ResultRecord {
+    Summary(Box<crate::analysis::PerformanceSummary>),
     ExecutionModel(crate::matching::ExecutionModelDescription),
     Equity(EquityPoint),
     Order(Order),
@@ -117,6 +121,7 @@ pub enum ResultRecord {
 
 /// A credit grant comes from the trusted writer. A producer must not send beyond
 /// it; close/cancel must interrupt a blocked credit wait in D12/D13.
+#[derive(Debug, Clone, Copy)]
 pub struct SinkCredit {
     pub max_records: usize,
     pub max_bytes: usize,
@@ -152,11 +157,7 @@ impl ResultBatch {
             first_sequence,
             records,
         };
-        if serde_json::to_vec(&batch)
-            .map_err(|_| QfError::new(ErrorCode::InvalidContract, "result_sink", "结果序列化无效"))?
-            .len()
-            > credit.max_bytes
-        {
+        if encode_bounded(&batch, credit.max_bytes)?.len() > credit.max_bytes {
             return Err(QfError::new(
                 ErrorCode::ResultBudgetExceeded,
                 "result_sink",
@@ -164,6 +165,24 @@ impl ResultBatch {
             ));
         }
         Ok(batch)
+    }
+    pub fn decode(input: &[u8], credit: &SinkCredit) -> QfResult<Self> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            first_sequence: Sequence,
+            records: Vec<ResultRecord>,
+        }
+        if input.len() > credit.max_bytes || input.len() > MAX_CONTROL_BYTES {
+            return Err(QfError::new(
+                ErrorCode::ResultBudgetExceeded,
+                "result_sink",
+                "结果消息超过信用",
+            ));
+        }
+        let wire: Wire = serde_json::from_slice(input)
+            .map_err(|_| QfError::new(ErrorCode::InvalidContract, "result_sink", "结果消息无效"))?;
+        Self::new(wire.first_sequence, wire.records, credit)
     }
     pub fn first_sequence(&self) -> Sequence {
         self.first_sequence
@@ -179,4 +198,36 @@ pub trait ResultSink {
     fn write(&mut self, batch: &ResultBatch) -> QfResult<()>;
     fn finalize(&mut self, outcome: &RunOutcome) -> QfResult<()>;
     fn abort(&mut self, error: &QfError) -> QfResult<()>;
+}
+
+/// Bound allocations as well as the serialized result message.
+pub(crate) fn encode_bounded(value: &impl Serialize, maximum: usize) -> QfResult<Vec<u8>> {
+    struct Buffer {
+        bytes: Vec<u8>,
+        maximum: usize,
+    }
+    impl std::io::Write for Buffer {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            if bytes.len() > self.maximum.saturating_sub(self.bytes.len()) {
+                return Err(std::io::Error::other("result budget"));
+            }
+            self.bytes.extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut buffer = Buffer {
+        bytes: Vec::with_capacity(maximum.min(4096)),
+        maximum,
+    };
+    serde_json::to_writer(&mut buffer, value).map_err(|_| {
+        QfError::new(
+            ErrorCode::ResultBudgetExceeded,
+            "result_sink",
+            "结果编码超过字节预算",
+        )
+    })?;
+    Ok(buffer.bytes)
 }

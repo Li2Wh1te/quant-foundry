@@ -134,8 +134,9 @@ def _run_module(module, spec, *, market_routes=None, research_routes=None, cance
         if not spec['calendar']:
             raise _error('RULE_UNAVAILABLE', '缺少已接受运行日历')
         host = _Host(module, spec, market_routes or {}, research_routes or {})
-        return _native.run_strategy(_json(spec), _json(host.handlers), host.dispatch,
-            cancellation if cancellation is not None else _native.CancellationToken())
+        from ._results import RunResults
+        return RunResults(_native.run_strategy(_json(spec), _json(host.handlers), host.dispatch,
+            cancellation if cancellation is not None else _native.CancellationToken()))
     finally:
         if host is not None:
             host.close()

@@ -167,6 +167,8 @@ pub fn connect(
         gateway: None,
         context: None,
         current: BTreeMap::new(),
+        benchmark_origin: None,
+        benchmark_security: None,
     };
     let events = match source {
         Source::Fixture { events } => {
@@ -226,6 +228,8 @@ pub struct Data {
     pub gateway: Option<Gateway>,
     pub context: Option<DependencyContext>,
     current: BTreeMap<SecurityKey, MarketEvent>,
+    pub benchmark_origin: Option<qf_core::analysis::BenchmarkPoint>,
+    pub benchmark_security: Option<String>,
 }
 impl StrategyDataPort for Data {
     type Frame = Frame;
@@ -239,6 +243,30 @@ impl StrategyDataPort for Data {
     fn publish(&mut self, event: &MarketEvent) -> QfResult<()> {
         self.current.insert(event.key().security, event.clone());
         Ok(())
+    }
+    fn benchmark(
+        &self,
+        security: &SecurityKey,
+        at: Nanoseconds,
+    ) -> QfResult<Option<qf_core::analysis::BenchmarkPoint>> {
+        if self.benchmark_security.as_deref() != Some(security.as_str()) {
+            return Ok(None);
+        }
+        if let Some(origin) = &self.benchmark_origin
+            && origin.time_ns == at
+        {
+            return Ok(Some(origin.clone()));
+        }
+        let value = self.current.get(security).and_then(|event| match event {
+            MarketEvent::Bar(bar) if bar.interval_end_ns == at => Some(bar.close.get()),
+            MarketEvent::TradeTick(tick) if tick.time_ns == at => Some(tick.price.get()),
+            _ => None,
+        });
+        Ok(value.map(|value| qf_core::analysis::BenchmarkPoint {
+            time_ns: at,
+            value: Some(value),
+            unavailable_reason: None,
+        }))
     }
     fn current_data(&self, securities: &[SecurityKey]) -> QfResult<Vec<MarketEvent>> {
         Ok(securities

@@ -492,7 +492,8 @@ fn description_is_required_result_even_without_market_and_mismatched_matcher_con
             partial: true
         }
     ));
-    assert_eq!(h.writer.records.len(), 1);
+    assert_eq!(h.writer.records.len(), 2); // model plus exact initial equity
+    assert!(matches!(h.writer.records[1], ResultRecord::Equity(_)));
     assert!(matches!(
         &h.writer.records[0],
         ResultRecord::ExecutionModel(_)
@@ -567,11 +568,34 @@ fn execution_description_needs_sufficient_record_and_byte_credit_before_initiali
     h.writer.credit_records = 1;
     h.writer.credit_bytes = required;
     let report = h.run(1, vec![], 1, false);
-    h.success(&report);
+    // The exact credit admits the description, but D11's necessary final
+    // summary is larger. It must fail, preserving the acknowledged metadata.
+    assert!(matches!(
+        report.outcome,
+        RunOutcome::Failed {
+            error: QfError {
+                code: ErrorCode::ResultBudgetExceeded,
+                ..
+            },
+            partial: true
+        }
+    ));
     assert!(matches!(
         h.writer.records[0],
         ResultRecord::ExecutionModel(_)
     ));
+    assert!(!h.host.calls.is_empty());
+    assert_eq!(h.writer.aborted, 1);
+    let mut h = Harness::new(Frequency::Day, "0.1", "10000");
+    h.writer.credit_records = 1;
+    let report = h.run(1, vec![], 1, false);
+    h.success(&report);
+    assert!(
+        h.writer
+            .records
+            .iter()
+            .any(|record| matches!(record, ResultRecord::Summary(_)))
+    );
 }
 
 #[test]

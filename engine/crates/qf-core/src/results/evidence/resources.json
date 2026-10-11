@@ -1,0 +1,295 @@
+{
+  "scope": "D11 module only; no gateway, D09 account, Python callback, supervisor, DB, or Docker in this resource probe",
+  "product_b1_b4_accepted": false,
+  "production_executed": false,
+  "environment": {
+    "os": "Linux-6.18.44-x86_64-with-glibc2.41",
+    "python": "3.12.2",
+    "rust": "locked 1.90.0 release",
+    "filesystem": "tmpfs; private temporary result files",
+    "input": "generated one event at a time; no market input file or copy",
+    "page_cache": "fresh result files each run; source cache cold/hot not applicable",
+    "measurement": "wait4 child peak RSS; compiler and launcher excluded"
+  },
+  "streams": [
+    {
+      "events": 1000000,
+      "file_limit_bytes": null,
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "virtual_memory_limit_bytes": 134217728,
+      "peak_child_rss_kib": 8784,
+      "cpu_seconds": 0.140134,
+      "wall_seconds": 0.14059848699980648,
+      "packet": {
+        "checksum": 1000000,
+        "events": 1000000,
+        "peak_retained_market_events": 1,
+        "probe": "D11_MODULE_ONLY_NOT_B1_B4",
+        "production_executed": false,
+        "python_callbacks": 0,
+        "results": {
+          "counts": {
+            "equity": 51,
+            "summary": 1,
+            "trades": 1000
+          },
+          "execution_model": null,
+          "max_page_read": 0,
+          "notices": {
+            "log_messages_truncated": "0",
+            "logs_dropped": "0",
+            "logs_truncated": false
+          },
+          "outcome": {
+            "result_id": "d11-stream-probe",
+            "status": "succeeded"
+          },
+          "partial": false,
+          "performance": {
+            "annualized_return": {
+              "status": "available",
+              "value": 0.0
+            },
+            "benchmark_return": {
+              "reason": "NO_BENCHMARK",
+              "status": "unavailable"
+            },
+            "cumulative_excess_return": {
+              "reason": "NO_BENCHMARK",
+              "status": "unavailable"
+            },
+            "cumulative_return": {
+              "status": "available",
+              "value": 0.0
+            },
+            "expected_sessions": 50,
+            "fees_to_initial_equity": {
+              "status": "available",
+              "value": 0.001
+            },
+            "initial_equity": "10000.00",
+            "maximum_drawdown": {
+              "status": "available",
+              "value": 0.09090909090909091
+            },
+            "mean_session_equity": {
+              "status": "available",
+              "value": 10500.0
+            },
+            "missing_equity_sessions": 0,
+            "policy": {
+              "annualization_sessions": 252,
+              "benchmark": null,
+              "curve_sampling": "session_close",
+              "formula_id": "qf.performance.v1",
+              "frequency": "tick",
+              "reference_calendar": "synthetic_d11_module_calendar",
+              "risk_free_rate": "0",
+              "statistic_precision": "float64; exact money strings",
+              "statistics_sampling": "session_close; initial capital is the interval origin; ddof=1",
+              "turnover_definition": "(buy_notional+sell_notional)/(2*mean(all valid session-close equities)); NA on gaps"
+            },
+            "sampled_sessions": 50,
+            "sharpe": {
+              "status": "available",
+              "value": 0.7483314773547889
+            },
+            "terminal_equity": "10000",
+            "trades": {
+              "account_totals": null,
+              "account_totals_unavailable_reason": "ACCOUNT_TOTALS_UNAVAILABLE",
+              "buy_fills": 1000,
+              "buy_notional": "10000",
+              "buy_quantity": "1000",
+              "fill_fees": "10.00",
+              "fills": 1000,
+              "mean_fill_notional": {
+                "status": "available",
+                "value": 10.0
+              },
+              "order_state_events": {},
+              "sell_fills": 0,
+              "sell_notional": "0",
+              "sell_quantity": "0",
+              "total_notional": "10000"
+            },
+            "turnover": {
+              "status": "available",
+              "value": 0.47619047619047616
+            },
+            "valid_return_samples": 50,
+            "volatility": {
+              "status": "available",
+              "value": 1.5306780218620668
+            }
+          },
+          "result_bytes": 231956,
+          "schema_id": "qf.results.v1"
+        },
+        "shards": 3
+      }
+    },
+    {
+      "events": 10000000,
+      "file_limit_bytes": null,
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3
+      ],
+      "virtual_memory_limit_bytes": 134217728,
+      "peak_child_rss_kib": 8792,
+      "cpu_seconds": 1.9007079999999998,
+      "wall_seconds": 1.9014731249999386,
+      "packet": {
+        "checksum": 10000000,
+        "events": 10000000,
+        "peak_retained_market_events": 1,
+        "probe": "D11_MODULE_ONLY_NOT_B1_B4",
+        "production_executed": false,
+        "python_callbacks": 0,
+        "results": {
+          "counts": {
+            "equity": 501,
+            "summary": 1,
+            "trades": 10000
+          },
+          "execution_model": null,
+          "max_page_read": 0,
+          "notices": {
+            "log_messages_truncated": "0",
+            "logs_dropped": "0",
+            "logs_truncated": false
+          },
+          "outcome": {
+            "result_id": "d11-stream-probe",
+            "status": "succeeded"
+          },
+          "partial": false,
+          "performance": {
+            "annualized_return": {
+              "status": "available",
+              "value": 0.0
+            },
+            "benchmark_return": {
+              "reason": "NO_BENCHMARK",
+              "status": "unavailable"
+            },
+            "cumulative_excess_return": {
+              "reason": "NO_BENCHMARK",
+              "status": "unavailable"
+            },
+            "cumulative_return": {
+              "status": "available",
+              "value": 0.0
+            },
+            "expected_sessions": 500,
+            "fees_to_initial_equity": {
+              "status": "available",
+              "value": 0.01
+            },
+            "initial_equity": "10000.00",
+            "maximum_drawdown": {
+              "status": "available",
+              "value": 0.09090909090909091
+            },
+            "mean_session_equity": {
+              "status": "available",
+              "value": 10500.0
+            },
+            "missing_equity_sessions": 0,
+            "policy": {
+              "annualization_sessions": 252,
+              "benchmark": null,
+              "curve_sampling": "session_close",
+              "formula_id": "qf.performance.v1",
+              "frequency": "tick",
+              "reference_calendar": "synthetic_d11_module_calendar",
+              "risk_free_rate": "0",
+              "statistic_precision": "float64; exact money strings",
+              "statistics_sampling": "session_close; initial capital is the interval origin; ddof=1",
+              "turnover_definition": "(buy_notional+sell_notional)/(2*mean(all valid session-close equities)); NA on gaps"
+            },
+            "sampled_sessions": 500,
+            "sharpe": {
+              "status": "available",
+              "value": 0.7551726387295257
+            },
+            "terminal_equity": "10000",
+            "trades": {
+              "account_totals": null,
+              "account_totals_unavailable_reason": "ACCOUNT_TOTALS_UNAVAILABLE",
+              "buy_fills": 10000,
+              "buy_notional": "100000",
+              "buy_quantity": "10000",
+              "fill_fees": "100.00",
+              "fills": 10000,
+              "mean_fill_notional": {
+                "status": "available",
+                "value": 10.0
+              },
+              "order_state_events": {},
+              "sell_fills": 0,
+              "sell_notional": "0",
+              "sell_quantity": "0",
+              "total_notional": "100000"
+            },
+            "turnover": {
+              "status": "available",
+              "value": 4.761904761904762
+            },
+            "valid_return_samples": 500,
+            "volatility": {
+              "status": "available",
+              "value": 1.5168115033691056
+            }
+          },
+          "result_bytes": 2292983,
+          "schema_id": "qf.results.v1"
+        },
+        "shards": 3
+      }
+    }
+  ],
+  "write_failure": {
+    "events": 20000,
+    "file_limit_bytes": 1024,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3
+    ],
+    "virtual_memory_limit_bytes": 134217728,
+    "peak_child_rss_kib": 8800,
+    "cpu_seconds": 0.0041259999999999995,
+    "wall_seconds": 0.008668758000112575,
+    "packet": {
+      "failure": {
+        "code": "RESULT_BUDGET_EXCEEDED",
+        "message": "结果容量、文件完整性或提交失败",
+        "operation": "result_sink",
+        "scope": {}
+      },
+      "outcome": {
+        "error": {
+          "code": "RESULT_BUDGET_EXCEEDED",
+          "message": "结果容量、文件完整性或提交失败",
+          "operation": "result_sink",
+          "scope": {}
+        },
+        "partial": true,
+        "status": "failed"
+      },
+      "probe": "D11_MODULE_ONLY",
+      "processed_events": 6000,
+      "requested_events": 20000
+    }
+  }
+}

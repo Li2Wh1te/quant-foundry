@@ -32,6 +32,10 @@ pub struct OrderActivation {
 /// D06 supplies order storage and atomic command processing with D09's account.
 /// No matcher can see ineligible orders: the driver filters before consume().
 pub trait ExecutionPort: AccountPort {
+    /// Read-only D09 totals, never inferred by the analyzer from positions.
+    fn analysis_totals(&self) -> Option<crate::accounting::AccountTotals> {
+        None
+    }
     fn submit_order(
         &mut self,
         intent: &OrderIntent,
@@ -201,6 +205,14 @@ pub trait StrategyDataPort {
     fn publish(&mut self, event: &MarketEvent) -> QfResult<()>;
     fn check(&mut self) -> QfResult<DependencyCheck>;
     fn close(&mut self) -> QfResult<()>;
+    /// An aligned observed benchmark sample; absence stays explicit in D11.
+    fn benchmark(
+        &self,
+        _security: &SecurityKey,
+        _at: Nanoseconds,
+    ) -> QfResult<Option<crate::analysis::BenchmarkPoint>> {
+        Ok(None)
+    }
     fn current_data(&self, _securities: &[SecurityKey]) -> QfResult<Vec<MarketEvent>> {
         Err(error(
             ErrorCode::CapabilityUnavailable,
@@ -360,6 +372,7 @@ pub struct EngineConfig {
 }
 pub struct Engine<S> {
     config: EngineConfig,
+    analysis: Option<crate::analysis::Performance>,
     normalized_match_parameters: Option<(crate::types::ExactDecimal, crate::types::ExactDecimal)>,
     calendar: SessionCalendar,
     merge: crate::clock::StreamingMerge<S>,
@@ -407,6 +420,7 @@ impl BoundaryBudget {
     }
 }
 struct Output {
+    analysis: Option<crate::analysis::Performance>,
     pending: VecDeque<ResultRecord>,
     bytes: usize,
     next_sequence: u64,
@@ -441,8 +455,9 @@ fn encoded_len(value: &impl serde::Serialize, maximum: usize) -> QfResult<usize>
     Ok(counter.bytes)
 }
 impl Output {
-    fn new() -> Self {
+    fn new(analysis: Option<crate::analysis::Performance>) -> Self {
         Self {
+            analysis,
             pending: VecDeque::new(),
             bytes: 0,
             next_sequence: 1,
@@ -462,6 +477,13 @@ impl Output {
                 "result_sink",
                 "回调内待发结果超过预算",
             ));
+        }
+        if let Some(analysis) = &mut self.analysis {
+            match &record {
+                ResultRecord::Order(order) => analysis.order(order)?,
+                ResultRecord::Trade(fill) => analysis.fill(fill)?,
+                _ => (),
+            }
         }
         self.bytes += bytes;
         self.pending.push_back(record);
@@ -896,6 +918,11 @@ impl<S: EventSource> Engine<S> {
             calendar,
             sources,
         )?;
+        engine.analysis = Some(crate::analysis::Performance::from_run(
+            config,
+            engine.calendar.reference(),
+            engine.calendar.sessions().len() as u64,
+        )?);
         engine.normalized_match_parameters = Some((config.participation_rate, config.slippage_bps));
         Ok(engine)
     }
@@ -922,6 +949,7 @@ impl<S: EventSource> Engine<S> {
         Ok(Self {
             config,
             normalized_match_parameters: None,
+            analysis: None,
             calendar,
             merge,
         })
@@ -947,7 +975,7 @@ impl<S: EventSource> Engine<S> {
             registration: Registration::new(&self.config.universe, self.config.frequency)
                 .expect("validated registration"),
             pending: VecDeque::new(),
-            output: Output::new(),
+            output: Output::new(self.analysis.take()),
             budget: BoundaryBudget::new(),
             command_sequence: 0,
             progress: Progress {
@@ -967,6 +995,13 @@ impl<S: EventSource> Engine<S> {
             } else {
                 cleanup_errors.push(failure);
             }
+        }
+        if result.is_ok() {
+            result = runtime
+                .complete_results(&self.config)
+                .and_then(|_| runtime.flush())
+                .and_then(|_| runtime.check_data())
+                .and_then(|_| runtime.ports.control.check());
         }
         if result.is_ok() {
             result = runtime
@@ -1147,6 +1182,80 @@ where
         }
         Ok(())
     }
+    fn benchmark_sample(
+        &self,
+        at: Nanoseconds,
+    ) -> QfResult<Option<crate::analysis::BenchmarkPoint>> {
+        let Some(name) = self
+            .output
+            .analysis
+            .as_ref()
+            .and_then(|a| a.policy().benchmark.as_ref())
+        else {
+            return Ok(None);
+        };
+        self.ports.data.benchmark(&SecurityKey::new(name)?, at)
+    }
+    fn sample_close(&mut self, session: &CalendarSession, config: &EngineConfig) -> QfResult<()> {
+        if self.output.analysis.is_none() {
+            return Ok(());
+        }
+        let at = session.session.close_ns;
+        let equity = self.ports.execution.value(at)?.total_value;
+        let benchmark = self.benchmark_sample(at)?;
+        let point = self.output.analysis.as_mut().expect("analysis").session(
+            self.progress.completed_sessions,
+            &session.session.key,
+            at,
+            equity,
+            equity.is_none().then(|| "MISSING_VALUATION".into()),
+            benchmark,
+        )?;
+        self.output
+            .push(ResultRecord::Equity(point), &config.limits)?;
+        self.flush()
+    }
+    fn sample_bar(
+        &mut self,
+        session: &CalendarSession,
+        time: Nanoseconds,
+        config: &EngineConfig,
+    ) -> QfResult<()> {
+        if self
+            .output
+            .analysis
+            .as_ref()
+            .is_some_and(|a| a.policy().curve_sampling == crate::run::ResultSampling::BarClose)
+            && time < session.session.close_ns
+        {
+            let equity = self.ports.execution.value(time)?.total_value;
+            let point = self.output.analysis.as_mut().expect("analysis").bar_curve(
+                &session.session.key,
+                time,
+                equity,
+            );
+            self.output
+                .push(ResultRecord::Equity(point), &config.limits)?;
+            self.flush()?;
+        }
+        Ok(())
+    }
+    fn complete_results(&mut self, config: &EngineConfig) -> QfResult<()> {
+        if let Some(analysis) = &self.output.analysis {
+            let summary = analysis.summary(self.ports.execution.analysis_totals());
+            self.output
+                .push(ResultRecord::Summary(Box::new(summary)), &config.limits)?;
+            self.flush()?;
+            let view = self.ports.execution.value(self.clock.visibility().now_ns)?;
+            for position in view.positions.into_values() {
+                self.ports.control.check()?;
+                self.output
+                    .push(ResultRecord::Position(position), &config.limits)?;
+                self.flush()?;
+            }
+        }
+        Ok(())
+    }
     fn close_accounts(&mut self, session: &CalendarSession, config: &EngineConfig) -> QfResult<()> {
         self.ports.control.check()?;
         self.clock.advance(session.session.close_ns)?;
@@ -1158,6 +1267,7 @@ where
             .execution
             .check_session_end(&session.session.key)?;
         self.write_corporate_effects(config)?;
+        self.sample_close(session, config)?;
         if closing_orders.len() > config.limits.max_notifications_per_boundary {
             return Err(error(
                 ErrorCode::ResourceLimit,
@@ -1452,6 +1562,19 @@ where
             // market result is produced. Required writer credit comes first.
             self.flush()?;
         }
+        if self.output.analysis.is_some() {
+            let at = calendar.sessions()[0].before_open_ns;
+            let benchmark = self.benchmark_sample(at)?;
+            let point = self
+                .output
+                .analysis
+                .as_mut()
+                .expect("analysis")
+                .begin(at, benchmark)?;
+            self.output
+                .push(ResultRecord::Equity(point), &config.limits)?;
+            self.flush()?;
+        }
         self.call(Call::Initialize, config, calendar, 0, false)?;
         self.registration.seal();
         // Validate all schedule/calendar precision before processing markets,
@@ -1578,6 +1701,7 @@ where
                         }
                         count += 1;
                     }
+                    self.sample_bar(session, time, config)?;
                     // ALL accounts and market publications at this Bar end are
                     // complete before notifications, timers, or handle_data.
                     if time >= session.session.close_ns && !session_closed {

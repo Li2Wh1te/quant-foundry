@@ -405,6 +405,8 @@ pub fn capabilities() -> Capabilities {
             "python_strategy_sdk".into(),
             "tick_callbacks".into(),
             "tick_matching".into(),
+            "session_performance".into(),
+            "bounded_result_shards".into(),
         ],
         execution_models: vec![
             ExecutionModel::BarNextIntervalV1,

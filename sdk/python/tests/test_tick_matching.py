@@ -135,7 +135,7 @@ class TickMatchingTests(unittest.TestCase):
                 self.assertEqual(summary['progress']['completed_events'], 5)
                 self.assertLessEqual(summary['merge']['peak_buffered_events'], batch_rows)
                 self.assertLessEqual(gateway.max_batch, batch_rows)
-                self.assertEqual(summary['portfolio']['positions']['A.SH']['quantity'], 100)
+                self.assertEqual(json.loads(result.page_json('positions', None, 1))['items'][0]['quantity'], 100)
                 self.assertEqual(Decimal(summary['portfolio']['cash']), Decimal('8991.70'))
                 self.assertEqual(len(trades(result)), 4)
             self.assertEqual([seq for _,seq,_ in seen], [1,2,3,4,5])

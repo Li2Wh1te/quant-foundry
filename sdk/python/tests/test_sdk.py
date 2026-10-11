@@ -95,7 +95,7 @@ class SDKTests(unittest.TestCase):
             result=self.run_strategy(SimpleNamespace(initialize=initialize,handle_data=bars,on_order=notify,on_trade=on_trade),wired,market_routes=routes)
             report=self.assertSucceeded(result)
             self.assertEqual(report['portfolio']['cash'],'9899.00')
-            self.assertEqual(report['portfolio']['positions']['A.SH']['quantity'],10)
+            self.assertEqual(page(result,'positions',limit=1)['items'][0]['quantity'],10)
             self.assertEqual(len([c for c in calls if c[0]=='bar']),3)
             self.assertEqual(len([c for c in calls if c[0]=='daily']),3)
             self.assertEqual(len(page(result,'trades')['items']),1)
@@ -161,7 +161,7 @@ class SDKTests(unittest.TestCase):
         trades=page(result,'trades')['items']
         self.assertTrue(trades)
         self.assertTrue(all(int(t['execution_time_ns'])>close for t in trades))
-        self.assertGreaterEqual(int(report['portfolio']['positions']['A.SH']['quantity']),2)
+        self.assertGreaterEqual(int(page(result,'positions',limit=1)['items'][0]['quantity']),2)
 
     def test_exception_source_location_expiration_and_cancel_release(self):
         saved=[]
@@ -486,13 +486,13 @@ from types import SimpleNamespace
 from quantfoundry._worker import _run_module
 os.umask(0o022)
 result=_run_module(SimpleNamespace(),json.load(sys.stdin))
-roots=list(Path(os.environ['TMPDIR']).glob('qf-d10-*'))
+roots=list(Path(os.environ['TMPDIR']).glob('qf-results-*'))
 assert len(roots)==1
 assert stat.S_IMODE(roots[0].stat().st_mode)==0o700
 files=list(roots[0].iterdir())
 assert files and all(stat.S_IMODE(path.stat().st_mode)==0o600 for path in files)
 del result
-assert not list(Path(os.environ['TMPDIR']).glob('qf-d10-*'))
+assert not list(Path(os.environ['TMPDIR']).glob('qf-results-*'))
 print('private result owner released')
 """
             process=subprocess.run([sys.executable,'-I','-c',program],input=json.dumps(spec(days=1)),
