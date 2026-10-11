@@ -176,7 +176,9 @@ def main():
         return 0 if summary['outcome']['status'] == 'succeeded' else 1
     except BaseException as error:
         diagnostic = json.loads(_native.strategy_error_json(error))
-        print(_json({'outcome':{'status':'failed','error':diagnostic,'partial':False},'production_executed':False}))
+        outcome = ({'status':'cancelled','partial':False} if diagnostic['code']=='CANCELLED'
+            else {'status':'failed','error':diagnostic,'partial':False})
+        print(_json({'outcome':outcome,'production_executed':False}))
         return 1
     finally:
         if result is not None:

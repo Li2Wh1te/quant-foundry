@@ -56,6 +56,8 @@ requested page (1–10000), also bounded to the control-message byte allowance.
 Cursors identify this result owner and an already emitted trade sequence.
 Result.close (or owner drop) releases the private temporary files. This local
 writer is the D10 worker seam; D13 still owns durable trusted result persistence.
+Temporary directories/files explicitly use permissions 0700/0600 regardless of
+the caller's umask. These contain bounded business results, never copied market history.
 The summary's `logs_truncated` reports both message clipping and logs omitted
 after the run allowance, including an exact boundary with no clipped message.
 

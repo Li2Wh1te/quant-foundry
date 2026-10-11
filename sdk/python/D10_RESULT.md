@@ -32,6 +32,8 @@ Validation:
 - An independent read-only reviewer reproduced and checked fixes for worker
   module identity, IPC/connect deadlines, SyntaxError location, unknown quote
   staleness, setup cancellation state and visible run-log truncation.
+  Temporary result directories/files explicitly use 0700/0600 and are checked
+  in a fresh process with umask 022, including owner-drop cleanup.
 - `backend/tests/test_s3_data_gateway.py` adds a required S3-CI CurrentStore →
   bounded Arrow → Rust Engine → Python query/order/cancel/notification test with
   explicit synthetic rules and stored prices. Local execution is honestly

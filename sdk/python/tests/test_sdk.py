@@ -342,6 +342,14 @@ sys.meta_path.insert(0, RefuseLegacy())
             self.assertEqual(error['code'],'STRATEGY_ERROR');self.assertEqual(error['scope']['file'],'broken_strategy.py')
             self.assertEqual(error['scope']['line'],'1');self.assertNotIn(directory,json.dumps(error))
 
+    def test_worker_import_keyboard_interrupt_is_cancelled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            strategy=Path(directory)/'cancel_strategy.py';strategy.write_text('raise KeyboardInterrupt\n')
+            process=subprocess.run([sys.executable,'-I','-m','quantfoundry._worker','--strategy',str(strategy),'--isolated-test'],
+                input=json.dumps({'spec':spec(days=1)}),text=True,capture_output=True,timeout=10,cwd=directory)
+            self.assertEqual(process.returncode,1)
+            self.assertEqual(json.loads(process.stdout)['outcome'],{'status':'cancelled','partial':False})
+
     def test_native_source_closes_when_callback_raises_after_arrow_query(self):
         source=spec(days=1)
         with ipc_spec(source,batch_rows=1) as (wired,gateway,routes):
@@ -468,3 +476,25 @@ sys.meta_path.insert(0, RefuseLegacy())
         def invalid(c): run_daily(lambda c:None,time='10:15')
         result=self.run_strategy(SimpleNamespace(initialize=invalid),source)
         self.assertEqual(summary(result)['outcome']['error']['code'],'CAPABILITY_UNAVAILABLE')
+
+    def test_result_files_are_private_even_with_permissive_umask_and_drop_releases(self):
+        import os
+        with tempfile.TemporaryDirectory() as directory:
+            program="""import json,os,stat,sys
+from pathlib import Path
+from types import SimpleNamespace
+from quantfoundry._worker import _run_module
+os.umask(0o022)
+result=_run_module(SimpleNamespace(),json.load(sys.stdin))
+roots=list(Path(os.environ['TMPDIR']).glob('qf-d10-*'))
+assert len(roots)==1
+assert stat.S_IMODE(roots[0].stat().st_mode)==0o700
+files=list(roots[0].iterdir())
+assert files and all(stat.S_IMODE(path.stat().st_mode)==0o600 for path in files)
+del result
+assert not list(Path(os.environ['TMPDIR']).glob('qf-d10-*'))
+print('private result owner released')
+"""
+            process=subprocess.run([sys.executable,'-I','-c',program],input=json.dumps(spec(days=1)),
+                text=True,capture_output=True,timeout=10,env={**os.environ,'TMPDIR':directory})
+            self.assertEqual(process.returncode,0,process.stdout+process.stderr)

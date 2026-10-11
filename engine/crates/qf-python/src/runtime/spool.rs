@@ -4,8 +4,9 @@ use qf_core::run::{MAX_CONTROL_BYTES, RunOutcome};
 use qf_core::{ErrorCode, QfError, QfResult};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
-use std::fs::{File, OpenOptions};
+use std::fs::{DirBuilder, File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -54,7 +55,10 @@ impl Spool {
         let nonce = NONCE.fetch_add(1, Ordering::Relaxed);
         let token = format!("{}-{nonce}-{run_id}", std::process::id());
         let directory = std::env::temp_dir().join(format!("qf-d10-{}-{nonce}", std::process::id()));
-        std::fs::create_dir(&directory).map_err(|_| failure())?;
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&directory)
+            .map_err(|_| failure())?;
         Ok(Self {
             directory,
             token,
@@ -71,6 +75,7 @@ impl Spool {
             let open = |suffix| {
                 OpenOptions::new()
                     .create_new(true)
+                    .mode(0o600)
                     .read(true)
                     .write(true)
                     .open(self.directory.join(format!("{name}.{suffix}")))
