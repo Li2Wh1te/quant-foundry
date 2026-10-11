@@ -40,7 +40,10 @@ fn return_rate(value: Money, base: Money) -> Metric {
     }
     match value.checked_sub(base) {
         Ok(delta) => metric(float(delta) / float(base)),
-        Err(_) => na("NUMERIC_RANGE_UNSUPPORTED"),
+        // Research ratios are float64, not a cash settlement. Opposite-scale
+        // valid money (e.g. 100 and 1e-28) can have an unrepresentable Decimal
+        // difference although the wealth ratio is perfectly valid.
+        Err(_) => metric(float(value) / float(base) - 1.0),
     }
 }
 fn available(m: &Metric) -> Option<f64> {
@@ -458,8 +461,17 @@ impl Performance {
                 available(&cumulative).map_or_else(
                     || na("NUMERIC_RANGE_UNSUPPORTED"),
                     |r| {
+                        // Preserve near-total losses: float (1+r) can become 0
+                        // while the exact terminal/initial wealth is positive.
+                        // log1p keeps tiny ordinary returns precise instead.
+                        let log_wealth = if r > -0.5 {
+                            r.ln_1p()
+                        } else {
+                            (float(self.terminal.expect("valid terminal")) / float(self.initial))
+                                .ln()
+                        };
                         metric(
-                            (r.ln_1p() * self.policy.annualization_sessions as f64
+                            (log_wealth * self.policy.annualization_sessions as f64
                                 / self.sessions as f64)
                                 .exp_m1(),
                         )
@@ -488,9 +500,21 @@ impl Performance {
             })
             .map_or_else(
                 || {
-                    let rf_daily = (float(self.policy.risk_free_rate).ln_1p()
-                        / self.policy.annualization_sessions as f64)
-                        .exp_m1();
+                    let rf = float(self.policy.risk_free_rate);
+                    let rf_log = if rf > -0.5 {
+                        rf.ln_1p()
+                    } else {
+                        // A valid Decimal rf>-1 must not round to float -1
+                        // before its annual-to-session growth conversion.
+                        float(
+                            self.policy
+                                .risk_free_rate
+                                .checked_add(Money::ONE)
+                                .expect("negative rf>-1 has representable positive growth"),
+                        )
+                        .ln()
+                    };
+                    let rf_daily = (rf_log / self.policy.annualization_sessions as f64).exp_m1();
                     metric(
                         (self.returns.mean - rf_daily) / std.unwrap()
                             * (self.policy.annualization_sessions as f64).sqrt(),

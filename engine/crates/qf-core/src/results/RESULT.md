@@ -25,16 +25,17 @@ S2 已合并的 main `7f18987a86e6311b3367f4d7be6da61406454b80`，无文件冲�
 Rust 1.90.0、Python 3.12.2，原生 Linux 隔离夹具，未访问生产或供应商。
 
 - `QF_S3_PYTHON=backend/.venv/bin/python bash scripts/test_s3_engine.sh`：
-  fmt/clippy、workspace Rust 240 项、公共核心契约、生成 DTO、仓库 Python 18 项、
+  fmt/clippy、workspace Rust 241 项、公共核心契约、生成 DTO、仓库 Python 18 项、
   release wheel 构建/独立安装和 SDK 66 项通过。
-- `cargo test -p qf-core --locked --test analysis_results`：19 项通过。
+- `cargo test -p qf-core --locked --test analysis_results`：20 项通过。
   收益 `[0.1,-0.2,0.2]` 的样本方差手算 `13/300`，回撤 `0.2`；
   真 D09/D10 买 100×10+1、卖 40×12−1，权益 10198、费用 2、总成交额 1480、
   剩余成本 600.6、已实现 78.6。空/单点/零波动/缺估值/无及错位基准/
   循环小数、分钟/Tick 年化不随事件数改变均有独立预期。
 - 对抗复核补强并验证：分片软/硬链接、目录替换、已封存文件损坏/权限变化、
   最终 manifest 替换/已有目标、提交时取消、信用阻塞/断流、记录预算、空日志洪泛、
-  SDK 用户 record 名与时间字段重名。公式常规浮点断言误差 <=1e-11；
+  SDK 用户 record 名与时间字段重名；接近全损/无风险收益 -1 时先保留精确正
+  增长量再取对数，避免 float 1+r 变零。公式常规浮点断言误差 <=1e-11；
   `1e-20` 微小精确权益变化的收益断言误差 <1e-30。复核为本次独立手算和第二遍
   源码/对抗检查，没有声称额外人员或子代理审批。
 - 受保护账户/策略/历史读取六个 backend 模块：78 passed。

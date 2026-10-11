@@ -277,6 +277,35 @@ fn configured_annual_basis_and_nonzero_risk_free_have_independent_oracle() {
     assert_eq!(s.policy.annualization_sessions, 2);
     assert_eq!(s.policy.risk_free_rate.to_string(), "0.21");
 }
+
+#[test]
+fn near_total_loss_and_near_minus_one_risk_free_keep_positive_growth() {
+    let mut c = serde_json::to_value(config()).unwrap();
+    c["initial_cash"] = serde_json::json!("100");
+    c["annualization_sessions"] = serde_json::json!(1);
+    let mut p =
+        Performance::from_run(&serde_json::from_value(c.clone()).unwrap(), "fixture", 252).unwrap();
+    p.begin(Nanoseconds::new(0), None).unwrap();
+    for i in 0..252 {
+        sample(&mut p, i, Some("0.0000000000000000000000000001"));
+    }
+    near(
+        &p.summary(None).annualized_return,
+        1e-30_f64.powf(1.0 / 252.0) - 1.0,
+    );
+    c["annualization_sessions"] = serde_json::json!(252);
+    c["risk_free_rate"] = serde_json::json!("-0.9999999999999999999999999999");
+    let mut p = Performance::from_run(&serde_json::from_value(c).unwrap(), "fixture", 2).unwrap();
+    p.begin(Nanoseconds::new(0), None).unwrap();
+    sample(&mut p, 0, Some("110"));
+    sample(&mut p, 1, Some("132"));
+    // Annual growth is 10^-28, so session growth is 10^(-28/252)=10^(-1/9).
+    let rf_daily = 10.0_f64.powf(-1.0 / 9.0) - 1.0;
+    near(
+        &p.summary(None).sharpe,
+        (0.15 - rf_daily) / 0.005_f64.sqrt() * 252.0_f64.sqrt(),
+    );
+}
 #[test]
 fn fine_curve_peak_is_separate_from_default_daily_drawdown() {
     let mut p = make(1);

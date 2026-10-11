@@ -12,10 +12,14 @@ D05's `indicators.rs` remains the only technical-indicator implementation.
 
 For initial equity E0 and n accepted close samples E1..En:
 
-- Session return: Et/E(t-1)-1. The exact subtraction precedes the statistical
-  float conversion. A missing close breaks both adjacent returns. It remains a
+- Session return: Et/E(t-1)-1. When representable, the exact subtraction precedes
+  float conversion to retain tiny changes. Otherwise valid, differently scaled
+  money uses the float64 wealth ratio; no account value is rounded or changed.
+  A missing close breaks both adjacent returns. It remains a
   curve point; no forward fill, zero fill or skip-and-splice occurs.
 - Cumulative: En/E0-1. Annualized: expm1(log1p(cumulative)*A/n).
+  Near -1, the log uses the exact positive wealth ratio before float conversion,
+  avoiding a rounded float 1+r=0; the same protection applies to annual rf.
 - Drawdown: Et/max(E0..Et)-1; maximum drawdown is a nonnegative loss fraction.
   Summary statistics use session peaks; optional Bar curves use their own
   observed curve peak and flag gaps without changing statistical frequency.
