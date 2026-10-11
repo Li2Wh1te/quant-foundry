@@ -1,0 +1,19 @@
+{
+  "kind": "synthetic_business_oracles",
+  "production_executed": false,
+  "cases": [
+    {"id":"cash_conservation","rules":"synthetic T0, integer quantities, fee=1 per order","initial_cash":"10000","actions":[{"buy":100,"price":"10","fee":"1"},{"sell":40,"price":"12","fee":"1"}],"expected":{"cash":"9478","quantity":60,"mark_price":"12","equity":"10198","remaining_cost":"600.6","realized_pnl":"78.6"}},
+    {"id":"cash_dividend","initial_quantity":100,"initial_price":"10","cash_dividend_per_share":"0.2","ex_price":"9.8","expected_before_payment":{"receivable":"20","market_value":"980","equity":"1000"},"expected_after_payment":{"cash_increase":"20","receivable":"0","equity":"1000"}},
+    {"id":"split","initial_quantity":100,"initial_price":"10","split_ratio":"2","expected":{"quantity":200,"price":"5","market_value":"1000"}},
+    {"id":"nanosecond_identity","timestamps_ns":["1767225600000000123","1767225600000000123"],"sequence":["1","2"],"expected_events":2},
+    {"id":"lookahead","current_ns":"1767225600000000123","request_end_ns":"1767225600000000124","expected_error":"LOOKAHEAD_FORBIDDEN"},
+    {"id":"data_changed","first_read_generation":10,"next_read_generation":11,"expected_terminal":"DATA_CHANGED"},
+    {"id":"repeating_average_cost","cost_basis_total":"1","quantity":3,"display_scale":12,"rounding":"half_even","expected":{"display_average_cost":"0.333333333333","all_sold_cost_released":"1","remaining_cost":"0"}},
+    {"id":"half_even_midpoints","input":["0.005","0.015"],"scale":2,"expected":["0.00","0.02"]},
+    {"id":"same_bar_cross_symbol","interval_start_ns":"100","interval_end_ns":"200","callback_after_symbol":"A","new_order_security":"B","expected":"not_fill_in_B_interval_100_200"},
+    {"id":"after_close_day_order","submitted":"S1.after_close","expected_eligible_session":"S2","expected_expiry":"S2.after_last_market_event_before_after_close"},
+    {"id":"quote_budget_repeat","side":"ask","quote_price":"10","display_quantity":100,"participation":"1","events":["q1","q2_same_price_and_size"],"orders":[60,60],"expected_fills":[60,40]},
+    {"id":"unfilled_sale_not_cash","cash":"0","sale_pending_proceeds":"1000","new_buy_cost":"900","expected":"INSUFFICIENT_CASH"}
+  ],
+  "note":"These expected values are independent small examples, not outputs of the existing Python engine. Development adds trade-rule and public-API cases."
+}

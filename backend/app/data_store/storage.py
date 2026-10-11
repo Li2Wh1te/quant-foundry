@@ -623,6 +623,14 @@ class CurrentStore:
         from .readers import read_many
         return read_many(self, queries, expected_generations=expected_generations, cancelled=cancelled)
 
+    @_public_errors
+    def read_arrow(self, spec, query, *, expected_generation=None, cancelled=None):
+        """Internal bounded projection; identical locks, budgets and quality gate."""
+        from .readers import read_many
+        expected = None if expected_generation is None else {spec.name: expected_generation}
+        return read_many(self, [(spec, query)], expected_generations=expected,
+                         cancelled=cancelled, arrow=True)[0]
+
     def _summary(self, dataset, outcome, metrics):
         from .maintenance import write_summary
         try:

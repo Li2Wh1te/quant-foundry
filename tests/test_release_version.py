@@ -72,6 +72,22 @@ class ReleaseVersionTestCase(unittest.TestCase):
                 package_json_file=self.package_json_file,
             )
 
+    def test_rust_workspace_and_dynamic_sdk_share_the_release_version(self) -> None:
+        engine_manifest = self.root / "engine" / "Cargo.toml"
+        engine_manifest.parent.mkdir()
+        engine_manifest.write_text('[workspace.package]\nversion = "0.1.0"\n')
+        engine_lock = engine_manifest.with_name("Cargo.lock")
+        engine_lock.write_text('version = 4\n[[package]]\nname = "qf-core"\nversion = "0.1.0"\n'
+                               '[[package]]\nname = "qf-python"\nversion = "0.1.0"\n')
+        set_version("0.2.0", version_file=self.version_file,
+                    pyproject_file=self.pyproject_file, package_json_file=self.package_json_file)
+        self.assertIn('version = "0.2.0"', engine_manifest.read_text())
+        self.assertEqual(engine_lock.read_text().count('version = "0.2.0"'), 2)
+        engine_manifest.write_text('[workspace.package]\nversion = "0.3.0"\n')
+        with self.assertRaisesRegex(VersionError, "engine/Cargo.toml"):
+            check_version_consistency(version_file=self.version_file,
+                                      pyproject_file=self.pyproject_file, package_json_file=self.package_json_file)
+
 
 if __name__ == "__main__":
     unittest.main()

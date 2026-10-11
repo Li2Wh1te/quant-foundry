@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:quantfoundry:backtest-run-v2",
+  "title": "Quant Foundry RunConfig v1.1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["api_schema", "strategy_revision_id", "account_id", "start", "end", "frequency", "universe", "parameters", "execution_model", "initial_cash"],
+  "properties": {
+    "api_schema": {"const": "qf.backtest.v2"},
+    "strategy_revision_id": {"type": "string", "minLength": 1},
+    "account_id": {"type": "string", "minLength": 1},
+    "start": {"type": "string", "format": "date"},
+    "end": {"type": "string", "format": "date"},
+    "frequency": {"enum": ["1d", "1m", "5m", "15m", "30m", "60m", "tick"]},
+    "universe": {"type": "array", "minItems": 1, "maxItems": 10000, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "parameters": {"type": "object", "maxProperties": 128, "description": "JSON only; root container depth <=8 and compact sorted UTF-8 bytes <=64KiB checked by Rust."},
+    "execution_model": {"enum": ["bar_next_interval_v1", "trade_tick_v1", "quote_tick_v1"]},
+    "benchmark": {"type": ["string", "null"]},
+    "seed": {"type": "integer", "minimum": 0, "maximum": 2147483647, "default": 0},
+    "result_sampling": {"enum": ["session_close", "bar_close"], "default": "session_close"},
+    "cost_overrides": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"commission_rate": {"$ref": "#/$defs/unit_decimal"}, "minimum_commission": {"$ref": "#/$defs/nonnegative_decimal"}},
+      "description": "Commission options only; mandatory dated fees remain rule-derived, with included components charged once."
+    },
+    "initial_cash": {"$ref": "#/$defs/positive_decimal", "description": "Explicit initial CNY cash; no implicit amount from account selection."},
+    "currency": {"const": "CNY", "default": "CNY"},
+    "reference_calendar": {"type": "string", "minLength": 1, "maxLength": 128},
+    "participation_rate": {"$ref": "#/$defs/unit_decimal", "default": "0.10"},
+    "slippage_bps": {"$ref": "#/$defs/nonnegative_decimal", "default": "0"},
+    "risk_free_rate": {"$ref": "#/$defs/decimal", "default": "0"},
+    "annualization_sessions": {"type": "integer", "minimum": 1, "maximum": 366, "default": 252}
+  },
+  "$comment": "Shape only: enable explicit format checks. Rust also validates start<=end, decimal storage, 0<participation_rate<=1, 0<=slippage_bps<=10000, risk_free_rate>-1, params depth/bytes and bounded labels. D13 must additionally validate ownership, actual capabilities, dated fees/rules, unambiguous calendar and resource quotas; D01 never advertises execution support.",
+  "$defs": {
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", "maxLength": 128},
+    "positive_decimal": {"type": "string", "pattern": "^(?=.{1,128}$)(?=.*[1-9])(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", "maxLength": 128},
+    "nonnegative_decimal": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$", "maxLength": 128},
+    "unit_decimal": {"type": "string", "pattern": "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$", "maxLength": 128}
+  },
+  "allOf": [{
+    "if": {"properties": {"frequency": {"const": "tick"}}},
+    "then": {"properties": {"execution_model": {"enum": ["trade_tick_v1", "quote_tick_v1"]}, "result_sampling": {"const": "session_close"}}},
+    "else": {"properties": {"execution_model": {"const": "bar_next_interval_v1"}}}
+  }]
+}

@@ -1,0 +1,12 @@
+{
+  "kind": "quote_tick",
+  "event": {
+    "security": "510300.SH",
+    "session": "SSE:2026-01-01",
+    "identity": {"source_session": "fixture-session", "channel": "fixture-quote", "sequence": "2", "stable_input_sequence": "2"},
+    "time_ns": "1767225600000000123",
+    "bid": "9.99", "ask": "10.01",
+    "bid_quantity": 100, "ask_quantity": 200,
+    "units": {"price_currency": "CNY", "quantity_unit": "shares"}
+  }
+}
