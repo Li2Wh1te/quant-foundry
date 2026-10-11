@@ -28,7 +28,7 @@ scope.dispose();
   status additionally accepts `state?`. Catalog defaults: 100/page, 10 pages, 1000 items.
 - `CatalogSnapshot`: `items,total,phase,next_offset,complete,incompleteReason,counts,readAt,error`.
   The server total and loaded item count are distinct; incomplete snapshots have `counts=null`.
-- `currentStatus`, `updateStatus`, `issueReason`, `frequencyLabel`, `datasetPresentation`,
+- `currentStatus`, `updateStatus`, `issueReason`, `frequencyLabel`, `datasetName`, `datasetPresentation`,
   `formatCount`, `formatValue`, `formatTimestamp`, `errorPresentation` return display-only values.
   Formatters preserve precise text. `representation` is the descriptor layout; queries use
   `preview_key.representation`. Units, price basis, coverage and history remain undeclared.

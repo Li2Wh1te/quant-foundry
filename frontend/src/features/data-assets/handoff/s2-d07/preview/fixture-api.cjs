@@ -8,7 +8,10 @@ const refusals = {
   'metadata-restricted-error': [409, 'DATA_RESTRICTED'],
   'metadata-changed-error': [409, 'DATA_CHANGED'],
   'metadata-rebuild-error': [409, 'REBUILD_REQUIRED'],
-  'metadata-missing-error': [404, 'DATASET_UNKNOWN']
+  'metadata-missing-error': [404, 'DATASET_UNKNOWN'],
+  'metadata-network-error': [502, 'NETWORK_ERROR'],
+  'metadata-file-invalid-error': [422, 'FILE_INVALID'],
+  'metadata-unknown-error': [503, 'UNEXPECTED_STORE_FAILURE']
 };
 const localIssues = ['issues-paged', 'issues-paged-changed', 'issues-paged-slow'];
 let scenario = 'normal';

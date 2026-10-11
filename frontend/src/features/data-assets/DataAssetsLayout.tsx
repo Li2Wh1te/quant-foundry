@@ -1,7 +1,7 @@
 import { RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { clearsPreview, createRequestScope, currentStatus, dataAssetsClient, DataStoreApiError, frequencyLabel, isCancellation,
+import { clearsPreview, createRequestScope, currentStatus, dataAssetsClient, datasetName, DataStoreApiError, frequencyLabel, isCancellation,
   type CurrentDataset, type RequestScope } from "./data";
 import { DatasetView } from "./DatasetView";
 import { PreviewPanel } from "./PreviewPanel";
@@ -20,6 +20,7 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [refreshVersion, setRefreshVersion] = useState(0);
+  const [previewVersion, setPreviewVersion] = useState(0);
   const active = useRef<RequestScope | null>(null);
   const scroll = useRef<Record<DataAssetsView, number>>({ overview: 0, preview: 0, updates: 0 });
   const clear = useCallback(() => {
@@ -36,6 +37,12 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
       .then(result => { if (!disposed) setDataset(result); })
       .catch(problem => {
         if (disposed || isCancellation(problem)) return;
+        // A failed metadata check leaves generation/schema/permission freshness
+        // unknown. Retain explanatory metadata when appropriate, but unmount the
+        // preview session so neither an old page nor its cursors can continue.
+        // PreviewPanel remembers the consumed navigation action and will wait
+        // for an explicit reread after this remount, including GET recovery.
+        setPreviewVersion(value => value + 1);
         // A metadata refresh can revoke the same read boundary as /query.
         // Unmount all object panels before reporting an authoritative refusal,
         // so an older successful preview cannot remain visible as current data.
@@ -62,7 +69,7 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
   }
 
   return <section className="qf-assets" aria-busy={busy}>
-    <WorkspaceHeader title={dataset?.name ?? "数据集详情"}
+    <WorkspaceHeader title={dataset ? datasetName(dataset) : "数据集详情"}
       description={dataset ? `${frequencyLabel(dataset.frequency)} · ${dataset.source}` : "查看当前数据集、字段和能力说明。"}
       back={<Link className="qf-assets-back" to={catalogHref(params)}>← 数据资产</Link>}
       status={dataset && <span className={`qf-assets-state state-${dataset.status}`}>{currentStatus(dataset.status).label}</span>}
@@ -74,7 +81,7 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
           查看当前数据
         </button>}
       </>} />
-    {error && <LocalNotice tone="error">{error}{dataset && " 当前保留上次读取的数据集摘要。"}</LocalNotice>}
+    {error && <LocalNotice tone="error">{error}{dataset && " 当前保留上次读取的数据集摘要；旧数据预览及分页已清除。"}</LocalNotice>}
     {dataset?.status === "rebuilding" && <LocalNotice tone="warning">当前数据暂不可读取，请稍后刷新页面。</LocalNotice>}
     <DatasetTabs value={view} onChange={changeView} />
     {/* Keep same-object panels mounted so tab navigation preserves local inputs,
@@ -83,7 +90,7 @@ export function DataAssetsLayout({ datasetId }: DataAssetsLayoutProps) {
       id={`qf-assets-panel-${panel}`} role="tabpanel" aria-labelledby={`qf-assets-tab-${panel}`}
       tabIndex={0} hidden={view !== panel} className="qf-assets-panel">
       {dataset ? panel === "overview" ? <DatasetView dataset={dataset} />
-        : panel === "preview" ? <PreviewPanel dataset={dataset} />
+        : panel === "preview" ? <PreviewPanel key={previewVersion} dataset={dataset} />
         : <UpdateIssuesPanel dataset={dataset} refreshVersion={refreshVersion} />
         : !error && <div className="qf-assets-loading" role="status">正在读取数据集详情…</div>}
     </div>)}

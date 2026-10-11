@@ -1,7 +1,7 @@
 import { CheckCircle2, CircleAlert, CircleHelp, Clock3, Copy, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { createRequestScope, currentStatus, dataAssetsClient, DataStoreApiError, formatCount as count,
+import { createRequestScope, currentStatus, dataAssetsClient, datasetName, DataStoreApiError, formatCount as count,
   formatTimestamp as time, frequencyLabel, isCancellation, updateStatus,
   type CatalogSnapshot, type CurrentDataset, type RequestScope, type StatusPresentation } from "./data";
 import { Select } from "../../components/controls/Select";
@@ -14,37 +14,8 @@ const PAGE_SIZE = 20;
 const collator = new Intl.Collator("zh-CN", { numeric: true, sensitivity: "base" });
 const knownStatuses = ["available", "restricted", "not_checked", "empty", "rebuild_required", "rebuilding"];
 
-// Translate only the native titles emitted by the inspected server registry.
-// A new or already descriptive server name remains intact; aliases never change
-// identity, source, price basis, units, coverage, or a server availability fact.
-const nativeTitles: Record<string, string> = {
-  stock_daily: "股票日频", etf_daily: "ETF 日频", index_daily: "指数日频",
-  tick: "逐笔数据", intraday_bar: "分钟行情", calendar: "交易日历", exchange_calendar: "交易所日历",
-  fund_news: "基金资讯", anomaly_stock: "个股异动", rank_trend: "排名趋势",
-  fund_holdings: "基金持仓", fund_stock_history: "基金股票持仓报告", fund_bond_history: "基金债券持仓报告",
-  stock_indicators: "股票财务指标", fund_financial_indicators: "基金财务指标",
-  fund_income: "基金利润报告", fund_balance: "基金资产负债报告",
-  stock_income: "股票利润报告", stock_balance: "股票资产负债报告", stock_cash_flow: "股票现金流报告",
-  fund_allocation: "基金资产配置", fund_industry: "基金行业配置", fund_holders: "基金持有人构成",
-  fund_top_holders: "基金主要持有人", fund_dividends: "基金分红", stock_actions: "股票公司行为",
-  fund_manager_performance: "基金经理业绩", fund_manager_style: "基金经理风格",
-  fund_returns: "基金收益", fund_drawdowns: "基金回撤", fund_performance_history: "基金业绩记录",
-  dragon_tiger: "龙虎榜", stock_auction: "股票竞价", auction_benchmark: "竞价基准",
-  limit_up: "涨停数据", limit_down: "跌停数据", limit_break: "炸板数据",
-  anomaly_list: "异动列表", limit_ladder: "连板记录", stock_quote: "股票行情",
-  etf_quote: "ETF 行情", index_quote: "指数行情", stock_valuation: "股票估值",
-  tickers: "标的资料", fund_company: "基金公司", fund_manager: "基金经理", fund_profile: "基金资料",
-  fund_nav: "基金净值", hot_list: "热度排名", skyrocket: "热度上升排名", hot_history: "热度排名记录",
-  fund_quota_summary: "基金额度摘要", fund_quota_list: "基金额度列表", fund_offerings: "基金发行",
-  fund_manager_experience: "基金经理任职经历", index_catalog: "指数分类", index_constituents: "指数成分",
-  etf_directory: "ETF 目录", etf_adjustment_factors: "ETF 调整因子",
-  corporate_action_facts: "公司行为事实", trading_status_facts: "交易状态事实"
-};
-
-export function catalogName(item: CurrentDataset): string {
-  const title = /^(市场|基金|标的|运维|数据) · ([a-z][a-z0-9_]*)$/.exec(item.name);
-  return title && Object.hasOwn(nativeTitles, title[2]) ? `${title[1]} · ${nativeTitles[title[2]]}` : item.name;
-}
+/** Compatibility export; every view uses D01's shared display alias. */
+export const catalogName = datasetName;
 
 function normalized(value: string): string { return value.normalize("NFKC").trim().toLocaleLowerCase("zh-CN"); }
 

@@ -168,6 +168,25 @@ async function storage(p) {
         await openRead(p); await scenario(name); const before = queryCount(); await refresh(p);
         await panel(p).getByRole('alert').waitFor(); assert.equal(await table(p).count(), 0); assert.equal(queryCount(), before);
       });
+      for (const name of ['metadata-network-error', 'metadata-file-invalid-error', 'metadata-unknown-error']) {
+        await check(`${name}: failed metadata refresh retains the summary and withdraws preview cursors until an explicit reread`, async () => {
+          await openRead(p); await scenario(name); const before = queryCount(); await refresh(p);
+          await p.getByRole('alert').waitFor();
+          await p.getByRole('heading', { name: title('daily'), exact: true }).waitFor();
+          assert.equal(await p.locator('.qf-preview-result').count(), 0, 'Unverified metadata cannot leave a current preview or continuation cursor');
+          assert.equal(await panel(p).getByRole('button', { name: '下一页', exact: true }).count(), 0);
+          assert.equal(queryCount(), before, 'A failed metadata refresh must not automatically repeat a query');
+          await shot(p, `${name}-390`);
+          await scenario('normal'); await refresh(p);
+          assert.equal(await table(p).count(), 0);
+          assert.equal(queryCount(), before, 'Metadata recovery still requires an explicit preview action');
+          await panel(p).getByRole('button', { name: '查看当前数据', exact: true }).click();
+          await table(p).waitFor();
+          await panel(p).getByRole('button', { name: '下一页', exact: true }).click();
+          await panel(p).getByText('第 2 页 · 本页 1 行', { exact: true }).waitFor();
+          assert.equal(queryCount(), before + 2, 'Explicit recovery starts a new bounded page sequence');
+        });
+      }
       for (const name of ['generation-next', 'restriction-next', 'query-changed', 'query-maintenance']) await check(`${name}: authoritative query clears results and never mixes pages`, async () => {
         await openRead(p); await scenario(name); await panel(p).getByRole('button', { name: '下一页', exact: true }).click();
         await panel(p).getByRole('alert').waitFor(); assert.equal(await p.locator('.qf-preview-result').count(), 0);
@@ -220,6 +239,10 @@ async function storage(p) {
           await p.locator('.qfo-nav-item').getByText(label, { exact: true }).click(); await p.waitForURL(`${base}${route}`);
           await p.locator('.qfo-main').waitFor(); assert.equal(await p.locator('.qf-assets').count(), 0);
         }
+        // URL navigation may finish before the previous shell's effects are
+        // disposed. Send the shortcut only after the target workspace renders.
+        await p.getByRole('heading', { name: '回测工作台', exact: true }).waitFor();
+        await p.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
         await p.keyboard.press('Control+k'); await p.getByRole('combobox', { name: '搜索页面或功能', exact: true }).fill('数据资产');
         await p.keyboard.press('Enter'); await p.waitForURL(`${base}/admin/data-assets`); await p.locator('.qf-catalog').waitFor();
         const before = requests.filter(r => r.path.includes('/data-store/')).length;
