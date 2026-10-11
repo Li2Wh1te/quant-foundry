@@ -1,44 +1,43 @@
-import { useEffect, useRef, useState } from "react";
-import { fetchBacktestResult, type BacktestResultPage } from "../../api/backtestRuns";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Select } from "../../components/controls/Select";
-import { displayNumber, RESULT_KINDS, type ResultRow } from "./resultData";
-import { finite } from "./workbench";
-const sides: Record<string, string> = { buy: "买入", sell: "卖出", long: "多头", short: "空头", net: "净持仓" };
-const statuses: Record<string, string> = { filled: "已成交", partially_filled: "部分成交", cancelled: "已取消", rejected: "已拒绝", submitted: "已提交", accepted: "已接受", pending: "待处理" };
-const stamp = (v: unknown) => v ? new Date(String(v)).toLocaleString("zh-CN", { hour12: false, timeZone: "Asia/Shanghai" }) : "—";
-function Instrument({ row }: { row: ResultRow }) { return <><strong>{row.event_display_name || row.event_name || row.event_trading_code || "标的展示信息未记录"}</strong><small>{row.event_trading_code || "代码未记录"}</small><details><summary>标的身份</summary><code>{row.instrument_id}</code></details></>; }
-/** Page only the selected evidence kind/date; a cursor is scoped to both. */
-export function ResultTables({ runId, dates, disabled, version }: { runId: string; dates: string[]; disabled: boolean; version: string }) {
-  const [kind, setKind] = useState("fills"), [date, setDate] = useState("");
-  const [cursors, setCursors] = useState<Array<string | undefined>>([undefined]);
-  const [storedPage, setPage] = useState<(BacktestResultPage & { scope: string }) | null>(null), [error, setError] = useState(""), [loading, setLoading] = useState(false), [retry, setRetry] = useState(0);
-  const selectedDate = dates.includes(date) ? date : dates.at(-1) || "";
-  const scope = `${runId}:${kind}:${kind === "positions" ? selectedDate : ""}`;
-  const page = storedPage?.scope === scope ? storedPage : null;
-  const cursorScope = `${kind}:${selectedDate}`;
-  const previousScope = useRef(cursorScope);
-  const cursor = previousScope.current === cursorScope ? cursors.at(-1) : undefined;
-  useEffect(() => { if (previousScope.current !== cursorScope) { previousScope.current = cursorScope; setCursors([undefined]); } }, [cursorScope]);
-  useEffect(() => {
-    const controller = new AbortController(); setError("");
-    if (disabled || kind === "positions" && !selectedDate) { setPage(null); return; }
-    setLoading(true);
-    fetchBacktestResult(runId, kind, cursor, controller.signal, kind === "positions" ? { start_time: selectedDate, end_time: selectedDate } : {}).then(value => {
-      if (!controller.signal.aborted) { if (value.truncated && !value.next_cursor || value.has_more && !value.next_cursor || value.next_cursor && cursors.includes(value.next_cursor)) throw new Error("明细分页异常，无法继续读取。"); setPage({ ...value, scope }); }
-    }).catch(e => { if (!controller.signal.aborted) setError(e.message); }).finally(() => { if (!controller.signal.aborted) setLoading(false); });
-    return () => controller.abort();
-  }, [runId, kind, selectedDate, cursor, disabled, version, retry]);
-  const change = (value: string) => { setKind(value); setCursors([undefined]); setPage(null); };
-  return <section className="qfr-card" id="holding"><header><h2>持仓与交易</h2><span>事件时名称与代码</span></header>
-    <div className="qfr-table-controls"><label>明细类型<Select value={kind} onChange={e => change(e.target.value)}>{Object.entries(RESULT_KINDS).filter(([key]) => !["data-preflight", "data-chunks"].includes(key)).map(([key, name]) => <option value={key} key={key}>{name}</option>)}</Select></label>
-    {kind === "positions" && <label>日终持仓时点<Select value={selectedDate} onChange={e => { setDate(e.target.value); setCursors([undefined]); setPage(null); }}>{dates.map(d => <option key={d} value={d}>{stamp(d)}</option>)}</Select></label>}
-    <span className="qfr-loading" role="status">{loading ? "正在读取明细…" : ""}</span></div>
-    {error && <p className="qfr-error" role="alert">{error}<button onClick={() => setRetry(v => v + 1)}>重试</button></p>}
-    {disabled ? <p className="qfr-empty">结果待判定，暂不开放明细读取。</p> : kind === "positions" && !selectedDate ? <p className="qfr-empty">没有已记录的日终估值时点。</p> : page && <>
-      {page.items.length ? <div className="qfr-table-scroll">{["fills", "orders", "positions"].includes(kind) ? <table><thead><tr><th>{kind === "positions" ? "标的" : "时间 / 标的"}</th><th>方向</th><th>数量</th>{kind === "positions" ? <><th>可用数量</th><th>平均成本</th><th>估值 / 市值</th><th>已实现 / 未实现损益</th></> : kind === "fills" ? <><th>成交价</th><th>费用</th><th>滑点金额</th></> : <><th>委托价</th><th>成交数量</th><th>状态</th></>}</tr></thead>
-        <tbody>{page.items.map((raw, index) => { const row = raw as ResultRow; const mark = finite(row.mark_price), quantity = finite(row.quantity); return <tr key={String(row.fill_id || row.order_id || `${row.instrument_id}:${row.side}:${index}`)}><td>{kind !== "positions" && <small>{stamp(row.timestamp || row.submitted_at)}</small>}<Instrument row={row}/></td><td>{sides[row.side] || row.side || "—"}</td><td>{displayNumber(row.quantity)}</td>
-        {kind === "positions" ? <><td>{displayNumber(row.available_quantity)}</td><td>{displayNumber(row.average_price)}</td><td>{displayNumber(row.mark_price)}<small>市值 {displayNumber(mark !== null && quantity !== null ? mark * quantity : null)}</small></td><td>{displayNumber(row.realized_pnl)} / {displayNumber(row.unrealized_pnl)}</td></> : kind === "fills" ? <><td>{displayNumber(row.price)}</td><td>{displayNumber(row.fees)}</td><td>{displayNumber(row.slippage_amount)}</td></> : <><td>{displayNumber(row.price)}</td><td>{displayNumber(row.filled_quantity)}</td><td>{statuses[row.status] || row.status}<small>{row.status_reason}</small></td></>}</tr>; })}</tbody></table> : <div className="qfr-records">{page.items.map((row, i) => <details key={i}><summary>{RESULT_KINDS[kind as keyof typeof RESULT_KINDS]} · 本页第 {i + 1} 条</summary><pre>{JSON.stringify(row, null, 2)}</pre></details>)}</div>}</div> : <p className="qfr-empty">{kind === "positions" ? "该时点没有已记录的非零持仓。" : "本次运行没有此类记录。"}</p>}
-      <footer><span>第 {cursors.length} 页 · 本页 {page.items.length} 条 · 按时间顺序</span><button disabled={loading || cursors.length === 1} onClick={() => { setCursors(c => c.slice(0, -1)); setPage(null); }}>上一页</button><button disabled={loading || !page.next_cursor} onClick={() => { setCursors(c => [...c, page.next_cursor!]); setPage(null); }}>下一页</button></footer>
-    </>}
+import type { ResultKind, ResultRow } from "../../api/backtestResults";
+import { displayNumber, RESULT_KINDS } from "./resultData";
+import { useResultPage } from "./useResultPage";
+
+export function PageFeedback({ data }: { data: ReturnType<typeof useResultPage> }) {
+  return <>{data.loading && <p role="status">正在读取本页… <button onClick={data.cancel}>取消加载</button></p>}
+    {data.error && <p className="qfr-error" role="alert">本节读取失败：{data.error} {data.page && "当前展示上次读取的本页。"}<button onClick={data.reload}>重试本节</button></p>}
+    {data.cancelled && <p role="status">本页加载已取消，尚未确认的内容不作为空结果。<button onClick={data.reload}>重新加载</button></p>}</>;
+}
+/** Paging state lives in the URL, so reload/back/result navigation preserves it. */
+export function PageNavigation({ data, cursorKey, title }: { data: ReturnType<typeof useResultPage>; cursorKey: string; title: string }) {
+  const location = useLocation(), navigate = useNavigate(), query = new URLSearchParams(location.search);
+  const current = query.get(cursorKey) || "", page = data.page;
+  function change(cursor: string) {
+    const next = new URLSearchParams(location.search); cursor ? next.set(cursorKey, cursor) : next.delete(cursorKey);
+    navigate({ pathname: location.pathname, search: next.toString(), hash: location.hash }, { state: location.state });
+  }
+  return <footer aria-label={`${title}分页`}><span>本页 {page?.items.length ?? "—"} 条 · 每页最多 100 条{page?.partial ? " · 部分结果" : ""}</span>
+    <button disabled={!current || data.loading} onClick={() => change("")}>首页</button>
+    <button disabled={data.loading || !page?.next_cursor} onClick={() => change(page!.next_cursor!)}>下一页</button></footer>;
+}
+function Cell({ value }: { value: unknown }) { return <>{value == null ? "—" : typeof value === "object" ? JSON.stringify(value) : typeof value === "string" ? value : displayNumber(value)}</>; }
+const columns: Record<string, [string, string[]][]> = {
+  equity: [["时间 / 纳秒", ["time_ns", "as_of"]], ["权益", ["equity"]], ["现金", ["cash"]], ["估值状态 / 原因", ["unavailable_reason", "valuation_reason", "valuation_status"]], ["累计费用", ["cumulative_fees"]]],
+  orders: [["订单", ["order_id"]], ["标的", ["security", "event_trading_code", "instrument_id"]], ["方向", ["side"]], ["数量", ["quantity"]], ["成交数量", ["filled_quantity"]], ["限价", ["limit_price", "price"]], ["状态 / 原因", ["status", "reason_code", "status_reason"]]],
+  trades: [["成交", ["trade_id", "fill_id"]], ["标的", ["security", "event_trading_code", "instrument_id"]], ["方向", ["side"]], ["数量", ["quantity"]], ["原始成交价", ["price"]], ["费用", ["fee", "fees"]], ["时间 / 纳秒", ["execution_time_ns", "time_ns", "timestamp"]]],
+  positions: [["标的", ["security", "event_trading_code", "instrument_id"]], ["数量", ["quantity"]], ["可卖数量", ["sellable", "available_quantity"]], ["平均成本", ["average_cost", "average_price"]], ["市值（原保存）", ["market_value"]]],
+};
+export function ResultTables({ runId, enabled, version, legacy }: { runId: string; enabled: boolean; version: number; legacy: boolean }) {
+  const location = useLocation(), navigate = useNavigate(), query = new URLSearchParams(location.search);
+  const selected = query.get("detail") || "trades", kind = Object.hasOwn(RESULT_KINDS, selected) ? selected as ResultKind : "trades";
+  const data = useResultPage(runId, kind, query.get("after") || "", enabled, version), fields = columns[kind];
+  const unsupported = legacy && ["records", "logs"].includes(kind);
+  return <section className="qfr-card" id="holding"><header><h2>结果明细</h2><span>金额、纳秒与原保存值完整展示</span></header>
+    <div className="qfr-table-controls"><label>明细类型<Select value={kind} onChange={e => { const next = new URLSearchParams(location.search); next.set("detail", e.target.value); next.delete("after"); navigate({ pathname: location.pathname, search: next.toString(), hash: "#holding" }, { state: location.state }); }}>{Object.entries(RESULT_KINDS).map(([value, label]) => <option key={value} value={value}>{label}</option>)}</Select></label></div>
+    <PageFeedback data={data}/>{!enabled && <p className="qfr-empty">等待运行终结后读取保存结果。</p>}
+    {unsupported && <p className="qfr-note">旧历史没有保存此类结果时明确不可用，不执行旧引擎补算。</p>}
+    {data.page && <>{data.page.items.length ? <div className="qfr-table-scroll">{fields ? <table><thead><tr>{fields.map(([label]) => <th key={label}>{label}</th>)}<th>原始记录</th></tr></thead><tbody>{data.page.items.map((row: ResultRow, i) => <tr key={row.result_sequence || row.id || i}>{fields.map(([label, keys]) => <td key={label}><Cell value={keys.map(key => row[key]).find(v => v !== undefined)}/></td>)}<td><details><summary>查看原值</summary><pre>{JSON.stringify(row, null, 2)}</pre></details></td></tr>)}</tbody></table> : <div className="qfr-records">{data.page.items.map((row, i) => <article key={row.result_sequence || i}><strong>{RESULT_KINDS[kind]} · {row.result_sequence || i + 1}</strong><pre>{JSON.stringify(row, null, 2)}</pre></article>)}</div>}</div> : <p className="qfr-empty">服务确认本页没有已保存记录。</p>}
+    <p className="qfr-note">{data.page.notices?.logs_truncated ? "日志已截断，原服务通知保留在本页。" : "分页展示；未读取的记录不参与本页统计。"}</p><PageNavigation data={data} cursorKey="after" title="明细"/></>}
   </section>;
 }

@@ -95,6 +95,8 @@ async function request<T>(path: string, init: RequestInit = {}, signal?: AbortSi
     return body as T;
   } finally { requests.delete(controller); signal?.removeEventListener("abort", abort); }
 }
+/** Result and historical readers share immediate access revocation with runs. */
+export const readRunResource = request;
 function page(value: RunPage): RunPage {
   if (!value || !Array.isArray(value.items) || typeof value.has_more !== "boolean" ||
     value.has_more && (typeof value.next_cursor !== "string" || !value.next_cursor)) throw new RunApiError(502, "INVALID_CONTRACT");

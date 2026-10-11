@@ -5,6 +5,7 @@ set -euo pipefail
 qf_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 qf_build=${QF_S3_BUILD_ROOT:?Build the locked SDK wheel first}
 qf_evidence=${QF_D15_EVIDENCE:?Choose a browser evidence directory}
+qf_d16=${QF_D16_UI:-0}
 qf_test_root=$(mktemp -d "${TMPDIR:-/tmp}/q15-ui.XXXXXX")
 export DOCKER_CONFIG="$qf_test_root/docker-config"
 qf_suffix=${qf_test_root##*.}
@@ -58,7 +59,7 @@ import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
 for p in ['VERSION','backend/app','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
           'sdk/python/tests/support_sdk.py','ops/s3-d12','ops/s3-d15/isolated_server.py','tests/s3_runtime_suite.py',
-          'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','examples/strategies','examples/http_workflow.py','docs/backtesting']:
+          'ops/s3-d16', 'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','examples/strategies','examples/http_workflow.py','docs/backtesting']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)
@@ -67,7 +68,7 @@ assert len(wheels)==1, 'Use one exact installed SDK wheel'
 (target/'wheels').mkdir();shutil.copyfile(wheels[0],target/'wheels'/wheels[0].name)
 # Reuse D12's trusted test image; append only D15's executable fixture.
 dockerfile=(target/'ops/s3-d12/runner-test.Dockerfile').read_text()
-(target/'runner.Dockerfile').write_text(dockerfile+'\nCOPY ops/s3-d15/isolated_server.py /app/ops/s3-d15/isolated_server.py\nRUN chmod -R a+rX /app/ops\nCMD ["python", "ops/s3-d15/isolated_server.py"]\n')
+(target/'runner.Dockerfile').write_text(dockerfile+'\nCOPY ops/s3-d16 /app/ops/s3-d16\nCOPY ops/s3-d15/isolated_server.py /app/ops/s3-d15/isolated_server.py\nRUN chmod -R a+rX /app/ops\nCMD ["python", "ops/s3-d15/isolated_server.py"]\n')
 PY
 docker build --network none -f "$qf_test_root/build/ops/s3-d12/worker.Dockerfile" -t "$qf_worker_tag" "$qf_test_root/build" > "$qf_evidence/worker-build.log" 2>&1
 qf_worker_id=$(docker image inspect --format '{{.Id}}' "$qf_worker_tag")
@@ -92,7 +93,7 @@ docker run -d --name "$qf_runner" --publish 127.0.0.1::8080 --cpus 1 --memory 1g
     --mount "type=bind,src=$qf_test_root/work,dst=/qf-work" \
     --mount "type=bind,src=$qf_test_root/db-socket,dst=/qf-db,readonly" \
     --env "QF_TEST_DAEMON_ROOT=$qf_test_root/work" --env "QF_D15_WORKER_IMAGE=$qf_worker_id" \
-    --env QF_D15_ROOT=/qf-work --env QF_D15_BIND_PORT=8080 --env QF_D15_MANIFEST=/qf-work/d15-manifest.json \
+    --env "QF_D16_UI=$qf_d16" --env QF_D15_ROOT=/qf-work --env QF_D15_BIND_PORT=8080 --env QF_D15_MANIFEST=/qf-work/d15-manifest.json \
     --env "LF_D01_ALLOW_OVERLAY_TEST=${LF_D01_ALLOW_OVERLAY_TEST:-0}" \
     --env QF_ENVIRONMENT=test --env QF_DATABASE_HOST=/qf-db --env QF_DATABASE_USER=postgres \
     --env QF_DATABASE_PASSWORD=private-d15-test --env QF_DATABASE_NAME=qf_d15_test \
@@ -124,3 +125,8 @@ for qf_try in $(seq 1 60); do
 done
 QF_D15_NATIVE=0 QF_D15_EVIDENCE="$qf_evidence/interface-substitute" node "$qf_root/frontend/tests/s3-run-ui.e2e.cjs"
 QF_D15_NATIVE=1 QF_D15_MANIFEST="$qf_test_root/work/d15-manifest.json" QF_D15_EVIDENCE="$qf_evidence/real-isolated-service" node "$qf_root/frontend/tests/s3-run-ui.e2e.cjs"
+
+if [[ $qf_d16 == 1 ]]; then
+    QF_D16_NATIVE=0 QF_D16_EVIDENCE="$qf_evidence/d16-interface-substitute" node "$qf_root/frontend/tests/s3-results-ui.e2e.cjs"
+    QF_D16_NATIVE=1 QF_D16_MANIFEST="$qf_test_root/work/d15-manifest.json" QF_D16_EVIDENCE="$qf_evidence/d16-real-isolated-service" node "$qf_root/frontend/tests/s3-results-ui.e2e.cjs"
+fi

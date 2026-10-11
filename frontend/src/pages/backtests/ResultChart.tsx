@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { finite } from "./workbench";
-import { displayNumber, localDay, type ResultRow } from "./resultData";
+import { displayNumber, exactDifference, localDay, numeric, reason, type ResultRow } from "./resultData";
 /** Keep missing samples in the path sequence. Pointer and keyboard inspection
  * use the original data, even when many points share the same screen pixel. */
 export function ResultChart({ rows, field, title, bars = false, percent = true, timezone }: { rows: ResultRow[]; field: string; title: string; bars?: boolean; percent?: boolean; timezone: string }) {
   const [chosen, setChosen] = useState(0), [width, setWidth] = useState(800);
   const container = useRef<HTMLDivElement>(null);
   useEffect(() => { const node = container.current; if (!node) return; const observer = new ResizeObserver(entries => setWidth(Math.max(180, entries[0].contentRect.width))); observer.observe(node); return () => observer.disconnect(); }, [rows.length]);
-  const points = useMemo(() => rows.map(row => ({ row, x: Date.parse(row.as_of), y: row.valuation_status === "blocked" ? null : finite(row[field]) })), [rows, field]);
+  const origin = field === "equity" ? rows.find(row => typeof row.equity === "string")?.equity : null;
+  const points = useMemo(() => rows.map(row => ({ row, x: Date.parse(row.as_of), y: row.valuation_status === "blocked" ? null : numeric(origin !== null ? exactDifference(row[field], origin) : row[field]) })), [rows, field, origin]);
   const valid = points.filter(p => Number.isFinite(p.x) && p.y !== null);
   if (!valid.length) return <div ref={container} className="qfr-chart-empty">暂无可绘制的{title}数据</div>;
   const [xmin, xmax, rawmin, rawmax] = valid.reduce((b, p) => [Math.min(b[0], p.x), Math.max(b[1], p.x), Math.min(b[2], p.y!), Math.max(b[3], p.y!)], [Infinity, -Infinity, 0, 0]);
@@ -20,7 +20,8 @@ export function ResultChart({ rows, field, title, bars = false, percent = true, 
   }).join(" ");
   const selected = points[Math.min(chosen, points.length - 1)];
   return <div ref={container} className="qfr-chart-wrap">
-    <div className="qfr-chart-readout" aria-live="polite"><span>{localDay(selected?.row.as_of, timezone)}</span><strong>{displayNumber(selected?.y, percent)}</strong>{selected?.y === null && <span>{selected.row.valuation_reason || "估值或收益缺失"}</span>}</div>
+    {origin !== null && <p className="qfr-note">纵轴为相对本页首个有效权益的金额变化；读取值保留原始精度。</p>}
+    <div className="qfr-chart-readout" aria-live="polite"><span>{localDay(selected?.row.as_of, timezone)}</span><strong>{displayNumber(selected?.row[field], percent)}</strong>{selected?.row.time_ns && <code>{selected.row.time_ns}</code>}{selected?.y === null && <span>{selected.row.valuation_reason || reason(selected.row[field])}</span>}</div>
     <svg viewBox={`0 0 ${width} 305`} role="img" aria-label={`${title}，可使用下方日期滑块查看各时点数值`} onPointerMove={e => {
       const rect = e.currentTarget.getBoundingClientRect(), value = xmin + ((e.clientX - rect.left) / rect.width * width - 68) / (width - 80) * (xmax - xmin);
       let index = 0, distance = Infinity; points.forEach((p, i) => { if (Math.abs(p.x - value) < distance) { index = i; distance = Math.abs(p.x - value); } }); setChosen(index);

@@ -42,7 +42,7 @@ module.exports=async function({page,context,manifest,token,base,output,steps}){
  await page.goto(`${base}/admin/strategies/${manifest.legacy_strategy_id}/backtests?run=${manifest.legacy_run_id}`);
  await page.getByRole('heading',{name:'旧引擎历史只读',exact:true}).waitFor();assert.equal(await page.getByRole('button',{name:'重新运行',exact:true}).count(),0);
  await page.getByRole('link',{name:'查看原始历史结果',exact:true}).click();await page.waitForURL(url=>url.pathname===`/admin/backtest-runs/${manifest.legacy_run_id}/results`);
- await page.getByText('LEGACY RESULT · 历史只读',{exact:true}).waitFor();await page.screenshot({path:path.join(output,'legacy-history-readonly.png')});
+ await page.getByRole('heading',{name:'历史结果 · 只读',exact:true}).waitFor();await page.screenshot({path:path.join(output,'legacy-history-readonly.png')});
  const legacy=await get(`/api/admin/backtests/${manifest.legacy_run_id}/results/summary`);assert.equal(legacy.summary.value,'123456789.123456789012345678');assert.equal(legacy.summary.time_ns,'1767225600000000123');
  fs.writeFileSync(path.join(output,'strategy-regression.json'),JSON.stringify({production_executed:false,legacy_revision:original,new_revision:revision,account,legacy,new_strategy_id:strategy.id},null,2));
  steps.push('original history URL remains read-only with exact saved result and nanoseconds');

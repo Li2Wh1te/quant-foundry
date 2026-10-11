@@ -41,6 +41,7 @@ jobs:
         env:
           QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-ui-build
           QF_D15_EVIDENCE: ${{ runner.temp }}/s3-ui-evidence
+          QF_D16_UI: "1"
         run: bash scripts/test_s3_run_ui.sh
       - uses: actions/upload-artifact@v4
         if: always()
