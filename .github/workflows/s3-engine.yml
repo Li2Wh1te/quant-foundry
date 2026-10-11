@@ -81,4 +81,4 @@ jobs:
         working-directory: backend
         run: |
           uv pip install --python .venv/bin/python --no-deps "$QF_S3_BUILD_ROOT"/wheels/quantfoundry_sdk-*.whl
-          uv run --locked --no-sync python -m pytest -q tests/test_s3_data_gateway.py tests/test_s3_research_api.py
+          uv run --locked --no-sync python -m pytest -q tests/test_s3_data_gateway.py tests/test_s3_research_api.py tests/test_s3_gateway_streams.py

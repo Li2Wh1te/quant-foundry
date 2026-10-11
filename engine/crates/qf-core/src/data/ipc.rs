@@ -69,6 +69,7 @@ pub struct IpcGateway {
     sequence: u64,
     budget: usize,
     timeout: Duration,
+    run_deadline: Option<Instant>,
     cancelled: Arc<AtomicBool>,
     failure: Option<QfError>,
     closed: bool,
@@ -76,6 +77,30 @@ pub struct IpcGateway {
     row_budget: usize,
 }
 impl IpcGateway {
+    /// D10's explicit callback queries share the same run-bound connection and
+    /// D04 framing/limits as the Rust event source. No second transport codec.
+    pub fn callback_request(
+        &mut self,
+        operation: &str,
+        body: Value,
+    ) -> QfResult<(String, Value, Vec<u8>)> {
+        let op: Operation =
+            serde_json::from_value(Value::String(operation.into())).map_err(|_| invalid())?;
+        if !matches!(
+            op,
+            Operation::Check | Operation::OpenStream | Operation::Next | Operation::CloseStream
+        ) || !body.is_object()
+        {
+            return Err(invalid());
+        }
+        let (header, payload) = self.call(op, body)?;
+        let status = serde_json::to_value(header.status)
+            .map_err(|_| invalid())?
+            .as_str()
+            .ok_or_else(invalid)?
+            .to_owned();
+        Ok((status, header.body, payload))
+    }
     /// Connected socket ONLY. D12 binds run, ownership, container and endpoint.
     pub fn new(
         socket: UnixStream,
@@ -105,6 +130,7 @@ impl IpcGateway {
             sequence: 0,
             budget,
             timeout,
+            run_deadline: None,
             cancelled,
             failure: None,
             closed: false,
@@ -116,6 +142,12 @@ impl IpcGateway {
         crate::types::keys::label(binding, 128)?;
         self.binding = Some(binding.into());
         Ok(self)
+    }
+    /// A worker-wide deadline bounds every read/write, including cleanup.
+    /// Per-request timeouts alone cannot enforce a whole-run wall budget.
+    pub fn with_run_deadline(mut self, deadline: Instant) -> Self {
+        self.run_deadline = Some(deadline);
+        self
     }
     fn checkpoint(&self, deadline: Instant) -> QfResult<()> {
         if self.closed || self.cancelled.load(Ordering::Relaxed) {
@@ -167,7 +199,10 @@ impl IpcGateway {
         Ok(())
     }
     fn exchange(&mut self, op: Operation, body: Value) -> QfResult<(Header, Vec<u8>)> {
-        let deadline = Instant::now() + self.timeout;
+        let request_deadline = Instant::now() + self.timeout;
+        let deadline = self
+            .run_deadline
+            .map_or(request_deadline, |d| d.min(request_deadline));
         self.checkpoint(deadline)?;
         self.sequence = self
             .sequence

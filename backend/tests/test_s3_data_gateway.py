@@ -297,6 +297,81 @@ def test_currentstore_arrow_rust_d03_merge_real_chain(formal,tmp_path,credit):
     assert output['samples'][0]['event']['time_ns']==str(BASE)
     assert gateway.stats['storage_rows']==6 and ctx.closed
 
+def test_currentstore_rust_python_callback_query_command_chain(formal,tmp_path):
+    """Real storage/IPC/Engine/SDK with explicitly synthetic dated rule facts.
+
+    Production mappings are not invented; live Tick matching remains D08.
+    """
+    try:
+        from quantfoundry import _native
+        from quantfoundry.api import get_price,get_current_data,order,cancel_order,LimitOrder
+        from quantfoundry._worker import _run_module
+    except ImportError:
+        if os.getenv('QF_S3_INTEGRATION_REQUIRED')=='1':
+            pytest.fail('required installed D10 wheel missing')
+        pytest.skip('install wheel for the real strategy SDK integration')
+    from types import SimpleNamespace
+    fixtures_spec=importlib.util.spec_from_file_location('d10_storage_fixture',ROOT/'sdk/python/tests/support_sdk.py')
+    fixtures=importlib.util.module_from_spec(fixtures_spec)
+    fixtures_spec.loader.exec_module(fixtures)
+    wiring=fixtures.spec(days=1,securities=('A.SH',),frequency='tick')
+    wiring['run_id']='isolated-run'
+    session=wiring['calendar'][0]
+    session['session']['key']='2026-01-01:auction'
+    wiring['facts'][0]['day']['session']='2026-01-01:auction'
+    # D04's small oracle BASE is 08:00 exchange-local time; this strategy
+    # fixture must use an accepted trading phase, preserving the real calendar.
+    market_base=BASE+90*fixtures.MINUTE
+    stored=rows(6)
+    for row in stored: row['time_ns']+=90*fixtures.MINUTE
+    data_spec=contract();formal.register(data_spec);put(formal,data_spec,stored)
+    grant=AuthorizedRun('isolated-run','isolated-owner',('A.SH',),market_base-100,market_base+1000)
+    gateway=RunDataGateway(formal,AuthenticatedPrincipal('isolated-owner'),grant,(binding(data_spec),),batch_rows=2)
+    ctx=gateway.open(dict(run_id='isolated-run',universe=['A.SH']))
+    endpoint=tmp_path/'sdk.sock'
+    listener=socket.socket(socket.AF_UNIX);listener.bind(str(endpoint));listener.listen(1)
+    wiring['source']=dict(kind='ipc',socket_path=str(endpoint),binding='market',request=request(start=market_base,end=market_base+100))
+    failures=[]
+    def server():
+        peer,_=listener.accept()
+        try: serve(transport.Channel(peer,timeout=10),gateway,ctx)
+        except transport.TransportError: pass
+        except BaseException as error: failures.append(error)
+    thread=threading.Thread(target=server,daemon=True);thread.start()
+    seen=[];frames=[];orders=[]
+    def tick(context,event):
+        seen.append((context.now_ns,event.sequence))
+        assert event.last_price==Decimal(PRICE)
+        assert get_current_data()['A.SH'].last_price==Decimal(PRICE)
+        frame=get_price('A.SH',count=2,fields=('price','quantity','sequence'))
+        assert not frame.empty and frame['time_ns'].max()<=context.now_ns
+        assert frame['price'].tolist()==[Decimal(PRICE)]*len(frame)
+        same=frame[frame['time_ns']==context.now_ns]
+        assert all(int(value)<=event.sequence for value in same['sequence'])
+        frames.append(frame)
+        submitted=order('A.SH',1,style=LimitOrder('10'))
+        assert submitted.accepted and context.portfolio.frozen_cash==Decimal('11')
+        assert cancel_order(submitted.order_id).accepted
+        assert context.portfolio.frozen_cash==0
+    result=None
+    try:
+        from quantfoundry.data import _MarketRoute
+        result=_run_module(SimpleNamespace(handle_tick=tick,on_order=lambda c,o:orders.append(o.status)),wiring,
+            market_routes={'tick':_MarketRoute('market',('price','quantity'))})
+        report=json.loads(result.summary_json())
+        assert report['outcome']['status']=='succeeded',json.dumps(report['outcome'],ensure_ascii=False)
+        assert report['progress']['completed_events']==6 and Decimal(report['portfolio']['cash'])==10000
+        assert report['cleanup_errors']==[] and not report['production_executed']
+        assert seen==[(market_base+i//2,i+1) for i in range(6)]
+        assert orders.count('open')==6 and orders.count('cancelled')==6
+        assert len(frames)==6 and frames[0]['sequence'].tolist()==[1]
+        thread.join(4)
+        assert not thread.is_alive() and not failures and ctx.closed,failures
+        assert gateway.stats['storage_rows']>=6
+    finally:
+        if result is not None: result.close()
+        listener.close();endpoint.unlink(missing_ok=True)
+
 def test_quote_double_sided_quantities_to_rust(formal,tmp_path):
     _,gateway,ctx=setup(formal,count=4,kind='quote_tick')
     result,output=rust_probe(gateway,ctx,tmp_path,request(fields=('bid','ask','bid_quantity','ask_quantity')))

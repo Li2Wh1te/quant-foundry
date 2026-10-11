@@ -204,13 +204,14 @@ class _Callback:
     boundary: dict
     view: Any
     published_quotes: Mapping | None = None
+    native_bridge: Any = None
 
 
 _ACTIVE: ContextVar[_Callback | None] = ContextVar('qf_read_callback', default=None)
 
 
 @contextmanager
-def _callback(session: _DataSession, boundary: Mapping, *, published_quotes: Mapping | None = None):
+def _callback(session: _DataSession, boundary: Mapping, *, published_quotes: Mapping | None = None, native_bridge=None):
     if _ACTIVE.get() is not None:
         raise _error('INVALID_CONTRACT', '不能递归进入策略读取回调')
     boundary = json.loads(_json(boundary))
@@ -218,7 +219,7 @@ def _callback(session: _DataSession, boundary: Mapping, *, published_quotes: Map
     if published_quotes is not None and (not isinstance(published_quotes, Mapping) or len(published_quotes)>10000):
         view.expire()
         raise _error('RESOURCE_LIMIT', '当前行情内存视图超过标的预算')
-    active = _Callback(session, boundary, view, published_quotes)
+    active = _Callback(session, boundary, view, published_quotes, native_bridge)
     token = _ACTIVE.set(active)
     try:
         yield active
@@ -413,6 +414,17 @@ def get_current_data(securities: Sequence[str] | None = None) -> Mapping[str, Cu
     securities = _securities(securities, active, default=True)
     if not securities:
         return MappingProxyType({})
+    if active.native_bridge is not None:
+        from ._worker import _quote
+        encoded, payload = active.native_bridge.request('current', _json(securities))
+        if payload:
+            raise _error('INVALID_CONTRACT', '当前行情视图不应包含Arrow缓冲')
+        now = int(active.boundary['now_ns'])
+        result = {s: CurrentQuote(s, now, None, None, True, None) for s in securities}
+        for event in json.loads(encoded):
+            quote = _quote(event, now)
+            result[quote.security] = quote
+        return MappingProxyType(result)
     if active.published_quotes is not None:
         # D10 supplies its already published, accepted Rust quote snapshot and
         # complete D03 keys. This path performs no parent IPC per tick. Values
@@ -553,3 +565,27 @@ def get_industry(securities: Sequence[str], *, as_of: TimeLike | None = None) ->
 
 def get_instruments(securities: Sequence[str] | None = None, *, as_of: TimeLike | None = None) -> DataFrame:
     return _research('instruments', _active().session.universe if securities is None else securities, FIELDS['instruments'], as_of)
+
+
+def _terminal_guard(func):
+    """Caught terminal native query failures still end the Rust run."""
+    from functools import wraps
+    @wraps(func)
+    def checked(*args, **kwargs):
+        try:
+            return func(*args, **kwargs)
+        except _native.ContractError as error:
+            active = _ACTIVE.get()
+            if (active is not None and active.native_bridge is not None
+                    and getattr(error, 'code', '') in ('RESOURCE_LIMIT','RESULT_BUDGET_EXCEEDED','DATA_CHANGED','CANCELLED')):
+                try:
+                    active.native_bridge.request('fault', _json(dict(code=error.code, operation='strategy_query',
+                        message='策略查询达到终止边界', scope={})))
+                except _native.ContractError:
+                    pass
+            raise
+    return checked
+
+for _name in ('get_price','get_current_data','get_fundamentals','get_valuation','get_index_stocks','get_industry','get_instruments'):
+    globals()[_name] = _terminal_guard(globals()[_name])
+del _name
