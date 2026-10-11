@@ -62,6 +62,10 @@ jobs:
         run: rustup toolchain install 1.90.0 --profile minimal --component rustfmt --component clippy
       - name: Build and test installed wheel
         run: bash scripts/test_s3_engine.sh
+      - name: D11 bounded ten-million module stream and real file-write failure
+        run: |
+          cargo build --manifest-path engine/Cargo.toml --locked --release -p qf-core --example result_stream
+          python scripts/check_s3_results.py --events 10000000
       # Existing Validate workflow continues full backend/frontend testing.
       - uses: astral-sh/setup-uv@v5
       - name: Verify protected account, strategy and historical result consumers

@@ -46,6 +46,7 @@ pub struct Host {
     pub logs_truncated: bool,
     record_points: u64,
     log_bytes: usize,
+    log_records: u64,
     fault: Option<QfError>,
 }
 #[derive(Deserialize)]
@@ -100,6 +101,7 @@ impl Host {
             logs_truncated: false,
             record_points: 0,
             log_bytes: 0,
+            log_records: 0,
             fault: None,
         }
     }
@@ -245,8 +247,12 @@ impl Host {
                         }
                         // Both per-message and exhausted-run truncation remain
                         // visible in the run summary, even at an exact cutoff.
-                        if self.log_bytes >= 1024 * 1024 {
+                        if self.log_bytes >= 1024 * 1024 || self.log_records >= 10_000 {
                             self.logs_truncated = true;
+                            self.spool
+                                .lock()
+                                .map_err(|_| invalid("结果锁失败"))?
+                                .note_dropped_log();
                             return Ok(Response {
                                 body: json!({"truncated":true}),
                                 payload: Vec::new(),
@@ -263,6 +269,7 @@ impl Host {
                         }
                         self.logs_truncated |= row.truncated;
                         self.log_bytes += row.message.len();
+                        self.log_records += 1;
                     }
                     _ => return Err(invalid("策略不可写订单、成交或账户结果")),
                 }

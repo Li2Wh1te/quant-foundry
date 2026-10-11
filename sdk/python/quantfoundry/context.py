@@ -117,7 +117,7 @@ def _order(row):
                     'limit_price': None if row['limit_price'] is None else Decimal(row['limit_price'])})
 
 def _trade(row):
-    return Trade(**{**row, 'execution_time_ns': int(row['execution_time_ns']),
+    return Trade(**{**{key:row[key] for key in Trade.__dataclass_fields__}, 'execution_time_ns': int(row['execution_time_ns']),
                     'price': Decimal(row['price']), 'fee': Decimal(row['fee'])})
 
 def _portfolio(row):

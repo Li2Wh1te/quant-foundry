@@ -31,6 +31,8 @@ pub struct Spec {
     pub initial_marks: BTreeMap<SecurityKey, ValuationMark>,
     pub source: Source,
     pub synthetic_model: Option<String>,
+    #[serde(default)]
+    pub benchmark_origin: Option<qf_core::analysis::BenchmarkPoint>,
     pub result_budget_bytes: u64,
     pub data_budget_bytes: usize,
     pub max_active_orders: usize,

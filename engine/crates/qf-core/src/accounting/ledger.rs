@@ -66,7 +66,8 @@ impl AccountLimits {
         Ok(())
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AccountTotals {
     /// Trading realized P&L plus earned dividends less dividend tax.
     pub realized_pnl: Money,

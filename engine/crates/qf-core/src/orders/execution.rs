@@ -458,6 +458,9 @@ impl<F: OrderFacts> AccountPort for OrderManager<F> {
     }
 }
 impl<F: OrderFacts> ExecutionPort for OrderManager<F> {
+    fn analysis_totals(&self) -> Option<crate::accounting::AccountTotals> {
+        Some(self.account.totals().clone())
+    }
     fn submit_order(
         &mut self,
         intent: &OrderIntent,

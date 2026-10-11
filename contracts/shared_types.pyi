@@ -11,6 +11,12 @@ class CorporateEffect(TypedDict):
     tax: str
     policy: str
 
+class AccountTotals(TypedDict):
+    realized_pnl: str
+    trading_fees: str
+    dividend_income: str
+    dividend_tax: str
+
 class PositionView(TypedDict):
     security: str
     quantity: int
@@ -28,10 +34,71 @@ class AccountView(TypedDict):
     total_value: str | None
     positions: dict[str, PositionView]
 
+class AnalysisPolicy(TypedDict):
+    formula_id: str
+    statistic_precision: str
+    annualization_sessions: int
+    risk_free_rate: str
+    reference_calendar: str
+    frequency: Literal['1d', '1m', '5m', '15m', '30m', '60m', 'tick']
+    curve_sampling: Literal['session_close', 'bar_close']
+    statistics_sampling: str
+    benchmark: str | None
+    turnover_definition: str
+
+class BenchmarkPoint(TypedDict):
+    time_ns: str
+    value: str | None
+    unavailable_reason: str | None
+
+class TradeStatistics(TypedDict):
+    fills: int
+    buy_fills: int
+    sell_fills: int
+    buy_quantity: str
+    sell_quantity: str
+    buy_notional: str
+    sell_notional: str
+    total_notional: str
+    fill_fees: str
+    order_state_events: dict[str, int]
+    mean_fill_notional: Metric
+    account_totals: AccountTotals | None
+    account_totals_unavailable_reason: str | None
+
+class PerformanceSummary(TypedDict):
+    policy: AnalysisPolicy
+    expected_sessions: int
+    sampled_sessions: int
+    valid_return_samples: int
+    missing_equity_sessions: int
+    initial_equity: str
+    terminal_equity: str | None
+    cumulative_return: Metric
+    annualized_return: Metric
+    maximum_drawdown: Metric
+    volatility: Metric
+    sharpe: Metric
+    benchmark_return: Metric
+    cumulative_excess_return: Metric
+    turnover: Metric
+    mean_session_equity: Metric
+    fees_to_initial_equity: Metric
+    trades: TradeStatistics
+
 class EquityPoint(TypedDict):
     time_ns: str
+    session: str | None
+    sampling: str
     equity: str | None
     unavailable_reason: str | None
+    net_value: Metric
+    session_return: Metric
+    cumulative_return: Metric
+    drawdown: Metric
+    benchmark_value: str | None
+    benchmark_cumulative_return: Metric
+    cumulative_excess_return: Metric
 
 class TradingSession(TypedDict):
     key: str
@@ -134,6 +201,35 @@ class OrderResult(TypedDict):
     unchanged: bool
     requested_quantity: int | None
     effective_quantity: int | None
+
+class ShardDescriptor(TypedDict):
+    kind: str
+    file: str
+    index_file: str
+    start_item: str
+    count: str
+    first_sequence: str
+    last_sequence: str
+    data_bytes: str
+    index_bytes: str
+    sha256: str
+    index_sha256: str
+
+class OutputNotices(TypedDict):
+    logs_dropped: str
+    log_messages_truncated: str
+    logs_truncated: bool
+
+class ResultManifest(TypedDict):
+    schema_id: str
+    run_id: str
+    outcome: RunOutcome
+    partial: bool
+    counts: dict[str, str]
+    shards: list[ShardDescriptor]
+    result_bytes: str
+    notices: OutputNotices
+    performance: PerformanceSummary | None
 
 class UserRecord(TypedDict):
     time_ns: str
@@ -365,6 +461,16 @@ class StatisticRecord(TypedDict):
     kind: Literal['statistic']
     value: float
 RecordValue = DecimalRecord | IntegerRecord | TextRecord | StatisticRecord
+class AvailableMetric(TypedDict):
+    status: Literal['available']
+    value: float
+class UnavailableMetric(TypedDict):
+    status: Literal['unavailable']
+    reason: str
+Metric = AvailableMetric | UnavailableMetric
+class SummaryRecord(TypedDict):
+    kind: Literal['summary']
+    record: PerformanceSummary
 class EquityRecord(TypedDict):
     kind: Literal['equity']
     record: EquityPoint
@@ -389,4 +495,4 @@ class UserRecordEnvelope(TypedDict):
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = SummaryRecord | ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope

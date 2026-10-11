@@ -78,6 +78,8 @@ class BacktestClient:
         _unavailable()
     def result(self, run_id: str, *, kind: str = "summary", limit: int = 100,
                cursor: str | None = None) -> Mapping[str, Any]:
+        from ._results import validate_result_request
+        validate_result_request(kind, limit, cursor)
         _unavailable()
     def batch(self, configs: Sequence[RunConfig], *, idempotency_key: str) -> Mapping[str, Any]:
         _unavailable()

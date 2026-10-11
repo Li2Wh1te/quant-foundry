@@ -159,7 +159,9 @@ impl RunResult {
         after: Option<&str>,
         limit: usize,
     ) -> PyResult<String> {
-        let kind: ResultKind = convert(bounded_json(&format!("\"{kind}\"")))?;
+        let kind: ResultKind = convert(bounded_json(
+            &serde_json::to_string(kind).expect("kind string"),
+        ))?;
         let name = spool::public_kind(kind)
             .ok_or_else(|| python_error(invalid("摘要请使用summary_json")))?;
         let spool = self
@@ -269,13 +271,21 @@ impl ResultSink for CheckedWriter {
     }
     fn finalize(&mut self, outcome: &RunOutcome) -> QfResult<()> {
         use qf_core::data::DataGateway;
-        if let (Some(gateway), Some(context)) = (&self.gateway, &self.context) {
-            gateway
-                .lock()
-                .map_err(|_| invalid("数据通道锁失败"))?
-                .check(context)?;
-        }
-        self.writer.finalize(outcome)
+        self.writer.finalize_guarded(outcome, || {
+            if let (Some(gateway), Some(context)) = (&self.gateway, &self.context) {
+                let mut guard = gateway.lock().map_err(|_| invalid("数据通道锁失败"))?;
+                if guard.check(context)? != qf_core::data::DependencyCheck::Unchanged {
+                    return Err(QfError::new(
+                        ErrorCode::DataChanged,
+                        "result_commit",
+                        "结果提交前数据已变化",
+                    ));
+                }
+                Ok(Some(guard))
+            } else {
+                Ok(None)
+            }
+        })
     }
     fn abort(&mut self, error: &QfError) -> QfResult<()> {
         self.writer.abort(error)
@@ -336,6 +346,8 @@ fn execute(
         budget,
         deadline,
     )?;
+    data.benchmark_origin = spec.benchmark_origin.clone();
+    data.benchmark_security = spec.config.benchmark.clone();
     let gateway = data.gateway.clone();
     let context = data.context.clone();
     let mut host = host::Host::new(
@@ -385,7 +397,6 @@ fn execute(
         control: &mut control,
         results: &mut writer,
     });
-    spool.lock().map_err(|_| invalid("结果写入锁失败"))?.outcome = Some(report.outcome.clone());
     let portfolio = execution.value(report.progress.now_ns).ok();
     Ok(
         json!({"outcome":report.outcome,"progress":{"completed_events":report.progress.completed_events,"completed_sessions":report.progress.completed_sessions,"now_ns":report.progress.now_ns},
@@ -528,6 +539,7 @@ pub fn run_strategy(
     let spool = Arc::new(Mutex::new(convert(spool::Spool::new(
         &spec.run_id,
         spec.result_budget_bytes,
+        cancellation.cancelled.clone(),
     ))?));
     let (sender, receiver) = sync_channel(1);
     let receiver = Mutex::new(receiver);
@@ -577,6 +589,10 @@ pub fn run_strategy(
     let report = match result {
         Ok(report) => report,
         Err(error) => {
+            let _ = spool
+                .lock()
+                .map_err(|_| python_error(invalid("结果锁失败")))?
+                .fail(&error);
             let outcome = if error.code == ErrorCode::Cancelled {
                 RunOutcome::Cancelled { partial: false }
             } else {
@@ -585,10 +601,6 @@ pub fn run_strategy(
                     partial: false,
                 }
             };
-            spool
-                .lock()
-                .map_err(|_| python_error(invalid("结果锁失败")))?
-                .outcome = Some(outcome.clone());
             json!({"outcome":outcome,"production_executed":false})
         }
     };

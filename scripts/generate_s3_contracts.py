@@ -28,7 +28,7 @@ def rust_wire_stub() -> str:
                 "AccountView", "RunConfigFields", "CostOverrides", "FeeConfig", "DatedFeeComponent",
                 "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
                 "DependencyState", "DependencyContext", "DataRequest", "ActualScope", "BatchMetadata", "RunScope",
-                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent", "ExecutionModelDescription"}
+                "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent", "ExecutionModelDescription", "AnalysisPolicy", "BenchmarkPoint", "PerformanceSummary", "TradeStatistics", "AccountTotals", "OutputNotices", "ShardDescriptor", "ResultManifest"}
     aliases = {"String":"str", "bool":"bool", "u64":"int", "u32":"int", "u16":"int", "i64":"int",
                "Nanoseconds":"str", "Sequence":"str", "SecurityKey":"str", "SessionKey":"str", "ChannelKey":"str",
                "Quantity":"int", "QuantityStep":"int", "Money":"str", "Price":"str", "ExactDecimal":"str", "Value":"Any", "FiniteStatistic":"float",
@@ -36,6 +36,7 @@ def rust_wire_stub() -> str:
                "Product":"Literal['main_board_stock', 'star_stock', 'chi_next_stock', 'beijing_stock', 'equity_etf', 'bond_etf', 'money_etf', 'gold_etf', 'commodity_etf', 'cross_border_etf', 'index', 'unknown']",
                "InvestorKind":"Literal['resident_individual', 'resident_enterprise', 'other', 'unknown']",
                "RunConfig":"RunConfigFields", "ErrorCode":"str", "QfError":"ErrorDTO",
+               "Metric":"Metric", "RunOutcome":"RunOutcome",
                "Currency":"Literal['CNY']", "QuantityUnit":"Literal['shares']",
                "TimeUnit":"Literal['utc_nanoseconds']", "RoundingPolicy":"Literal['half_even', 'half_up', 'toward_zero', 'away_from_zero']",
                "Frequency":"Literal['1d', '1m', '5m', '15m', '30m', '60m', 'tick']",
@@ -171,6 +172,16 @@ class StatisticRecord(TypedDict):
     kind: Literal['statistic']
     value: float
 RecordValue = DecimalRecord | IntegerRecord | TextRecord | StatisticRecord
+class AvailableMetric(TypedDict):
+    status: Literal['available']
+    value: float
+class UnavailableMetric(TypedDict):
+    status: Literal['unavailable']
+    reason: str
+Metric = AvailableMetric | UnavailableMetric
+class SummaryRecord(TypedDict):
+    kind: Literal['summary']
+    record: PerformanceSummary
 class EquityRecord(TypedDict):
     kind: Literal['equity']
     record: EquityPoint
@@ -195,7 +206,7 @@ class UserRecordEnvelope(TypedDict):
 class LogRecordEnvelope(TypedDict):
     kind: Literal['log']
     record: LogRecord
-ResultRecord = ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
+ResultRecord = SummaryRecord | ExecutionModelRecord | EquityRecord | OrderRecord | TradeRecord | PositionRecord | CorporateActionRecord | UserRecordEnvelope | LogRecordEnvelope
 ''')
     return "\n".join(output)
 
