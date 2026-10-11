@@ -404,8 +404,13 @@ pub fn capabilities() -> Capabilities {
             "technical_indicators".into(),
             "python_strategy_sdk".into(),
             "tick_callbacks".into(),
+            "tick_matching".into(),
         ],
-        execution_models: vec![ExecutionModel::BarNextIntervalV1],
+        execution_models: vec![
+            ExecutionModel::BarNextIntervalV1,
+            ExecutionModel::TradeTickV1,
+            ExecutionModel::QuoteTickV1,
+        ],
         frequencies: vec![
             Frequency::Day,
             Frequency::Minute,
@@ -413,6 +418,7 @@ pub fn capabilities() -> Capabilities {
             Frequency::FifteenMinutes,
             Frequency::ThirtyMinutes,
             Frequency::Hour,
+            Frequency::Tick,
         ],
         production_data_available: false,
     }

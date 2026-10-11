@@ -300,7 +300,8 @@ def test_currentstore_arrow_rust_d03_merge_real_chain(formal,tmp_path,credit):
 def test_currentstore_rust_python_callback_query_command_chain(formal,tmp_path):
     """Real storage/IPC/Engine/SDK with explicitly synthetic dated rule facts.
 
-    Production mappings are not invented; live Tick matching remains D08.
+    Production mappings are not invented. D08's real Tick matcher uses the
+    synthetic precision and price-band facts explicitly declared below.
     """
     try:
         from quantfoundry import _native
@@ -316,6 +317,11 @@ def test_currentstore_rust_python_callback_query_command_chain(formal,tmp_path):
     fixtures_spec.loader.exec_module(fixtures)
     wiring=fixtures.spec(days=1,securities=('A.SH',),frequency='tick')
     wiring['run_id']='isolated-run'
+    # This transport oracle deliberately carries an 18-decimal, high price.
+    # Match its named synthetic facts to that unchanged raw Decimal; never
+    # relax production rules or round the source to make matching pass.
+    wiring['rules'][0]['price_tick']='0.000000000000000001'
+    wiring['facts'][0]['day']['price_limit']['upper']='200000000'
     session=wiring['calendar'][0]
     session['session']['key']='2026-01-01:auction'
     wiring['facts'][0]['day']['session']='2026-01-01:auction'

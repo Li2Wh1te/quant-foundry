@@ -41,6 +41,8 @@ pub struct TradeTick {
     pub identity: EventIdentity,
     pub time_ns: Nanoseconds,
     pub price: Price,
+    /// Verified incremental shares for this print. A cumulative source must
+    /// be explicitly normalized upstream; the matcher never infers deltas.
     pub quantity: Quantity,
     pub units: MarketUnits,
 }

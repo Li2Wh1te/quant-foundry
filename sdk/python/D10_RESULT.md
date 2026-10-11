@@ -1,5 +1,9 @@
 # S3-D10 result
 
+Historical D10 handoff: its Tick matching gap is closed by
+[D08](../../engine/crates/qf-core/src/matching/D08_RESULT.md); the integration
+boundaries below describe D10's original completion point.
+
 D03 Engine now drives Python initialize/session/Bar/Tick/timer/order/trade
 callbacks through bounded safe request/reply channels. SDK commands reach the
 single D06 OrderManager and D09 Account; D07 BarMatcher uses their real cumulative

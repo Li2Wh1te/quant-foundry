@@ -15,6 +15,7 @@ use qf_core::engine::{
 use qf_core::matching::{
     FillBudget, MatchOutcome, Matcher,
     bar::{BarMatcher, BarRules},
+    tick::TickMatcher,
 };
 use qf_core::orders::{Order, OrderLimits, OrderManager};
 use qf_core::results::{ResultKind, ResultSink};
@@ -206,35 +207,31 @@ impl RunControl for Control {
     }
 }
 struct Rules(Facts);
-impl RulesPort<Option<BarRules>> for Rules {
+impl RulesPort<BarRules> for Rules {
     fn for_event(
         &mut self,
         event: &MarketEvent,
         session: &qf_core::clock::CalendarSession,
-    ) -> QfResult<Option<BarRules>> {
+    ) -> QfResult<BarRules> {
         let row = self.0.row(&event.key().security, &session.session.key)?;
-        if matches!(event, MarketEvent::Bar(_)) {
-            Ok(Some(BarRules::new(
-                &self.0.book,
-                row.instrument.clone(),
-                row.day.clone(),
-                self.0.usage.clone(),
-            )?))
-        } else {
-            Ok(None)
-        }
+        BarRules::new(
+            &self.0.book,
+            row.instrument.clone(),
+            row.day.clone(),
+            self.0.usage.clone(),
+        )
     }
 }
 enum Matching {
     Bar(BarMatcher),
-    TickPending,
+    Tick(TickMatcher),
 }
 impl Matcher for Matching {
-    type Rules = Option<BarRules>;
+    type Rules = BarRules;
     fn model_description(&self) -> Option<qf_core::matching::ExecutionModelDescription> {
         match self {
             Self::Bar(m) => m.model_description(),
-            Self::TickPending => None,
+            Self::Tick(m) => m.model_description(),
         }
     }
     fn consume(
@@ -253,21 +250,8 @@ impl Matcher for Matching {
         budget: &dyn FillBudget,
     ) -> QfResult<MatchOutcome> {
         match self {
-            Self::Bar(matcher) => matcher.consume_with_budget(
-                event,
-                orders,
-                rules.as_ref().ok_or_else(|| invalid("Bar规则未接入"))?,
-                budget,
-            ),
-            Self::TickPending if orders.is_empty() => Ok(MatchOutcome {
-                fills: Vec::new(),
-                orders: Vec::new(),
-            }),
-            Self::TickPending => Err(QfError::new(
-                ErrorCode::CapabilityUnavailable,
-                "tick_matching",
-                "D08 Tick撮合尚未实现；当前仅支持真实逐Tick回调和查询/命令绑定",
-            )),
+            Self::Bar(matcher) => matcher.consume_with_budget(event, orders, rules, budget),
+            Self::Tick(matcher) => matcher.consume_with_budget(event, orders, rules, budget),
         }
     }
 }
@@ -365,7 +349,7 @@ fn execute(
     );
     let mut matcher = match spec.config.execution_model {
         ExecutionModel::BarNextIntervalV1 => Matching::Bar(BarMatcher::from_run(&spec.config)?),
-        _ => Matching::TickPending,
+        _ => Matching::Tick(TickMatcher::from_run(&spec.config)?),
     };
     let limits = EngineLimits {
         max_active_orders: spec.max_active_orders,
