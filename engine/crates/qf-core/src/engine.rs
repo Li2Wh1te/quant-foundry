@@ -201,6 +201,13 @@ pub trait StrategyDataPort {
     fn publish(&mut self, event: &MarketEvent) -> QfResult<()>;
     fn check(&mut self) -> QfResult<DependencyCheck>;
     fn close(&mut self) -> QfResult<()>;
+    fn current_data(&self, _securities: &[SecurityKey]) -> QfResult<Vec<MarketEvent>> {
+        Err(error(
+            ErrorCode::CapabilityUnavailable,
+            "current_data",
+            "已发布行情读取未接入",
+        ))
+    }
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BarBoundary {
@@ -563,6 +570,32 @@ impl<D: StrategyDataPort, E: ExecutionPort> ReadView for ScopedView<'_, D, E> {
     fn account(&self) -> QfResult<AccountView> {
         self.execution.borrow().value(self.visibility.now_ns)
     }
+    fn visibility(&self) -> Visibility {
+        self.visibility.clone()
+    }
+    fn current_data(&self, securities: &[SecurityKey]) -> QfResult<Vec<MarketEvent>> {
+        if securities.len() > 10_000 || securities.iter().any(|s| !self.universe.contains(s)) {
+            return Err(error(
+                ErrorCode::DataRestricted,
+                "current_data",
+                "当前行情标的超出运行集合",
+            ));
+        }
+        let events = self.data.current_data(securities)?;
+        if events.len() > securities.len()
+            || events.iter().any(|e| {
+                !securities.contains(&e.key().security)
+                    || !self.visibility.contains_market(&e.key())
+            })
+        {
+            return Err(error(
+                ErrorCode::LookaheadForbidden,
+                "current_data",
+                "当前行情越过已发布边界",
+            ));
+        }
+        Ok(events)
+    }
     fn read(&mut self, request: &DataRequest) -> QfResult<Self::Frame> {
         request.validate(self.visibility.now_ns)?;
         if request
@@ -686,6 +719,38 @@ fn rejected(failure: QfError) -> OrderResult {
     }
 }
 impl<E: ExecutionPort, C: RunControl> CommandSink for ScopedCommands<'_, E, C> {
+    fn get_order(&self, order_id: &str) -> QfResult<Order> {
+        crate::types::keys::label(order_id, 128)?;
+        self.execution.borrow().order(order_id)
+    }
+    fn get_open_orders(&self) -> QfResult<Vec<Order>> {
+        let execution = self.execution.borrow();
+        let mut orders = Vec::new();
+        for security in self.universe {
+            orders.extend(execution.active_orders(security, self.limits.max_active_orders)?);
+            if orders.len() > self.limits.max_active_orders {
+                return Err(error(
+                    ErrorCode::ResourceLimit,
+                    "get_open_orders",
+                    "活动订单集合超限",
+                ));
+            }
+        }
+        Ok(orders)
+    }
+    fn emit(&mut self, record: ResultRecord) -> QfResult<()> {
+        self.checkpoint()?;
+        if !matches!(record, ResultRecord::Record(_) | ResultRecord::Log(_)) {
+            return Err(self.budget.fail(error(
+                ErrorCode::InvalidContract,
+                "record",
+                "策略只能提交用户指标或日志",
+            )));
+        }
+        self.output
+            .push(record, self.limits)
+            .map_err(|e| self.budget.fail(e))
+    }
     fn submit(&mut self, intent: &OrderIntent) -> QfResult<OrderResult> {
         self.checkpoint()?;
         if !self.universe.contains(&intent.security) {
@@ -978,6 +1043,9 @@ where
     ) -> QfResult<()> {
         self.ports.control.check()?;
         self.budget.check()?;
+        // Persist bounded pending order/trade records before exposing history
+        // to a callback. Notifications still drain through the nonrecursive queue.
+        self.flush()?;
         let visibility = self.clock.visibility();
         // Method-scoped account borrows end before invoking the host. Views see
         // synchronous reservations/cancellations within this same callback.

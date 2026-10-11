@@ -8,12 +8,14 @@ use crate::types::{
 use crate::{ErrorCode, QfResult};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PriceBasis {
     Raw,
     ResearchAdjusted,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ValuationMark {
     pub price: Price,
     pub price_time_ns: Nanoseconds,

@@ -10,6 +10,8 @@ use qf_core::types::{
 };
 use qf_core::{QfError, QfResult};
 
+mod runtime;
+
 create_exception!(_native, ContractError, PyValueError);
 fn python_error(error: QfError) -> PyErr {
     let code = error.code.as_str();
@@ -326,5 +328,6 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("MAX_VIEW_ROWS", qf_core::data::views::MAX_VIEW_ROWS)?;
     m.add("MAX_VIEW_BYTES", qf_core::data::views::MAX_VIEW_BYTES)?;
     m.add_class::<PythonReadView>()?;
+    runtime::register(m)?;
     Ok(())
 }

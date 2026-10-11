@@ -4,7 +4,8 @@ use qf_core::results::{
 };
 use qf_core::rules::{DatedFeeComponent, FeeComponentKind, FeeConfig, FeeFact};
 use qf_core::run::{
-    BatchRequest, Frequency, MAX_PARAMETER_BYTES, RunConfig, RunStatus, capabilities,
+    BatchRequest, ExecutionModel, Frequency, MAX_PARAMETER_BYTES, RunConfig, RunStatus,
+    capabilities,
 };
 use qf_core::types::market::{Currency, QuantityUnit};
 use qf_core::types::{MarketEvent, Nanoseconds, Quantity, Sequence};
@@ -340,8 +341,28 @@ fn batch_context_is_fixed_and_capabilities_are_honest() {
     batch.configs = vec![first; 257];
     assert!(batch.validate().is_err());
     let caps = capabilities();
-    assert!(caps.execution_models.is_empty());
-    assert!(caps.frequencies.is_empty());
+    assert_eq!(
+        caps.execution_models,
+        vec![ExecutionModel::BarNextIntervalV1]
+    );
+    assert!(
+        caps.implemented
+            .iter()
+            .any(|name| name == "python_strategy_sdk")
+    );
+    assert!(caps.implemented.iter().any(|name| name == "tick_callbacks"));
+    assert!(!caps.frequencies.contains(&Frequency::Tick));
+    assert_eq!(
+        caps.frequencies,
+        vec![
+            Frequency::Day,
+            Frequency::Minute,
+            Frequency::FiveMinutes,
+            Frequency::FifteenMinutes,
+            Frequency::ThirtyMinutes,
+            Frequency::Hour
+        ]
+    );
     assert!(!caps.production_data_available);
     assert!(RunStatus::Succeeded.terminal());
     assert!(!RunStatus::Running.terminal());

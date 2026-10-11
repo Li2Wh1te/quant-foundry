@@ -11,27 +11,32 @@ use crate::types::{
 use crate::{ErrorCode, QfError, QfResult};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionPhase {
     BeforeOpen,
     SessionClose,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ActionBoundary {
     pub session: SessionKey,
     pub phase: ActionPhase,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum EntitlementRule {
     AllHeld,
     SettledOnly,
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CashSettlement {
     pub scale: u32,
     pub rounding: RoundingPolicy,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CashDividendTax {
     /// Resolve D02's actual investor/product/registration-date policy.
     DatedStock {
@@ -41,7 +46,8 @@ pub enum CashDividendTax {
     /// Available only within a named synthetic RuleUse namespace.
     SyntheticFlat { rate: D },
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShareRatio {
     pub numerator: u32,
     pub denominator: u32,
@@ -71,21 +77,24 @@ impl ShareRatio {
         )
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ShareAcquisitionDate {
     InheritRecordLots,
     ExDate,
 }
 /// Investor-scoped accepted cash-tax fact for share changes. Missing is not
 /// zero. D02's cash-dividend rule is not reused as an invented bonus-share tax.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShareTaxFact {
     pub investor: InvestorKind,
     pub per_entitled_share: Money,
     pub settlement: CashSettlement,
     pub basis: String,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum CorporateActionKind {
     CashDividend {
         per_share: Money,
@@ -111,7 +120,8 @@ pub enum CorporateActionKind {
         lapse_compensation: Option<Money>,
     },
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CorporateAction {
     pub action_id: String,
     pub security: SecurityKey,
