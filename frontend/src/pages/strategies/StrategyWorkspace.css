@@ -741,3 +741,5 @@
 
 /* Field labels must not pass their emphasis to editable values. */
 .qfs-drawer input,.qfs-drawer select,.qfs-drawer textarea { font-weight:400; }
+
+.qfs-code{position:relative}.qfs-s3-completions{position:absolute;bottom:28px;right:20px;max-height:200px;overflow:auto;display:flex;flex-direction:column;background:var(--surface);border:1px solid var(--border);border-radius:8px;box-shadow:0 6px 20px #0002;z-index:5}.qfs-s3-completions button{text-align:left;padding:6px 14px;border:0;background:transparent;color:var(--text)}.qfs-s3-completions [aria-selected=true]{background:var(--orange-50)}.qfs-s3-completion-hint{position:absolute;bottom:4px;right:16px;color:var(--muted);font-size:11px;pointer-events:none}

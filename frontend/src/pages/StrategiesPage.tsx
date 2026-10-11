@@ -45,6 +45,7 @@ import { OverviewShell } from "../components/OverviewShell";
 import { TEMPLATES, type TemplateKey } from "./strategies/templates";
 import { Drawer, ResizeHandle, RecentRuns, NavigationConfirm } from "./strategies/WorkspaceParts";
 import "./strategies/StrategyWorkspace.css";
+import { S3_COMPLETIONS } from "./strategyData/s3";
 import { useAuth } from "../auth/AuthContext";
 
 type EditorDraft = {
@@ -1068,7 +1069,7 @@ export function StrategiesPage() {
                           : `使用已发布 v${currentRevisionNumber}`
                       }
                       onClick={() =>
-                        navigate(`/admin/strategies/${detail.id}/backtests`)
+                        navigate(`/admin/strategies/${detail.id}/backtests?create=1`)
                       }
                     >
                       <ExternalLink />
@@ -1369,7 +1370,7 @@ export function StrategiesPage() {
                       <h3>{checkLabel}</h3>
                       <p>语法、入口签名、默认参数与 Schema 契约。</p>
                       <p className="qfs-muted">
-                        静态检查不代表策略运行或回测已通过。
+                        S3 使用同步 initialize / handle_data / handle_tick 等回调与 quantfoundry.api。静态检查不执行策略，也不代表数据或生产已就绪。旧 run(context, parameters) 原文可以保存，迁入后另发布新修订。
                       </p>
                       <button onClick={() => setDiagnostics(true)}>
                         查看检查详情
@@ -1582,6 +1583,14 @@ const StrategyCodeEditor = memo(function StrategyCodeEditor({
   updateDraftField: <K extends keyof EditorDraft>(field: K, value: EditorDraft[K]) => void;
   updateCursor: () => void;
 }) {
+  const [completion, setCompletion] = useState<{start: number; end: number; items: string[]; selected: number} | null>(null);
+  useEffect(() => { setCompletion(null); }, [editorValue, file, controlsDisabled]);
+  const insert = (name: string) => {
+    if (!completion || controlsDisabled || file !== "sourceCode") return;
+    updateDraftField(file, editorValue.slice(0, completion.start) + name + editorValue.slice(completion.end));
+    const end = completion.start + name.length; setCompletion(null);
+    requestAnimationFrame(() => { if (editorRef.current) { editorRef.current.focus(); editorRef.current.selectionStart = editorRef.current.selectionEnd = end; } updateCursor(); });
+  };
   return (
 <div className="qfs-code" role="tabpanel">
                   <pre ref={linesRef} aria-hidden="true">
@@ -1615,6 +1624,18 @@ const StrategyCodeEditor = memo(function StrategyCodeEditor({
                         linesRef.current.scrollTop = e.currentTarget.scrollTop;
                     }}
                     onKeyDown={(e) => {
+                      if (file === "sourceCode" && !controlsDisabled && e.ctrlKey && e.code === "Space") {
+                        e.preventDefault(); const end = e.currentTarget.selectionStart;
+                        const prefix = editorValue.slice(0, end).match(/[A-Za-z_]+$/)?.[0] || "";
+                        const items = S3_COMPLETIONS.filter(name => name.startsWith(prefix));
+                        setCompletion(items.length ? { start: end-prefix.length, end, items, selected: 0 } : null); return;
+                      }
+                      if (completion) {
+                        if (e.key === "Escape") { e.preventDefault(); setCompletion(null); return; }
+                        if (["ArrowDown", "ArrowUp"].includes(e.key)) { e.preventDefault(); setCompletion({...completion, selected:(completion.selected+(e.key === "ArrowDown" ? 1 : -1)+completion.items.length)%completion.items.length}); return; }
+                        if (["Enter", "Tab"].includes(e.key)) { e.preventDefault(); insert(completion.items[completion.selected]); return; }
+                        setCompletion(null);
+                      }
                       if (e.key === "Tab" && !controlsDisabled) {
                         e.preventDefault();
                         const t = e.currentTarget,
@@ -1633,6 +1654,8 @@ const StrategyCodeEditor = memo(function StrategyCodeEditor({
                       }
                     }}
                   />
+                  {completion && <div className="qfs-s3-completions" role="listbox" aria-label="S3 API 补全">{completion.items.map((name,index) => <button type="button" role="option" aria-selected={completion.selected===index} key={name} onMouseDown={e => e.preventDefault()} onClick={() => insert(name)}>{name}</button>)}</div>}
+                  {file === "sourceCode" && <small className="qfs-s3-completion-hint">Ctrl + Space：S3 API 补全；从 quantfoundry.api 导入使用。</small>}
                 </div>
   );
 });

@@ -1,12 +1,11 @@
 import { isDialogBackdropClick } from "../../components/controls/dialogBackdrop";
 import { useEffect, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
+import { useAuth } from "../../auth/AuthContext";
+import { STATUS } from "../backtests/run-ui/config";
 import { X } from "lucide-react";
-import {
-  fetchStrategyBacktestWorkspace,
-  type BacktestRun,
-} from "../../api/backtestRuns";
+import { listRuns, onRunAccessDenied, type RunSummary } from "../../api/runService";
 
 export function ResizeHandle({
   label,
@@ -129,7 +128,8 @@ export function Drawer({
   );
 }
 export function RecentRuns({ strategyId }: { strategyId: string }) {
-  const [rows, setRows] = useState<BacktestRun[]>([]),
+  const { logout } = useAuth(), navigate = useNavigate();
+  const [rows, setRows] = useState<RunSummary[]>([]),
     [error, setError] = useState(""),
     [loading, setLoading] = useState(true);
   useEffect(() => {
@@ -137,37 +137,19 @@ export function RecentRuns({ strategyId }: { strategyId: string }) {
     setLoading(true);
     setRows([]);
     setError("");
-    (async () => {
-      try {
-        let cursor: string | undefined;
-        let recent: BacktestRun[] = [];
-        // The existing cursor API is ascending and snapshot-bounded.
-        // Walk it to retain the actual latest ten without inventing a total.
-        do {
-          const workspace = await fetchStrategyBacktestWorkspace(
-            strategyId,
-            c.signal,
-            cursor,
-          );
-          if (c.signal.aborted) return;
-          recent = [...recent, ...workspace.runs.items].slice(-10);
-          const next = workspace.runs.has_more
-            ? workspace.runs.next_cursor
-            : undefined;
-          if (workspace.runs.has_more && (!next || next === cursor))
-            throw new Error("回测历史分页无效，请重试。");
-          cursor = next || undefined;
-        } while (cursor);
-        setRows(recent.reverse());
-      } catch (e) {
-        if (!c.signal.aborted)
-          setError(e instanceof Error ? e.message : "回测历史加载失败。");
-      } finally {
-        if (!c.signal.aborted) setLoading(false);
-      }
-    })();
-    return () => c.abort();
-  }, [strategyId]);
+    const unsubscribe = onRunAccessDenied(status => {
+      c.abort(); setRows([]); setLoading(false);
+      setError(status === 401 ? "登录状态已失效。" : "没有回测查看权限。");
+      if (status === 401) { logout(); navigate("/login", { replace: true }); }
+    });
+    listRuns(undefined, c.signal, strategyId).then(page => {
+      // D13 returns the newest page first. One bounded request is enough.
+      if (!c.signal.aborted) setRows(page.items.slice(0, 10));
+    }).catch(e => {
+      if (!c.signal.aborted) setError(e instanceof Error ? e.message : "回测历史加载失败。");
+    }).finally(() => { if (!c.signal.aborted) setLoading(false); });
+    return () => { unsubscribe(); c.abort(); };
+  }, [strategyId, logout, navigate]);
   return (
     <>
       <h3>最近回测</h3>
@@ -183,28 +165,14 @@ export function RecentRuns({ strategyId }: { strategyId: string }) {
       ) : (
         rows.map((r) => (
           <div className="qfs-record" key={r.run_id}>
-            <Link to={`/admin/strategies/${strategyId}/backtests`}>
-              {r.label || r.run_id}
+            <Link to={`/admin/strategies/${strategyId}/backtests?run=${encodeURIComponent(r.run_id)}`}>
+              {r.run_id}
             </Link>
             <small>
-              状态：
-              {(
-                {
-                  succeeded: "成功",
-                  failed: "失败",
-                  running: "运行中",
-                  queued: "排队中",
-                  cancelled: "已取消",
-                } as Record<string, string>
-              )[r.status] || r.status}
+              {r.engine_kind === "rust" ? "Rust 回测" : "历史只读"} · {STATUS[r.status] || "未知状态"}
             </small>
-            <small>版本引用：{r.strategy_revision_id || "—"}</small>
-            <small>
-              账户：{r.account_profile_id || "未指定"}
-              {r.account_profile_version
-                ? ` · v${r.account_profile_version}`
-                : ""}
-            </small>
+            <small>版本引用：{r.normalized_config?.strategy_revision_id || r.strategy_revision_id || "—"}</small>
+            <small>账户：{r.normalized_config?.account_id || r.account_profile_id || "未指定"} · v{r.account_version ?? r.account_profile_version ?? "—"}</small>
           </div>
         ))
       )}

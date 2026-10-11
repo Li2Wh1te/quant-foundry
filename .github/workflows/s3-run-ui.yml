@@ -1,0 +1,50 @@
+name: S3 run UI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  browser:
+    name: Browser run lifecycle and real isolated service
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.2"
+      - uses: astral-sh/setup-uv@v5
+      - uses: pnpm/action-setup@v4
+        with:
+          version: "11.19.0"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - name: Install and check the frontend before browser runs
+        run: |
+          pnpm -C frontend install --frozen-lockfile
+          pnpm -C frontend test
+          pnpm -C frontend build
+          pnpm -C frontend exec playwright install --with-deps chromium
+      - name: Build locked immutable SDK wheel
+        run: |
+          rustup toolchain install 1.90.0 --profile minimal
+          python -m venv "$RUNNER_TEMP/s3-ui-build/build"
+          "$RUNNER_TEMP/s3-ui-build/build/bin/python" -m pip install --require-hashes -r sdk/python/requirements-build.lock
+          cd sdk/python
+          "$RUNNER_TEMP/s3-ui-build/build/bin/maturin" build --release --locked --out "$RUNNER_TEMP/s3-ui-build/wheels"
+      - name: Clickable UI with fixture transport and actual runner container
+        env:
+          QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-ui-build
+          QF_D15_EVIDENCE: ${{ runner.temp }}/s3-ui-evidence
+        run: bash scripts/test_s3_run_ui.sh
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: s3-run-ui-browser-evidence
+          path: ${{ runner.temp }}/s3-ui-evidence/
+          if-no-files-found: error
