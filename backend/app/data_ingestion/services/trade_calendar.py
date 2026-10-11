@@ -28,7 +28,7 @@ from app.data_ingestion.constants import (
     TRADE_CALENDAR_SYNC_KEY,
     TUSHARE_SOURCE,
 )
-from app.backtesting.calendar_axis import (
+from app.calendars.facts import (
     CalendarDefinition,
     CalendarExchangeBinding,
     CalendarPITContext,
@@ -39,10 +39,10 @@ from app.backtesting.calendar_axis import (
     normalize_calendar_id,
     select_pit_candidate,
 )
-from app.backtesting.data.requests import QueryBoundary
-from app.backtesting.data.calendar_repository import CalendarFactRepository
-from app.backtesting.calendar_models import CalendarReconciliationRangeRecord, CalendarSessionFactRecord
-from app.backtesting.data.errors import LegacyExchangeAmbiguousError, CalendarIngestionRangeIncompleteError
+from app.calendars.contracts import QueryBoundary
+from app.calendars.repository import CalendarFactRepository
+from app.calendars.models import CalendarReconciliationRangeRecord, CalendarSessionFactRecord
+from app.data_contracts.errors import LegacyExchangeAmbiguousError, CalendarIngestionRangeIncompleteError
 from app.db.session import get_engine
 
 if TYPE_CHECKING:
@@ -313,7 +313,7 @@ def resolve_calendar_id(
         )
     day = effective_day
     cutoff = data_cutoff
-    from app.backtesting.data.requests import QueryBoundary
+    from app.calendars.contracts import QueryBoundary
 
     context = CalendarPITContext.from_query_boundary(
         QueryBoundary(data_cutoff=cutoff, include_cutoff_day=True)

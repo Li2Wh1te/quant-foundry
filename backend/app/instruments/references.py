@@ -1,11 +1,11 @@
 """Dependency-free versioned reference values shared across domains.
 
 This module deliberately imports nothing heavier than the stdlib-only leaf
-``app.backtesting.domain``.  The generic backtesting data contract
-(``app.backtesting.data``) names its versioned policies through
+``app.backtest_service.config_values``.  The generic backtesting data contract
+(``app.data_contracts``) names its versioned policies through
 :class:`VersionedReference`, so the type must live below the heavy reverse
 dependencies -- keeping it here (together with the lazy exports of
-``app.backtesting.data``) is what breaks the ``instruments`` <->
+``app.data_contracts``) is what breaks the ``instruments`` <->
 ``backtesting`` import cycle.  Nothing in this file may grow an import of
 the data contract or of other instrument modules.
 """

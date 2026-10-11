@@ -27,23 +27,9 @@ from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from app.backtesting.data.errors import (
-    HistoryBarInstrumentMismatchError,
-    HistoryBarsDuplicateError,
-    HistoryBarsIncompleteError,
-    IdentityMappingConflictError,
-    IdentityMappingEvidenceMissingError,
-    IdentityMappingIncompleteError,
-    LookbackSessionsLimitExceededError,
-)
-from app.backtesting.data.facts import Bar, FactEvidence
-from app.backtesting.domain import DomainValidationError
-from app.backtesting.data.pit_history import (
-    read_segmented_history,
-    resolve_pit_mappings,
-)
-from app.backtesting.data.requests import PriceBasis, QualityStatus
-from app.backtesting.result_models import resolve_display_snapshot
+from app.data_contracts.errors import (IdentityMappingConflictError, IdentityMappingEvidenceMissingError)
+from app.backtest_service.config_values import DomainValidationError
+from app.instruments.display_snapshot import resolve_display_snapshot
 from app.data_ingestion.models.etf import EtfEntity
 from app.db.base import Base
 from app.core.config import get_settings
@@ -72,8 +58,6 @@ from app.instruments.models import (
     MappingResolutionHead,
 )
 from app.instruments.repository import InstrumentCodeMappingRepository
-from app.strategy_protocol.contract import LookbackLimitExceededError
-from app.strategy_protocol.data_view import BarDTO, StrategyDataDTO
 
 
 INSTRUMENT_ID = uuid4()
@@ -111,39 +95,8 @@ def _mapping(
     )
 
 
-def _bar(day: date, *, instrument_id=INSTRUMENT_ID) -> Bar:
-    return Bar(
-        instrument_id=instrument_id,
-        trade_date=day,
-        frequency="1d",
-        open=Decimal("1"),
-        high=Decimal("1.1"),
-        low=Decimal("0.9"),
-        close=Decimal("1.05"),
-        volume=Decimal("100"),
-        amount=Decimal("105"),
-        price_basis=PriceBasis.RAW,
-        evidence=FactEvidence(
-            source=SOURCE,
-            observed_at=datetime(2026, 1, 2, tzinfo=UTC),
-            known_at=datetime(2026, 1, 2, tzinfo=UTC),
-            quality_status=QualityStatus.COMPLETE,
-        ),
-    )
 
 
-class _BarReader:
-    def __init__(self, rows):
-        self.rows = {code: list(values) for code, values in rows.items()}
-        self.calls = []
-
-    def read_bars(self, source_code, start_date, end_date):
-        self.calls.append((source_code, start_date, end_date))
-        return tuple(
-            row
-            for row in self.rows.get(source_code, ())
-            if start_date <= row.trade_date <= end_date
-        )
 
 
 class StableIdentityAcceptanceTests(unittest.TestCase):
@@ -432,36 +385,6 @@ class StableIdentityAcceptanceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.details["actual"], 2)
         self.assertEqual(len(ctx.exception.details["fact_ids"]), 2)
 
-    def test_pure_mapping_resolution_rejects_duplicate_fact_version(self):
-        logical_key = f"mapping:{INSTRUMENT_ID}:duplicate-version"
-        first = _mapping(
-            "DUPLICATE-A.SH",
-            date(2026, 1, 1),
-            known_at=datetime(2026, 1, 2, tzinfo=UTC),
-            logical_fact_key=logical_key,
-            fact_id=uuid4(),
-        )
-        duplicate = _mapping(
-            "DUPLICATE-B.SH",
-            date(2026, 1, 1),
-            known_at=datetime(2026, 1, 3, tzinfo=UTC),
-            logical_fact_key=logical_key,
-            fact_id=uuid4(),
-        )
-
-        with self.assertRaises(IdentityMappingConflictError) as ctx:
-            resolve_pit_mappings(
-                INSTRUMENT_ID,
-                source=SOURCE,
-                sessions=[date(2026, 1, 5)],
-                mappings=(first, duplicate),
-                data_cutoff=datetime(2026, 1, 6, tzinfo=UTC),
-            )
-
-        self.assertEqual(ctx.exception.details["logical_fact_key"], logical_key)
-        self.assertEqual(ctx.exception.details["fact_version"], 1)
-        self.assertEqual(ctx.exception.details["actual"], 2)
-        self.assertEqual(len(ctx.exception.details["fact_ids"]), 2)
 
     def test_pure_identity_resolution_rejects_blank_mapping_evidence(self):
         mapping = _mapping("NO-EVIDENCE.SH", date(2026, 1, 1))
@@ -483,163 +406,9 @@ class StableIdentityAcceptanceTests(unittest.TestCase):
         self.assertEqual(ctx.exception.details["expected"], "non-blank evidence")
         self.assertEqual(ctx.exception.details["actual"], "")
 
-    def test_mapping_correction_replays_by_data_cutoff(self):
-        old_id = uuid4()
-        key = "mapping:task10:effective-window"
-        old = _mapping(
-            "OLD.SH",
-            date(2026, 1, 1),
-            known_at=datetime(2026, 1, 2, tzinfo=UTC),
-            logical_fact_key=key,
-            fact_id=old_id,
-        )
-        new = _mapping(
-            "NEW.SH",
-            date(2026, 1, 1),
-            known_at=datetime(2026, 2, 1, tzinfo=UTC),
-            logical_fact_key=key,
-            fact_id=uuid4(),
-            fact_version=2,
-            supersedes_fact_id=old_id,
-        )
-        sessions = [date(2026, 1, 5)]
-        before = resolve_pit_mappings(
-            INSTRUMENT_ID,
-            source=SOURCE,
-            sessions=sessions,
-            mappings=[old, new],
-            data_cutoff=datetime(2026, 1, 31, tzinfo=UTC),
-        )
-        after = resolve_pit_mappings(
-            INSTRUMENT_ID,
-            source=SOURCE,
-            sessions=sessions,
-            mappings=[old, new],
-            data_cutoff=datetime(2026, 2, 2, tzinfo=UTC),
-        )
-        self.assertEqual(before.session_bindings[date(2026, 1, 5)], "OLD.SH")
-        self.assertEqual(after.session_bindings[date(2026, 1, 5)], "NEW.SH")
 
-    def test_cross_code_history_stitches_one_stable_identity(self):
-        sessions = [date(2026, 1, 5), date(2026, 1, 6)]
-        mappings = [
-            _mapping("OLD.SH", date(2026, 1, 1), date(2026, 1, 6)),
-            _mapping("NEW.SH", date(2026, 1, 6)),
-        ]
-        resolution = resolve_pit_mappings(
-            INSTRUMENT_ID,
-            source=SOURCE,
-            sessions=sessions,
-            mappings=mappings,
-            data_cutoff=CUTOFF,
-        )
-        reader = _BarReader(
-            {"OLD.SH": [_bar(sessions[0])], "NEW.SH": [_bar(sessions[1])]}
-        )
-        history = read_segmented_history(resolution, reader)
-        self.assertEqual([row.trade_date for row in history.bars], sessions)
-        self.assertEqual({row.instrument_id for row in history.bars}, {INSTRUMENT_ID})
-        self.assertEqual([call[0] for call in reader.calls], ["OLD.SH", "NEW.SH"])
 
-    def test_missing_duplicate_out_of_range_and_wrong_identity_bars_block(self):
-        day = date(2026, 1, 5)
-        mapping = _mapping("A.SH", date(2026, 1, 1))
-        resolution = resolve_pit_mappings(
-            INSTRUMENT_ID,
-            source=SOURCE,
-            sessions=[day],
-            mappings=[mapping],
-            data_cutoff=CUTOFF,
-        )
 
-        with self.assertRaises(HistoryBarsIncompleteError):
-            read_segmented_history(resolution, _BarReader({"A.SH": []}))
-
-        class DuplicateReader(_BarReader):
-            def read_bars(self, source_code, start_date, end_date):
-                rows = super().read_bars(source_code, start_date, end_date)
-                return rows + rows
-
-        with self.assertRaises(HistoryBarsDuplicateError):
-            read_segmented_history(resolution, DuplicateReader({"A.SH": [_bar(day)]}))
-
-        class OutOfRangeReader(_BarReader):
-            def read_bars(self, source_code, start_date, end_date):
-                self.calls.append((source_code, start_date, end_date))
-                return (_bar(start_date), _bar(end_date + timedelta(days=1)))
-
-        with self.assertRaises(HistoryBarsIncompleteError):
-            read_segmented_history(resolution, OutOfRangeReader({}))
-
-        with self.assertRaises(HistoryBarInstrumentMismatchError):
-            read_segmented_history(
-                resolution,
-                _BarReader({"A.SH": [_bar(day, instrument_id=uuid4())]}),
-            )
-
-    def test_lookback_limit_fails_before_session_or_pit_provider_reads(self):
-        class Resolver:
-            calls = 0
-
-            def resolve_sessions(self, **kwargs):
-                self.calls += 1
-                return ()
-
-        class PitReader:
-            calls = 0
-
-            def bars_for_sessions(self, **kwargs):
-                self.calls += 1
-                sessions = kwargs.get("sessions") or kwargs.get("resolved_sessions")
-                return tuple(
-                    BarDTO(
-                        instrument_id=INSTRUMENT_ID,
-                        trade_date=day,
-                        values={"close": Decimal("1")},
-                    )
-                    for day in sessions
-                )
-
-        resolver = Resolver()
-        pit = PitReader()
-        facade = StrategyDataDTO(
-            object(),
-            data_cutoff=CUTOFF,
-            session_resolver=resolver,
-            pit_reader=pit,
-        )
-        with self.assertRaises(LookbackSessionsLimitExceededError):
-            facade.bars(INSTRUMENT_ID, lookback_sessions=513)
-        self.assertEqual(resolver.calls, 0)
-        self.assertEqual(pit.calls, 0)
-
-        explicit_sessions = [
-            CUTOFF.date() - timedelta(days=index)
-            for index in range(512, -1, -1)
-        ]
-        explicit_pit = PitReader()
-        explicit = StrategyDataDTO(
-            object(),
-            data_cutoff=CUTOFF,
-            resolved_sessions=explicit_sessions,
-            pit_reader=explicit_pit,
-        )
-        with self.assertRaises(LookbackLimitExceededError) as context:
-            explicit.bars(
-                INSTRUMENT_ID,
-                start_date=explicit_sessions[0],
-                end_date=explicit_sessions[-1],
-            )
-        self.assertEqual(context.exception.requested, 513)
-        self.assertEqual(context.exception.maximum, 512)
-        self.assertEqual(explicit_pit.calls, 0)
-
-        sessions = [CUTOFF.date() - timedelta(days=index) for index in range(511, -1, -1)]
-        valid = StrategyDataDTO(
-            object(), data_cutoff=CUTOFF, resolved_sessions=sessions, pit_reader=pit
-        )
-        valid.bars(INSTRUMENT_ID, lookback_sessions=512)
-        self.assertEqual(pit.calls, 1)
 
     def test_missing_display_never_uses_current_snapshot_fallback(self):
         class MissingDisplayProvider:
@@ -657,49 +426,6 @@ class StableIdentityAcceptanceTests(unittest.TestCase):
         self.assertIsNone(snapshot.event_name)
         self.assertIsNone(snapshot.event_display_name)
 
-    def test_result_event_display_snapshot_is_frozen(self):
-        from tests.backtest_runtime_fixture import (
-            CountingStrategyView,
-            DictMarketData,
-            INSTRUMENT_ID as RUNTIME_INSTRUMENT_ID,
-            ScriptedStrategy,
-            build_axis,
-            build_runner,
-        )
-
-        class DisplayProvider:
-            name = "旧名称"
-
-            def resolve_display(self, instrument_id, *, effective_at, data_cutoff):
-                return InstrumentDisplay(
-                    instrument_id=instrument_id,
-                    trading_code="510300",
-                    name=self.name,
-                    display_name=self.name,
-                )
-
-        provider = DisplayProvider()
-        axis = build_axis([date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5)])
-        runner = build_runner(
-            run_id="task10-display-snapshot",
-            axis=axis,
-            market_data=DictMarketData(
-                {
-                    day: {RUNTIME_INSTRUMENT_ID: ("99", "100")}
-                    for day in (date(2026, 8, 3), date(2026, 8, 4), date(2026, 8, 5))
-                }
-            ),
-            strategy_view=CountingStrategyView(
-                {date(2026, 8, 3): "100", date(2026, 8, 4): "101"}
-            ),
-            strategy=ScriptedStrategy({0: {str(RUNTIME_INSTRUMENT_ID): "1"}}),
-        )
-        runner._display_provider = provider
-        result = runner.run()
-        provider.name = "新名称"
-        event = next(event for event in result.events if event.event_type == "order_submitted")
-        self.assertEqual(event.display_snapshot.event_name, "旧名称")
-        self.assertEqual(event.payload["display"]["event_name"], "旧名称")
 
 
 class IdentityLifecycleAcceptanceTests(unittest.TestCase):
@@ -1540,16 +1266,6 @@ class MigrationScopeAcceptanceTests(unittest.TestCase):
         self.assertGreaterEqual(source.count('(\"effective_range\", \"&&\")'), 6)
         self.assertGreaterEqual(source.count('(\"knowledge_range\", \"&&\")'), 6)
 
-    def test_public_scope_does_not_add_deferred_protocols(self):
-        source = Path(
-            __file__).resolve().parents[1] / "app/backtesting/data/pit_history.py"
-        tree = source.read_text(encoding="utf-8")
-        self.assertNotIn("class DataSession", tree)
-        self.assertNotIn("class TimeAxis", tree)
-        self.assertNotIn("warmup_sessions", tree)
-        self.assertNotIn("consistency_token", tree)
-        self.assertNotIn("qfq", tree.lower())
-        self.assertNotIn("hfq", tree.lower())
 
     def test_task10_migration_round_trips_on_sqlite(self):
         """SQLite smoke tests must exercise migration DDL, not only ORM metadata."""

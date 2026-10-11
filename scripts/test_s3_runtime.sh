@@ -123,3 +123,4 @@ docker run --name "$qf_runner" --network none --cpus 1 --memory 1g --memory-swap
 mkdir -p "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}"
 cp "$qf_test_root/work/isolation-evidence.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"
 cp "$qf_test_root/work/d14-service/d14-examples.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"
+cp "$qf_test_root/work/d13-service/retired-execution-writes.json" "${QF_S3_RUNTIME_EVIDENCE:-$qf_build/runtime-evidence}/"

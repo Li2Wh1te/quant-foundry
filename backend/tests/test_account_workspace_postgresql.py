@@ -7,11 +7,11 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.backtesting.account_profiles import AccountProfileStatus
-from app.backtesting.account_queries import AccountProfileQueries
-from app.backtesting.models import BacktestRunRecord
-from app.backtesting.schemas import AccountProfileOverviewResponse, AccountProfileUsageResponse
-from app.backtesting.service import AccountProfileService, AccountProfileVersionConflictError
+from app.backtest_service.accounts.types import AccountProfileStatus
+from app.backtest_service.accounts.queries import AccountProfileQueries
+from app.backtest_service.history.storage_models import BacktestRunRecord
+from app.backtest_service.accounts.schemas import AccountProfileOverviewResponse, AccountProfileUsageResponse
+from app.backtest_service.accounts.service import AccountProfileService, AccountProfileVersionConflictError
 from app.core.config import get_settings
 from app.strategies.service import StrategyStorageService
 from tests.test_backtesting_account_profile_storage import fee_schedule_payload
@@ -102,7 +102,7 @@ def test_catalogue_counts_history_scope_and_literal_pagination():
             import asyncio
             import json
             from fastapi import FastAPI
-            from app.backtesting.router import router
+            from app.backtest_service.accounts.router import router
             from app.core.auth import AuthenticatedPrincipal
             from app.db.session import get_db_session
             app = FastAPI()

@@ -77,7 +77,7 @@ jobs:
         run: |
           uv sync --locked
           uv run --locked alembic upgrade head
-          uv run --locked python -m pytest -q tests/test_account_workspace.py tests/test_backtesting_account_profiles.py tests/test_backtesting_account_profile_storage.py tests/test_strategy_storage.py tests/test_backtesting_result_api.py tests/test_backtesting_pagination.py
+          uv run --locked python -m pytest -q tests/test_account_workspace.py tests/test_backtesting_account_profile_storage.py tests/test_strategy_storage.py tests/test_backtesting_pagination.py
       - name: Build the real Rust IPC consumer
         working-directory: engine
         run: cargo build -p qf-core --locked --example consume_gateway
@@ -93,7 +93,22 @@ jobs:
         working-directory: backend
         env:
           QF_S3_D13_REQUIRED: "1"
+          QF_D17_EVIDENCE: ${{ runner.temp }}/s3-retirement-evidence
         run: uv run --locked --no-sync python -m pytest -q tests/test_s3_run_service.py
+      - name: D17 blocked startup, empty migrations and private cleanup refusal/apply
+        working-directory: backend
+        env:
+          QF_D17_EVIDENCE: ${{ runner.temp }}/s3-retirement-evidence
+        run: |
+          uv run --locked --no-sync python -m pytest -q tests/test_s3_retirement.py
+          uv run --locked --no-sync python ../scripts/scan_legacy_dependencies.py --repo .. --max-bytes 33554432 --output "$RUNNER_TEMP/s3-retirement-evidence/inventory.json"
+      - name: Retain isolated retirement and historical value evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: s3-retirement-evidence
+          path: ${{ runner.temp }}/s3-retirement-evidence/
+          if-no-files-found: error
       - name: D14 installed CLI and HTTP clients, examples and migration protection
         working-directory: backend
         env:

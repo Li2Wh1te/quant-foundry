@@ -40,7 +40,7 @@ from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence
 from uuid import UUID, uuid4
 
-from app.backtesting.data.errors import (
+from app.data_contracts.errors import (
     IdentityMappingConflictError,
     IdentityMappingIncompleteError,
     freeze_json,

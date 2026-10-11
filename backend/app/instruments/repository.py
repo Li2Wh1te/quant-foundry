@@ -10,7 +10,7 @@ from sqlalchemy.dialects.postgresql import Range
 from sqlalchemy.orm import Session
 
 from app.backtest_service.config_values import DomainValidationError, _aware_datetime
-from app.backtesting.data.errors import (
+from app.data_contracts.errors import (
     IdentityMappingConflictError,
     IdentityMappingEvidenceMissingError,
     IdentityMappingIncompleteError,

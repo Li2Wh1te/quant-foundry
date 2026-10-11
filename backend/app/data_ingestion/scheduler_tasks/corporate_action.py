@@ -77,13 +77,13 @@ def _cash_calendar_resolver(session: Any):
     def resolve(item: Any, instrument_id: Any) -> dict[str, object]:
         nonlocal identity_repository, calendar_provider, gateway
         if identity_repository is None:
-            from app.backtesting.data.calendar_sql import SqlCalendarAxisDataProvider
-            from app.backtesting.settlement import CalendarAxisSettlementGateway
+            from app.calendars.sql import SqlNamedCalendarFactProvider
+            from app.calendars.neighbors import NextOpenSessionGateway
             from app.instruments.identity_repository import InstrumentIdentityRepository
 
             identity_repository = InstrumentIdentityRepository(session)
-            calendar_provider = SqlCalendarAxisDataProvider(session)
-            gateway = CalendarAxisSettlementGateway(calendar_provider)
+            calendar_provider = SqlNamedCalendarFactProvider(session)
+            gateway = NextOpenSessionGateway(calendar_provider)
         source_date = item.payment_date
         if source_date is None:
             raise ValueError("corporate_action_cash_date_unresolved")

@@ -22,7 +22,7 @@ from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.exc import IntegrityError, OperationalError
 from sqlalchemy.orm import Session
 
-from app.backtesting.data.errors import (
+from app.data_contracts.errors import (
     IdentityMappingConflictError,
     IdentityMappingEvidenceMissingError,
     IdentityMappingIncompleteError,

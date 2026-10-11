@@ -6,8 +6,8 @@ from decimal import Decimal
 from types import MappingProxyType
 from uuid import UUID, uuid4
 
-from app.backtesting.domain import DomainValidationError
-from app.backtesting.result_models import (
+from app.backtest_service.config_values import DomainValidationError
+from app.instruments.display_snapshot import (
     InstrumentDisplaySnapshot,
     resolve_display_snapshot,
 )

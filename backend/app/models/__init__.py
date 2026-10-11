@@ -41,7 +41,7 @@ from app.backtest_service.history.storage_models import (
     BacktestQueueGuardRecord,
     BacktestRunRecord,
 )
-from app.backtesting.calendar_models import (
+from app.calendars.models import (
     CalendarRegistryRecord,
     CalendarSourcePriorityRecord,
     CalendarDefinitionRecord,

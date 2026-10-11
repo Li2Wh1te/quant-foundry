@@ -9,7 +9,7 @@ from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.backtesting.saved_comparisons import ComparisonDefinition, ComparisonStore, CreateComparison, SavedComparison, SavedComparisonMember, UpdateComparison
+from app.backtest_service.history.saved_comparisons import ComparisonDefinition, ComparisonStore, CreateComparison, SavedComparison, SavedComparisonMember, UpdateComparison
 from app.db.base import Base
 
 

@@ -9,8 +9,8 @@ from alembic.operations import Operations
 from sqlalchemy import Boolean, Column, Date, DateTime, MetaData, String, Table, create_engine, text
 from sqlalchemy.orm import Session
 
-from app.backtesting.calendar_models import CalendarReconciliationRangeRecord, CalendarSessionFactRecord
-from app.backtesting.data.calendar_repository import CalendarFactRepository
+from app.calendars.models import CalendarReconciliationRangeRecord, CalendarSessionFactRecord
+from app.calendars.repository import CalendarFactRepository
 from app.data_ingestion.services.trade_calendar import backfill_legacy_trading_calendar_days
 
 

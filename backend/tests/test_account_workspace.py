@@ -6,10 +6,10 @@ import pytest
 from pydantic import ValidationError
 from starlette.requests import Request
 
-from app.backtesting.models import BacktestAccountProfileRecord
-from app.backtesting.router import _http_error, _usage_owner
-from app.backtesting.schemas import AccountProfileUpdateRequest
-from app.backtesting.service import AccountProfileService, AccountProfileVersionConflictError
+from app.backtest_service.history.storage_models import BacktestAccountProfileRecord
+from app.backtest_service.accounts.router import _http_error, _usage_owner
+from app.backtest_service.accounts.schemas import AccountProfileUpdateRequest
+from app.backtest_service.accounts.service import AccountProfileService, AccountProfileVersionConflictError
 from app.core.auth import AuthenticatedPrincipal
 
 

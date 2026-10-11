@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import uuid4
 
-from app.backtesting.pagination import (
+from app.backtest_service.history.pagination import (
     CURSOR_VERSION,
     DEFAULT_PAGE_SIZE,
     MAX_PAGE_SIZE,

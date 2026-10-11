@@ -31,9 +31,9 @@ from app.data_ingestion.schemas.etf_adjustment import (
     EtfAdjustmentSyncResult,
 )
 from app.data_ingestion.schemas.trading_calendar import DataSyncCheckpointState
-from app.backtesting.calendar_axis import normalize_calendar_id
-from app.backtesting.data.calendar_repository import CalendarFactRepository
-from app.backtesting.data.errors import InstrumentCalendarUnresolvedError
+from app.calendars.facts import normalize_calendar_id
+from app.calendars.repository import CalendarFactRepository
+from app.data_contracts.errors import InstrumentCalendarUnresolvedError
 from app.db.session import get_engine
 
 if TYPE_CHECKING:
