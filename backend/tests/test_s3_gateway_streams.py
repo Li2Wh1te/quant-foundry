@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pytest
 
-from app.backtest_service.data_gateway import DataBatch, MARKET_SCHEMA, serve
+from app.backtest_service.data_gateway import DataBatch, GatewayError, MARKET_SCHEMA, serve
 
 _loader = importlib.util.spec_from_file_location('d10_stream_transport',
     Path(__file__).resolve().parents[2]/'sdk/python/quantfoundry/_transport.py')
@@ -44,11 +44,14 @@ class _ProtocolFixture:
         label = query['label']
         self.active.add(label)
         try:
+            if label == 'changed-query':
+                raise GatewayError('DATA_CHANGED','synthetic dependency changed')
             for page in range(2):
                 rows = [dict(kind='trade_tick',security='A.SH',session='synthetic',
                     source_session='synthetic',channel='synthetic',sequence=page*page_rows+i,
                     stable_input_sequence=page*page_rows+i,time_ns=100+page*page_rows+i,
-                    price='10',quantity=1) for i in range(page_rows)]
+                    price='1'*self.batch_bytes if label=='oversized-query' else '10',
+                    quantity=1) for i in range(page_rows)]
                 table = pa.Table.from_pylist(rows, schema=MARKET_SCHEMA)
                 yield DataBatch(table,dict(schema_id='qf.market.v1',time_unit='utc_nanoseconds',
                     price_currency='CNY',quantity_unit='shares',rows=page_rows,
@@ -137,6 +140,10 @@ def test_two_active_streams_terminal_limit_cancel_disconnect_release_both(ending
         _next(client,query)
         assert gateway.active == {'source','query'}
         if ending in {'excess_stream','excess_rows'}:
+            if ending == 'excess_rows':
+                # Leave a free slot so the row-credit assertion cannot be
+                # satisfied solely by the third-stream rejection.
+                client.call('close_stream',{'stream_id':query})
             with pytest.raises(transport.TransportError) as caught:
                 _open(client,'third',credit=3 if ending=='excess_rows' else 1)
             assert caught.value.code == 'RESOURCE_LIMIT'
@@ -145,3 +152,16 @@ def test_two_active_streams_terminal_limit_cancel_disconnect_release_both(ending
         else:
             client.channel.close()
     assert gateway.closed_streams == {'source','query'}
+
+
+@pytest.mark.parametrize(('label','code'),[
+    ('oversized-query','RESOURCE_LIMIT'),('changed-query','DATA_CHANGED')])
+def test_query_byte_budget_and_data_change_release_retained_source(label,code):
+    with _connection() as (gateway, client):
+        source = _open(client,'source')
+        _next(client,source)
+        query = _open(client,label)
+        with pytest.raises(transport.TransportError) as caught:
+            _next(client,query)
+        assert caught.value.code == code
+    assert gateway.closed_streams == {'source',label}
