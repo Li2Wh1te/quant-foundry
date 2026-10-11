@@ -86,6 +86,18 @@ pub trait ExecutionPort: AccountPort {
         }
         self.fill_allowance(id, requested, price, step)
     }
+    fn candidate_fill_allowance_after(
+        &self,
+        _prior: &[Fill],
+        _candidate: &Fill,
+        _step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        Err(error(
+            ErrorCode::CapabilityUnavailable,
+            "fill_budget",
+            "完整候选成交账户核验未接入",
+        ))
+    }
     /// Concrete D06 overrides with one revision-bound account/order commit.
     fn apply_match_outcome(
         &mut self,
@@ -159,6 +171,15 @@ impl<E: ExecutionPort> FillBudget for ExecutionBudget<'_, E> {
     ) -> QfResult<FillAllowance> {
         self.0
             .fill_allowance_after(prior, id, requested, price, step)
+    }
+    fn candidate_allowance_after(
+        &self,
+        prior: &[Fill],
+        candidate: &Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0
+            .candidate_fill_allowance_after(prior, candidate, step)
     }
 }
 pub trait RulesPort<R> {
@@ -332,6 +353,7 @@ pub struct EngineConfig {
 }
 pub struct Engine<S> {
     config: EngineConfig,
+    normalized_match_parameters: Option<(crate::types::ExactDecimal, crate::types::ExactDecimal)>,
     calendar: SessionCalendar,
     merge: crate::clock::StreamingMerge<S>,
 }
@@ -798,7 +820,7 @@ impl<S: EventSource> Engine<S> {
                 "参考日历与归一化run日期范围不一致",
             ));
         }
-        Self::new(
+        let mut engine = Self::new(
             EngineConfig {
                 frequency: config.frequency,
                 execution_model: config.execution_model,
@@ -808,7 +830,9 @@ impl<S: EventSource> Engine<S> {
             },
             calendar,
             sources,
-        )
+        )?;
+        engine.normalized_match_parameters = Some((config.participation_rate, config.slippage_bps));
+        Ok(engine)
     }
     pub fn new(config: EngineConfig, calendar: SessionCalendar, sources: Vec<S>) -> QfResult<Self> {
         config.limits.validate()?;
@@ -832,6 +856,7 @@ impl<S: EventSource> Engine<S> {
         let merge = crate::clock::StreamingMerge::new(sources, config.limits.merge)?;
         Ok(Self {
             config,
+            normalized_match_parameters: None,
             calendar,
             merge,
         })
@@ -1323,6 +1348,27 @@ where
         let config = &engine.config;
         let calendar = &engine.calendar;
         self.check_data()?;
+        if let Some(description) = self.ports.matcher.model_description() {
+            if description.model != config.execution_model
+                || description.frequency != config.frequency
+                || engine
+                    .normalized_match_parameters
+                    .is_some_and(|parameters| {
+                        parameters != (description.participation_rate, description.slippage_bps)
+                    })
+            {
+                return Err(error(
+                    ErrorCode::InvalidRunConfig,
+                    "execution_model",
+                    "撮合模型说明与运行配置不一致",
+                ));
+            }
+            self.output
+                .push(ResultRecord::ExecutionModel(description), &config.limits)?;
+            // Preserve the assumptions even if initialize fails before any
+            // market result is produced. Required writer credit comes first.
+            self.flush()?;
+        }
         self.call(Call::Initialize, config, calendar, 0, false)?;
         self.registration.seal();
         // Validate all schedule/calendar precision before processing markets,

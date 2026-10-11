@@ -105,6 +105,7 @@ pub struct CorporateActionEvent {
     deny_unknown_fields
 )]
 pub enum ResultRecord {
+    ExecutionModel(crate::matching::ExecutionModelDescription),
     Equity(EquityPoint),
     Order(Order),
     Trade(Fill),
