@@ -18,24 +18,24 @@ test('catalog recovers from corrupt and obsolete workspace state', () => {
   for (const value of [null, 2, 'old', [], { api:'daily_bars', tab:'removed', type:'invalid', example:99 }]) {
     assert.deepEqual(restoreCatalogState(value), DEFAULT_STATE);
   }
-  assert.deepEqual(restoreCatalogState({ query:' bars ', api:'bars', type:'data', tab:'example', example:1 }),
-    { query:' bars ', api:'bars', type:'data', tab:'example', example:1 });
-  for (const example of [-1, 2, Infinity, '1', null]) assert.equal(restoreCatalogState({api:'bars',example}).example,0);
+  assert.deepEqual(restoreCatalogState({ query:' price ', api:'get_price', type:'data', tab:'example', example:0 }),
+    { query:' price ', api:'get_price', type:'data', tab:'example', example:0 });
+  for (const example of [-1, 2, Infinity, '1', null]) assert.equal(restoreCatalogState({api:'get_price',example}).example,0);
 });
 test('search and type filters intersect without changing the selected document', () => {
-  assert.deepEqual(filterCatalog('  BARS  ','all').map(item=>item.id),['bars']);
+  assert.deepEqual(filterCatalog('  GET_PRICE  ','all').map(item=>item.id),['get_price']);
   assert.deepEqual(filterCatalog('context.clock','data'),[]);
-  assert.deepEqual(filterCatalog('时间','clock').map(item=>item.id),['now']);
-  assert.deepEqual(filterCatalog('','context').map(item=>item.id),['session_date','data_cutoff']);
-  assert.equal(filterCatalog('','all').length,7);
+  assert.deepEqual(filterCatalog('initialize','clock').map(item=>item.id),['callbacks','scheduling']);
+  assert.deepEqual(filterCatalog('','context').map(item=>item.id),['context','record']);
+  assert.equal(filterCatalog('','all').length,10);
 });
 test('documents describe strict runtime limits rather than prototype-only promises', () => {
-  const bars=API_ENTRIES.find(item=>item.id==='bars'), factors=API_ENTRIES.find(item=>item.id==='adjusted_series');
-  assert.match(JSON.stringify(bars.params),/两个 date 必须同时提供/);
-  assert.match(JSON.stringify(bars.boundary),/history_incomplete/);
-  assert.match(JSON.stringify(bars.returns),/volume/);
-  assert.match(JSON.stringify(factors.notes),/AdjustmentNotActiveError/);
-  assert.match(JSON.stringify(factors.params),/不支持 raw/);
+  const price=API_ENTRIES.find(item=>item.id==='get_price'), orders=API_ENTRIES.find(item=>item.id==='orders');
+  assert.match(JSON.stringify(price.params),/恰好选择一个/);
+  assert.match(JSON.stringify(price.boundary),/LOOKAHEAD_FORBIDDEN/);
+  assert.match(JSON.stringify(price.returns),/Decimal/);
+  assert.match(JSON.stringify(orders.notes),/先等卖出成交/);
+  assert.match(JSON.stringify(orders.returns),/effective_quantity/);
   for(const entry of API_ENTRIES) for(const example of entry.examples) {
     assert.doesNotMatch(example.code,/uuid-\d|daily_bars\(|adjustment_factors\(|eligible_etfs\(|clock\.sessions\(/);
   }
@@ -46,6 +46,7 @@ test('default document is accessible even when browser storage is unavailable', 
   assert.match(html,/role="tablist"/);
   assert.match(html,/role="tabpanel"/);
   assert.match(html,/href="\/admin\/strategies"/);
-  assert.match(html,/context\.data\.bars\(\)/);
+  assert.match(html,/get_price\(securities/);
+  assert.match(html,/quantfoundry\.api/);
   assert.doesNotMatch(html,/context\.data\.daily_bars\(\)/);
 });

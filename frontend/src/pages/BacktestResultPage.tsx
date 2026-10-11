@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
-import { ArrowLeft, Copy, Download, RefreshCw, X } from "lucide-react";
+import { ArrowLeft, Download, RefreshCw, X } from "lucide-react";
 import { fetchBacktestAnalysisSummary, fetchRunWorkbench, getBacktestRun, isTerminalBacktestStatus, type WorkbenchRun } from "../api/backtestRuns";
 import { listStrategyRevisions } from "../api/strategies";
 import { EvidenceTable } from "../components/EvidenceTable";
-import { CreateRunDrawer } from "./backtests/CreateRunDrawer";
 import { ResultChart } from "./backtests/ResultChart";
 import { ResultTables } from "./backtests/ResultTables";
 import { displayNumber, monthlyResults, readAllResults, RESULT_KINDS, type ResultRow } from "./backtests/resultData";
-import { copyConfiguration, finite, METRICS, runConfig, STATUS } from "./backtests/workbench";
+import { finite, METRICS, runConfig, STATUS } from "./backtests/workbench";
 import { comparisonUrl } from "./backtests/comparisonData";
 import "./backtests/Workbench.css";
 import "./backtests/Result.css";
@@ -30,7 +29,7 @@ function Report({ runId }: { runId: string }) {
   const [error, setError] = useState(""), [loading, setLoading] = useState(true), [refresh, setRefresh] = useState(0), [active, setActive] = useState("overview");
   const [summary, setSummary] = useState<Record<string, unknown> | null>(null);
   const [data, setData] = useState<Record<string, ResultRow[]>>({}), [dataErrors, setDataErrors] = useState<Record<string, string>>({}), [pending, setPending] = useState(false);
-  const [copyOpen, setCopyOpen] = useState(false), [exporting, setExporting] = useState(false), [exportStatus, setExportStatus] = useState(""), [toast, setToast] = useState("");
+  const [exporting, setExporting] = useState(false), [exportStatus, setExportStatus] = useState(""), [toast, setToast] = useState("");
   const exportController = useRef<AbortController | null>(null), generation = useRef(0);
   useEffect(() => () => exportController.current?.abort(), []);
   useEffect(() => { if (!toast) return; const timer = setTimeout(() => setToast(""), 4000); return () => clearTimeout(timer); }, [toast]);
@@ -110,12 +109,12 @@ function Report({ runId }: { runId: string }) {
   const years = [...new Set(monthlies.map(row => row.month.slice(0, 4)))];
   const currentMetrics = data.metrics || [], disabled = run?.status === "indeterminate";
   return <div className="qfr-page">
-    <div className="qfr-heading"><div><div className="qfb-eyebrow">BACKTEST RESULT</div><h1>{run?.strategy_name || "单次回测结果"}{run?.revision_number ? ` · v${run.revision_number}` : ""}</h1><p>{alias} {alias && "·"} {run ? STATUS[run.status] : "正在读取运行"}</p><code>{runId}</code></div><div className="qfr-actions"><button onClick={() => returnToWorkbench()}><ArrowLeft size={16}/>{comparisonReturn ? "返回对比" : "返回工作台"}</button><button disabled={loading || pending} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16}/>刷新</button><button disabled={!run || disabled || exporting} className="qfb-primary" onClick={() => void download()}><Download size={16}/>{exporting ? "导出中…" : "导出结果"}</button></div></div>
+    <div className="qfr-heading"><div><div className="qfb-eyebrow">LEGACY RESULT · 历史只读</div><h1>{run?.strategy_name || "单次回测结果"}{run?.revision_number ? ` · v${run.revision_number}` : ""}</h1><p>{alias} {alias && "·"} {run ? STATUS[run.status] : "正在读取运行"}</p><code>{runId}</code></div><div className="qfr-actions"><button onClick={() => returnToWorkbench()}><ArrowLeft size={16}/>{comparisonReturn ? "返回对比" : "返回工作台"}</button><button disabled={loading || pending} onClick={() => setRefresh(v => v + 1)}><RefreshCw size={16}/>刷新</button><button disabled={!run || disabled || exporting} className="qfb-primary" onClick={() => void download()}><Download size={16}/>{exporting ? "导出中…" : "导出结果"}</button></div></div>
     {toast && <div className="qfb-toast" role="status">{toast}<button aria-label="关闭提示" onClick={() => setToast("")}><X size={16}/></button></div>}
     {error && <p className="qfr-error" role="alert">{error}<button onClick={() => setRefresh(v => v + 1)}>重试</button></p>}
     {exporting && <p role="status">{exportStatus}<button onClick={() => exportController.current?.abort()}>取消导出</button></p>}
     {!run ? <div className="qfr-empty">{loading ? "正在读取回测结果…" : "无法读取本次运行，请检查链接或重试。"}</div> : <div className="qfr-layout"><nav className="qfr-nav" aria-label="结果章节">{sections.map(([id, title]) => <a key={id} href={`#${id}`} aria-current={active === id ? "location" : undefined} onClick={() => setActive(id)}>{title}</a>)}</nav><main className="qfr-main">
-      <section className="qfr-card qfr-run-strip"><div><strong>{run.strategy_name || "策略名称未记录"}</strong><span className={`qfb-badge qfb-${run.status}`}>{STATUS[run.status]}</span><small>{config.start_date || "—"} — {config.end_date || "—"} · {config.frequency === "1d" ? "日线" : config.frequency || "频率未记录"}</small></div><div><small>初始现金</small><strong>{displayNumber(config.initial_cash)} {config.currency || ""}</strong></div><div className="qfr-actions"><button onClick={() => { try { copyConfiguration(run); if (!run.strategy_id) throw new Error("策略身份暂不可用，无法复制配置。"); setCopyOpen(true); } catch (e) { setError(message(e)); } }}><Copy size={16}/>复制配置</button><button disabled={run.status !== "succeeded"} onClick={() => returnToWorkbench(true)}>加入对比</button></div></section>
+      <section className="qfr-card qfr-run-strip"><div><strong>{run.strategy_name || "策略名称未记录"}</strong><span className={`qfb-badge qfb-${run.status}`}>{STATUS[run.status]}</span><small>{config.start_date || "—"} — {config.end_date || "—"} · {config.frequency === "1d" ? "日线" : config.frequency || "频率未记录"}</small></div><div><small>初始现金</small><strong>{displayNumber(config.initial_cash)} {config.currency || ""}</strong></div><div className="qfr-actions"><button disabled={!run.strategy_id} onClick={() => navigate(`/admin/strategies/${run.strategy_id}/backtests?create=1`)}>迁入后创建 Rust 回测</button><button disabled={run.status !== "succeeded"} onClick={() => returnToWorkbench(true)}>加入对比</button></div></section>
       <p className="qfr-integrity">{run.status === "succeeded" ? "运行已完成" : "部分结果：仅展示已持久化数据"} · 完整性：{({ passed: "验证通过", unavailable: "无法核实", complete: "完整", valid: "验证通过", incomplete: "不完整", pending: "待核实", failed: "验证失败", unknown: "未知" } as Record<string,string>)[run.result_integrity_status || ""] || "以运行诊断中的原始证据为准"}<span className="qfr-loading" role="status">{pending ? "正在更新结果…" : ""}</span></p>
       {Object.entries(dataErrors).filter(([, e]) => e).map(([kind, e]) => <p className="qfr-error" role="alert" key={kind}>{RESULT_KINDS[kind as keyof typeof RESULT_KINDS] || "分析摘要"}读取失败：{e}；已有展示保留上次读取结果。<button onClick={() => setRefresh(v => v + 1)}>重试</button></p>)}
       <section className="qfr-kpis" id="overview">{metrics.map(metric => { const row = currentMetrics.find(r => r.metric_key === metric.key), value = finite(row?.value); return <div key={metric.key}><span>{metric.name}</span><strong className={metric.key.includes("return") && value !== null ? value > 0 ? "qfr-up" : value < 0 ? "qfr-down" : "" : ""}>{displayNumber(row?.value, metric.percent)}</strong><small>{row ? value === null ? row.unavailable_reason || "计算依据不足" : metric.key === "cumulative_fees" ? config.currency || "按账户币种" : "本次运行实际结果" : disabled ? "结果待判定" : "尚未产出"}</small>{row && <EvidenceTable title="查看计算口径" value={row}/>}</div>; })}</section>
@@ -130,6 +129,6 @@ function Report({ runId }: { runId: string }) {
       <EvidenceTable title="退出码、完成标记与完整性" value={{ exit_code: run.child_exit_code, completion_marker: run.completion_marker, integrity_status: run.result_integrity_status, integrity: run.result_integrity_evidence, decision: run.terminal_decision_reason, result_counts: run.result_counts }}/></div></section>
       <section className="qfr-card" id="configuration"><header><h2>冻结配置</h2><span>运行创建时记录</span></header><div className="qfr-body"><dl className="qfr-config"><div><dt>策略版本</dt><dd>v{run.revision_number || "—"} · {alias || "版本别名未记录"}</dd></div><div><dt>回测账户 UUID / 版本</dt><dd>{run.account_profile_id || "未记录"} / v{run.account_profile_version || "—"}</dd></div><div><dt>费用方案 / 版本</dt><dd>{run.fee_schedule_key || "未记录"} / v{run.fee_schedule_version || "—"}</dd></div><div><dt>时区 / 币种</dt><dd>{timezone} / {config.currency || "未记录"}</dd></div></dl><EvidenceTable title="策略参数、账户与运行配置" value={{ revision: run.strategy_revision_id, parameters: run.parameters, config: run.backtest_config, data_request: run.data_request }}/><EvidenceTable title="组件快照、随机种子与行为版本" value={{ components: run.component_snapshot, behavior_versions: run.behavior_versions, random_seed: run.random_seed }}/></div></section>
     </main></div>}
-    {copyOpen && run && <div className="qfb-page"><CreateRunDrawer initialStrategyId={run.strategy_id || undefined} source={run} onClose={() => setCopyOpen(false)} onCreated={created => { setCopyOpen(false); navigate(back, { state: { workbench: { ...origin?.workbench, selected: { ...created, strategy_id: run.strategy_id, strategy_name: run.strategy_name, revision_number: run.revision_number } } } }); }}/></div>} 
+
   </div>;
 }

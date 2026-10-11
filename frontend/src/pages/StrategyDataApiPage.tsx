@@ -95,7 +95,7 @@ export function StrategyDataApiPage() {
     setState(value => ({ ...value, type })); setMenuOpen(false); triggerRef.current?.focus();
   }
   return <div className="qfa-page" ref={mainRef}>
-    <header className="qfa-page-head"><div><div className="qfa-eyebrow">Strategy Context API</div><h1>策略数据接口</h1><p>查阅策略运行时可访问的数据接口、时间边界、参数与返回结构。</p></div>
+    <header className="qfa-page-head"><div><div className="qfa-eyebrow">S3 Strategy API</div><h1>策略数据接口</h1><p>查阅 quantfoundry.api 的同步回调、数据、交易和运行合同。正式数据可用性以服务能力与预检为准。</p></div>
       <Link className="qfa-button" to="/admin/strategies"><Code2 aria-hidden="true" />返回策略工作台</Link>
     </header>
     <div className="qfa-workspace">
@@ -138,7 +138,7 @@ export function StrategyDataApiPage() {
         }}>{TABS.map(tab => <button type="button" id={`qfa-tab-${tab.id}`} key={tab.id} role="tab" aria-selected={state.tab === tab.id} aria-controls="qfa-panel" tabIndex={state.tab === tab.id ? 0 : -1} onClick={() => setState(value => ({ ...value, tab: tab.id }))}>{tab.label}</button>)}</div>
         <div className="qfa-detail-body" id="qfa-panel" ref={detailRef} role="tabpanel" aria-labelledby={`qfa-tab-${state.tab}`} tabIndex={0} onScroll={event => rememberScroll(detailKey, event.currentTarget.scrollTop)}>
           {state.tab === "reference" && <div className="qfa-info-grid"><PropertyCard title="参数" rows={entry.params} /><PropertyCard title="返回值" rows={entry.returns} /><section className="qfa-card qfa-full"><header><h3>使用说明</h3></header><div className="qfa-card-body qfa-notes">{entry.notes.map(note => <p className="qfa-note" key={note}>{note}</p>)}</div></section></div>}
-          {state.tab === "example" && <><div className="qfa-example-tabs" aria-label="调用示例">{entry.examples.map((item, index) => <button type="button" key={item.title} aria-pressed={state.example === index} onClick={() => setState(value => ({ ...value, example: index }))}>{item.title}</button>)}</div><div className="qfa-code-panel"><header><span>{example.title}</span><button type="button" disabled={copying} onClick={() => void copy(example.code, `${entry.signature} 示例代码`)}>复制代码</button></header><pre tabIndex={0} aria-label="Python 示例代码"><code>{example.code}</code></pre></div><p className="qfa-example-note">在策略决策函数中使用，context 由运行时提供。示例不保证当前数据覆盖完整；调用条件与限制见「说明」和「时间边界」。</p></>}
+          {state.tab === "example" && <><div className="qfa-example-tabs" aria-label="调用示例">{entry.examples.map((item, index) => <button type="button" key={item.title} aria-pressed={state.example === index} onClick={() => setState(value => ({ ...value, example: index }))}>{item.title}</button>)}</div><div className="qfa-code-panel"><header><span>{example.title}</span><button type="button" disabled={copying} onClick={() => void copy(example.code, `${entry.signature} 示例代码`)}>复制代码</button></header><pre tabIndex={0} aria-label="Python 示例代码"><code>{example.code}</code></pre></div><p className="qfa-example-note">在 S3 策略回调中使用，context 由运行时提供。示例不保证当前数据覆盖完整；调用条件与限制见「说明」和「时间边界」。</p></>}
           {state.tab === "boundary" && <div className="qfa-info-grid"><PropertyCard title="可见性规则" rows={entry.boundary} /><section className="qfa-card"><header><h3>统一原则</h3></header><div className="qfa-card-body"><p className="qfa-note"><strong>查询不能超过当前策略可见截止时点。</strong><br />运行时执行时间边界与数据资格检查；查看交易日期或决策时间，不会改变这些限制。</p></div></section></div>}
         </div>
       </section>

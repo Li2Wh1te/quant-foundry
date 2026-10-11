@@ -114,23 +114,20 @@ def test_forced_termination_cannot_become_a_determinate_result() -> None:
 
 def test_frontend_declares_visibility_polling_and_all_terminal_stops() -> None:
     source = (ROOT / "frontend/src/pages/BacktestRunsPage.tsx").read_text(encoding="utf-8")
-    api_source = (ROOT / "frontend/src/api/backtestRuns.ts").read_text(encoding="utf-8")
+    states = (ROOT / "frontend/src/pages/backtests/run-ui/config.ts").read_text(encoding="utf-8")
+    api_source = (ROOT / "frontend/src/api/runService.ts").read_text(encoding="utf-8")
 
-    assert 'FOREGROUND_POLLING_PROTOCOL = "foreground_polling@1"' in api_source
     assert "document.visibilityState" in source
     assert 'document.addEventListener("visibilitychange"' in source
-    assert "FOREGROUND_POLL_INTERVAL_MS" in source
-    # The workbench now shares one cancellation controller for list and selected
-    # detail refreshes. Check the lifecycle contract instead of obsolete refs
-    # from the previous page's independent polling implementation.
     assert "new AbortController()" in source
-    assert "controller.current?.abort()" in source
-    assert "generation !== sequence.current" in source
-    assert "pageRef.current?.items.some" in source
-    assert "isTerminalBacktestStatus" in source
-    assert "stopped || polling" in source
+    # D15 owns independent, abortable list/detail/batch resources. Late reads
+    # cannot replace the current selection; legacy terminal records do not poll.
+    assert "seq !== detailSequence.current" in source
+    assert "actionController.current?.abort()" in source
+    assert 'r.engine_kind === "rust" && !terminal(r.status)' in source
+    assert 'api_schema: "qf.backtest.v2"' in api_source
     for terminal in ("succeeded", "failed", "cancelled", "timed_out", "indeterminate"):
-        assert f'"{terminal}"' in api_source
+        assert f'"{terminal}"' in states
 
 
 def test_launch_identity_type_remains_available_for_fault_injection_adapters() -> None:
