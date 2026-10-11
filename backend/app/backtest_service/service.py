@@ -92,7 +92,9 @@ class RunService:
                     parameter_schema=dict(type="object", maxProperties=128),
                     errors=["CAPABILITY_UNAVAILABLE", "DATA_RESTRICTED", "DATA_CHANGED", "RULE_UNAVAILABLE",
                             "INVALID_RUN_CONFIG", "IDEMPOTENCY_CONFLICT", "RESOURCE_LIMIT", "CANCELLED",
-                            "STRATEGY_ERROR", "RESULT_BUDGET_EXCEEDED", "LEGACY_ENGINE_RETIRED"]),
+                            "LOOKAHEAD_FORBIDDEN", "NUMERIC_RANGE_UNSUPPORTED", "INSUFFICIENT_CASH",
+                            "INSUFFICIENT_SELLABLE", "INVALID_ORDER", "STRATEGY_ERROR",
+                            "RESULT_BUDGET_EXCEEDED", "LEGACY_ENGINE_RETIRED"]),
                     actual_data=self.provider.capabilities(),
                     limits=dict(control_bytes=1024*1024, parameter_bytes=64*1024, parameter_depth=8,
                                 batch_runs=256, compare_runs=16, result_page_items=10000))
@@ -160,14 +162,14 @@ class RunService:
 
     def submit(self, owner, config, key):
         digest = canonical_hash(config)
-        previous = self.repository.existing(owner, key, digest)
+        previous = self.repository.existing(owner, key, digest, config=config)
         if previous:
             return self.repository.status(owner, previous["id"])
         return self.repository.submit(self.accepted_work(owner, config), key, digest)
 
     def batch(self, owner, configs, key):
         digest = canonical_hash(configs)
-        previous = self.repository.existing(owner, key, digest, batch=True)
+        previous = self.repository.existing(owner, key, digest, batch=True, config=configs)
         if previous:
             return str(previous["id"])
         # Validate every item before the single atomic queue insertion.

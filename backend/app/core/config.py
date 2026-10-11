@@ -198,13 +198,17 @@ class Settings(BaseSettings):
 
     @property
     def database_url(self) -> URL:
+        unix_socket = self.database_host.startswith("/")
         return URL.create(
             "postgresql+psycopg",
             username=self.database_user,
             password=self.database_password.get_secret_value(),
-            host=self.database_host,
-            port=self.database_port,
+            host=None if unix_socket else self.database_host,
+            port=None if unix_socket else self.database_port,
             database=self.database_name,
+            # Keep the trusted Unix endpoint through Alembic's URL string
+            # roundtrip; a slash in the URL authority loses its hostname.
+            query={"host": self.database_host, "port": str(self.database_port)} if unix_socket else {},
         )
 
 

@@ -17,8 +17,15 @@ from app.db.base import Base
 from app.db.session import get_db_session
 from app.backtest_service.accounts.schemas import FeeScheduleRequest
 from app.backtest_service.accounts.service import _build_schedule, _json_value
-from app.backtest_service.serialization import canonical_hash
+from app.backtest_service.serialization import encoded
+import hashlib
 from app.backtest_service.accounts.types import _fee_schedule_payload
+
+
+def canonical_hash(snapshot):
+    # Original catalogue hashes are bare 64-character hex, unlike the new run
+    # request hash marker. Preserve this identity for every saved fee version.
+    return hashlib.sha256(encoded(snapshot)).hexdigest()
 
 
 class FeeScheduleVersionRecord(Base):

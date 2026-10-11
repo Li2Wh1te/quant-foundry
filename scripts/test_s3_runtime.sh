@@ -15,6 +15,11 @@ qf_worker_id=''
 qf_runner_id=''
 cleanup() {
     docker rm -f "$qf_runner" >/dev/null 2>&1 || true
+    # PG makes this private socket directory sticky and owns its two files.
+    # Remove only those exact test endpoints as their container owner, before
+    # removing our private DB. Never broaden this to a host path/volume cleanup.
+    docker exec --user postgres "$qf_database" rm -f -- \
+        /var/run/postgresql/.s.PGSQL.5432 /var/run/postgresql/.s.PGSQL.5432.lock >/dev/null 2>&1 || true
     docker rm -f "$qf_database" >/dev/null 2>&1 || true
     # Recover interrupted tests by exact claim AND this newly allocated mount
     # root. No label/name alone authorizes touching any other test/production.

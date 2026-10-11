@@ -44,6 +44,18 @@ def summary(row):
                 normalized_config=row["config"])
 
 
+def same_config(accepted, requested):
+    """Omitted calendar and its already accepted explicit value are equivalent."""
+    if isinstance(accepted, list) and isinstance(requested, list):
+        return len(accepted) == len(requested) and all(same_config(a, b) for a, b in zip(accepted, requested))
+    if not isinstance(accepted, dict) or not isinstance(requested, dict):
+        return False
+    value = dict(requested)
+    if "reference_calendar" not in value and "reference_calendar" in accepted:
+        value["reference_calendar"] = accepted["reference_calendar"]
+    return accepted == value
+
+
 class DatabaseRunRepository:
     def __init__(self, engine, *, budget=None, queue_limit=1024, result_root=None):
         self.engine = engine
@@ -102,12 +114,24 @@ class DatabaseRunRepository:
             raise RuntimeFault("INVALID_RUN_CONFIG", "需要有界的Idempotency-Key")
         return key
 
-    def existing(self, owner, key, request_hash, *, batch=False):
+    @staticmethod
+    def _submit_key(key):
+        # Client keys cannot collide with code-owned batch/retry child keys.
+        return "submit:" + canonical_hash(key)[7:]
+
+    @staticmethod
+    def _batch_configs(c, batch_id):
+        return c.execute(select(R.c.config).where(R.c.batch_id == batch_id, R.c.retry_of.is_(None))
+                         .order_by(R.c.batch_index).limit(256)).scalars().all()
+
+    def existing(self, owner, key, request_hash, *, batch=False, config=None):
         self._key(key)
+        key = key if batch else self._submit_key(key)
         table = B if batch else R
         with self.engine.connect() as c:
             row = c.execute(select(table).where(table.c.owner == owner, table.c.idempotency_key == key)).mappings().one_or_none()
-            if row is not None and row["request_hash"] != request_hash:
+            if row is not None and row["request_hash"] != request_hash and not same_config(
+                    self._batch_configs(c, row["id"]) if batch else row["config"], config):
                 raise RuntimeFault("IDEMPOTENCY_CONFLICT", "同一幂等键已绑定不同配置")
             return dict(row) if row else None
 
@@ -125,12 +149,12 @@ class DatabaseRunRepository:
                     status="queued", cancel_requested=False, fence=0, lease_until=0)
 
     def submit(self, work, key, request_hash):
-        self._key(key)
+        key = self._submit_key(self._key(key))
         values = self._values(work, key, request_hash)
         with self._transaction(group=True) as c:
             row = c.execute(select(R).where(R.c.owner == work.owner, R.c.idempotency_key == key)).mappings().one_or_none()
             if row:
-                if row["request_hash"] != request_hash:
+                if row["request_hash"] != request_hash and not same_config(row["config"], work.config):
                     raise RuntimeFault("IDEMPOTENCY_CONFLICT", "同一幂等键已绑定不同配置")
                 return summary(row)
             self._capacity(c, 1)
@@ -156,7 +180,7 @@ class DatabaseRunRepository:
         with self._transaction(group=True) as c:
             row = c.execute(select(B).where(B.c.owner == works[0].owner, B.c.idempotency_key == key)).mappings().one_or_none()
             if row:
-                if row["request_hash"] != request_hash:
+                if row["request_hash"] != request_hash and not same_config(self._batch_configs(c, row["id"]), [w.config for w in works]):
                     raise RuntimeFault("IDEMPOTENCY_CONFLICT", "同一幂等键已绑定不同批次")
                 return str(row["id"])
             self._capacity(c, len(values))
@@ -299,17 +323,18 @@ class DatabaseRunRepository:
             bid = identity(batch_id)
             if c.execute(select(B.c.id).where(B.c.id == bid, B.c.owner == owner)).scalar_one_or_none() is None:
                 raise RuntimeFault("DATA_RESTRICTED", "批次不存在或无权访问")
-            previous = c.execute(select(R).where(R.c.owner == owner, R.c.idempotency_key.startswith(prefix))).mappings().all()
+            previous = c.execute(select(R).where(R.c.owner == owner, R.c.idempotency_key.startswith(prefix))
+                                 .order_by(R.c.batch_index).limit(256)).mappings().all()
             if previous:
                 if any(r["request_hash"] != digest for r in previous):
                     raise RuntimeFault("IDEMPOTENCY_CONFLICT", "重跑幂等键已用于另一批次")
                 return [str(r["id"]) for r in previous]
-            rows = c.execute(select(R).where(R.c.batch_id == bid, R.c.owner == owner)
-                             .order_by(R.c.batch_index, R.c.created_at.desc(), R.c.id.desc()).with_for_update()).mappings().all()
-            latest = {}
-            for r in rows:
-                latest.setdefault(r["batch_index"], r)
-            failed = [r for r in latest.values() if r["status"] == "failed"]
+            ranked = select(R.c.id, func.row_number().over(partition_by=R.c.batch_index,
+                        order_by=(R.c.created_at.desc(), R.c.id.desc())).label("rank"))\
+                        .where(R.c.batch_id == bid, R.c.owner == owner).subquery()
+            latest = c.execute(select(R).join(ranked, ranked.c.id == R.c.id).where(ranked.c.rank == 1)
+                               .order_by(R.c.batch_index).limit(256).with_for_update(of=R)).mappings().all()
+            failed = [r for r in latest if r["status"] == "failed"]
             self._capacity(c, len(failed))
             values = [self._values(AcceptedWork(r["owner"], r["config"], r["strategy_source"], WorkerLimits(**r["limits"]), r["accepted"]),
                        prefix+":"+str(r["batch_index"]), digest, batch_id=bid, index=r["batch_index"], retry_of=r["id"])

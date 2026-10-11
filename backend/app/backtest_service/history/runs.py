@@ -28,6 +28,7 @@ def legacy_summary(row):
                 strategy_revision_id=row.strategy_revision_id,
                 account_profile_id=row.account_profile_id,
                 account_profile_version=row.account_profile_version,
+                cost_configuration=row.fee_schedule_snapshot,
                 initial_cash=row.initial_cash, backtest_config=row.backtest_config,
                 result_summary=row.result_summary, result_counts=row.result_counts)))
 

@@ -157,6 +157,11 @@ class D13Tests(unittest.TestCase):
         base = get_settings()
         if base.environment != "test" or "test" not in base.database_name:
             raise RuntimeError("D13 regressions require a private test database")
+        from sqlalchemy.engine import make_url
+        self_url = make_url(base.database_url.render_as_string(hide_password=False))
+        if base.database_host.startswith("/"):
+            if self_url.query.get("host") != base.database_host:
+                raise RuntimeError("private migration socket was lost in URL serialization")
         cls.dbname = "qf_d13_test_"+uuid4().hex
         cls.admin = create_engine(base.database_url, isolation_level="AUTOCOMMIT")
         with cls.admin.connect() as c:
@@ -169,8 +174,14 @@ class D13Tests(unittest.TestCase):
             cls.alembic = Path("/app/alembic.ini")
         cls.migrate("20261011_01")
         cls.old_account, cls.old_revision = catalogue(cls.engine, "def run(context, parameters): pass")
+        from app.backtest_service.accounts.fee_catalog import FeeScheduleVersionRecord
+        cls.old_fee_key = "d13-original-"+uuid4().hex
+        cls.old_fee_snapshot = dict(account_payload("5.000000000000000123"), key=cls.old_fee_key, version=1)
+        cls.old_fee_hash = hashlib.sha256(encoded(cls.old_fee_snapshot)).hexdigest()
         cls.old_run, cls.old_point = uuid4(), uuid4()
         with Session(cls.engine) as s:
+            s.add(FeeScheduleVersionRecord(key=cls.old_fee_key, version=1, name_zh="原费用目录", name_en="Original fee",
+                          snapshot=cls.old_fee_snapshot, snapshot_hash=cls.old_fee_hash))
             s.add(BacktestRunRecord(id=cls.old_run, run_kind="backtest_run", profile="formal@1", status="succeeded", terminal_status="succeeded",
                   idempotency_scope=OWNER, tenant_id=OWNER, idempotency_key=uuid4().hex, config_hash="a"*64,
                   account_profile_id=str(cls.old_account), account_profile_version="1", strategy_revision_id=str(cls.old_revision),
@@ -285,6 +296,7 @@ class D13Tests(unittest.TestCase):
         row, config = self.submit({"exact_integer": 9007199254740993, "large_integer": 10**100}, key)
         self.assertEqual(row["normalized_config"]["parameters"]["large_integer"], 10**100)
         self.assertEqual(self.http("POST", payload=config, key=key).json()["run_id"], row["run_id"])
+        self.assertEqual(self.http("POST", payload=row["normalized_config"], key=key).json()["run_id"], row["run_id"])
         config["parameters"] = {"different": 1}
         self.assertEqual(self.http("POST", payload=config, key=key).status_code, 409)
         for params in ({"big": "x"*65536}, {"nested": [[[[[[[[[1]]]]]]]]]}):
@@ -392,6 +404,14 @@ class D13Tests(unittest.TestCase):
                 connection.execute(update(Run).where(Run.id == identity(valid[0].run_id)).values(status="succeeded"))
 
     def test_legacy_upgrade_values_same_site_and_startup_without_computation(self):
+        from app.backtest_service.accounts.fee_catalog import FeeCatalogRepository
+        with Session(self.engine) as session:
+            fees = FeeCatalogRepository(session)
+            self.assertEqual(fees.require(self.old_fee_key, 1), self.old_fee_snapshot)
+            published = fees.publish(key="d13-new-"+uuid4().hex, version=1, name_zh="新费用目录", name_en="New fee",
+                                     fee_rules=account_payload()["fee_rules"], metadata={"currency": "CNY"})
+            self.assertEqual(len(published.snapshot_hash), 64)
+            session.commit()
         response = self.http("GET", "/"+str(self.old_run))
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["initial_cash"], "10000.000000000000000123")
@@ -426,7 +446,18 @@ assert not any(n.startswith("app.backtesting.") and n.split(".")[2] in %r for n 
         repository, process, services = create_services(settings=settings, engine=self.engine, provider=self.provider, daemon=DockerDaemon())
         self.provider.process = process
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
+        source = """from quantfoundry.api import order, LimitOrder
+def before_trading_start(c):
+    if not getattr(c.state, 'bought', False):
+        c.state.bought = True
+        assert order('A.SH', 100, style=LimitOrder('10')).accepted
+"""
+        self.account, self.revision = catalogue(self.engine, source)
+        self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
         row, config = self.submit()
+        with Session(self.engine) as session:
+            AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
+            session.commit()
         try:
             deadline = time.monotonic()+30
             while time.monotonic() < deadline:
@@ -439,7 +470,21 @@ assert not any(n.startswith("app.backtesting.") and n.split(".")[2] in %r for n 
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["performance"]["initial_equity"], "10000")
+            self.assertEqual(result.json()["performance"]["trades"]["fill_fees"], "1")
+            trades = self.http("GET", "/"+row["run_id"]+"/results/trades").json()["items"]
+            self.assertEqual(len(trades), 1)
+            self.assertEqual(trades[0]["fee"], "1")
             self.assertEqual(self.http("POST", "/"+row["run_id"]+"/cancel").json()["status"], "succeeded")
+            comparison = self.http("POST", "/compare", {"run_ids": [str(self.old_run), row["run_id"]]})
+            self.assertEqual(comparison.status_code, 200, comparison.text)
+            self.assertIsNone(comparison.json()["ranking"])
+            self.assertEqual({item["engine_kind"] for item in comparison.json()["items"]}, {"legacy_python", "rust"})
+            page = self.http("GET", "/"+row["run_id"]+"/results/equity?limit=1").json()
+            self.assertEqual(len(page["items"]), 1)
+            if page["next_cursor"]:
+                next_page = self.http("GET", "/"+row["run_id"]+"/results/equity?limit=1&cursor="+page["next_cursor"])
+                self.assertEqual(next_page.status_code, 200, next_page.text)
+                self.assertNotEqual(next_page.json()["items"], page["items"])
             self.assertFalse(list(work_root.iterdir()))
         finally:
             supervisor.stop()
