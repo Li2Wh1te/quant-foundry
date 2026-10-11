@@ -28,11 +28,10 @@
 </div>
 
 > [!NOTE]
-> Quant Foundry is in early development. It currently integrates Tushare Pro and provides ETF data
-> management, a Python strategy workbench, and local daily ETF backtesting. Tonghuashun connection
-> management and independent fund, A-share and index ingestion are available. A-share backtesting, futures,
-> paper trading, risk controls, and live execution are planned.
-> This README describes its code branch; consult the matching README when using an older version.
+> Quant Foundry is in early development. S3 uses a Rust core, Python strategies and one web/CLI/SDK run API.
+> Legacy Python execution code is retired; accounts, original strategies and historical results remain.
+> Formal data mappings, full D18 acceptance and the P01 production cutover are still pending.
+> Module and isolated test success does not establish production readiness. Ingestion boundaries are unchanged.
 
 ## Why this project
 
@@ -56,8 +55,8 @@ This release unifies workspace layouts, typography, controls, and creation flows
 
 - Configure encrypted data-source credentials in the UI and inspect ingestion tasks and coverage.
 - Name published strategy revisions, search instruments by name or code, and create checked backtests in a stepped Drawer.
-- Explore dedicated result pages, positions, fills, and diagnostics; export all paginated results as JSON.
-- Compare 2–10 completed runs and persist comparison names, run order, and reference runs on the server.
+- Read bounded result pages, positions, fills and diagnostics; preserve old results as read-only history.
+- Compare S3 runs with their configuration differences; retain existing saved comparisons as read-only history.
 - Permanently delete unpublished, unreferenced strategies and unreferenced accounts; preserve historical objects through archiving or retirement.
 
 See the [CHANGELOG](./CHANGELOG.md) and [v0.3.0 Release](https://github.com/Li2Wh1te/quant-foundry/releases/tag/v0.3.0).
@@ -93,9 +92,9 @@ interaction; it does not represent an actual engine run or investment performanc
 | Data ingestion | Tushare trading calendars, ETF reference data, daily bars, adjustment factors, cash dividends, and suspension/trading status; full, incremental, or recent reconciliation workflows depending on task type |
 | Data exploration | ETF search and filters, persistent watchlists, reference details, candles and moving averages, forward/backward adjusted charts, adjustment-factor records, calendar coverage, and synchronization status |
 | Strategy management | Python source and parameter editing, draft saving, static validation, named immutable revisions, history, archiving, and safe deletion of unpublished strategies; private source is stored in PostgreSQL |
-| Accounts and execution configuration | Backtest accounts, fee schedules and their versions, usage history and safe deletion, initial cash and positions, slippage models, and execution component selection |
-| Local backtesting | Bind a published strategy and fixed instruments, check local data and configuration, queue runs, inspect progress, cancel, rerun, and investigate failures |
-| Result analysis | Equity and drawdown, cash and market value, performance and fee metrics, position and fill details, server-saved run comparisons, configuration differences, data evidence, and JSON export |
+| Accounts and execution configuration | Preserve account/fee versions and history; new runs explicitly select initial cash, authorized securities, frequency, execution and cost parameters |
+| Local backtesting | S3 callbacks, a unified run service, read-only preflight, queue, cancellation, parameter batches and paginated results; unavailable formal dependencies refuse execution |
+| Result analysis | S3 equity, orders, trades, positions, records and diagnostics; configuration-aware comparisons and read-only historical results |
 | Tasks and operations | Persistent ingestion scheduling, manual execution and history, a consistent workspace UI, structured service logs, and Docker Compose self-hosting |
 
 ### Ingest first, then backtest locally
@@ -117,19 +116,12 @@ or repairing data, check coverage and rerun preflight.
 
 ### Current boundaries
 
-- Formal backtesting currently supports **ETFs, daily frequency, fixed instruments, and raw prices**.
-  Dynamic instrument selection is not yet available.
-- Charts support forward/backward adjustment; adjusted research prices are not yet enabled for formal
-  backtests. Chart controls do not define backtest support.
-- Preflight checks coverage, calendars, instrument identity, rules, and temporal evidence. Current
-  daily bars are not strictly point-in-time (PIT) data: follow the report's degradation confirmation
-  or blocking requirements. Missing evidence in other areas can also prevent a run.
-- Static strategy validation checks syntax, the entry point, and parameter contracts. Actual execution
-  happens during backtesting. The default `hold` template does not initiate trades.
-- Some metrics depend on available data and conventions. For example, the PIT daily risk-free-rate
-  Sharpe variant is unavailable when that rate series is missing.
-- A-share stock daily bars, futures, paper trading, live execution, and a complete risk-control workflow
-  are not yet provided.
+- S3 code covers A-share stocks, domestic ETFs, daily/minute/hour bars and basic trade/quote ticks. The data foundation decides actual availability.
+- Web, `qf backtest` and `BacktestClient` use the same `qf.backtest.v2` API; explicit initial cash is required and initial positions are empty.
+- Strategies use `quantfoundry.api` callbacks. The old `run(context, parameters)` execution protocol is retired; original source is retained.
+- Missing formal D04/D05 mappings and isolation prerequisites block production execution.
+- Historical values are read as saved; failed/cancelled partial results and unavailable metrics remain explicit.
+- Full D18 B1–B4, production runner topology, P01 cutover and C01 production cleanup remain pending.
 
 ## Quick start
 
@@ -168,9 +160,9 @@ Give the revision an alias describing the change so it is recognizable when sele
 The default strategy's core behavior is:
 
 ```python
-def run(context, parameters):
-    """Keep the current portfolio without submitting a new trading intent."""
-    return {"mode": "hold"}
+def initialize(context):
+    """Keep the empty portfolio without submitting orders."""
+    pass
 ```
 
 **Success check:** the strategy has a published revision and offers an entry to its backtest workspace.
@@ -261,33 +253,18 @@ window. Creating a schedule or seeing a chart alone does not establish backtest 
 
 ### 3. Prepare the strategy, account, and instruments
 
-- Select a published revision in **策略工作台 (Strategy Workbench)**. Start with `hold` to exercise the
-  workflow. To generate trades, consult **策略数据接口 (Strategy Data Interface)** and the
-  [strategy protocol implementation](./backend/app/strategy_protocol/), then validate and publish your strategy.
-- Create an available account in **回测账户 (Backtest Accounts)**, configure the fee schedule and rules,
-  save it, and select its corresponding version in the backtest workspace.
-- Search and select ETFs by name or code in **固定标的范围 (Fixed Instruments)**. Initial positions use
-  the same searchable selector. The system resolves UUIDs; you do not enter them manually. Missing
-  identity mappings must be repaired before proceeding, and preflight remains authoritative.
+Select a published S3 callback strategy and account configuration. See the
+[backtest guide](./docs/backtesting/README.md) and [strategy API](./sdk/python/quantfoundry/api.pyi)
+for five migration examples and CLI/SDK commands. Migration creates a new revision and keeps original source/results.
+Choose the authorized universe, dates, frequency, execution model and explicit initial cash.
 
 ### 4. Check and run
 
-Open **回测工作台 → 创建回测 (Backtest Workspace → Create Backtest)**, or enter from a strategy:
-
-1. **策略与版本 (Strategy and Revision):** select a published version by number and alias and set parameters.
-2. **账户与执行配置 (Account and Execution):** select an account version, dates, cash, instruments,
-   exchange calendars, slippage, warmup sessions, and initial positions. Dates cannot be in the future; start with raw prices.
-3. **运行检查与确认 (Check and Confirm):** click **检查当前配置 (Check Current Configuration)**.
-   Resolve missing data, account, or rule issues. Review and confirm permitted degradations; resolve
-   blockers before continuing. Every configuration change requires a fresh check. Then click **创建回测 (Create Backtest)**.
-
-The independent Runner executes against the local database. Open **完整结果 (Full Results)** to inspect
-metrics, curves, details, and diagnostics. Copy configuration for another run, export JSON, or add the
-run to a comparison and save the comparison on the server.
-
-**Success check:** inspect the run status, result integrity, and result page. A successful empty `hold`
-example may have no fills and a flat curve. Use diagnostics, preflight evidence, and `make selfhost-logs`
-to investigate failures.
+Preflight the current configuration, resolve blockers and submit through the shared API.
+Queue, progress, cancellation, paginated results and parameter comparisons use that same service.
+Missing formal dependencies or restricted-worker topology refuse execution. Isolated fixtures do not establish production readiness.
+Legacy writes return authenticated `LEGACY_ENGINE_RETIRED`; old history URLs remain read-only.
+P01 owns the production cutover; this guide does not authorize deployment or user-data cleanup.
 
 ## Roadmap
 
@@ -296,8 +273,8 @@ These are development directions, not promised dates or a fixed delivery sequenc
 | Direction | Current state | Planned work |
 | --- | --- | --- |
 | Data sources | Tushare ETF/calendar ingestion; independent Tonghuashun fund/A-share/index collection and version inspection | Live acceptance, bulk import optimization, then a unified data foundation |
-| Asset coverage | ETF data management and daily backtesting are implemented | Add A-share stocks, futures, and their corresponding data and trading rules |
-| Research and backtesting | Strategy revisions, preflight, fixed-instrument runs, and result analysis are implemented | Improve data quality, adjusted research prices, dynamic instruments, and research capabilities |
+| Asset coverage | S3 code covers A-share stocks and domestic ETFs, daily/minute/hour bars and basic ticks | Complete formal mappings and acceptance; futures are outside this scope |
+| Research and backtesting | Rust core, Python callbacks, web/CLI/SDK and read-only history | Complete D18 integration acceptance and the separate P01 production cutover |
 | Paper trading | Planned | Validate continuously running strategies and trading workflows |
 | Risk controls | Planned | Build controls for paper and live trading |
 | Live execution | Planned | Integrate execution venues, actual orders, and operational management |
@@ -343,7 +320,8 @@ flowchart LR
     Scheduler --> Database
     Runner["Independent Runner Supervisor"] <--> Database
     Runner --> Worker["Strategy backtest subprocess"]
-    Worker <--> Database
+    Worker <--> Gateway["Restricted IPC data/result gateway"]
+    Gateway <--> Runner
     Backend --> Logs["Structured JSONL logs"]
     Runner --> Logs
     Migration["Alembic"] --> Database
@@ -361,8 +339,8 @@ backend/
 │   ├── data_ingestion/     # Source clients, ingestion, checkpoints, and queries
 │   ├── scheduling/         # Persistent ingestion scheduling and execution
 │   ├── strategies/         # Private drafts and immutable strategy revisions
-│   ├── strategy_protocol/  # Strategy entry point and data access contracts
-│   ├── backtesting/        # Preflight, execution, accounting, and analysis
+│   ├── calendars/          # Shared calendar facts and bounded queries
+│   ├── backtest_service/   # S3 control API, accounts and read-only history
 │   └── runner/             # Independent backtest supervision
 ├── tests/
 └── pyproject.toml
@@ -507,8 +485,8 @@ provide full parameters, response schemas, and interactive API exploration.
 | Authentication and version | Validate an access token and query the deployed version |
 | Data queries | Read locally stored trading calendars, ETF reference data, daily bars, and adjustment factors |
 | Strategies | Manage drafts, static validation, revision aliases, publishing, archiving, and safe deletion |
-| Backtest accounts and configuration | Manage account/fee versions and query available execution components |
-| Backtest runs and results | Preflight, create, inspect, cancel, rerun, view report details, and manage saved comparisons |
+| Backtest accounts and configuration | Manage shared accounts, fee versions and historical associations |
+| Backtest runs and results | S3 capabilities, preflight, submit, cancel, batches, paginated results and comparisons; old results and saved comparisons remain read-only |
 | Ingestion scheduling | Task types, schedules, execution history, and status counts |
 
 Business APIs use `Authorization: Bearer <QF_API_TOKEN>`:

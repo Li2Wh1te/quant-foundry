@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.instruments.domain import VersionedReference
 from app.instruments.rule_exceptions_repository import PersistedExceptionSet
 from app.instruments.rule_preflight import (

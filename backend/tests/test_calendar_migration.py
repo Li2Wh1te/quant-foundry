@@ -6,7 +6,7 @@ from sqlalchemy import create_engine, text
 import unittest
 from unittest.mock import patch
 
-from app.backtesting.data.errors import (
+from app.data_contracts.errors import (
     CalendarSourcePriorityChainBrokenError,
     CalendarSourcePriorityInvalidError,
     CalendarSourcePriorityMissingError,

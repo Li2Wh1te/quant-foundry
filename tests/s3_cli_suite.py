@@ -162,6 +162,7 @@ class D14Tests(unittest.TestCase):
 
     tearDownClass = classmethod(D13Tests.tearDownClass.__func__)
     migrate = classmethod(D13Tests.migrate.__func__)
+    legacy_values = classmethod(D13Tests.legacy_values.__func__)
     setUp = D13Tests.setUp
     tearDown = D13Tests.tearDown
 

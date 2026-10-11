@@ -12,7 +12,7 @@ from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
 from app.data_ingestion.repositories.etf_adjustment import (
     EtfAdjustmentFactorRepository,
 )
-from app.backtesting.data.errors import InstrumentCalendarUnresolvedError
+from app.data_contracts.errors import InstrumentCalendarUnresolvedError
 from app.data_ingestion.schemas.etf_adjustment import (
     EtfAdjustmentFactorInput,
     EtfAdjustmentFactorUpsertResult,

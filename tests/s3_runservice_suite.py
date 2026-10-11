@@ -20,6 +20,15 @@ import unittest
 from unittest.mock import patch
 from uuid import uuid4
 
+# Every regression in this suite (HTTP/SDK/CLI/real worker included) runs with
+# both retired namespaces blocked, not merely selected algorithm modules.
+class _NoRetiredNamespace:
+    def find_spec(self, fullname, path=None, target=None):
+        if any(fullname == p or fullname.startswith(p+'.') for p in ('app.backtesting','app.strategy_protocol')):
+            raise ImportError('retired execution import: '+fullname)
+
+sys.meta_path.insert(0, _NoRetiredNamespace())
+
 import pyarrow as pa
 import requests
 from sqlalchemy import create_engine, insert, select, text, update
@@ -59,8 +68,6 @@ except ImportError:
 TOKEN = "d13-private-http-token-" + "a"*40
 CURSOR = "d13-private-cursor-key-" + "b"*40
 OWNER = "token:"+hashlib.sha256(TOKEN.encode()).hexdigest()
-BLOCKED = ("accounting", "execution", "bar_matching", "analyzers", "analysis_inputs", "runtime",
-           "production_runtime", "runner_worker", "registry", "run_router", "run_repository", "fees", "domain")
 
 
 def account_payload(minimum="1"):
@@ -178,7 +185,7 @@ class D13Tests(unittest.TestCase):
         cls.old_fee_key = "d13-original-"+uuid4().hex
         cls.old_fee_snapshot = dict(account_payload("5.000000000000000123"), key=cls.old_fee_key, version=1)
         cls.old_fee_hash = hashlib.sha256(encoded(cls.old_fee_snapshot)).hexdigest()
-        cls.old_run, cls.old_point = uuid4(), uuid4()
+        cls.old_run, cls.old_point, cls.old_failure, cls.old_comparison = uuid4(), uuid4(), uuid4(), uuid4()
         with Session(cls.engine) as s:
             s.add(FeeScheduleVersionRecord(key=cls.old_fee_key, version=1, name_zh="原费用目录", name_en="Original fee",
                           snapshot=cls.old_fee_snapshot, snapshot_hash=cls.old_fee_hash))
@@ -192,8 +199,29 @@ class D13Tests(unittest.TestCase):
                   as_of=datetime(2026,1,1,tzinfo=timezone.utc), valuation_status="complete",
                   cash=Decimal("123456789.123456789012345678"), market_value=Decimal("0"),
                   equity=Decimal("123456789.123456789012345678"), cumulative_fees=Decimal("1.000000000000000001")))
+            s.add(BacktestRunRecord(id=cls.old_failure, run_kind="backtest_run", profile="formal@1", status="failed", terminal_status="failed",
+                  idempotency_scope=OWNER, tenant_id=OWNER, idempotency_key=uuid4().hex, config_hash="b"*64,
+                  account_profile_id=str(cls.old_account), account_profile_version="1", strategy_revision_id=str(cls.old_revision),
+                  initial_cash="9999.123456789012345678", finished_at=datetime.now(timezone.utc),
+                  error_message="旧失败原文：余额不足；不重新执行", failure_evidence={"line":17,"time_ns":"1767225600000000456"},
+                  result_summary={"value":"9998.123456789012345678","original":"保留失败部分结果"}))
+            s.flush()
+            from app.backtest_service.history.saved_comparisons import SavedComparison, SavedComparisonMember
+            s.add(SavedComparison(id=cls.old_comparison, owner_scope=OWNER, name="旧比较：中文/原顺序", baseline_run_id=cls.old_run))
+            s.flush()
+            s.add_all([SavedComparisonMember(comparison_id=cls.old_comparison,run_id=cls.old_failure,position=0),
+                       SavedComparisonMember(comparison_id=cls.old_comparison,run_id=cls.old_run,position=1)])
             s.commit()
+        cls.original_values = cls.legacy_values()
+        if any(not rows for rows in cls.original_values.values()):
+            raise AssertionError('D17 historical preservation requires nonempty original samples in every protected relation')
         cls.migrate("head")
+        if cls.legacy_values() != cls.original_values:
+            raise AssertionError('D17 migration changed original IDs/text/money/associations')
+        if os.environ.get('QF_D17_EVIDENCE'):
+            evidence=Path(os.environ['QF_D17_EVIDENCE']);evidence.mkdir(parents=True,exist_ok=True)
+            (evidence/'legacy-upgrade-values.json').write_text(json.dumps(dict(kind='isolated_old_database_upgrade',production_executed=False,
+                before=cls.original_values,after=cls.legacy_values(),retired_namespaces_blocked=True),ensure_ascii=False,indent=2,default=str)+'\n')
         cls.base = Path(os.environ.get("QF_D13_TEST_ROOT") or tempfile.mkdtemp(prefix="qf-d13-service-"))
         cls.base.mkdir(exist_ok=True)
         cls.settings = Settings(api_token=TOKEN, cursor_signing_key=CURSOR, database_password="private",
@@ -212,10 +240,37 @@ class D13Tests(unittest.TestCase):
 
     @classmethod
     def migrate(cls, target):
-        result = subprocess.run([sys.executable, "-m", "alembic", "-c", str(cls.alembic), "upgrade", target],
+        script = '''import sys
+class Block:
+    def find_spec(self,fullname,path=None,target=None):
+        if any(fullname==p or fullname.startswith(p+'.') for p in ('app.backtesting','app.strategy_protocol')):
+            raise ImportError('retired namespace in migration: '+fullname)
+sys.meta_path.insert(0,Block())
+from alembic.config import main
+main(sys.argv[1:])
+'''
+        result = subprocess.run([sys.executable, "-c", script, "-c", str(cls.alembic), "upgrade", target],
                     env=cls.environment, capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stderr)
+
+    @classmethod
+    def legacy_values(cls):
+        queries = {
+            'account':'SELECT * FROM backtest_account_profiles WHERE id=:account',
+            'account_versions':'SELECT * FROM backtest_account_profile_versions WHERE profile_id=:account ORDER BY version',
+            'fee':'SELECT * FROM backtest_fee_schedule_versions WHERE key=:fee ORDER BY version',
+            'strategy':'SELECT * FROM strategies WHERE id=(SELECT strategy_id FROM strategy_revisions WHERE id=:revision)',
+            'draft':'SELECT * FROM strategy_drafts WHERE strategy_id=(SELECT strategy_id FROM strategy_revisions WHERE id=:revision)',
+            'revision':'SELECT * FROM strategy_revisions WHERE id=:revision',
+            'runs':'SELECT * FROM backtest_runs WHERE id IN (:run,:failure) ORDER BY id',
+            'equity':'SELECT * FROM backtest_equity_curve WHERE run_id=:run ORDER BY sequence',
+            'comparison':'SELECT * FROM backtest_saved_comparisons WHERE id=:comparison',
+            'members':'SELECT * FROM backtest_saved_comparison_members WHERE comparison_id=:comparison ORDER BY position',
+        }
+        params=dict(account=cls.old_account,fee=cls.old_fee_key,revision=cls.old_revision,run=cls.old_run,failure=cls.old_failure,comparison=cls.old_comparison)
+        with cls.engine.connect() as c:
+            return {key:[dict(row) for row in c.execute(text(query),params).mappings()] for key,query in queries.items()}
 
     @classmethod
     def tearDownClass(cls):
@@ -419,6 +474,17 @@ class D13Tests(unittest.TestCase):
         self.assertEqual(equity["cash"], "123456789.123456789012345678")
         self.assertEqual(equity["cumulative_fees"], "1.000000000000000001")
         self.assertEqual(equity["run_id"], str(self.old_run))
+        saved=requests.get(self.url+'/api/admin/backtest-comparisons/'+str(self.old_comparison),
+                           headers={'Authorization':'Bearer '+TOKEN},timeout=10)
+        self.assertEqual(saved.status_code,200,saved.text)
+        self.assertEqual(saved.json()['name'],'旧比较：中文/原顺序')
+        self.assertEqual(saved.json()['run_ids'],[str(self.old_failure),str(self.old_run)])
+        self.assertEqual(saved.json()['baseline_run_id'],str(self.old_run))
+        with self.engine.connect() as c:
+            error=c.execute(text('SELECT error_message,failure_evidence,account_profile_id,strategy_revision_id FROM backtest_runs WHERE id=:id'),{'id':self.old_failure}).one()
+        self.assertEqual(error.error_message,'旧失败原文：余额不足；不重新执行')
+        self.assertEqual(error.failure_evidence,{'line':17,'time_ns':'1767225600000000456'})
+        self.assertEqual((error.account_profile_id,error.strategy_revision_id),(str(self.old_account),str(self.old_revision)))
         new, _ = self.submit()
         page = self.http("GET").json()
         ids = {r["run_id"] for r in page["items"]}
@@ -432,13 +498,13 @@ class D13Tests(unittest.TestCase):
         script = '''import sys
 class Block:
     def find_spec(self, fullname, path=None, target=None):
-        if fullname.startswith("app.backtesting.") and fullname.split(".")[2] in %r:
+        if any(fullname==p or fullname.startswith(p+'.') for p in ('app.backtesting','app.strategy_protocol')):
             raise ImportError("retired compute imported: "+fullname)
 sys.meta_path.insert(0, Block())
 import app.main, app.models, app.runner.__main__
 app.main.app.openapi()
-assert not any(n.startswith("app.backtesting.") and n.split(".")[2] in %r for n in sys.modules)
-''' % (BLOCKED, BLOCKED)
+assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n in sys.modules)
+'''
         checked = subprocess.run([sys.executable, "-c", script], env=self.environment, capture_output=True, text=True)
         self.assertEqual(checked.returncode, 0, checked.stderr)
 
@@ -486,6 +552,13 @@ def before_trading_start(c):
 """
         self.account, self.revision = catalogue(self.engine, source)
         self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
+        def legacy_execution_rows():
+            from app.backtest_service.history import result_records
+            tables = {'backtest_runs', *(getattr(result_records, name).__tablename__ for name in result_records.__all__)}
+            with self.engine.connect() as c:
+                return {table: sorted(json.dumps(dict(row),sort_keys=True,default=str,ensure_ascii=False)
+                    for row in c.execute(text('SELECT * FROM "'+table+'"')).mappings()) for table in sorted(tables)}
+        protected = legacy_execution_rows()
         row, config = self.submit()
         with Session(self.engine) as session:
             AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
@@ -518,6 +591,9 @@ def before_trading_start(c):
                 self.assertEqual(next_page.status_code, 200, next_page.text)
                 self.assertNotEqual(next_page.json()["items"], page["items"])
             self.assertFalse(list(work_root.iterdir()))
+            self.assertEqual(legacy_execution_rows(),protected, 'new Rust run wrote old roots/snapshots/events/results')
+            (self.base/'retired-execution-writes.json').write_text(json.dumps(dict(production_executed=False,
+                real_runner_container=True,run_id=row['run_id'],before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
         finally:
             supervisor.stop()
 

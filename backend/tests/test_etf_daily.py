@@ -11,7 +11,7 @@ from app.data_ingestion.schemas.etf_daily import (
     EtfDailyBarUpsertResult,
 )
 from app.data_ingestion.schemas.trading_calendar import DataSyncCheckpointState
-from app.backtesting.data.errors import InstrumentCalendarUnresolvedError
+from app.data_contracts.errors import InstrumentCalendarUnresolvedError
 from app.data_ingestion.services.etf_daily import (
     ETF_DAILY_FIELDS,
     ETF_DAILY_FULL_SYNC_KEY,

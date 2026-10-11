@@ -7,7 +7,7 @@ from uuid import uuid4
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.instruments.domain import (
     InstrumentCodeMapping,
     InstrumentDisplayFact,

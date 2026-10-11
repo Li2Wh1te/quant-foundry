@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from sqlalchemy.dialects import postgresql
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.instruments.domain import VersionedReference
 from app.instruments.rule_facts_models import InstrumentRuleFactRecord
 from app.instruments.rule_facts_repository import (

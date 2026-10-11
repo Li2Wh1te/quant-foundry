@@ -8,15 +8,15 @@ from uuid import uuid4
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.schema import CreateTable
 
-from app.backtesting.account_profiles import AccountProfileStatus
-from app.backtesting.models import BacktestAccountProfileRecord
-from app.backtesting.repository import BacktestAccountProfileRepository
-from app.backtesting.schemas import (
+from app.backtest_service.accounts.types import AccountProfileStatus
+from app.backtest_service.history.storage_models import BacktestAccountProfileRecord
+from app.backtest_service.accounts.repository import BacktestAccountProfileRepository
+from app.backtest_service.accounts.schemas import (
     AccountProfileCreateRequest,
     AccountProfileUpdateRequest,
     FeeScheduleRequest,
 )
-from app.backtesting.service import (
+from app.backtest_service.accounts.service import (
     AccountProfileNameConflictError,
     AccountProfileService,
     AccountProfileValidationError,

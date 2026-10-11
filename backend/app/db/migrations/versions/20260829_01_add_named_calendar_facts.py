@@ -21,7 +21,7 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
-from app.backtesting.calendar_seed import (
+from app.db.migrations.named_calendar_seed import (
     BINDING_FACT_IDS,
     BOOTSTRAP_KNOWN_AT,
     BOOTSTRAP_OBSERVED_AT,
@@ -44,7 +44,7 @@ from app.backtesting.calendar_seed import (
     common_provenance,
     seed_manifest,
 )
-from app.backtesting.data.errors import (
+from app.data_contracts.errors import (
     CalendarSourcePriorityChainBrokenError,
     CalendarSourcePriorityInvalidError,
     CalendarSourcePriorityMissingError,

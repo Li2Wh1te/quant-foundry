@@ -9,10 +9,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 from starlette.requests import Request
 
-from app.backtesting.models import BacktestRunRecord
-from app.backtesting.result_router import compare_runs
-from app.backtesting.comparison import BacktestComparison
-from app.backtesting.saved_comparisons import ComparisonStore, CreateComparison, UpdateComparison
+from app.backtest_service.history.storage_models import BacktestRunRecord
+from app.backtest_service.history.router import compare_runs
+from app.backtest_service.history.comparison import BacktestComparison
+from app.backtest_service.history.saved_comparisons import ComparisonStore, CreateComparison, UpdateComparison
 from app.core.auth import AuthenticatedPrincipal
 from app.core.config import get_settings
 from app.strategies.service import StrategyStorageService

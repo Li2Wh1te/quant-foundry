@@ -3,7 +3,7 @@ from datetime import UTC, date, datetime
 from uuid import UUID
 from sqlalchemy import select, or_, and_
 from sqlalchemy.orm import Session
-from app.backtesting.data.errors import ProviderContractViolationError
+from app.data_contracts.errors import ProviderContractViolationError
 from app.data_ingestion.models.corporate_action import CorporateActionFact, CorporateActionCoverageFact
 
 class CorporateActionRepository:
