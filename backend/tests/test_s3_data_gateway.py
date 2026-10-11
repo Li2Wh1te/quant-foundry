@@ -359,7 +359,7 @@ def test_currentstore_rust_python_callback_query_command_chain(formal,tmp_path):
         result=_run_module(SimpleNamespace(handle_tick=tick,on_order=lambda c,o:orders.append(o.status)),wiring,
             market_routes={'tick':_MarketRoute('market',('price','quantity'))})
         report=json.loads(result.summary_json())
-        assert report['outcome']['status']=='succeeded',report
+        assert report['outcome']['status']=='succeeded',json.dumps(report['outcome'],ensure_ascii=False)
         assert report['progress']['completed_events']==6 and Decimal(report['portfolio']['cash'])==10000
         assert report['cleanup_errors']==[] and not report['production_executed']
         assert seen==[(market_base+i//2,i+1) for i in range(6)]
