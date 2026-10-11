@@ -54,7 +54,7 @@ def list_page(repository, owner, limit, cursor, key, *, strategy_id=None, sessio
         # Two bounded set reads, independent of full history size.
         new_rows = {r.id: r for r in session.scalars(select(Run).where(Run.id.in_([r.id for r in selected if r.engine_kind == "rust"]))).all()}
         old_rows = {r.id: r for r in session.scalars(select(BacktestRunRecord).where(BacktestRunRecord.id.in_([r.id for r in selected if r.engine_kind != "rust"]))).all()}
-        accepted, size = [], 128
+        accepted, size = [], 16*1024  # Signed cursor and page envelope share the 1MiB budget.
         for row in selected:
             if row.engine_kind == "rust":
                 root = new_rows[row.id]

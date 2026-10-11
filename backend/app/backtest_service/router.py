@@ -115,7 +115,19 @@ def batch_page(s, o, batch_id, limit, cursor, key):
     scope = dict(owner=o, batch_id=batch_id, limit=limit)
     offset = decode(cursor, scope, key) if cursor else 0
     rows, more = s.repository.batch_rows(o, batch_id, offset=offset, limit=limit)
-    return dict(items=rows, has_more=more, next_cursor=encode(offset+len(rows), scope, key) if more else None)
+    # Item count alone does not bound pages when accepted fee/parameter JSON is
+    # large. Keep room for the signed cursor and advance only over emitted rows.
+    items, used = [], 0
+    for row in rows:
+        size = len(encoded(row)) + 1
+        if used + size > 1024*1024 - 16*1024:
+            if not items:
+                raise RuntimeFault("RESOURCE_LIMIT", "单项运行摘要超过控制消息预算")
+            more = True
+            break
+        items.append(row)
+        used += size
+    return dict(items=items, has_more=more, next_cursor=encode(offset+len(items), scope, key) if more else None)
 
 
 @router.get("/batches/{batch_id}")

@@ -138,7 +138,8 @@ class DatabaseRunRepository:
     def _values(self, work, key, request_hash, *, batch_id=None, index=None, retry_of=None):
         if (not work.owner or len(work.owner) > 128 or len(work.strategy_source.encode()) > 256 * 1024
                 or "\x00" in work.strategy_source or not self.budget.fits([work.limits])
-                or len(encoded(work.specification)) > MAX_WORK_BYTES):
+                or len(encoded(dict(config=work.config, accepted=work.specification,
+                                    strategy_source=work.strategy_source, limits=vars(work.limits)))) > MAX_WORK_BYTES - 16*1024):
             raise RuntimeFault("RESOURCE_LIMIT", "已受理控制配置超过预算")
         config = deepcopy(work.config)
         return dict(id=uuid4(), owner=work.owner, idempotency_key=key, request_hash=request_hash,

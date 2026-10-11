@@ -20,7 +20,7 @@ cleanup() {
     # removing our private DB. Never broaden this to a host path/volume cleanup.
     docker exec --user postgres "$qf_database" rm -f -- \
         /var/run/postgresql/.s.PGSQL.5432 /var/run/postgresql/.s.PGSQL.5432.lock >/dev/null 2>&1 || true
-    docker rm -f "$qf_database" >/dev/null 2>&1 || true
+    docker rm -fv "$qf_database" >/dev/null 2>&1 || true
     # Recover interrupted tests by exact claim AND this newly allocated mount
     # root. No label/name alone authorizes touching any other test/production.
     PYTHONPATH="$qf_root/backend" python3 - "$qf_test_root/work" <<'PY'
@@ -87,7 +87,8 @@ docker build --network none -f "$qf_test_root/build/ops/s3-d12/worker.Dockerfile
 qf_worker_id=$(docker image inspect --format '{{.Id}}' "$qf_worker_tag")
 docker build --network none -f "$qf_test_root/build/ops/s3-d12/runner-test.Dockerfile" -t "$qf_runner_tag" "$qf_test_root/build"
 qf_runner_id=$(docker image inspect --format '{{.Id}}' "$qf_runner_tag")
-# A freshly allocated private PG has no network or persistent volume. Only the
+# A freshly allocated private PG has no network; its own anonymous data volume
+# is removed with this exact container in cleanup. Only the
 # trusted test runner mounts its socket; sibling strategy workers never do.
 docker pull postgres:17
 docker run -d --name "$qf_database" --network none --cpus 1 --memory 512m --memory-swap 512m \

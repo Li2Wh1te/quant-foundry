@@ -420,7 +420,14 @@ class D13Tests(unittest.TestCase):
         self.assertEqual(equity["cumulative_fees"], "1.000000000000000001")
         self.assertEqual(equity["run_id"], str(self.old_run))
         new, _ = self.submit()
-        ids = {r["run_id"] for r in self.http("GET").json()["items"]}
+        page = self.http("GET").json()
+        ids = {r["run_id"] for r in page["items"]}
+        while page["next_cursor"]:
+            response = self.http("GET", "?limit=100&cursor="+page["next_cursor"])
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertLess(len(response.content), 1024*1024)
+            page = response.json()
+            ids.update(r["run_id"] for r in page["items"])
         self.assertIn(str(self.old_run), ids); self.assertIn(new["run_id"], ids)
         script = '''import sys
 class Block:
@@ -434,6 +441,31 @@ assert not any(n.startswith("app.backtesting.") and n.split(".")[2] in %r for n 
 ''' % (BLOCKED, BLOCKED)
         checked = subprocess.run([sys.executable, "-c", script], env=self.environment, capture_output=True, text=True)
         self.assertEqual(checked.returncode, 0, checked.stderr)
+
+    def test_batch_pages_bound_bytes_and_keep_every_run(self):
+        fees = account_payload()
+        fees["metadata"]["description"] = "x"*48000
+        with Session(self.engine) as session:
+            AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=fees)
+            session.commit()
+        configs = [dict(self.template["config"], parameters={"index": i}) for i in range(24)]
+        response = self.http("POST", "/batches", {"configs": configs}, key=uuid4().hex)
+        self.assertEqual(response.status_code, 202, response.text)
+        self.assertLess(len(response.content), 1024*1024)
+        page = response.json()
+        bid = page["batch_id"]
+        self.assertLess(len(page["items"]), 24)
+        ids = [r["run_id"] for r in page["items"]]
+        while page["next_cursor"]:
+            response = self.http("GET", "/batches/"+bid+"?limit=100&cursor="+page["next_cursor"])
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertLess(len(response.content), 1024*1024)
+            page = response.json()
+            ids.extend(r["run_id"] for r in page["items"])
+        self.assertEqual(len(set(ids)), 24)
+        self.assertEqual(len(ids), 24)
+        self.runs.extend(ids)
+        self.assertEqual(self.http("POST", "/batches/"+bid+"/cancel").status_code, 200)
 
     def test_real_runner_database_http_sdk_and_d11_result(self):
         if os.environ.get("QF_D13_REAL_WORKER_REQUIRED") != "1":
@@ -470,10 +502,10 @@ def before_trading_start(c):
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["performance"]["initial_equity"], "10000")
-            self.assertEqual(result.json()["performance"]["trades"]["fill_fees"], "1")
+            self.assertEqual(result.json()["performance"]["trades"]["fill_fees"], "1.00")
             trades = self.http("GET", "/"+row["run_id"]+"/results/trades").json()["items"]
             self.assertEqual(len(trades), 1)
-            self.assertEqual(trades[0]["fee"], "1")
+            self.assertEqual(trades[0]["fee"], "1.00")
             self.assertEqual(self.http("POST", "/"+row["run_id"]+"/cancel").json()["status"], "succeeded")
             comparison = self.http("POST", "/compare", {"run_ids": [str(self.old_run), row["run_id"]]})
             self.assertEqual(comparison.status_code, 200, comparison.text)

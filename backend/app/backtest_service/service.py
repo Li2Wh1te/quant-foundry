@@ -12,7 +12,7 @@ from app.strategies.models import Strategy, StrategyRevision
 from app.strategies.parameter_contract import validate_parameters
 from app.strategies.validation import validate_s3_source
 from .accounts.service import AccountProfileService, AccountProfileNotFoundError
-from .repository import identity
+from .repository import MAX_WORK_BYTES, identity
 from .runtime_contracts import AcceptedWork, RuntimeFault, WorkerLimits
 from .serialization import canonical_hash, encoded
 
@@ -151,6 +151,9 @@ class RunService:
             raise RuntimeFault("RULE_UNAVAILABLE", "所选参考日历不适用于本运行")
         normalized["reference_calendar"] = calendar
         normalized = normalize(normalized)
+        if len(encoded(dict(config=normalized, accepted=work.specification,
+                            strategy_source=work.strategy_source, limits=vars(work.limits)))) > MAX_WORK_BYTES - 16*1024:
+            raise RuntimeFault("RESOURCE_LIMIT", "已受理控制配置超过预算")
         return AcceptedWork(work.owner, normalized, work.strategy_source, work.limits, work.specification)
 
     def preflight(self, owner, config):
