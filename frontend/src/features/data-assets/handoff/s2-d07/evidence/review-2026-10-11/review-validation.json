@@ -1,0 +1,69 @@
+{
+  "reviewDate": "2026-10-11",
+  "runtimeFixCommit": "71d5c8be35a79973e439621bcd890c85d36e66a3",
+  "reviewMain": "60e594742cf7b2ee78b0b50b2cf48b10400ef7d3",
+  "latestMainSync": "fcda2700d65c21d99d024f7abddfb1099e6673a4",
+  "finalHeadCI": "Recorded separately on PR #158 after final documentation freeze; not inferred from older runs.",
+  "localChecks": {
+    "frontendTests": {
+      "passed": 140,
+      "failed": 0
+    },
+    "d01ClientTests": {
+      "passed": 31,
+      "failed": 0
+    },
+    "typescriptForceBuild": "passed",
+    "frontendProductionBuild": "passed; existing large-chunk warning",
+    "d07Browser": {
+      "passed": 31,
+      "pageErrors": 0,
+      "artifact": "d07-acceptance.json"
+    },
+    "routes": {
+      "passed": 22,
+      "pageErrors": 0,
+      "artifact": "routes.json"
+    },
+    "d03Browser": {
+      "passed": 27,
+      "pageErrors": 0,
+      "artifact": "d03-acceptance.json"
+    },
+    "d05CombinedBrowser": {
+      "passed": 48,
+      "pageErrors": 0,
+      "artifact": "d05-combined-summary.json"
+    },
+    "issuesPostgreSQL": {
+      "passed": 2,
+      "failed": 0
+    },
+    "nativeHTTP": {
+      "passed": 14,
+      "artifact": "native-http.json"
+    },
+    "nativeBrowser": {
+      "passed": 3,
+      "pageErrors": 0,
+      "artifact": "native-browser.json"
+    },
+    "rootTests": {
+      "passed": 18
+    },
+    "releaseCheck": "0.3.0 consistent"
+  },
+  "disposableDatabaseCleanup": {
+    "command_exit": 0,
+    "postgres_reaped": true,
+    "pgdata_removed": true
+  },
+  "productionBundleFixtureMarkers": [],
+  "fullBackendAndContainers": "Not run locally on unsupported overlay. Requires new exact-head supported-filesystem CI.",
+  "realDataAcceptance": false,
+  "productionOperations": false,
+  "gateOverrides": false,
+  "mergedMain": false,
+  "deployed": false,
+  "authorization": "Continue PR review and ordinary fixes only; preserve already authorized /issues CAST and two tests."
+}

@@ -1,0 +1,52 @@
+{
+  "comparisonMain": "d4becb53bc2393412cb9550530827bc2bbb97b36",
+  "originalPrHead": "aeaef20165145064ee7c55fd07ad664bf3fb70c6",
+  "changedFiles": 325,
+  "classes": {
+    "runtime": 33,
+    "tests-and-handoff": 62,
+    "archive": 3,
+    "image": 213,
+    "evidence-json": 14
+  },
+  "originalRequirementsVerified": 27,
+  "binaryAndJsonIntegrity": true,
+  "s3AndR01ImplementationPreserved": true,
+  "taskPackageManifests": [
+    {
+      "manifest": "Quant_Foundry_S2-D01_API_and_Status_v1.0/S2-D01/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D02_Workspace_Shell_v1.0/S2-D02/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D03_Data_Catalog_v1.0/S2-D03/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D04_Dataset_Details_v1.0/S2-D04/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D05_Safe_Data_Preview_v1.0/S2-D05/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D06_Updates_and_Issues_v1.0/S2-D06/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2-D07_Integration_and_Handoff_v1.0/S2-D07/SHA256SUMS.json",
+      "entries": 8
+    },
+    {
+      "manifest": "Quant_Foundry_S2_Batch1_Small_Tasks_v1.0/CONTENTS_SHA256.json",
+      "entries": 15
+    }
+  ],
+  "reviewMain": "60e594742cf7b2ee78b0b50b2cf48b10400ef7d3",
+  "latestMainSync": "fcda2700d65c21d99d024f7abddfb1099e6673a4",
+  "originalMainComparisonRetained": true
+}
