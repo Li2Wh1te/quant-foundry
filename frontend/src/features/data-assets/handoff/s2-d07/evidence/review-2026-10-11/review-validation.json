@@ -65,5 +65,12 @@
   "gateOverrides": false,
   "mergedMain": false,
   "deployed": false,
-  "authorization": "Continue PR review and ordinary fixes only; preserve already authorized /issues CAST and two tests."
+  "authorization": "Continue PR review and ordinary fixes only; preserve already authorized /issues CAST and two tests.",
+  "catalogRepeatedInputFix": {
+    "priorFailedHead": "276649ddbc2ba4448faa6a4a843a6d76f8b8b212",
+    "before": "catalog-input-before-fix.json",
+    "after": "catalog-input-after-fix.json",
+    "sequencesPassed": 30,
+    "finalHeadChecks": "Recorded on PR #158 after final freeze; previous D03 passes are historical."
+  }
 }

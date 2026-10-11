@@ -1,6 +1,6 @@
 import { CheckCircle2, CircleAlert, CircleHelp, Clock3, Copy, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useNavigationType, useSearchParams } from "react-router-dom";
 import { createRequestScope, currentStatus, dataAssetsClient, datasetName, DataStoreApiError, formatCount as count,
   formatTimestamp as time, frequencyLabel, isCancellation, updateStatus,
   type CatalogSnapshot, type CurrentDataset, type RequestScope, type StatusPresentation } from "./data";
@@ -112,6 +112,11 @@ export function CatalogRow({ item, params }: { item: CurrentDataset; params: URL
 
 export function CatalogView() {
   const [params, setParams] = useSearchParams();
+  const navigationType = useNavigationType();
+  const context = catalogParams(params).toString();
+  const latestParams = useRef(catalogParams(params));
+  const issuedContexts = useRef(new Set<string>());
+  const [searchInput, setSearchInput] = useState(params.get("search") ?? "");
   const restoredContext = useRef<string | null>(null);
   const latestCatalog = useRef<CatalogSnapshot | null>(null);
   const [catalog, setCatalog] = useState<CatalogSnapshot | null>(null);
@@ -125,6 +130,18 @@ export function CatalogView() {
   }, []);
   const report = useCallback((message: string) => setError({ message, retained: false, denied: true }), []);
   const failure = useDataAssetsFailure(clear, report);
+
+  useLayoutEffect(() => {
+    // Router transitions may publish an earlier URL after the next input has
+    // arrived. Preserve the latest local edit through our own pending changes;
+    // browser history and external navigation still restore their URL state.
+    if (navigationType !== "POP" && issuedContexts.current.has(context)) {
+      if (context === latestParams.current.toString()) issuedContexts.current.clear();
+      return;
+    }
+    issuedContexts.current.clear(); latestParams.current = catalogParams(params);
+    setSearchInput(params.get("search") ?? "");
+  }, [context, params, navigationType]);
 
   useEffect(() => {
     const scope = createRequestScope();
@@ -158,17 +175,17 @@ export function CatalogView() {
   const pages = Math.max(1, Math.ceil(filtered.length / PAGE_SIZE));
   const visiblePage = Math.min(catalogPage(params.get("page")), pages);
   const visible = filtered.slice((visiblePage - 1) * PAGE_SIZE, visiblePage * PAGE_SIZE);
-  const context = catalogParams(params).toString();
   const metrics = catalogMetrics(catalog);
   const filtersActive = !!search || [status, source, frequency].some(value => value !== "all");
 
   useEffect(() => {
     // Correct invalid/shrunken pages in the URL only after this read finishes.
     // Replacing this entry avoids leaving a broken page in browser history.
-    if (!catalog || busy || !params.has("page") || params.get("page") === String(visiblePage)) return;
+    if (!catalog || busy || latestParams.current.toString() !== context
+      || !params.has("page") || params.get("page") === String(visiblePage)) return;
     const next = catalogParams(params); next.set("page", String(visiblePage));
     setParams(next, { replace: true });
-  }, [catalog, busy, params, visiblePage, setParams]);
+  }, [catalog, busy, context, params, visiblePage, setParams]);
 
   useLayoutEffect(() => {
     if (!catalog || busy || restoredContext.current === context
@@ -178,16 +195,21 @@ export function CatalogView() {
     restoreCatalogScroll(params); restoredContext.current = context;
   }, [catalog, busy, context, params, visiblePage]);
 
+  function navigateCatalog(next: URLSearchParams) {
+    latestParams.current = next; issuedContexts.current.add(next.toString());
+    // A controlled text input must update outside the router's transition.
+    setSearchInput(next.get("search") ?? ""); setParams(next);
+  }
   function update(key: string, value: string) {
-    saveCatalogScroll(params);
-    const next = catalogParams(params); next.set(key, value); next.set("page", "1");
-    setParams(next);
+    saveCatalogScroll(latestParams.current);
+    const next = catalogParams(latestParams.current); next.set(key, value); next.set("page", "1");
+    navigateCatalog(next);
   }
   function go(page: number) {
-    saveCatalogScroll(params);
-    const next = catalogParams(params); next.set("page", String(page)); setParams(next);
+    saveCatalogScroll(latestParams.current);
+    const next = catalogParams(latestParams.current); next.set("page", String(page)); navigateCatalog(next);
   }
-  function reset() { saveCatalogScroll(params); setParams(new URLSearchParams({ page: "1" })); }
+  function reset() { saveCatalogScroll(latestParams.current); navigateCatalog(new URLSearchParams({ page: "1" })); }
   function retry() { setRefresh(value => value + 1); }
 
   return <section className="qf-assets qf-catalog" aria-busy={busy}>
@@ -214,7 +236,7 @@ export function CatalogView() {
       <button className="qfo-secondary-btn" type="button" onClick={retry} disabled={busy}>重试完整加载</button>
     </LocalNotice>}
     <div className="qf-assets-toolbar qf-catalog-toolbar">
-      <label>搜索数据集<input value={search} placeholder="中文名称、原名或标识" onChange={event => update("search", event.target.value)} /></label>
+      <label>搜索数据集<input value={searchInput} placeholder="中文名称、原名或标识" onChange={event => update("search", event.target.value)} /></label>
       <label>当前状态<Select aria-label="当前状态" value={status} onChange={event => update("status", event.target.value)}>
         <option value="all">全部状态</option>
         {knownStatuses.map(value => <option key={value} value={value}>{currentStatus(value).label}</option>)}

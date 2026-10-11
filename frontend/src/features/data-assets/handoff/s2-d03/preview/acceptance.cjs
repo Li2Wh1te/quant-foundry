@@ -260,13 +260,17 @@ async function context(browser, width = 390) {
       });
       await check('rapid repeated filters and refreshes retain the final URL selection and reset pages', async () => {
         await open(p, 'page=3');
-        for (let i = 0; i < 3; i++) {
+        for (let i = 0; i < 30; i++) {
           await p.getByLabel('搜索数据集', { exact: true }).fill('数据集 002');
           await p.getByLabel('搜索数据集', { exact: true }).fill('数据集 001');
           await p.getByLabel('搜索数据集', { exact: true }).fill('隔离示例');
           await choose(p, '来源', sourceB); await choose(p, '频率', '分钟');
           await refresh(p);
           assert.equal(await listRows(p).count(), 4); assert.equal(new URL(p.url()).searchParams.get('page'), '1');
+          assert.equal(await p.getByLabel('搜索数据集', { exact: true }).inputValue(), '隔离示例');
+          assert.equal(new URL(p.url()).searchParams.get('search'), '隔离示例');
+          assert.equal(new URL(p.url()).searchParams.get('source'), sourceB);
+          assert.equal(new URL(p.url()).searchParams.get('frequency'), 'minute');
           await p.getByRole('button', { name: '清除筛选', exact: true }).click();
         }
       });
