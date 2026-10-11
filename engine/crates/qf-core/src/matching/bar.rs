@@ -131,6 +131,7 @@ impl BarMatcher {
             ExactDecimal::legal_quantity(volume, self.participation, ExactDecimal::ONE, step)?;
         let mut ids = BTreeSet::new();
         for order in orders {
+            crate::types::keys::label(&order.order_id, 128)?;
             if !ids.insert(&order.order_id)
                 || order.security != bar.security
                 || !order.status.is_active()
@@ -204,8 +205,25 @@ impl BarMatcher {
                 ));
             }
             let requested = order.remaining()?.min(remaining);
-            let allowance =
-                budget.allowance_after(&outcome.fills, &order.order_id, requested, price, step)?;
+            let mut candidate = Fill {
+                trade_id: budget.trade_id(outcome.fills.len())?,
+                order_id: order.order_id.clone(),
+                security: order.security.clone(),
+                side: order.side,
+                quantity: requested,
+                price,
+                fee: ExactDecimal::ZERO,
+                execution_time_ns: bar.interval_end_ns,
+            };
+            crate::types::keys::label(&candidate.trade_id, 128)?;
+            if outcome
+                .fills
+                .iter()
+                .any(|fill| fill.trade_id == candidate.trade_id)
+            {
+                return Err(scoped(bar, ErrorCode::InvalidContract, "候选成交ID重复"));
+            }
+            let allowance = budget.candidate_allowance_after(&outcome.fills, &candidate, step)?;
             if allowance.requested_quantity != requested || allowance.effective_quantity > requested
             {
                 return Err(scoped(
@@ -225,16 +243,8 @@ impl BarMatcher {
                 continue;
             }
             remaining = remaining.checked_sub(quantity)?;
-            outcome.fills.push(Fill {
-                trade_id: budget.trade_id(outcome.fills.len())?,
-                order_id: order.order_id.clone(),
-                security: order.security.clone(),
-                side: order.side,
-                quantity,
-                price,
-                fee: ExactDecimal::ZERO,
-                execution_time_ns: bar.interval_end_ns,
-            });
+            candidate.quantity = quantity;
+            outcome.fills.push(candidate);
             let mut changed = order.clone();
             changed.filled_quantity = changed.filled_quantity.checked_add(quantity)?;
             changed.status = if changed.filled_quantity == changed.quantity {

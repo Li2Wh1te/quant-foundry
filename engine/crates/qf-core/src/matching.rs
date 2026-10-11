@@ -79,6 +79,21 @@ pub trait FillBudget {
         }
         self.allowance(order_id, requested, price, step)
     }
+    /// Quote the actual candidate (including its confirmation time) against
+    /// the one account after prior fills. A price-only budget cannot prove
+    /// that a partial sale can pay minimum fees or disposal tax.
+    fn candidate_allowance_after(
+        &self,
+        _prior: &[Fill],
+        _candidate: &Fill,
+        _step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        Err(crate::QfError::new(
+            crate::ErrorCode::CapabilityUnavailable,
+            "fill_budget",
+            "完整候选成交账户核验未接入",
+        ))
+    }
     /// Stable run-local IDs, in emitted fill order. No growing replay ledger.
     fn trade_id(&self, offset: usize) -> QfResult<String>;
 }

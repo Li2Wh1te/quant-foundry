@@ -14,7 +14,13 @@
     {"id":"buy_five_cent_tick", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"1", "tick":"0.05", "expected":"10.05"},
     {"id":"sell_five_cent_tick", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"1", "tick":"0.05", "expected":"9.95"},
     {"id":"buy_tiny_bps", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"0.0000000000000000000000000001", "tick":"0.01", "expected":"10.01"},
-    {"id":"sell_tiny_bps", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"0.0000000000000000000000000001", "tick":"0.01", "expected":"9.99"}
+    {"id":"sell_tiny_bps", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"0.0000000000000000000000000001", "tick":"0.01", "expected":"9.99"},
+    {"id":"buy_zero_bps", "side":"buy", "ohlc":["10","12","9","10"], "limit":null, "bps":"0", "tick":"0.01", "expected":"10"},
+    {"id":"sell_zero_bps", "side":"sell", "ohlc":["10","12","9","10"], "limit":null, "bps":"0", "tick":"0.01", "expected":"10"},
+    {"id":"buy_limit_caps_large_bps", "side":"buy", "ohlc":["10","12","9","10"], "limit":"11", "bps":"2000", "tick":"0.01", "expected":"11"},
+    {"id":"sell_limit_caps_large_bps", "side":"sell", "ohlc":["10","12","9","10"], "limit":"9", "bps":"2000", "tick":"0.01", "expected":"9"},
+    {"id":"buy_full_bps_cap", "side":"buy", "ohlc":["10","10.02","9","10"], "limit":null, "bps":"10000", "tick":"0.01", "expected":"10.02"},
+    {"id":"sell_full_bps_cap", "side":"sell", "ohlc":["10","12","9.98","10"], "limit":null, "bps":"10000", "tick":"0.01", "expected":"9.98"}
   ],
   "shared_volume":{"volume":101,"participation":"0.5","orders":[30,30],"fills":[30,20],"fees":["1","1"],"cash":"9498","quantity":50},
   "gap_budget":{"initial_cash":"350","estimate":"10","orders":[10,10],"open":"20","fills":[10,7],"fees":["1","1"],"cash":"8","quantity":17},

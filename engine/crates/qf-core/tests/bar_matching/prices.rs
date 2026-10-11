@@ -45,6 +45,18 @@ fn independent_price_table_uses_real_orders_accounts_and_one_rational_tick_round
                 assert_eq!(outcome.fills.len(), 1, "{case}");
                 let fill = &outcome.fills[0];
                 assert_eq!(fill.price, p(expected), "{case}");
+                let reference = match (side, case["limit"].as_str()) {
+                    (Side::Buy, Some(limit)) => p(prices[0]).min(p(limit)),
+                    (Side::Sell, Some(limit)) => p(prices[0]).max(p(limit)),
+                    (_, None) => p(prices[0]),
+                };
+                assert!(
+                    match side {
+                        Side::Buy => fill.price >= reference,
+                        Side::Sell => fill.price <= reference,
+                    },
+                    "adverse rounding/capping improved the selected reference: {case}"
+                );
                 assert_eq!(fill.execution_time_ns, time(row, start + 1));
                 assert_eq!(fill.fee, d("1"));
                 assert_eq!(

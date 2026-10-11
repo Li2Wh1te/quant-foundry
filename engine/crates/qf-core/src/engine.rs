@@ -86,6 +86,18 @@ pub trait ExecutionPort: AccountPort {
         }
         self.fill_allowance(id, requested, price, step)
     }
+    fn candidate_fill_allowance_after(
+        &self,
+        _prior: &[Fill],
+        _candidate: &Fill,
+        _step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        Err(error(
+            ErrorCode::CapabilityUnavailable,
+            "fill_budget",
+            "完整候选成交账户核验未接入",
+        ))
+    }
     /// Concrete D06 overrides with one revision-bound account/order commit.
     fn apply_match_outcome(
         &mut self,
@@ -159,6 +171,15 @@ impl<E: ExecutionPort> FillBudget for ExecutionBudget<'_, E> {
     ) -> QfResult<FillAllowance> {
         self.0
             .fill_allowance_after(prior, id, requested, price, step)
+    }
+    fn candidate_allowance_after(
+        &self,
+        prior: &[Fill],
+        candidate: &Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0
+            .candidate_fill_allowance_after(prior, candidate, step)
     }
 }
 pub trait RulesPort<R> {

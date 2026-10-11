@@ -37,11 +37,19 @@ D04 的 `RulesPort<BarRules>` 必须按事件标的和实际会话提供正式�
 是未复权 CNY 原价及已验证份额量。正式映射仍由 D04/底座接入；隔离事实不能
 启用市场能力。撮合没有数据读取、数据库、第二份账户或费用累计器。
 
-调用链为 D03 `consume_with_budget` → 每个候选
-`FillBudget::allowance_after(prior_fills, ...)` → D06 `claim_match/commit_match`
+调用链为 D03 `consume_with_budget` → 每个实际候选
+`FillBudget::candidate_allowance_after(prior_fills, candidate, step)` → D06 `claim_match/commit_match`
 → 唯一 D09 账户核费及提交。后序候选先预览已选择的前序成交，不能重复消费
 可用现金或预支未选择的卖款。候选失败不返回半批，D06 成交/订单/累计费用批次
 失败全部不提交。matcher 的 `consume` 无预算入口明确拒绝。
+
+该接缝通过 `ExecutionPort::candidate_fill_allowance_after` 转发，包含实际成交
+时间与 ID。买卖两侧均用 D09 已有 `assess_fill` 核验最低佣金、FIFO 税款、冻结
+现金及卖款可用时点，不另建手续费或资金公式。当前卖出候选不足以支付费用/
+税款时不成交，保留余单、共享量和未收取的费用；后序候选只可使用已选择的
+前序净卖款。仅资金不足转为未成交，未知规则、税务事实及非法身份仍拒绝整批。
+未接入完整候选核验的预算适配器明确返回能力不足，不回退到仅按价格的预算。
+非法订单/成交 ID 或同批重复成交 ID 在返回候选批次前拒绝。
 
 滑点跳空后只成交真实可支付量，保留余单；最低佣金按订单累计核定。DAY 到期
 继续由 D03/D06 在最后市场事件后处理，after_close 新 DAY 属下一实际会话。
@@ -53,7 +61,8 @@ D04 的 `RulesPort<BarRules>` 必须按事件标的和实际会话提供正式�
 已有有界 ResultSink 在 initialize 前写一次 `ResultRecord::ExecutionModel`，
 无成交或初始化异常也保留模型、频率、参与率、滑点、成交单位及价格/量/路径/
 队列假设。
-`Engine::from_run` 检查描述和同一归一化配置一致，信用不足使运行失败。该
+`Engine::from_run` 检查描述和同一归一化配置一致；信用不足使运行在 initialize
+前失败，单条批次的精确字节信用可正常使用。该
 serde 变体和 Python wire 类型由同一生成器同步；D11/D13 应接收至结果摘要。
 
 matcher 仅保留授权集合和每标的最后区间终点，内存与 universe 有界。不保存

@@ -546,6 +546,14 @@ impl<F: OrderFacts> ExecutionPort for OrderManager<F> {
     ) -> QfResult<FillAllowance> {
         self.allowance_after(prior, id, requested, price, step)
     }
+    fn candidate_fill_allowance_after(
+        &self,
+        prior: &[Fill],
+        candidate: &Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.candidate_allowance_after(prior, candidate, step)
+    }
     fn apply_match_outcome(
         &mut self,
         event: &MarketEvent,

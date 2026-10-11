@@ -205,6 +205,411 @@ fn buy_and_sell_orders_share_volume_in_real_stable_order_priority() {
 }
 
 #[test]
+fn a_small_sale_cannot_pay_its_minimum_fee_from_another_orders_frozen_cash() {
+    let row = &rows()[0];
+    let mut m = manager("112", Facts::default());
+    seed(&mut m, 10); // 112 - 100 - 1 = 11, all reserved by the B buy below.
+    let sale = submit_at(
+        &mut m,
+        "A",
+        Side::Sell,
+        10,
+        None,
+        TimeInForce::Gtc,
+        2,
+        time(row, 571),
+    );
+    submit_at(
+        &mut m,
+        "B",
+        Side::Buy,
+        1,
+        None,
+        TimeInForce::Gtc,
+        3,
+        time(row, 571),
+    );
+    let before = m.value(time(row, 571)).unwrap();
+    assert_eq!(before.cash, d("11"));
+    assert_eq!(before.frozen_cash, d("11"));
+    let result = commit(
+        &mut m,
+        &mut matcher("1", "0"),
+        &bar(
+            row,
+            "A",
+            571,
+            572,
+            2,
+            ["0.1", "0.2", "0.09", "0.1"],
+            Some(1),
+        ),
+        &rules(row, "A"),
+    );
+    assert!(result.fills.is_empty());
+    assert_eq!(
+        result.orders[0].reason_code,
+        Some(ErrorCode::InsufficientCash)
+    );
+    assert_eq!(m.get_order(&sale.order_id).unwrap().filled_quantity, q(0));
+    assert_eq!(m.value(time(row, 572)).unwrap().cash, before.cash);
+    assert_eq!(
+        m.value(time(row, 572)).unwrap().frozen_cash,
+        before.frozen_cash
+    );
+    assert_eq!(m.account().held_quantity(&sec("A")), q(10));
+    assert_eq!(m.account().totals().trading_fees, d("1"));
+}
+
+#[test]
+fn unaffordable_partial_sales_keep_volume_and_fees_until_a_payable_sale() {
+    let row = &rows()[0];
+    let mut m = manager("101", Facts::default());
+    seed(&mut m, 10);
+    let sale = submit_at(
+        &mut m,
+        "A",
+        Side::Sell,
+        10,
+        None,
+        TimeInForce::Gtc,
+        2,
+        time(row, 571),
+    );
+    let mut matcher = matcher("1", "0");
+    for seq in 2..=3 {
+        let result = commit(
+            &mut m,
+            &mut matcher,
+            &bar(
+                row,
+                "A",
+                569 + seq,
+                570 + seq,
+                seq as u64,
+                ["0.1", "0.2", "0.09", "0.1"],
+                Some(1),
+            ),
+            &rules(row, "A"),
+        );
+        assert!(result.fills.is_empty());
+        assert_eq!(result.orders.len(), usize::from(seq == 2));
+        assert_eq!(m.account().totals().trading_fees, d("1"));
+        assert_eq!(m.value(time(row, 570 + seq)).unwrap().cash, d("0"));
+        assert_eq!(
+            m.account().reservation(&sale.order_id).unwrap().fee_paid,
+            d("0")
+        );
+    }
+    let result = commit(
+        &mut m,
+        &mut matcher,
+        &bar(
+            row,
+            "A",
+            573,
+            574,
+            4,
+            ["0.1", "0.2", "0.09", "0.1"],
+            Some(10),
+        ),
+        &rules(row, "A"),
+    );
+    assert_eq!(result.fills[0].quantity, q(10));
+    assert_eq!(result.fills[0].fee, d("1"));
+    assert_eq!(m.value(time(row, 574)).unwrap().cash, d("0"));
+    assert_eq!(m.account().held_quantity(&sec("A")), q(0));
+    assert_eq!(
+        m.get_order(&sale.order_id).unwrap().status,
+        OrderStatus::Filled
+    );
+}
+
+#[test]
+fn a_later_sale_can_pay_its_fee_only_from_selected_prior_net_proceeds() {
+    let row = &rows()[0];
+    for (first, second, limit, volume, expected, cash, held, fees) in [
+        // First: 3*0.5-1=0.5. Second: 1*0.5-1=-0.5, payable after the first.
+        (3, 1, None, 4, vec![q(3), q(1)], "0", 6, "3"),
+        // Unpayable first candidate uses no volume; the next can sell all 3.
+        (1, 3, None, 3, vec![q(3)], "0.5", 7, "2"),
+        // A missed limit is no sale income to fund the later minimum fee.
+        (3, 1, Some("10"), 4, vec![], "0", 10, "1"),
+    ] {
+        let mut m = manager("101", Facts::default());
+        seed(&mut m, 10);
+        for (seq, quantity, limit) in [(2, first, limit), (3, second, None)] {
+            submit_at(
+                &mut m,
+                "A",
+                Side::Sell,
+                quantity,
+                limit,
+                TimeInForce::Gtc,
+                seq,
+                time(row, 571),
+            );
+        }
+        let result = commit(
+            &mut m,
+            &mut matcher("1", "0"),
+            &bar(
+                row,
+                "A",
+                571,
+                572,
+                2,
+                ["0.5", "0.6", "0.49", "0.5"],
+                Some(volume),
+            ),
+            &rules(row, "A"),
+        );
+        assert_eq!(
+            result.fills.iter().map(|f| f.quantity).collect::<Vec<_>>(),
+            expected
+        );
+        assert!(result.fills.iter().all(|f| f.fee == d("1")));
+        assert_eq!(m.value(time(row, 572)).unwrap().cash, d(cash));
+        assert_eq!(m.account().held_quantity(&sec("A")), q(held));
+        assert_eq!(m.account().totals().trading_fees, d(fees));
+    }
+}
+
+struct InvalidTradeIds<'a>(&'a Manager, &'a str);
+impl FillBudget for InvalidTradeIds<'_> {
+    fn allowance(
+        &self,
+        id: &str,
+        qty: Quantity,
+        price: Price,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0.allowance(id, qty, price, step)
+    }
+    fn trade_id(&self, _offset: usize) -> QfResult<String> {
+        Ok(self.1.into())
+    }
+    fn candidate_allowance_after(
+        &self,
+        prior: &[Fill],
+        candidate: &Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        self.0.candidate_allowance_after(prior, candidate, step)
+    }
+}
+
+#[test]
+fn malformed_or_duplicate_fill_ids_cannot_publish_a_batch_or_consume_its_interval() {
+    let row = &rows()[0];
+    for id in [
+        "".into(),
+        " invalid ".into(),
+        "control\n".into(),
+        "x".repeat(129),
+        "qf-trade-00000000000000000001".into(),
+    ] {
+        let mut m = manager("350", Facts::default());
+        for sequence in 1..=2 {
+            submit_at(
+                &mut m,
+                "A",
+                Side::Buy,
+                10,
+                None,
+                TimeInForce::Gtc,
+                sequence,
+                row.before_open_ns,
+            );
+        }
+        let orders = m.open_orders();
+        let before = m.value(row.before_open_ns).unwrap();
+        let event = bar(row, "A", 570, 571, 1, ["20", "21", "19", "20"], Some(100));
+        let mut matcher = matcher("1", "0");
+        code(
+            matcher.consume_with_budget(
+                &event,
+                &orders,
+                &rules(row, "A"),
+                &InvalidTradeIds(&m, &id),
+            ),
+            ErrorCode::InvalidContract,
+        );
+        assert_eq!(m.open_orders(), orders);
+        assert_eq!(m.value(row.before_open_ns).unwrap(), before);
+        assert_eq!(m.account().totals().trading_fees, d("0"));
+        let result = commit(&mut m, &mut matcher, &event, &rules(row, "A"));
+        assert_eq!(
+            result.fills.iter().map(|f| f.quantity).collect::<Vec<_>>(),
+            vec![q(10), q(7)]
+        );
+    }
+}
+
+#[test]
+fn invalid_order_ids_and_mismatched_source_sessions_refuse_even_with_zero_volume() {
+    let row = &rows()[0];
+    let mut m = manager("10000", Facts::default());
+    let order = submit_at(
+        &mut m,
+        "A",
+        Side::Buy,
+        10,
+        None,
+        TimeInForce::Gtc,
+        1,
+        row.before_open_ns,
+    );
+    let event = bar(row, "A", 570, 571, 1, ["10", "12", "9", "10"], Some(0));
+    let mut matcher = matcher("1", "0");
+    for id in [
+        "".into(),
+        " leading".into(),
+        "control\n".into(),
+        "x".repeat(129),
+    ] {
+        let mut invalid = order.clone();
+        invalid.order_id = id;
+        code(
+            matcher.consume_with_budget(&event, &[invalid], &rules(row, "A"), &m),
+            ErrorCode::InvalidContract,
+        );
+    }
+    let mut wrong_session = event.clone();
+    if let MarketEvent::Bar(ref mut bar) = wrong_session {
+        bar.identity.source_session = rows()[1].session.key.clone();
+    }
+    code(
+        matcher.consume_with_budget(
+            &wrong_session,
+            std::slice::from_ref(&order),
+            &rules(row, "A"),
+            &m,
+        ),
+        ErrorCode::InvalidContract,
+    );
+    let result = commit(&mut m, &mut matcher, &event, &rules(row, "A"));
+    assert!(result.fills.is_empty());
+    assert_eq!(result.orders[0].status, OrderStatus::Open);
+    assert_eq!(m.account().totals().trading_fees, d("0"));
+}
+
+#[test]
+fn reversing_buy_sell_priority_changes_shared_volume_without_prespending_a_later_sale() {
+    let row = &rows()[0];
+    for sell_first in [false, true] {
+        let mut m = manager("212", Facts::default());
+        seed(&mut m, 10); // Cash 111; buy admission reserves 61 at the known mark.
+        let sides = if sell_first {
+            [Side::Sell, Side::Buy]
+        } else {
+            [Side::Buy, Side::Sell]
+        };
+        for (offset, side) in sides.into_iter().enumerate() {
+            submit_at(
+                &mut m,
+                "A",
+                side,
+                6,
+                None,
+                TimeInForce::Gtc,
+                offset as u64 + 2,
+                time(row, 571),
+            );
+        }
+        let result = commit(
+            &mut m,
+            &mut matcher("1", "0"),
+            &bar(row, "A", 571, 572, 2, ["20", "21", "19", "20"], Some(8)),
+            &rules(row, "A"),
+        );
+        let expected = if sell_first {
+            (vec![(Side::Sell, q(6)), (Side::Buy, q(2))], "189", 6)
+        } else {
+            (vec![(Side::Buy, q(5)), (Side::Sell, q(3))], "69", 12)
+        };
+        assert_eq!(
+            result
+                .fills
+                .iter()
+                .map(|f| (f.side, f.quantity))
+                .collect::<Vec<_>>(),
+            expected.0
+        );
+        assert_eq!(m.value(time(row, 572)).unwrap().cash, d(expected.1));
+        assert_eq!(m.account().held_quantity(&sec("A")), q(expected.2));
+        assert_eq!(m.account().totals().trading_fees, d("3"));
+    }
+}
+
+#[test]
+fn admitted_odd_lot_sale_keeps_its_integer_remainder_and_one_minimum_fee() {
+    let row = &rows()[0];
+    let mut m = manager(
+        "10000",
+        Facts {
+            unit: 100,
+            minimum: 100,
+            ..Facts::default()
+        },
+    );
+    let buy = submit_at(
+        &mut m,
+        "A",
+        Side::Buy,
+        200,
+        None,
+        TimeInForce::Gtc,
+        1,
+        row.before_open_ns,
+    );
+    let mut matcher = matcher("1", "0");
+    commit(
+        &mut m,
+        &mut matcher,
+        &bar(row, "A", 570, 571, 1, ["10", "12", "9", "10"], Some(137)),
+        &rules(row, "A"),
+    );
+    m.cancel_at(&buy.order_id, &command(row, "A", 2, time(row, 571)))
+        .unwrap();
+    let sell = submit_at(
+        &mut m,
+        "A",
+        Side::Sell,
+        137,
+        None,
+        TimeInForce::Gtc,
+        3,
+        time(row, 571),
+    );
+    for (seq, quantity, fee) in [(2, 100, "1"), (3, 37, "0")] {
+        let result = commit(
+            &mut m,
+            &mut matcher,
+            &bar(
+                row,
+                "A",
+                569 + seq,
+                570 + seq,
+                seq as u64,
+                ["10", "12", "9", "10"],
+                Some(100),
+            ),
+            &rules(row, "A"),
+        );
+        assert_eq!(result.fills[0].quantity, q(quantity));
+        assert_eq!(result.fills[0].fee, d(fee));
+    }
+    assert_eq!(
+        m.get_order(&sell.order_id).unwrap().status,
+        OrderStatus::Filled
+    );
+    assert_eq!(m.value(time(row, 573)).unwrap().cash, d("9998"));
+    assert_eq!(m.account().held_quantity(&sec("A")), q(0));
+    assert_eq!(m.account().totals().trading_fees, d("2"));
+}
+
+#[test]
 fn missing_volume_rules_status_and_band_do_not_become_liquidity() {
     let row = &rows()[0];
     let mut m = manager("10000", Facts::default());
@@ -464,6 +869,21 @@ impl FillBudget for FailLater<'_> {
     }
     fn trade_id(&self, offset: usize) -> QfResult<String> {
         self.0.trade_id(offset)
+    }
+    fn candidate_allowance_after(
+        &self,
+        prior: &[Fill],
+        candidate: &Fill,
+        step: QuantityStep,
+    ) -> QfResult<FillAllowance> {
+        if !prior.is_empty() {
+            return Err(QfError::new(
+                ErrorCode::RuleUnavailable,
+                "synthetic_late_failure",
+                "合成后序候选拒绝",
+            ));
+        }
+        self.0.candidate_allowance_after(prior, candidate, step)
     }
 }
 

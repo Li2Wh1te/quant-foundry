@@ -527,3 +527,69 @@ fn description_is_required_result_even_without_market_and_mismatched_matcher_con
     ));
     assert!(h.host.calls.is_empty());
 }
+
+#[test]
+fn execution_description_needs_sufficient_record_and_byte_credit_before_initialize() {
+    let mut h = Harness::new(Frequency::Day, "0.1", "10000");
+    let description = ResultRecord::ExecutionModel(h.matcher.model_description().unwrap());
+    let batch = qf_core::results::ResultBatch::new(
+        Sequence::new(1),
+        vec![description],
+        &qf_core::results::SinkCredit {
+            max_records: 1,
+            max_bytes: qf_core::run::MAX_CONTROL_BYTES,
+        },
+    )
+    .unwrap();
+    let required = serde_json::to_vec(&batch).unwrap().len();
+    for (records, bytes) in [(0, required), (1, required - 1)] {
+        let mut h = Harness::new(Frequency::Day, "0.1", "10000");
+        h.writer.credit_records = records;
+        h.writer.credit_bytes = bytes;
+        let report = h.run(1, vec![], 1, false);
+        assert!(matches!(
+            report.outcome,
+            RunOutcome::Failed {
+                error: QfError {
+                    code: ErrorCode::ResultBudgetExceeded,
+                    ..
+                },
+                partial: false
+            }
+        ));
+        assert!(h.host.calls.is_empty());
+        assert!(h.writer.records.is_empty());
+        assert_eq!(h.writer.aborted, 1);
+        assert_eq!(h.data.closed, 1);
+        assert_eq!(h.host.finish_count, 1);
+        assert!(h.execution.open_orders().is_empty());
+    }
+    h.writer.credit_records = 1;
+    h.writer.credit_bytes = required;
+    let report = h.run(1, vec![], 1, false);
+    h.success(&report);
+    assert!(matches!(
+        h.writer.records[0],
+        ResultRecord::ExecutionModel(_)
+    ));
+}
+
+#[test]
+fn interrupted_description_acknowledgement_preserves_metadata_and_skips_initialize() {
+    let mut h = Harness::new(Frequency::Day, "0.1", "10000");
+    h.writer.fail_after_write = true;
+    let report = h.run(1, vec![], 1, false);
+    assert!(matches!(
+        report.outcome,
+        RunOutcome::Cancelled { partial: true }
+    ));
+    assert_eq!(h.writer.records.len(), 1);
+    assert!(matches!(
+        h.writer.records[0],
+        ResultRecord::ExecutionModel(_)
+    ));
+    assert!(h.host.calls.is_empty());
+    assert_eq!(h.writer.aborted, 1);
+    assert_eq!(h.data.closed, 1);
+    assert_eq!(h.host.finish_count, 1);
+}
