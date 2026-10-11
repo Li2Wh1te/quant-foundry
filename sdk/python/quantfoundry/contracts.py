@@ -319,12 +319,18 @@ class RunConfigFields(TypedDict):
 class BatchRequest(TypedDict):
     configs: list[RunConfigFields]
 
+class RunProgress(TypedDict):
+    completed_events: int
+    completed_sessions: int
+    now_ns: str
+
 class RunSummary(TypedDict):
     run_id: str
     status: Literal['queued', 'starting', 'running', 'succeeded', 'failed', 'cancelled']
     cancel_requested: bool
     progress_completed: int
     progress_total: int | None
+    progress: NotRequired[RunProgress | None]
     partial: bool
     error: ErrorDTO | None
 

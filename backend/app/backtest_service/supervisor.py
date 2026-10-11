@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from .local_queue import encoded
 from .process import attempt_name, container_name
-from .runtime_contracts import Claim, RuntimeFault
+from .runtime_contracts import Claim, RuntimeFault, checked_progress
 
 
 @dataclass
@@ -154,6 +154,9 @@ class _Task:
     name: str | None = None
     last_heartbeat: float = 0
     heartbeat_thread: Thread | None = None
+    progress: dict | None = None
+    progress_saved_at: float = 0
+    progress_messages: int = 0
 
 
 class RunnerSupervisor:
@@ -234,6 +237,16 @@ class RunnerSupervisor:
                         raise RuntimeFault('RESOURCE_LIMIT', '运行测量摘要超过预算')
                     if task.binding.telemetry is not None:
                         task.binding.telemetry(frame.body['metrics'])
+                elif frame.op == 'progress' and booted:
+                    task.progress = checked_progress(frame.body, task.progress)
+                    task.progress_messages += 1
+                    if task.progress_messages > 2*task.work.limits.wall_seconds+16:
+                        raise RuntimeFault('RESOURCE_LIMIT', '进度消息超过墙钟对应预算')
+                    now = time.monotonic()
+                    if now-task.progress_saved_at >= 1:
+                        if not self.repository.progress(task.claim, task.progress):
+                            raise RuntimeFault('STALE_CLAIM', '运行进度claim已失效')
+                        task.progress_saved_at = now
                 elif frame.op == "result" and booted and set(frame.body) == {"records"}:
                     records = frame.body["records"]
                     if type(records) is not list or not 1 <= len(records) <= 64:
@@ -501,6 +514,10 @@ class RunnerSupervisor:
                     RuntimeFault("RESULT_BUDGET_EXCEEDED", "必需结果无法持久化")
                 )
         try:
+            # Flush the latest bounded counter once before the terminal winner.
+            # Cancellation/expiry refuses this mutation and preserves prior state.
+            if task.progress is not None:
+                self.repository.progress(task.claim, task.progress)
             commit = lambda connection=None: self.repository.commit_outcome(
                 task.claim, outcome, result, connection, publish
             )

@@ -23,6 +23,7 @@ from .runtime_contracts import (
     GroupBudget,
     RuntimeFault,
     WorkerLimits,
+    checked_progress,
 )
 
 _ID = re.compile(r"[0-9a-f]{32}")
@@ -206,6 +207,7 @@ class LocalRunRepository:
                     work=work,
                     result=None,
                     outcome=None,
+                    progress=None,
                 )
                 if len(encoded(row)) > MAX_WORK_BYTES:
                     raise RuntimeFault("RESOURCE_LIMIT", "单运行控制状态超过预算")
@@ -248,6 +250,7 @@ class LocalRunRepository:
                     fence=row["fence"] + 1,
                     token=uuid4().hex,
                     supervisor_id=supervisor_id,
+                    progress=None,
                     lease_until=now + lease_seconds,
                 )
                 self._write(row["run_id"] + ".json", row)
@@ -300,6 +303,15 @@ class LocalRunRepository:
             if not self._valid(row, claim) or row["cancel_requested"]:
                 return False
             row["status"] = "running"
+            self._write(row["run_id"] + ".json", row)
+            return True
+
+    def progress(self, claim, value):
+        with self._locked():
+            row = self._row(claim.run_id)
+            if not self._valid(row, claim) or row["cancel_requested"]:
+                return False
+            row["progress"] = checked_progress(value, row.get("progress"))
             self._write(row["run_id"] + ".json", row)
             return True
 
@@ -416,6 +428,7 @@ class LocalRunRepository:
                     supervisor_id=None,
                     result=None,
                     outcome=None,
+                    progress=None,
                 )
                 self._write(replacement["run_id"] + ".json", replacement)
                 batch["items"][index] = replacement["run_id"]

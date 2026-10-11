@@ -323,12 +323,21 @@ impl RunStatus {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct RunProgress {
+    pub completed_events: u64,
+    pub completed_sessions: u64,
+    pub now_ns: Nanoseconds,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RunSummary {
     pub run_id: String,
     pub status: RunStatus,
     pub cancel_requested: bool,
     pub progress_completed: u64,
     pub progress_total: Option<u64>,
+    #[serde(default)]
+    pub progress: Option<RunProgress>,
     pub partial: bool,
     pub error: Option<QfError>,
 }

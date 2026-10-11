@@ -57,6 +57,7 @@ class Run(Base):
     lease_until: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     attempt_identity: Mapped[list[int] | None] = mapped_column(CONTROL_JSON)
     outcome: Mapped[dict | None] = mapped_column(CONTROL_JSON)
+    progress: Mapped[dict | None] = mapped_column(CONTROL_JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 

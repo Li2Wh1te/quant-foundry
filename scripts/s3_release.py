@@ -31,6 +31,16 @@ def sources(native=True):
         for base in ("backend/app", "ops/s3-d18"):
             paths.update((ROOT / base).rglob("*.py"))
         paths.update((ROOT / "contracts").glob("*.json"))
+        paths.update((ROOT / "ops/s3-d18").glob("*.Dockerfile"))
+        paths.add(ROOT / "ops/s3-d18/compose.s3.yaml")
+        paths.update(
+            p
+            for p in (ROOT / "frontend/src").rglob("*")
+            if p.suffix in (".ts", ".tsx", ".css")
+        )
+        paths.update(
+            ROOT / "frontend" / name for name in ("package.json", "pnpm-lock.yaml")
+        )
         paths.add(ROOT / "backend/uv.lock")
         paths.add(ROOT / "backend/pyproject.toml")
         for base in ("ops/s3-d12",):

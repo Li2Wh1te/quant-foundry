@@ -143,6 +143,7 @@ def main():
             market_routes=routes,
             research_routes=packet["research_routes"],
             _seeded=True,
+            _progress=lambda value: client.call('progress', json.loads(value)),
         )
         computation_seconds = time.monotonic() - computation_started
         transfer_started = time.monotonic()

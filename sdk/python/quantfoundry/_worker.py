@@ -126,7 +126,7 @@ class _Host:
         self.session.cache_size = 0
         self.callbacks.clear()
 
-def _run_module(module, spec, *, market_routes=None, research_routes=None, cancellation=None, _seeded=False):
+def _run_module(module, spec, *, market_routes=None, research_routes=None, cancellation=None, _seeded=False, _progress=None):
     """Internal integration seam, called in a supervisor-owned worker or tests."""
     if _RUNNING.get():
         raise _error('INVALID_CONTRACT', '不能递归运行策略')
@@ -153,7 +153,7 @@ def _run_module(module, spec, *, market_routes=None, research_routes=None, cance
         if len(calendar_input.encode()) > 16*1024*1024 or not 1 <= len(calendar) <= 10000:
             raise _error('RESOURCE_LIMIT', '运行日历超过有界元数据预算')
         result = RunResults(_native.run_strategy(_json(compact_spec), _json(host.handlers), host.dispatch,
-            cancellation if cancellation is not None else _native.CancellationToken(), calendar_input))
+            cancellation if cancellation is not None else _native.CancellationToken(), calendar_input, _progress))
         result._callback_metrics = host.callback_metrics
         return result
     finally:

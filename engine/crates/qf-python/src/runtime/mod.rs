@@ -199,6 +199,36 @@ struct Control {
     cancelled: Arc<AtomicBool>,
     deadline: Instant,
     progress: Progress,
+    expected_sessions: u64,
+    progress_callback: Option<Py<PyAny>>,
+    last_progress_sent: Instant,
+    progress_seconds: f64,
+    progress_messages: u64,
+}
+impl Control {
+    fn publish(&mut self, progress: Progress, force: bool) -> QfResult<()> {
+        self.progress = progress;
+        let now = Instant::now();
+        if !force && now.duration_since(self.last_progress_sent) < Duration::from_secs(1) {
+            return Ok(());
+        }
+        if let Some(callback) = &self.progress_callback {
+            let value = encode(&json!({"completed_events":progress.completed_events,
+                "completed_sessions":progress.completed_sessions,"now_ns":progress.now_ns}))?;
+            let started = Instant::now();
+            let result = Python::attach(|py| {
+                callback
+                    .call1(py, (value,))
+                    .map(|_| ())
+                    .map_err(|e| exception(py, &e))
+            });
+            self.progress_seconds += started.elapsed().as_secs_f64();
+            result?;
+            self.progress_messages += 1;
+            self.last_progress_sent = now;
+        }
+        Ok(())
+    }
 }
 impl Checkpoint for Control {
     fn check(&mut self) -> QfResult<()> {
@@ -218,8 +248,12 @@ impl Checkpoint for Control {
 impl RunControl for Control {
     fn progress(&mut self, progress: Progress) -> QfResult<()> {
         self.check()?;
-        self.progress = progress;
-        Ok(())
+        // The final session counter is acknowledged before Engine seals its
+        // success. A lost channel must still abort a partial result normally.
+        self.publish(
+            progress,
+            progress.completed_sessions == self.expected_sessions,
+        )
     }
 }
 struct Rules(Facts);
@@ -311,6 +345,7 @@ fn execute(
     callbacks: SyncSender<host::Callback>,
     cancelled: Arc<AtomicBool>,
     spool: spool::SharedSpool,
+    progress_callback: Option<Py<PyAny>>,
 ) -> QfResult<Value> {
     let mut facts = Facts::new(&spec)?;
     let calendar = SessionCalendar::new(
@@ -389,6 +424,13 @@ fn execute(
         _ => Matching::Tick(TickMatcher::from_run(&spec.config)?),
     };
     let limits = EngineLimits {
+        // Check a cheap native counter on each event; IPC remains at most
+        // once per second. Slow callbacks therefore still show live progress.
+        progress_every_events: if progress_callback.is_some() {
+            1
+        } else {
+            10_000
+        },
         max_active_orders: spec.max_active_orders,
         max_commands_per_boundary: spec.max_commands_per_boundary,
         merge: qf_core::clock::MergeLimits {
@@ -407,6 +449,11 @@ fn execute(
             completed_sessions: 0,
             now_ns: start,
         },
+        expected_sessions: spec.calendar.len() as u64,
+        progress_callback,
+        last_progress_sent: Instant::now() - Duration::from_secs(1),
+        progress_seconds: 0.0,
+        progress_messages: 0,
     };
     let mut writer = CheckedWriter {
         writer: spool::Writer(spool.clone()),
@@ -423,6 +470,10 @@ fn execute(
         control: &mut control,
         results: &mut writer,
     });
+    if !matches!(report.outcome, RunOutcome::Succeeded { .. }) {
+        // Preserve the primary failure if cancellation already closed IPC.
+        let _ = control.publish(report.progress, true);
+    }
     let driver_seconds = engine_started.elapsed().as_secs_f64();
     let ipc_metrics = data.gateway.as_ref().and_then(|g| g.lock().ok()).map(|g|
         json!({"exchange_seconds":g.exchange_seconds,"exchange_count":g.exchange_count,"payload_bytes":g.payload_bytes}));
@@ -443,7 +494,8 @@ fn execute(
         - host.callback_seconds
         - (ipc_seconds - host.callback_gateway_seconds)
         - conversion_seconds
-        - spool_seconds)
+        - spool_seconds
+        - control.progress_seconds)
         .max(0.0);
     // The terminal control message must not contain the full position map.
     // D11 already persisted final positions as bounded business shards.
@@ -456,7 +508,7 @@ fn execute(
     Ok(
         json!({"outcome":report.outcome,"progress":{"completed_events":report.progress.completed_events,"completed_sessions":report.progress.completed_sessions,"now_ns":report.progress.now_ns},
         "merge":{"peak_buffered_events":report.merge.peak_buffered_events,"peak_buffered_bytes":report.merge.peak_buffered_bytes,"source_reads":report.merge.source_reads},
-        "callback_count":host.callback_count,"timing":{"driver_including_wait_seconds":driver_seconds,"callback_including_sdk_seconds":host.callback_seconds,"gateway_inside_callbacks_seconds":host.callback_gateway_seconds,"rust_driver_exclusive_seconds":exclusive_seconds,"source_arrow_conversion_seconds":conversion_seconds,"worker_result_spool_write_seconds":spool_seconds,"ipc":ipc_metrics},"logs_truncated":host.logs_truncated,"portfolio":portfolio,"cleanup_errors":report.cleanup_errors,"production_executed":false}),
+        "callback_count":host.callback_count,"timing":{"driver_including_wait_seconds":driver_seconds,"callback_including_sdk_seconds":host.callback_seconds,"gateway_inside_callbacks_seconds":host.callback_gateway_seconds,"rust_driver_exclusive_seconds":exclusive_seconds,"source_arrow_conversion_seconds":conversion_seconds,"worker_result_spool_write_seconds":spool_seconds,"trusted_progress_seconds":control.progress_seconds,"trusted_progress_messages":control.progress_messages,"ipc":ipc_metrics},"logs_truncated":host.logs_truncated,"portfolio":portfolio,"cleanup_errors":report.cleanup_errors,"production_executed":false}),
     )
 }
 fn exception(py: Python<'_>, error: &PyErr) -> QfError {
@@ -572,7 +624,7 @@ impl Drop for EngineThread {
     }
 }
 #[pyfunction]
-#[pyo3(signature=(input, handlers, dispatch, cancellation, calendar_input=None))]
+#[pyo3(signature=(input, handlers, dispatch, cancellation, calendar_input=None, progress_callback=None))]
 pub fn run_strategy(
     py: Python<'_>,
     input: &str,
@@ -580,6 +632,7 @@ pub fn run_strategy(
     dispatch: Py<PyAny>,
     cancellation: PyRef<'_, CancellationToken>,
     calendar_input: Option<&str>,
+    progress_callback: Option<Py<PyAny>>,
 ) -> PyResult<RunResult> {
     let mut spec: Spec = convert(bounded_json(input))?;
     if let Some(calendar_input) = calendar_input {
@@ -610,8 +663,16 @@ pub fn run_strategy(
     let cancelled = cancellation.cancelled.clone();
     let result_spool = spool.clone();
     let run_cancelled = cancelled.clone();
-    let handle =
-        std::thread::spawn(move || execute(spec, handlers, sender, run_cancelled, result_spool));
+    let handle = std::thread::spawn(move || {
+        execute(
+            spec,
+            handlers,
+            sender,
+            run_cancelled,
+            result_spool,
+            progress_callback,
+        )
+    });
     let mut thread = EngineThread {
         handle: Some(handle),
         cancelled: cancelled.clone(),

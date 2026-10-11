@@ -41,7 +41,7 @@ from app.backtest_service.accounts.types import AccountProfileStatus
 from app.backtest_service.data_gateway import AuthorizedRun, MARKET_SCHEMA, MarketBinding, RunDataGateway
 from app.backtest_service.models import Run, RunResult
 from app.backtest_service.repository import DatabaseRunRepository, identity
-from app.backtest_service.runtime_contracts import Claim, RuntimeFault
+from app.backtest_service.runtime_contracts import Claim, RuntimeFault, GroupBudget, WorkerLimits
 from app.backtest_service.runtime_services import create_services
 from app.backtest_service.serialization import encoded
 from app.backtest_service.service import RunService, normalize
@@ -215,13 +215,39 @@ class D13Tests(unittest.TestCase):
         cls.original_values = cls.legacy_values()
         if any(not rows for rows in cls.original_values.values()):
             raise AssertionError('D17 historical preservation requires nonempty original samples in every protected relation')
+        # Also upgrade a nonempty previous S3 schema, including its immutable
+        # failed business run; adding progress must not rewrite its old values.
+        cls.migrate('20261012_01')
+        prior_id=uuid4()
+        prior_config=spec(days=1,securities=('A.SH',))['config']
+        prior_config.update(account_id=str(cls.old_account),strategy_revision_id=str(cls.old_revision),
+                            parameters={'original':'S3 原失败','time_ns':'1767225600000000123'})
+        with cls.engine.begin() as c:
+            c.execute(text('''INSERT INTO s3_runs
+                (id,owner,idempotency_key,request_hash,account_id,account_version,strategy_revision_id,
+                 config,accepted,strategy_source,limits,group_policy,status,outcome,finished_at)
+                VALUES (:id,:owner,:key,:hash,:account,1,:revision,CAST(:config AS jsonb),
+                    CAST(:accepted AS jsonb),:source,CAST(:limits AS jsonb),CAST(:policy AS jsonb),
+                    'failed',CAST(:outcome AS jsonb),CURRENT_TIMESTAMP)'''),
+                dict(id=prior_id,owner=OWNER,key=uuid4().hex,hash='c'*64,account=cls.old_account,
+                    revision=cls.old_revision,config=json.dumps(prior_config,ensure_ascii=False),
+                    accepted=json.dumps({'account_snapshot':{'fee_schedule':cls.old_fee_snapshot}},ensure_ascii=False),
+                    source='def initialize(c): pass # 原修订不改写',limits=json.dumps(vars(WorkerLimits())),
+                    policy=json.dumps(vars(GroupBudget())),outcome=json.dumps(dict(status='failed',partial=True,
+                        error=RuntimeFault('STRATEGY_ERROR','S3 原失败，不重新计算').diagnostic()),ensure_ascii=False)))
+            prior_values=dict(c.execute(text('SELECT * FROM s3_runs WHERE id=:id'),{'id':prior_id}).mappings().one())
         cls.migrate("head")
+        with cls.engine.connect() as c:
+            upgraded=dict(c.execute(text('SELECT * FROM s3_runs WHERE id=:id'),{'id':prior_id}).mappings().one())
+        if upgraded.pop('progress') is not None or upgraded!=prior_values:
+            raise AssertionError('S3 progress migration rewrote a retained prior run')
         if cls.legacy_values() != cls.original_values:
             raise AssertionError('D17 migration changed original IDs/text/money/associations')
         if os.environ.get('QF_D17_EVIDENCE'):
             evidence=Path(os.environ['QF_D17_EVIDENCE']);evidence.mkdir(parents=True,exist_ok=True)
             (evidence/'legacy-upgrade-values.json').write_text(json.dumps(dict(kind='isolated_old_database_upgrade',production_executed=False,
-                before=cls.original_values,after=cls.legacy_values(),retired_namespaces_blocked=True),ensure_ascii=False,indent=2,default=str)+'\n')
+                before=cls.original_values,after=cls.legacy_values(),retired_namespaces_blocked=True,
+                prior_s3_run_before=prior_values,prior_s3_run_after=upgraded),ensure_ascii=False,indent=2,default=str)+'\n')
         cls.base = Path(os.environ.get("QF_D13_TEST_ROOT") or tempfile.mkdtemp(prefix="qf-d13-service-"))
         cls.base.mkdir(exist_ok=True)
         cls.settings = Settings(api_token=TOKEN, cursor_signing_key=CURSOR, database_password="private",
@@ -399,12 +425,18 @@ main(sys.argv[1:])
         self.assertEqual(claim.run_id, row["run_id"])
         work = self.repository.work(claim)
         self.assertEqual(work.specification["account_snapshot"]["fee_schedule"]["fee_rules"][0]["minimum"], "1")
+        progress = dict(completed_events=2, completed_sessions=1, now_ns="1767225600000000123")
+        self.assertTrue(self.repository.progress(claim, progress))
+        self.assertEqual(self.http("GET", "/"+claim.run_id).json()["progress_completed"],2)
+        with self.assertRaises(RuntimeFault):
+            self.repository.progress(claim, dict(progress, now_ns="1767225600000000122"))
         with Session(self.engine) as s:
             with self.assertRaises(AccountProfileReferencedError):
                 AccountProfileService(s).permanently_delete(self.account, expected_version=2)
         with self.assertRaises(RuntimeFault):
             self.repository.commit_outcome(claim, dict(status="succeeded", result_id=row["run_id"]), None)
         self.repository.request_cancel(OWNER, row["run_id"])
+        self.assertFalse(self.repository.progress(claim, dict(progress, completed_events=3)))
         gw, ctx = self.provider.gateway(work, claim.run_id, Event())
         writer = _native.TrustedResultWriter(str(self.settings.s3_result_root), claim.run_id, 1024*1024)
         # Cancel must reject success before retaining any candidate/pointer.
@@ -412,10 +444,16 @@ main(sys.argv[1:])
             dict(status="succeeded", result_id=claim.run_id), "candidate", c, lambda: "candidate")))
         self.assertTrue(self.repository.commit_outcome(claim, dict(status="cancelled", partial=True), None))
         self.assertEqual(self.repository.request_cancel(OWNER, claim.run_id)["status"], "cancelled")
+        self.assertEqual(self.repository.status(OWNER,claim.run_id)['progress'],progress)
+        self.assertFalse(self.repository.progress(claim, dict(progress, completed_events=4)))
+        with self.engine.begin() as c:
+            with self.assertRaises(Exception):
+                c.execute(update(Run).where(Run.id==identity(claim.run_id)).values(progress=None))
         self.assertIsNone(self.repository.result_pointer(OWNER, claim.run_id)[1])
         gw.close(ctx)
         other, _ = self.submit()
         stale = self.repository.claim("crashed", time.time(), 2)
+        self.assertTrue(self.repository.progress(stale,progress))
         with self.engine.begin() as c:
             c.execute(update(Run).where(Run.id == identity(stale.run_id)).values(lease_until=time.time()-1))
         restarted = DatabaseRunRepository(self.engine, result_root=self.settings.s3_result_root)
@@ -426,6 +464,9 @@ main(sys.argv[1:])
         current = restarted.claim("replacement", time.time(), 30)
         self.assertNotEqual(current.token, stale.token)
         self.assertGreater(current.fence, stale.fence)
+        self.assertIsNone(restarted.status(OWNER,current.run_id)['progress'])
+        self.assertFalse(restarted.progress(stale,progress))
+        self.assertTrue(restarted.progress(current,dict(progress,completed_events=1)))
         self.assertFalse(restarted.commit_outcome(stale, dict(status="cancelled", partial=True), None))
 
     def test_database_batch_admission_retries_and_parallel_claim_budget(self):
@@ -558,11 +599,14 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         repository, process, services = create_services(settings=settings, engine=self.engine, provider=self.provider, daemon=DockerDaemon())
         self.provider.process = process
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
-        source = """from quantfoundry.api import order, LimitOrder
+        source = """import time
+from quantfoundry.api import order, LimitOrder
 def before_trading_start(c):
     if not getattr(c.state, 'bought', False):
         c.state.bought = True
         assert order('A.SH', 100, style=LimitOrder('10')).accepted
+def handle_data(c, data):
+    time.sleep(.65)
 """
         self.account, self.revision = catalogue(self.engine, source)
         self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
@@ -578,14 +622,20 @@ def before_trading_start(c):
             AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
             session.commit()
         try:
+            live_progress=[]
             deadline = time.monotonic()+30
             while time.monotonic() < deadline:
                 supervisor.step()
                 status = self.http("GET", "/"+row["run_id"]).json()
+                if status['status']=='running' and status['progress_completed']>0:
+                    live_progress.append(status['progress_completed'])
                 if status["status"] in ("succeeded", "failed", "cancelled"):
                     break
                 Event().wait(.05)
             self.assertEqual(status["status"], "succeeded", status)
+            self.assertTrue(live_progress,'real HTTP status stayed at zero throughout execution')
+            self.assertEqual(status['progress_completed'],len(self.template['source']['events']))
+            self.assertEqual(status['progress']['completed_sessions'],len(self.template['calendar']))
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["performance"]["initial_equity"], "10000")

@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from types import SimpleNamespace
 import unittest
 from quantfoundry import _native, ContractError
@@ -33,6 +34,40 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(report['outcome']['status'],'succeeded',report)
         self.assertEqual(report['cleanup_errors'],[])
         return report
+
+    def test_trusted_progress_is_live_bounded_and_finishes_with_actual_counters(self):
+        progress=[]; callbacks=[]
+        started=time.monotonic()
+        def bars(c, data):
+            callbacks.append(c.now_ns)
+            threading.Event().wait(.55)
+        result=self.run_strategy(SimpleNamespace(handle_data=bars),spec(days=4),
+            _progress=lambda value:progress.append(json.loads(value)))
+        elapsed=time.monotonic()-started
+        report=self.assertSucceeded(result)
+        self.assertEqual(len(callbacks),4)
+        self.assertEqual(report['progress']['completed_events'],8)
+        self.assertEqual(progress[-1],report['progress'])
+        self.assertTrue(any(0<p['completed_events']<8 for p in progress),progress)
+        self.assertLessEqual(len(progress),int(elapsed)+3)
+        self.assertEqual(report['timing']['trusted_progress_messages'],len(progress))
+        self.assertTrue(all(isinstance(p['now_ns'],str) for p in progress))
+        self.assertEqual([p['completed_events'] for p in progress],
+                         sorted(p['completed_events'] for p in progress))
+
+    def test_trusted_progress_channel_failure_cannot_publish_success(self):
+        def broken(value):
+            if json.loads(value)['completed_events']:
+                raise RuntimeError('private progress channel lost')
+        result=self.run_strategy(SimpleNamespace(handle_data=lambda c,d:None),
+                                 spec(days=1),_progress=broken)
+        report=summary(result)
+        self.assertEqual(report['outcome']['status'],'failed',report)
+        self.assertEqual(report['outcome']['error']['code'],'STRATEGY_ERROR')
+        self.assertEqual(report['outcome']['error']['scope']['function'],'broken')
+        self.assertTrue(report['outcome']['partial'])
+        self.assertTrue(report['results']['partial'])
+        self.assertEqual(report['results']['outcome']['status'],'failed')
 
     def test_streamed_session_facts_cover_more_than_one_control_page(self):
         source=spec(days=2,securities=tuple(f'S{i:04}.SH' for i in range(257)))

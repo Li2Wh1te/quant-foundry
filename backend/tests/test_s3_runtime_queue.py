@@ -69,6 +69,11 @@ def test_two_real_processes_only_one_claim_and_expired_claim_is_fenced(tmp_path)
     assert sum(c is not None for c in claims) == 1
     claim = next(c for c in claims if c is not None)
     assert repository.running(claim)
+    progress = dict(
+        completed_events=9, completed_sessions=1, now_ns="1767225600000000123"
+    )
+    assert repository.progress(claim, progress)
+    assert repository.status("owner", ids[0])["progress"] == progress
     assert repository.heartbeat(claim, time.time(), 5)
     assert repository.expired(time.time()) == []
     assert not repository.recover_stopped(claim, time.time())
@@ -83,9 +88,45 @@ def test_two_real_processes_only_one_claim_and_expired_claim_is_fenced(tmp_path)
     assert repository.recover_stopped(claim, time.time())
     next_claim = repository.claim("new", time.time(), 5)
     assert next_claim.fence == claim.fence + 1 and next_claim.token != claim.token
+    assert repository.status("owner", ids[0])["progress"] is None
+    assert not repository.progress(claim, progress)
+    assert repository.progress(next_claim, dict(progress, completed_events=1))
     assert not repository.commit_outcome(
         claim, dict(status="failed", partial=True), "late"
     )
+
+
+def test_current_progress_rejects_regression_and_survives_cancel_without_late_writes(
+    tmp_path,
+):
+    repository = LocalRunRepository(tmp_path)
+    _, ids = repository.enqueue_batch([work()])
+    claim = repository.claim("a", time.time(), 5)
+    progress = dict(
+        completed_events=8, completed_sessions=2, now_ns="1767225600000000123"
+    )
+    assert repository.running(claim)
+    assert repository.progress(claim, progress)
+    for bad in (
+        dict(progress, completed_events=7),
+        dict(progress, completed_sessions=1),
+        dict(progress, now_ns="1767225600000000122"),
+        dict(progress, completed_events=True),
+        dict(progress, completed_events=2**53),
+        dict(progress, now_ns="-0"),
+        dict(progress, now_ns="9223372036854775808"),
+        dict(progress, events=[]),
+    ):
+        with pytest.raises(RuntimeFault):
+            repository.progress(claim, bad)
+        assert repository.status("owner", ids[0])["progress"] == progress
+    repository.request_cancel("owner", ids[0])
+    assert not repository.progress(claim, dict(progress, completed_events=9))
+    assert repository.commit_outcome(
+        claim, dict(status="cancelled", partial=True), None
+    )
+    assert not repository.progress(claim, dict(progress, completed_events=10))
+    assert repository.status("owner", ids[0])["progress"] == progress
 
 
 def test_group_budget_and_batch_immutability(tmp_path):

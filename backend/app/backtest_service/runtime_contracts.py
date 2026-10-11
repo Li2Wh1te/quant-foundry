@@ -7,6 +7,7 @@ market snapshot, user-controlled Docker arguments or strategy import lives here.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import re
 from typing import Any, Callable, Protocol
 
 TERMINAL = frozenset(("succeeded", "failed", "cancelled"))
@@ -21,6 +22,36 @@ class RuntimeFault(ValueError):
         return dict(
             code=self.code, operation="supervisor", message=self.message, scope={}
         )
+
+
+def checked_progress(value, previous=None):
+    """One bounded current counter, never a per-event history or checkpoint."""
+    if (
+        type(value) is not dict
+        or set(value) != {"completed_events", "completed_sessions", "now_ns"}
+        or any(
+            type(value[k]) is not int or not 0 <= value[k] < 2**53
+            for k in ("completed_events", "completed_sessions")
+        )
+        or type(value["now_ns"]) is not str
+    ):
+        raise RuntimeFault("INVALID_CONTRACT", "运行进度格式或数量无效")
+    stamp = value["now_ns"]
+    if (
+        not stamp
+        or len(stamp) > 20
+        or re.fullmatch(r"-?(?:0|[1-9][0-9]*)", stamp) is None
+        or stamp != str(int(stamp))
+        or not -(2**63) <= int(stamp) < 2**63
+    ):
+        raise RuntimeFault("INVALID_CONTRACT", "运行进度纳秒无效")
+    if previous and (
+        value["completed_events"] < previous["completed_events"]
+        or value["completed_sessions"] < previous["completed_sessions"]
+        or int(stamp) < int(previous["now_ns"])
+    ):
+        raise RuntimeFault("INVALID_CONTRACT", "运行进度不能倒退")
+    return dict(value)
 
 
 @dataclass(frozen=True)
@@ -111,6 +142,7 @@ class RunRepository(Protocol):
     def attempt_identity(self, claim: Claim) -> tuple[int, int] | None: ...
     def heartbeat(self, claim: Claim, now: float, lease_seconds: float) -> bool: ...
     def running(self, claim: Claim) -> bool: ...
+    def progress(self, claim: Claim, value: dict) -> bool: ...
     def cancelled(self, claim: Claim) -> bool: ...
     def commit_outcome(
         self,
@@ -120,6 +152,7 @@ class RunRepository(Protocol):
         connection=None,
         publish: Callable | None = None,
     ) -> bool: ...
+
     # Expiry fences IPC/results immediately but keeps its resource reservation.
     # Retake only AFTER Docker confirms the old deterministic container stopped.
     def expired(self, now: float) -> list[Claim]: ...

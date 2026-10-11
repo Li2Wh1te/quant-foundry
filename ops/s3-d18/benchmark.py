@@ -763,6 +763,9 @@ def validate(repository, provider, run_ids, telemetry, load, frequency):
         expected = load.days * load.securities * 4 if frequency == "60m" else load.rows
         assert progress["completed_events"] == expected, (progress, expected)
         assert progress["completed_sessions"] == load.days, progress
+        assert (
+            status["progress_completed"] == expected and status["progress"] == progress
+        ), status
         if frequency == "60m":
             gateway = provider.gateways[run_id]
             assert (
@@ -1132,6 +1135,35 @@ def _main():
                                 frequency=frequency,
                                 passed=case["passed"],
                                 failure=case.get("failure"),
+                                fixture=case["fixture"],
+                                wall_with_admission_and_acceptance_reads_seconds=case[
+                                    "wall_with_admission_and_acceptance_reads_seconds"
+                                ],
+                                groups={
+                                    name: {
+                                        key: value
+                                        for key, value in case[name].items()
+                                        if key != "states"
+                                    }
+                                    for name in ("run", "first", "retry")
+                                    if name in case
+                                },
+                                results=[
+                                    {
+                                        key: value
+                                        for key, value in result.items()
+                                        if key != "telemetry"
+                                    }
+                                    | {
+                                        "engine_timing": result["telemetry"]["engine"][
+                                            "timing"
+                                        ],
+                                        "python_callbacks": result["telemetry"][
+                                            "python_callbacks"
+                                        ],
+                                    }
+                                    for result in case.get("results", [])
+                                ],
                             )
                         ),
                         flush=True,

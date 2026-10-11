@@ -4,7 +4,7 @@ use qf_core::results::{
 };
 use qf_core::rules::{DatedFeeComponent, FeeComponentKind, FeeConfig, FeeFact};
 use qf_core::run::{
-    BatchRequest, ExecutionModel, Frequency, MAX_PARAMETER_BYTES, RunConfig, RunStatus,
+    BatchRequest, ExecutionModel, Frequency, MAX_PARAMETER_BYTES, RunConfig, RunStatus, RunSummary,
     capabilities,
 };
 use qf_core::types::market::{Currency, QuantityUnit};
@@ -17,6 +17,24 @@ fn base() -> Value {
         "../../../../contracts/examples/run_config.json"
     ))
     .unwrap()
+}
+
+#[test]
+fn current_progress_keeps_exact_nanoseconds_and_accepts_old_summaries() {
+    let mut wire = json!({"run_id":"isolated-progress", "status":"running",
+        "cancel_requested":false, "progress_completed":10_000_000,
+        "progress_total":null, "partial":false, "error":null});
+    let old: RunSummary = serde_json::from_value(wire.clone()).unwrap();
+    assert!(old.progress.is_none());
+    wire["progress"] = json!({"completed_events":10_000_000,
+        "completed_sessions":1, "now_ns":"1767225600000000123"});
+    let parsed: RunSummary = serde_json::from_value(wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(parsed).unwrap(), wire);
+    wire["progress"]["now_ns"] = json!(1_767_225_600_000_000_123_i64);
+    assert!(serde_json::from_value::<RunSummary>(wire.clone()).is_err());
+    wire["progress"]["now_ns"] = json!("1767225600000000123");
+    wire["progress"]["completed_events"] = json!(true);
+    assert!(serde_json::from_value::<RunSummary>(wire).is_err());
 }
 
 #[test]

@@ -15,7 +15,9 @@ export interface RunIssue { code: string; operation?: string; message?: string; 
 export interface RunSummary {
   run_id: string; engine_kind: "rust" | "legacy_python"; api_schema: string; status: string;
   cancel_requested?: boolean; partial?: boolean; error?: RunIssue | null;
-  progress_completed?: number; progress_total?: number | null; normalized_config?: RunConfig;
+  progress_completed?: number; progress_total?: number | null;
+  progress?: { completed_events: number; completed_sessions: number; now_ns: string } | null;
+  normalized_config?: RunConfig;
   created_at?: string; finished_at?: string | null; batch_id?: string | null; retry_of?: string | null;
   account_version?: number; cost_configuration?: Record<string, unknown>;
   strategy_revision_id?: string; account_profile_id?: string; account_profile_version?: string;

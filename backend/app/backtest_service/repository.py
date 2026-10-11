@@ -13,7 +13,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import and_, func, insert, or_, select, text, update
 
 from .models import Run, RunBatch, RunResult
-from .runtime_contracts import AcceptedWork, Claim, GroupBudget, RuntimeFault, TERMINAL, WorkerLimits
+from .runtime_contracts import AcceptedWork, Claim, GroupBudget, RuntimeFault, TERMINAL, WorkerLimits, checked_progress
 from .serialization import canonical_hash, encoded
 
 R, B, P = Run.__table__, RunBatch.__table__, RunResult.__table__
@@ -34,7 +34,8 @@ def summary(row):
     outcome = row["outcome"] or {}
     return dict(run_id=str(row["id"]), engine_kind="rust", api_schema="qf.backtest.v2",
                 status=row["status"], cancel_requested=row["cancel_requested"],
-                progress_completed=0, progress_total=None,
+                progress_completed=(row.get('progress') or {}).get('completed_events', 0),
+                progress_total=None, progress=deepcopy(row.get('progress')),
                 partial=outcome.get("partial", False), error=outcome.get("error"),
                 batch_id=str(row["batch_id"]) if row["batch_id"] else None,
                 retry_of=str(row["retry_of"]) if row["retry_of"] else None,
@@ -212,7 +213,8 @@ class DatabaseRunRepository:
                 return None
             token, fence = uuid4().hex, row["fence"] + 1
             c.execute(update(R).where(R.c.id == row["id"]).values(status="starting", token=token,
-                      fence=fence, supervisor_id=supervisor_id, lease_until=now+lease_seconds, attempt_identity=None))
+                      fence=fence, supervisor_id=supervisor_id, lease_until=now+lease_seconds,
+                      attempt_identity=None, progress=None))
             return Claim(str(row["id"]), token, fence)
 
     def work(self, claim):
@@ -246,6 +248,15 @@ class DatabaseRunRepository:
 
     def running(self, claim):
         return self._mutate_claim(claim, dict(status="running"))
+
+    def progress(self, claim, value):
+        with self._transaction() as c:
+            row = self._row(c, claim.run_id, lock=True)
+            if not self._valid(row, claim) or row['cancel_requested']:
+                return False
+            progress = checked_progress(value, row['progress'])
+            c.execute(update(R).where(R.c.id == row['id']).values(progress=progress))
+            return True
 
     def cancelled(self, claim):
         with self.engine.connect() as c:
