@@ -62,9 +62,34 @@ def validate_strategy_draft(
             )
         )
 
-    issues = [*_validate_entry_point(module)]
+    callbacks = {"initialize", "handle_data", "handle_tick", "before_trading_start", "after_trading_end", "on_order", "on_trade"}
+    has_s3 = any(isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name in callbacks for n in module.body)
+    issues = list(validate_s3_source(source_code).issues) if has_s3 else [*_validate_entry_point(module)]
     issues.extend(_validate_parameter_contract(parameter_schema, default_parameters))
     return StrategyValidationResult(issues=tuple(issues))
+
+
+def validate_s3_source(source_code: str) -> StrategyValidationResult:
+    """Parse S3 callbacks without executing imports, decorators or code."""
+    try:
+        module = ast.parse(source_code)
+    except (SyntaxError, ValueError, RecursionError):
+        return StrategyValidationResult((StrategyValidationIssue("syntax_error", "策略Python语法无效。"),))
+    signatures = {"initialize": 1, "before_trading_start": 1, "after_trading_end": 1,
+                  "handle_data": 2, "handle_tick": 2, "on_order": 2, "on_trade": 2}
+    seen, issues = set(), []
+    for node in module.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) or node.name not in signatures:
+            continue
+        a = node.args
+        if (node.name in seen or isinstance(node, ast.AsyncFunctionDef) or node.decorator_list
+                or len(a.args)+len(a.posonlyargs) != signatures[node.name] or a.defaults
+                or a.vararg or a.kwarg or a.kwonlyargs):
+            issues.append(StrategyValidationIssue("s3_callback_signature", "S3回调须为唯一的同步固定参数函数。", node.lineno))
+        seen.add(node.name)
+    if not seen:
+        issues.append(StrategyValidationIssue("s3_callback_missing", "策略须定义S3初始化或事件回调；旧run入口不能执行。"))
+    return StrategyValidationResult(tuple(issues))
 
 
 def _validate_entry_point(module: ast.Module) -> list[StrategyValidationIssue]:

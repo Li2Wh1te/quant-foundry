@@ -47,12 +47,7 @@ class AccountProfileUnavailableError(AccountProfileError):
     """Raised when a profile is not currently eligible for a formal run."""
 
 
-class AccountProfileStatus(StrEnum):
-    """Lifecycle states visible to account selection."""
-
-    ACTIVE = "active"
-    INACTIVE = "inactive"
-    RETIRED = "retired"
+from app.backtest_service.accounts.types import AccountProfileStatus
 
 
 def _profile_id(value: UUID | str, field_name: str = "profile_id") -> UUID:

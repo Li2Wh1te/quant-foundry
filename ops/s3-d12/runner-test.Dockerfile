@@ -11,6 +11,9 @@ COPY backend/app /app/app
 COPY backend/app/runner /app/app/runner
 COPY sdk/python/tests/support_sdk.py /app/support_sdk.py
 COPY tests/s3_runtime_suite.py /app/s3_runtime_suite.py
+COPY tests/s3_runservice_suite.py /app/s3_runservice_suite.py
+COPY backend/alembic.ini /app/alembic.ini
+COPY VERSION /app/VERSION
 RUN chmod -R a+rX /app
 WORKDIR /app
 # This trusted test runner alone receives its authorized private daemon socket.

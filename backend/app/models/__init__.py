@@ -36,7 +36,7 @@ from app.instruments.rule_snapshots_models import (
 )
 from app.scheduling.models import ScheduledTask, TaskRun
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
-from app.backtesting.models import (
+from app.backtest_service.history.storage_models import (
     BacktestAccountProfileRecord,
     BacktestQueueGuardRecord,
     BacktestRunRecord,
@@ -51,7 +51,7 @@ from app.backtesting.calendar_models import (
     CalendarResolutionHeadRecord,
     CalendarReconciliationRangeRecord,
 )
-from app.backtesting.result_records import (
+from app.backtest_service.history.result_records import (
     RESULT_TABLE_NAMES,
     BacktestAnalysisSummaryRecord,
     BacktestDataChunkRecord,
@@ -123,6 +123,7 @@ __all__ = [
     "CalendarReconciliationRangeRecord",
 ]
 
-from app.backtesting.fee_catalog import FeeScheduleVersionRecord  # noqa: F401
+from app.backtest_service.accounts.fee_catalog import FeeScheduleVersionRecord  # noqa: F401
 
-from app.backtesting.saved_comparisons import SavedComparison, SavedComparisonMember  # noqa: F401
+from app.backtest_service.history.saved_comparisons import SavedComparison, SavedComparisonMember  # noqa: F401
+from app.backtest_service.models import Run, RunBatch, RunResult  # noqa: F401

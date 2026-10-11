@@ -33,7 +33,7 @@ from typing import Any, Mapping
 from types import MappingProxyType
 from uuid import UUID
 
-from app.backtesting.domain import DomainValidationError, _aware_datetime
+from app.backtest_service.config_values import DomainValidationError, _aware_datetime
 from app.instruments.domain import (
     VersionedReference,
     _required_label,

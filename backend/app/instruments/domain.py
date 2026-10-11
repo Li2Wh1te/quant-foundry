@@ -45,7 +45,7 @@ from app.backtesting.data.errors import (
     IdentityMappingIncompleteError,
     freeze_json,
 )
-from app.backtesting.domain import DomainValidationError, _aware_datetime
+from app.backtest_service.config_values import DomainValidationError, _aware_datetime
 
 
 # ---------------------------------------------------------------------------

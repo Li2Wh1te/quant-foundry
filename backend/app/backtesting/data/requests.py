@@ -36,7 +36,7 @@ from app.backtesting.data.errors import (
     LookbackSessionsLimitExceededError,
     UniversePreflightHashMismatchError,
 )
-from app.backtesting.domain import _aware_datetime
+from app.backtest_service.config_values import _aware_datetime
 # Imported from the dependency-free references module, not
 # app.instruments.domain: this edge is what breaks the instruments <->
 # backtesting import cycle (see app/instruments/references.py).

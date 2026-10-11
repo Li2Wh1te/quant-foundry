@@ -22,7 +22,7 @@ from typing import Any, Callable, Protocol
 from uuid import NAMESPACE_URL, UUID, uuid5
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.backtesting.data.errors import (
     CalendarBindingAmbiguousError,
     CalendarBindingUnknownError,

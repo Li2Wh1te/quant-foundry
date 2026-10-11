@@ -8,7 +8,7 @@ immutable once registered, and duplicate registration of the same
 
 from __future__ import annotations
 
-from app.backtesting.domain import DomainValidationError
+from app.backtest_service.config_values import DomainValidationError
 from app.instruments.domain import VersionedReference
 from app.instruments.rules.contracts import RulePackageDefinition
 

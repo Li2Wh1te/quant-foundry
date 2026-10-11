@@ -44,6 +44,8 @@ class AnalysisApiTestCase(unittest.TestCase):
             self.session, cursor_signing_key=SIGNING_KEY
         )
         self.run_id = uuid4()
+        from tests.history_fixtures import history_root
+        history_root(self.engine, self.run_id)
 
     def tearDown(self) -> None:
         self.session.close()
