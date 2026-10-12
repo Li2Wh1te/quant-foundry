@@ -89,6 +89,14 @@ export QF_S3_WORKER_LIMITS='{"cpu_millis":2000,"memory_bytes":5368709120,"pids":
 export QF_S3_GROUP_BUDGET='{"reserve_cpu_millis":2000,"reserve_memory_bytes":3221225472,"reserve_pids":96}'
 ```
 
+同一整组预算下，B4 两并发使用每项 1 CPU/2.5 GiB/256 MiB tmp 配置；
+默认日志额度保持，必要结果最多 128 MiB，超过则明确失败。已受理 run 保留自身预算，
+不因随后修改可信配置扩大；不要同时运行使用不同整组配置的 supervisor。
+
+```bash
+export QF_S3_WORKER_LIMITS='{"cpu_millis":1000,"memory_bytes":2684354560,"pids":64,"tmp_bytes":268435456,"file_bytes":134217728,"wall_seconds":3600,"result_bytes":134217728}'
+```
+
 ```bash
 export QF_S3_ACCEPT_NEW_RUNS=false
 docker compose -f compose.yaml -f ops/s3-d18/compose.s3.yaml config --quiet

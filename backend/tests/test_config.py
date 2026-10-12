@@ -29,6 +29,15 @@ class SettingsTestCase(unittest.TestCase):
             self.assertTrue(budget.fits([limits]))
             self.assertFalse(budget.fits([limits,limits]))
             self.assertEqual(limits.memory_bytes+budget.reserve_memory_bytes,8*1024**3)
+            parallel=dict(worker,cpu_millis=1000,memory_bytes=5*1024**3//2,
+                tmp_bytes=256*1024**2,file_bytes=128*1024**2)
+            concurrent=Settings(api_token=API_TOKEN,cursor_signing_key=CURSOR_SIGNING_KEY,
+                database_password='test-secret',_env_file=None,
+                s3_worker_limits=parallel,s3_group_budget=group)
+            two,bounded=configured_budgets(concurrent.s3_worker_limits,concurrent.s3_group_budget)
+            self.assertTrue(bounded.fits([two,two]))
+            self.assertFalse(bounded.fits([two,two,two]))
+            self.assertEqual(2*two.memory_bytes+bounded.reserve_memory_bytes,8*1024**3)
             with patch.dict(os.environ, {'QF_S3_WORKER_LIMITS':'null', 'QF_S3_GROUP_BUDGET':'null'}):
                 empty = Settings(api_token=API_TOKEN, cursor_signing_key=CURSOR_SIGNING_KEY,
                     database_password='test-secret', _env_file=None)

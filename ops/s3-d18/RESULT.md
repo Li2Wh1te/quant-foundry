@@ -4,6 +4,8 @@
 当前精确 head `3b61a3cb402e855fbe6ed45d641dfb2850ecbb82` 的常规五 workflow/六 job
 及原生 ARM64 job 已通过；[完整 B1–B4](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486524)
 仍在运行。短夹具、旧源码成绩和单元测试数量均不作为全量通过证据。
+可信资源接线修复已保存为本地 `8d8109a3b915961289ee8c10e268bddb9f56ffc3`，
+尚未推送，远端在跑提交和预算保持原值。
 
 从 D17 main `5a14110668f240f183bf3e6a08f638fc4e3fc02f` 接续，已整合随后实际 main
 `dd7be607e106da06e927fecd165cae12a0b5b3bd`（已发布 S2 PR177）。原 v1.1 全包、
@@ -100,12 +102,14 @@ Rust 235、SDK 83、网关/正式节点 111、迁移/历史/CLI；
 
 ## 可安装制品与运维交付
 
-Linux x86_64 当前干净提交 wheel/离线 backend/worker 镜像已独立安装、空库迁移、
+Linux x86_64 本地干净 `8d8109a` 的 wheel/离线 backend/worker 镜像已独立安装、空库迁移、
 API readyz、暂停接单、Web 无 Docker 权限及 runner 启停通过。镜像归档实际 load
-核对原 ID：`/tmp/s3-d18-release-images/3b61-x86_64-images.tar.gz`，
-540,193,116 字节，SHA256
-`e7c3a3c445c1013ad12d1a463e79e05475c287d5a577b60b21ee7f26b9d43516`。
-原生 ARM64 同提交构建、独立 wheel 安装、离线镜像与空库启动/停止通过；
+核对原 ID：`/tmp/s3-d18-release-images/8d8109a-x86_64-images.tar.gz`，
+508,218,139 字节，SHA256
+`0d15f6f0cec71491bdde50efb2a49b435bca35fa377e4d66cc4badb284db3063`。
+worker ID `55c4814…` 与 `3b61a3c` 完全一致，复用了已验证 native/SDK；
+backend ID `57b6eb2…` 含可信配置修复。原生 ARM64 当前 CI 的 `3b61a3c` 构建、
+独立 wheel 安装、离线镜像与空库启动/停止通过；本地后端修复的 ARM 制品尚待 CI。
 [实际可安装制品](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486524/artifacts/11723568221)
 SHA256 `b9c658e67174adf1aa96909389377fdda7fb09128aad2a71cfcaf3b63f591d0b`。
 该 ARM 制品含 wheel/镜像与启动证明，未导出 ARM 镜像 tar；受支持路径为从该 wheel
@@ -115,9 +119,12 @@ SHA256 `b9c658e67174adf1aa96909389377fdda7fb09128aad2a71cfcaf3b63f591d0b`。
 `1554673bfe4db10528c4663730f9877322ec594437bb9fa8489b8b4fcf8667af`；
 该提交的业务/测量源摘要为
 `1055ea53feb7bf3d57af026a651833f8b86361a3e5b2fd6046fb697ea6aff437`。
+本地 `8d8109a` 业务/测量源摘要为
+`e16ded1fe3a42ad1a702b854b9fd049951bb4b9f907742511e911f3df5b6a76d`，native/SDK 摘要不变。
 每个制品保留自身构建/native 二进制摘要，当前测量提交另记，不借 wheel 提交冒充。
 只有相同业务/native 摘要且六项完整成功才可复用纯文档后的证据，失败/smoke/脏树拒绝。
-磁盘曾满，只有本任务核身份、归档及无引用的可恢复缓存被精确回收，无全局 prune。
+本地启动冒烟曾因磁盘满失败，保留原失败日志；核对本任务旧镜像归档 SHA 与无引用后，
+仅精确回收旧镜像及三个无共享引用的构建缓存，重试启动通过。无全局 prune 或其他任务删除。
 
 实际构建、导入、正常迁移、启动、停止接单、取消、逐页结果核对和 cleanup dry-run/apply
 命令及当前依赖见 [README](README.md)。Compose 合并配置已在私有副本验证，未启动生产。
