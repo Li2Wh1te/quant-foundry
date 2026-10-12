@@ -89,6 +89,22 @@ def gateway(formal, binding, packet, *, rows=1):
     return gw, ctx
 
 
+def test_formal_plan_checks_data_credit_against_captured_worker_quota_before_admission(formal):
+    binding, packet, work = nodes(formal)
+    packet['data_budget_bytes'] = 1024**3
+    plan = AcceptedRunPlan(binding, packet, check_facts=lambda *_args, **_kwargs: None)
+    with pytest.raises(RuntimeFault, match='内存的一半') as failure:
+        plan.validate(work)
+    assert failure.value.code == 'RESOURCE_LIMIT'
+    from dataclasses import replace
+    approved = replace(work, limits=WorkerLimits(cpu_millis=2000,memory_bytes=5*1024**3))
+    assert plan.validate(approved) == packet['calendar_reference']
+    packet['data_budget_bytes'] = True
+    with pytest.raises(RuntimeFault) as failure:
+        plan.validate(approved)
+    assert failure.value.code == 'RESOURCE_LIMIT'
+
+
 def request(packet, *, end=None, count=None):
     return dict(securities=list(packet['config']['universe']), fields=['open','close','quantity'],
         frequency='1d', start_ns=None if count else packet['calendar'][0]['before_open_ns'],

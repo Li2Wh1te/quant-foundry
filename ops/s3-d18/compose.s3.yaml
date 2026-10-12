@@ -7,6 +7,8 @@ services:
     user: ${QF_S3_TRUSTED_UID:?existing service UID required}:${QF_S3_TRUSTED_GID:?existing service GID required}
     environment:
       QF_S3_ACCEPT_NEW_RUNS: ${QF_S3_ACCEPT_NEW_RUNS:-false}
+      QF_S3_WORKER_LIMITS: "${QF_S3_WORKER_LIMITS:-null}"
+      QF_S3_GROUP_BUDGET: "${QF_S3_GROUP_BUDGET:-null}"
       QF_S3_RESULT_ROOT: /app/data/s3-results
       QF_S3_WORKER_IMAGE: ${QF_S3_WORKER_IMAGE:?tested immutable worker image ID required}
     volumes:
@@ -20,6 +22,8 @@ services:
     command: [python, -m, app.runner]
     environment:
       QF_S3_WORK_ROOT: /qf-work
+      QF_S3_WORKER_LIMITS: "${QF_S3_WORKER_LIMITS:-null}"
+      QF_S3_GROUP_BUDGET: "${QF_S3_GROUP_BUDGET:-null}"
       QF_S3_DAEMON_WORK_ROOT: ${QF_S3_HOST_WORK_ROOT:?approved daemon host work root required}
       QF_S3_RESULT_ROOT: /app/data/s3-results
       QF_S3_WORKER_IMAGE: ${QF_S3_WORKER_IMAGE:?tested immutable worker image ID required}

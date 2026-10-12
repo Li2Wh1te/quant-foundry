@@ -116,6 +116,32 @@ class GroupBudget:
         )
 
 
+def configured_budgets(worker=None, group=None):
+    """Validated trusted service policy; omitted values retain existing defaults.
+
+    A custom worker needs an explicit whole group reservation for the runner,
+    gateway and DB. This does not grant client-selected Docker privileges or
+    change any deployed quota; operators must supply their approved policy.
+    """
+    if (worker is not None and type(worker) is not dict
+            or group is not None and type(group) is not dict
+            or worker is not None and group is None):
+        raise RuntimeFault('RESOURCE_LIMIT', '自定义worker预算需要明确的可信整组预算')
+    try:
+        limits = WorkerLimits(**(worker or {}))
+        budget = GroupBudget(**(group or {}))
+    except TypeError:
+        raise RuntimeFault('RESOURCE_LIMIT', '可信资源配置含未知字段或类型') from None
+    if group is not None and (budget.cpu_millis > 4000 or budget.memory_bytes > 8*1024**3
+            or budget.concurrency > 2 or budget.pids > 256 or budget.tmp_bytes > 512*1024**2
+            or budget.reserve_cpu_millis < 2000 or budget.reserve_memory_bytes < 3*1024**3
+            or budget.reserve_pids < 96):
+        raise RuntimeFault('RESOURCE_LIMIT', '整组预算须包含控制面与数据库并保持4CPU/8GiB及两并发上限')
+    if not budget.fits([limits]):
+        raise RuntimeFault('RESOURCE_LIMIT', 'worker预算无法在已配置整组预留后受理')
+    return limits, budget
+
+
 @dataclass(frozen=True)
 class Claim:
     run_id: str

@@ -7,7 +7,9 @@ from pydantic import (
     Field,
     IPvAnyAddress,
     SecretStr,
+    StrictInt,
     field_validator,
+    model_validator,
 )
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy import URL
@@ -52,6 +54,10 @@ class Settings(BaseSettings):
     s3_daemon_work_root: Path | None = None
     s3_worker_image: str | None = None
     s3_accept_new_runs: bool = True
+    # Trusted service configuration, never a RunConfig/client quota override.
+    # None preserves the existing worker/group policy.
+    s3_worker_limits: dict[str, StrictInt] | None = None
+    s3_group_budget: dict[str, StrictInt] | None = None
     foundation_worker_enabled: bool = False
     foundation_runtime_image_digest: str = ""
     foundation_archive_gid: int = Field(default=1000, ge=1)
@@ -81,6 +87,12 @@ class Settings(BaseSettings):
         if not isinstance(raw, str) or re.fullmatch(r"[0-9a-fA-F]{64}", raw) is None:
             raise ValueError("data source encryption key must contain 64 hexadecimal characters")
         return value
+
+    @model_validator(mode="after")
+    def validate_s3_budgets(self):
+        from app.backtest_service.runtime_contracts import configured_budgets
+        configured_budgets(self.s3_worker_limits, self.s3_group_budget)
+        return self
 
     @field_validator("log_dir")
     @classmethod

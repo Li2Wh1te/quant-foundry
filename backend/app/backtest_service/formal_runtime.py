@@ -14,7 +14,7 @@ import pyarrow as pa
 
 from app.data_store.adapters.registry import BY_ID
 from .data_gateway import GatewayError, MARKET_SCHEMA, MarketBinding, RunDataGateway
-from .runtime_contracts import RuntimeFault
+from .runtime_contracts import RuntimeFault, WorkerLimits
 
 
 REQUIRED_EXECUTION_FACTS = frozenset({
@@ -236,6 +236,11 @@ class AcceptedRunPlan:
                 or not self.spec.get('rules') or not self.spec.get('calendar_reference')
                 or self.spec.get('source', {}).get('kind') != 'ipc'):
             raise RuntimeFault('CAPABILITY_UNAVAILABLE', '正式运行频率、会话、规则或来源契约未就绪')
+        limits = getattr(work, 'limits', None) or WorkerLimits()
+        data_bytes = self.spec.get('data_budget_bytes')
+        if (not isinstance(limits, WorkerLimits) or type(data_bytes) is not int
+                or not 0 < data_bytes <= limits.memory_bytes//2):
+            raise RuntimeFault('RESOURCE_LIMIT', '正式数据信用超过已批准worker内存的一半，拒绝受理')
         dates = [row['date'] for row in self.spec['calendar']]
         if dates != sorted(set(dates)) or dates[0] < work.config['start'] or dates[-1] > work.config['end']:
             raise RuntimeFault('RULE_UNAVAILABLE', '正式运行会话与请求日期不一致')

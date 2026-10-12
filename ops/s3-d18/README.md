@@ -18,6 +18,10 @@ QF_S3_FINAL=1 QF_S3_RUNTIME_EVIDENCE="$QF_S3_RELEASE_ROOT/full" bash scripts/tes
 ```
 
 全量模式固定 B1、B2 两频率、B3 两类型和 B4；整个 runner/gateway、数据库和 worker 组最多 4 CPU / 8 GiB，批次最多两并发。
+基准由可信控制面显式选择已批准的 WorkerLimits：单项 2 CPU/5 GiB，B4 每项 1 CPU/2.5 GiB。
+发布 API 的默认 WorkerLimits 仍为 1 CPU/512 MiB、60 秒，没有扩大生产配额。
+P01 的可信服务配置必须与既有已批准配额及 AcceptedRunPlan 数据信用匹配；数据额度
+不得超过 worker 内存一半，不匹配则拒绝。完整基准通过不表示默认小配额可受理 B1。
 `QF_S3_FINAL_SMOKE=1` 仅调试，`QF_S3_FINAL_CASES` 仅重跑指定相关族；两者均不能输出全量通过。
 本地 overlay/tmpfs 不是正式文件系统证据。全量模式不使用 `LF_D01_ALLOW_OVERLAY_TEST` 的探针替身。
 原生双架构构建在标准 Linux x86_64/arm64 CI 分别执行，不把跨架构二进制说成相同。
@@ -71,6 +75,19 @@ docker load --input "$QF_S3_RELEASE_ROOT/s3-images.tar"
 先在原服务部署配置暂停新接单；保留状态、取消和历史读取，排空或显式终结旧 queued/active，核对未知结果。
 不能让两个 supervisor 认领同一队列，不能把旧任务自动转为 Rust任务。
 为既有项目填入已核准的 `QF_S3_TRUSTED_UID/GID`、`QF_S3_DAEMON_SOCKET_GID`、`QF_S3_HOST_WORK_ROOT/RESULT_ROOT`。
+
+`QF_S3_WORKER_LIMITS` 和 `QF_S3_GROUP_BUDGET` 是可选的可信 JSON 服务配置，backend/runner
+必须一致。省略或 `null` 保持既有默认配额；客户端 RunConfig 不能覆盖。
+自定义 worker 必须同时声明整组预算，整组不得超过 4 CPU/8 GiB、两并发，且须为
+runner/gateway/DB 预留至少 2 CPU/3 GiB/96 pids。数据信用还须通过 worker 内存一半的受理门禁。
+下面是已批准单项基准额度的配置形状，只能在对应额度已获准的隔离或 P01 环境使用；
+不执行这些命令来扩大生产配额。要改变当前整组配置，先排空 queued/starting/running，
+未排空时不同配置的提交/认领均拒绝；终态历史的配置和结果保持原值。
+
+```bash
+export QF_S3_WORKER_LIMITS='{"cpu_millis":2000,"memory_bytes":5368709120,"pids":64,"tmp_bytes":536870912,"file_bytes":268435456,"wall_seconds":3600,"result_bytes":134217728}'
+export QF_S3_GROUP_BUDGET='{"reserve_cpu_millis":2000,"reserve_memory_bytes":3221225472,"reserve_pids":96}'
+```
 
 ```bash
 export QF_S3_ACCEPT_NEW_RUNS=false

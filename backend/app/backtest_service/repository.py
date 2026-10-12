@@ -84,8 +84,12 @@ class DatabaseRunRepository:
                 if group:
                     if c.dialect.name == "postgresql":
                         c.execute(text("SELECT pg_advisory_xact_lock(731313,1)"))
-                    policy = c.execute(select(R.c.group_policy).limit(1)).scalar_one_or_none()
-                    if policy is not None and policy != vars(self.budget):
+                    # Only the current queue constrains a running group. Retained
+                    # terminal policies explain historical runs; never rewrite
+                    # them or require deleting results to configure a drained queue.
+                    policies = c.execute(select(R.c.group_policy).where(
+                        R.c.status.not_in(TERMINAL)).distinct().limit(2)).scalars()
+                    if any(policy != vars(self.budget) for policy in policies):
                         raise RuntimeFault("RESOURCE_LIMIT", "runner共享预算配置不一致")
                 yield c
                 c.commit()

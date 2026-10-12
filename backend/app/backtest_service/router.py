@@ -11,7 +11,7 @@ from app.db.session import get_engine
 from .history.router import _cursor_signing_key
 from .models import Run
 from .repository import DatabaseRunRepository, summary
-from .runtime_contracts import RuntimeFault
+from .runtime_contracts import RuntimeFault, configured_budgets
 from .service import FormalProvider, RunService, normalize
 from .serialization import encoded
 from .openapi import RUN_BODY, BATCH_BODY, COMPARE_BODY
@@ -29,10 +29,13 @@ def owner(request):
 
 def service(request: Request):
     settings = request.app.state.settings
+    limits, budget = configured_budgets(settings.s3_worker_limits, settings.s3_group_budget)
     repository = getattr(request.app.state, "s3_repository", None) or DatabaseRunRepository(
-        get_engine(), result_root=settings.s3_result_root)
+        get_engine(), budget=budget, result_root=settings.s3_result_root)
+    if settings.s3_group_budget is not None and repository.budget != budget:
+        raise fault(RuntimeFault('RESOURCE_LIMIT', 'API运行仓储与可信整组预算不一致'))
     provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings, engine=repository.engine)
-    return RunService(repository, provider, accepting=settings.s3_accept_new_runs)
+    return RunService(repository, provider, limits=limits, accepting=settings.s3_accept_new_runs)
 
 
 def fault(error):

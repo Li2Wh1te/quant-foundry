@@ -374,6 +374,29 @@ main(sys.argv[1:])
         self.assertEqual(self.http('POST','/'+row['run_id']+'/cancel').status_code,200)
         self.assertEqual(self.http('GET','/capabilities',token=None).status_code,401)
 
+    def test_budget_change_requires_drained_queue_and_preserves_terminal_policy(self):
+        row,config=self.submit()
+        budget=GroupBudget(reserve_cpu_millis=2000,reserve_memory_bytes=3*1024**3,reserve_pids=96)
+        changed=DatabaseRunRepository(self.engine,budget=budget,result_root=self.settings.s3_result_root)
+        service=RunService(changed,self.provider)
+        with self.assertRaises(RuntimeFault) as refused:
+            service.submit(OWNER,config,uuid4().hex)
+        self.assertEqual(refused.exception.code,'RESOURCE_LIMIT')
+        with self.assertRaises(RuntimeFault):
+            changed.claim('mismatched-current-policy',time.time(),5)
+        self.repository.request_cancel(OWNER,row['run_id'])
+        with self.engine.connect() as connection:
+            original=dict(self.repository._row(connection,row['run_id']))
+        self.assertEqual(original['status'],'cancelled')
+        fresh=service.submit(OWNER,config,uuid4().hex)
+        self.runs.append(fresh['run_id'])
+        with self.assertRaises(RuntimeFault):
+            self.repository.claim('old-policy',time.time(),5)
+        with self.engine.connect() as connection:
+            self.assertEqual(dict(changed._row(connection,row['run_id'])),original)
+            self.assertEqual(changed._row(connection,fresh['run_id'])['group_policy'],vars(budget))
+        changed.request_cancel(OWNER,fresh['run_id'])
+
     def test_http_schema_idempotency_parameter_and_owner_boundaries(self):
         from app.backtest_service.openapi import RUN_SCHEMA
         if (self.repo_root/"contracts/run_request.schema.json").exists():
@@ -595,7 +618,10 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         work_root = self.base/"work"; work_root.mkdir()
         settings = self.settings.model_copy(update=dict(s3_work_root=work_root,
                 s3_daemon_work_root=Path(os.environ["QF_TEST_DAEMON_ROOT"])/work_root.relative_to(Path("/qf-work")),
-                s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"]))
+                s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"],
+                s3_worker_limits=dict(cpu_millis=2000,memory_bytes=5*1024**3,pids=64,
+                    wall_seconds=3600,tmp_bytes=512*1024**2,file_bytes=256*1024**2,result_bytes=128*1024**2),
+                s3_group_budget=dict(reserve_cpu_millis=2000,reserve_memory_bytes=3*1024**3,reserve_pids=96)))
         # This required container test now runs the production FormalProvider
         # itself over the real E70 physical node layout. Only the explicitly
         # named execution facts are synthetic; no native/source-table fallback.
@@ -603,6 +629,7 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         from app.backtest_service.formal_runtime import AcceptedRunPlan
         from app.backtest_service.service import FormalProvider
         market,self.template = nodes(self.store,securities=('A.SH',))
+        self.template['data_budget_bytes']=1024**3
         checked_connections = []
         def resolve(work):
             packet = deepcopy(self.template)
@@ -624,8 +651,13 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         trusted = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
         repository, process, services = create_services(settings=settings, engine=self.engine, provider=trusted, daemon=DockerDaemon())
         trusted.process = process
+        self.repository = repository
         self.provider = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
-        self.service = RunService(self.repository,self.provider)
+        from app.backtest_service.runtime_contracts import configured_budgets
+        approved_limits,_ = configured_budgets(settings.s3_worker_limits,settings.s3_group_budget)
+        self.service = RunService(self.repository,self.provider,limits=approved_limits)
+        self.app.state.settings=settings
+        self.app.state.s3_repository=repository
         self.app.state.s3_provider = self.provider
         self.assertIsNone(self.provider.process,'web must not own Docker access')
         services.readiness.refresh()
@@ -644,6 +676,10 @@ def handle_data(c, data):
 """
         self.account, self.revision = catalogue(self.engine, source)
         self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
+        refused=RunService(repository,self.provider).preflight(OWNER,self.template['config'])
+        self.assertEqual(refused['errors'][0]['code'],'RESOURCE_LIMIT')
+        bad=dict(self.template['config'],worker_limits=settings.s3_worker_limits)
+        self.assertEqual(self.http('POST',payload=bad,key=uuid4().hex).status_code,422)
         def legacy_execution_rows():
             from app.backtest_service.history import result_records
             tables = {'backtest_runs', *(getattr(result_records, name).__tablename__ for name in result_records.__all__)}
@@ -652,14 +688,24 @@ def handle_data(c, data):
                     for row in c.execute(text('SELECT * FROM "'+table+'"')).mappings()) for table in sorted(tables)}
         protected = legacy_execution_rows()
         row, config = self.submit()
+        with self.engine.connect() as connection:
+            saved=self.repository._row(connection,row['run_id'])
+            self.assertEqual(saved['limits'],vars(approved_limits))
+            self.assertEqual(saved['group_policy'],vars(repository.budget))
         with Session(self.engine) as session:
             AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
             session.commit()
         try:
             live_progress=[]
+            real_limits=[]
             deadline = time.monotonic()+30
             while time.monotonic() < deadline:
                 supervisor.step()
+                for task in supervisor.tasks.values():
+                    actual=process.daemon.inspect(task.name) if task.name else None
+                    if actual and actual['State']['Running']:
+                        host=actual['HostConfig']
+                        real_limits.append((host['Memory'],host['NanoCpus'],host['PidsLimit']))
                 status = self.http("GET", "/"+row["run_id"]).json()
                 if status['status']=='running' and status['progress_completed']>0:
                     live_progress.append(status['progress_completed'])
@@ -668,6 +714,8 @@ def handle_data(c, data):
                 Event().wait(.05)
             self.assertEqual(status["status"], "succeeded", status)
             self.assertTrue(live_progress,'real HTTP status stayed at zero throughout execution')
+            self.assertTrue(real_limits,'configured HTTP run never started an actual worker')
+            self.assertEqual(set(real_limits),{(5*1024**3,2000*1_000_000,64)})
             self.assertEqual(status['progress_completed'],3)
             self.assertEqual(status['progress']['completed_sessions'],len(self.template['calendar']))
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
