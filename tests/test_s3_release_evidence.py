@@ -2,7 +2,9 @@
 from copy import deepcopy
 import importlib.util
 from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 
 spec = importlib.util.spec_from_file_location("s3_release", Path(__file__).resolve().parents[1]/"scripts/s3_release.py")
@@ -44,6 +46,25 @@ def full_record():
 
 
 class EvidenceReuseTests(unittest.TestCase):
+    def test_account_fee_fixture_change_rejects_reuse_with_unchanged_native(self):
+        with TemporaryDirectory(prefix="s3-evidence-helper-") as directory:
+            root = Path(directory)
+            (root/"tests").mkdir()
+            helper = root/"tests/s3_runservice_suite.py"
+            helper.write_text("minimum_commission = '1'\n")
+            with patch.object(release, "ROOT", root):
+                before = release.sources(native=False)
+                native = release.sources()
+                helper.write_text("minimum_commission = '9'\n")
+                after = release.sources(native=False)
+                self.assertEqual(native, release.sources())
+            record = full_record()
+            record["source"]["measurement_source"] = before
+            current = deepcopy(record["source"])
+            current["measurement_source"] = after
+            with self.assertRaises(AssertionError):
+                release.verify_full_record(record, current)
+
     def test_unchanged_clean_measurement_can_keep_distinct_original_wheel_origin(self):
         record = full_record()
         current = deepcopy(record["source"])

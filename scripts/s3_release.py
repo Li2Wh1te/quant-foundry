@@ -43,6 +43,11 @@ def sources(native=True):
         )
         paths.add(ROOT / "backend/uv.lock")
         paths.add(ROOT / "backend/pyproject.toml")
+        # The full runner imports catalogue/account/fee helpers from these
+        # copied modules. A helper change is measurement input even when the
+        # native wheel and backend production files remain unchanged.
+        paths.update((ROOT / "tests").glob("s3_*suite.py"))
+        paths.update((ROOT / "tests").glob("s3_*fixtures.py"))
         for base in ("ops/s3-d12",):
             paths.update(
                 p
