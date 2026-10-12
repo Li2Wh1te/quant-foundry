@@ -35,6 +35,23 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(report['cleanup_errors'],[])
         return report
 
+    def test_host_window_is_separate_from_arrow_packets_and_stays_within_run_grant(self):
+        from quantfoundry._worker import _Host
+        packet = spec(days=1)
+        packet.update(data_budget_bytes=1024*1024*1024, data_max_rows=110000)
+        host = _Host(SimpleNamespace(), packet, {}, {})
+        self.assertEqual(host.packet_bytes, 64*1024*1024)
+        self.assertEqual(host.session.max_rows, 110000)
+        self.assertGreater(host.session.max_bytes, 512*1024*1024)
+        self.assertLessEqual(host.session.max_bytes, _native.MAX_VIEW_BYTES)
+        self.assertLessEqual(host.session.required_data_budget_bytes + 3*host.packet_bytes,
+                             packet['data_budget_bytes'])
+        # An invalid small grant must fail admission before strategy execution.
+        packet['data_budget_bytes'] = 1024*1024
+        with self.assertRaises(ContractError) as invalid:
+            _Host(SimpleNamespace(), packet, {}, {})
+        self.assertEqual(invalid.exception.code, 'RESOURCE_LIMIT')
+
     def test_trusted_progress_is_live_bounded_and_finishes_with_actual_counters(self):
         progress=[]; callbacks=[]
         started=time.monotonic()

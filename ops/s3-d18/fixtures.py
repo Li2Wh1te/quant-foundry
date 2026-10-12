@@ -107,7 +107,10 @@ def template(load):
         result_sampling="session_close",
     )
     value.update(
-        data_budget_bytes=512 * 1024**2,
+        # B1's configured 100k-row window is charged by Rust for owned rows,
+        # output/Decimal conversion and packet copies. This is an allocation
+        # INSIDE the unchanged 5 GiB worker, not an extra cgroup/quota grant.
+        data_budget_bytes=(1024 if load.name == 'B1' else 512) * 1024**2,
         data_max_rows=110000,
         max_active_orders=1000,
         max_commands_per_boundary=1000,

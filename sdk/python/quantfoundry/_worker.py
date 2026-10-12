@@ -69,11 +69,20 @@ class _Host:
         self.callback_metrics = dict(count=0, seconds=0.0, by_kind={})
         total = spec['data_budget_bytes']
         self.packet_bytes = min(total // 8, 64*1024*1024)
+        cache_bytes = max(1, self.packet_bytes//8)
+        # The native source retains at most three packet buffers. Strategy
+        # windows have a separate credit; equating the whole window to one
+        # Arrow packet incorrectly rejected multi-batch cross sections.
+        data_grant = total - 3*self.packet_bytes
+        view_bytes = min(_native.MAX_VIEW_BYTES,
+                         data_grant - cache_bytes - 2*self.packet_bytes - 2*1024*1024)
+        if view_bytes <= 0:
+            raise _error('RESOURCE_LIMIT', '数据窗口和 IPC 未获得足够的完整运行预算')
         self.session = _DataSession(SimpleNamespace(channel=SimpleNamespace(arrow_budget=self.packet_bytes)),
             universe=spec['config']['universe'], frequency=spec['config']['frequency'],
             market_routes=routes, research_routes=research_routes, calendar=spec['calendar'],
-            max_rows=spec.get('data_max_rows', 10000), max_bytes=self.packet_bytes, cache_bytes=max(1,self.packet_bytes//8),
-            run_data_budget_bytes=total-3*self.packet_bytes)
+            max_rows=spec.get('data_max_rows', 10000), max_bytes=view_bytes, cache_bytes=cache_bytes,
+            run_data_budget_bytes=data_grant)
         self.handlers = {name: callable(getattr(module, method, None)) for name, method in (
             ('bars','handle_data'), ('ticks','handle_tick'), ('before_open','before_trading_start'),
             ('after_close','after_trading_end'), ('orders','on_order'), ('trades','on_trade'))}
