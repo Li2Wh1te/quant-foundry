@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useRef, useState } from "react";
 import { useLocation, useSearchParams } from "react-router-dom";
 import { buildPreviewRequest, createPreviewSession, DataStoreApiError, formatCount,
   formatTimestamp, formatValue, isCancellation, type CurrentDataset, type CurrentValue,
-  type PreviewResult, type PreviewSession } from "./data";
+  type CurrentReadEvidence, type PreviewResult, type PreviewSession } from "./data";
 import { DataSheet, LocalNotice } from "./components";
 import { useDataAssetsFailure } from "./components/useDataAssetsFailure";
 import "./PreviewPanel.css";
@@ -48,6 +48,18 @@ export function retainPreviewOnFailure(problem: unknown): boolean {
 function initialConditions(dataset: CurrentDataset) {
   return { subject: dataset.preview_key?.subject ?? "", fromKey: dataset.preview_key?.object_key ?? "",
     toKey: dataset.preview_key?.object_key ?? "", columns: defaultPreviewColumns(dataset), pageSize: 20 };
+}
+
+/** These facts describe the server's last successful whole-report check. */
+export function PriorValidReportNotice({ evidence, previousRead }: { evidence: CurrentReadEvidence; previousRead: boolean }) {
+  return <LocalNotice tone="warning">
+    <p>旧有效报告；{previousRead ? "上次成功读取时" : "本次服务端"}已核验整份报告（{formatCount(evidence.whole_report_rows)} 行）。本页仍是分页片段。</p>
+    <p>有效报告确认于 {formatTimestamp(evidence.current_confirmation.observed_at)}。</p>
+    <p>最新刷新于 {formatTimestamp(evidence.failed_refresh.observed_at)} 失败，未取得新的来源确认。整域验收未通过。</p>
+    <details><summary>报告字段质量说明</summary>
+      <p>{JSON.stringify(evidence.financial_quality_limitations)}</p>
+    </details>
+  </LocalNotice>;
 }
 
 /** D05 owns one bounded, in-memory example session. The server owns read permission. */
@@ -225,6 +237,7 @@ export function PreviewPanel({ dataset }: PreviewPanelProps) {
         {!shown.business_date_coverage_verified && "业务日期覆盖未验证。"}
       </p>}
       {dataset.frequency === "report" && <LocalNotice>当前报告片段；节点可能跨页，此页不代表完整报告或持仓报告。本页行数不是对象数。</LocalNotice>}
+      {shown.current_read_evidence && <PriorValidReportNotice evidence={shown.current_read_evidence} previousRead={stale || busy} />}
       {!shown.rows.length ? <p className="qf-preview-empty">{previewEmptyMessage(dataset, shown)}</p>
         : <div className="qf-assets-scroll qf-preview-scroll" tabIndex={0} role="region" aria-label="当前对象示例表格">
           <table><thead><tr>{conditions.columns.map(column => <th scope="col" key={column}>{column}</th>)}</tr></thead>

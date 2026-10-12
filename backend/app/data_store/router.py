@@ -76,7 +76,10 @@ def _http_error(error: DataStoreError | SQLAlchemyError) -> HTTPException:
               else 503 if error.code in {"DATA_STORE_REBUILDING", "DATA_STORE_NOT_INITIALIZED",
                                           "CATALOG_UNAVAILABLE", "STORAGE_UNAVAILABLE", "LOCK_TIMEOUT"}
               else 422)
-    return HTTPException(status, detail={"code": error.code, "message": str(error)})
+    detail = {"code": error.code, "message": str(error)}
+    if getattr(error, 'restriction_reason', None):
+        detail['reason'] = error.restriction_reason
+    return HTTPException(status, detail=detail)
 
 
 @contextmanager

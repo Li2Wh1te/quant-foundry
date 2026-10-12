@@ -103,6 +103,18 @@ export interface PreviewRequest {
 }
 
 export type CurrentValue = string | number | boolean | null;
+export type QualityExplanation = CurrentValue | QualityExplanation[] | { [key: string]: QualityExplanation };
+export interface CurrentReadEvidence {
+  method: "complete-prior-failed-refresh-read@1";
+  whole_report_rows: number;
+  whole_report_verified: true;
+  current_confirmation: { native_id: string; observed_at: string; content_hash: string };
+  failed_refresh: { reason: "SOURCE_REFRESH_FAILED"; blocking: false; native_id: string; observed_at: string; content_hash: string };
+  domain_read_restriction: string;
+  financial_quality_limitations: QualityExplanation;
+  latest_source_confirmation: false;
+  full_domain_accepted: false;
+}
 export interface PreviewResult {
   dataset: string;
   status: string;
@@ -119,6 +131,8 @@ export interface PreviewResult {
   unresolved_issues?: number;
   schema_id?: string;
   semantics?: Record<string, string>;
+  /** A server proof for this whole report, never a full-domain acceptance. */
+  current_read_evidence?: CurrentReadEvidence;
 }
 
 export interface RequestOptions { signal?: AbortSignal; timeoutMs?: number }

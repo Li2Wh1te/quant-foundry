@@ -11,6 +11,7 @@ const data = require('../index.ts');
 const validation = require('../validation.ts');
 const { dataStoreApi } = require('../../../../api/dataStore.ts');
 const { dataset, catalog, preview, scenarios } = require('./fixtures.cjs');
+const priorValidReport = require('../../../../../tests/fixtures/prior-valid-report.cjs');
 const response = (value, status = 200) => new Response(JSON.stringify(value), { status, headers: { 'Content-Type': 'application/json' } });
 const request = () => data.buildPreviewRequest(dataset());
 const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
@@ -23,6 +24,34 @@ async function withHttp(fetch, work) {
   finally { data.invalidateDataAssetsSession(); global.fetch = previousFetch; global.window = previousWindow; }
 }
 const invalid = field => error => error instanceof data.DataStoreApiError && error.code === 'INVALID_RESPONSE' && (!field || error.field === field);
+
+test('prior-valid evidence survives projections and keeps confirmation and failed refresh separate', () => {
+  const evidence = priorValidReport();
+  const result = validation.parsePreview(preview({ current_read_evidence: evidence }));
+  assert.deepEqual(result.current_read_evidence, evidence);
+  assert.notEqual(result.current_read_evidence.current_confirmation.observed_at,
+    result.current_read_evidence.failed_refresh.observed_at);
+  assert.equal(result.current_read_evidence.latest_source_confirmation, false);
+  assert.equal(result.current_read_evidence.full_domain_accepted, false);
+  assert.equal(validation.parsePreview(preview()).current_read_evidence, undefined);
+  assert.throws(() => validation.parsePreview(preview({ current_read_evidence: null })), invalid());
+});
+
+test('malformed or elevated report evidence refuses the page instead of silently discarding the proof', () => {
+  for (const overrides of [{ method: 'future-proof' }, { whole_report_rows: 0 }, { whole_report_rows: 1000 },
+    { whole_report_verified: false }, { latest_source_confirmation: true }, { full_domain_accepted: true },
+    { financial_quality_limitations: undefined }, { financial_quality_limitations: 'x'.repeat(32769) }]) {
+    assert.throws(() => validation.parsePreview(preview({ current_read_evidence: { ...priorValidReport(), ...overrides } })), invalid());
+  }
+  for (const changed of [{ observed_at: 'unknown' }, { content_hash: null }, { content_hash: 'not-a-hash' }, { native_id: '' }]) {
+    const evidence = priorValidReport(); Object.assign(evidence.current_confirmation, changed);
+    assert.throws(() => validation.parsePreview(preview({ current_read_evidence: evidence })), invalid());
+  }
+  const evidence = priorValidReport(); evidence.failed_refresh.blocking = true;
+  assert.throws(() => validation.parsePreview(preview({ current_read_evidence: evidence })), invalid());
+  let nested = null; for (let i = 0; i < 10; i++) nested = { child: nested };
+  assert.throws(() => validation.parsePreview(preview({ current_read_evidence: { ...priorValidReport(), financial_quality_limitations: nested } })), invalid());
+});
 
 test('D02 can consume the shared barrel and compatible legacy DTO imports with strict types', () => {
   const filename = path.resolve(__dirname, 'd02-contract.ts');
@@ -477,6 +506,54 @@ test('ordinary refresh failure retains the permitted page and original read time
       assert.deepEqual(session.getSnapshot(), before);
     } finally { session.dispose(); }
   });
+});
+
+test('caller and client mutations cannot rewrite the cached whole-report evidence after a failed refresh', async () => {
+  for (const boundary of ['read-result', 'snapshot', 'client-result']) {
+    const evidence = priorValidReport();
+    evidence.financial_quality_limitations.nested = [{ detail: { reasons: ['unit unconfirmed'] } }];
+    const upstream = preview({ current_read_evidence: evidence });
+    const expected = structuredClone(evidence);
+    let fail = false;
+    const session = data.createPreviewSession({ queryPreview: async () => {
+      if (fail) throw new data.DataStoreApiError(503, 'CATALOG_UNAVAILABLE', 'safe fixture failure');
+      return upstream;
+    } });
+    try {
+      const returned = await session.read(request());
+      const earlier = session.getSnapshot();
+      const exposed = boundary === 'read-result' ? returned : boundary === 'snapshot' ? earlier.result : upstream;
+      const proof = exposed.current_read_evidence;
+      proof.full_domain_accepted = true; proof.latest_source_confirmation = true; proof.whole_report_rows = 999;
+      proof.current_confirmation.native_id = 'caller-rewritten';
+      proof.failed_refresh.observed_at = proof.current_confirmation.observed_at;
+      proof.financial_quality_limitations.field[0] = 'caller-rewritten';
+      proof.financial_quality_limitations.nested[0].detail.reasons.push('caller-added');
+      const retained = session.getSnapshot();
+      assert.deepEqual(retained.result.current_read_evidence, expected, boundary);
+      assert.equal(retained.readAt, earlier.readAt);
+      fail = true;
+      await assert.rejects(session.read(request()), error => error.status === 503);
+      assert.deepEqual(session.getSnapshot().result.current_read_evidence, expected, boundary + ' after failure');
+    } finally { session.dispose(); }
+  }
+});
+
+test('transport proof values and sibling sessions retain separate nested explanations', async () => {
+  const source = preview({ current_read_evidence: priorValidReport() });
+  const client = data.createDataAssetsClient(async () => source);
+  const first = data.createPreviewSession(client), second = data.createPreviewSession(client);
+  try {
+    const firstResult = await first.read(request());
+    const expected = structuredClone(source.current_read_evidence);
+    await second.read(request());
+    firstResult.current_read_evidence.financial_quality_limitations.field.push('caller-added');
+    firstResult.current_read_evidence.failed_refresh.native_id = 'caller-rewritten';
+    source.current_read_evidence.current_confirmation.native_id = 'transport-rewritten';
+    source.current_read_evidence.financial_quality_limitations.field.push('transport-added');
+    assert.deepEqual(first.getSnapshot().result.current_read_evidence, expected);
+    assert.deepEqual(second.getSnapshot().result.current_read_evidence, expected);
+  } finally { first.dispose(); second.dispose(); }
 });
 
 test('object changes immediately clear the page and reject old results without erasing the new page', async () => {
