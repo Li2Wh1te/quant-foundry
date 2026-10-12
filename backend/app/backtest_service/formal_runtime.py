@@ -229,7 +229,9 @@ class AcceptedRunPlan:
     check_facts: object = None
 
     def validate(self, work):
-        if (self.market.unavailable_reason or self.market.frequency != work.config['frequency']
+        from .resampling import can_resample
+        if (self.market.unavailable_reason or (self.market.frequency != work.config['frequency']
+                and not can_resample(self.market.frequency, work.config['frequency']))
                 or work.config['frequency'] not in ('1d','1m','5m','15m','30m','60m','tick') or not self.spec.get('calendar')
                 or not self.spec.get('rules') or not self.spec.get('calendar_reference')
                 or self.spec.get('source', {}).get('kind') != 'ipc'):
