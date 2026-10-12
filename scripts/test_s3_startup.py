@@ -60,6 +60,7 @@ def main():
             QF_LOG_DIR="/tmp/logs",
             QF_SERVER_HOST="127.0.0.1",
             QF_S3_ACCEPT_NEW_RUNS="false",
+            QF_S3_WORKER_IMAGE=manifest["images"]["worker"]["id"],
         )
         env_args = [v for k, value in env.items() for v in ("--env", k + "=" + value)]
         base = [
@@ -140,6 +141,11 @@ def main():
                 "upgrade",
                 "head",
             )
+            # These commands have completed and their effects live in the
+            # private DB/volumes. Release their private container roots before
+            # starting long-lived entrypoints (also bounded on VFS daemons).
+            docker("rm", migration)
+            containers.remove(migration)
             for name in (prefix + "-work", prefix + "-results"):
                 docker("volume", "create", "--label", label, name)
                 volumes.append(name)
@@ -164,6 +170,9 @@ def main():
                 "-c",
                 'from pathlib import Path; assert Path("/qf-work").stat().st_uid==65532; assert Path("/app/data/s3-results").stat().st_uid==65532',
             )
+            initialized = containers[-1]
+            docker("rm", initialized)
+            containers.remove(initialized)
             result_mount = [
                 "--mount",
                 f"type=volume,src={volumes[1]},dst=/app/data/s3-results",
@@ -223,6 +232,11 @@ def main():
             containers.append(runner)
             time.sleep(2)
             assert json.loads(docker("inspect", runner))[0]["State"]["Running"]
+            docker("exec", api, "python", "-c",
+                'from pathlib import Path; from app.core.config import get_settings; '
+                'from app.backtest_service.runtime_readiness import check_runtime_ready; '
+                's=get_settings(); assert not Path("/var/run/docker.sock").exists(); '
+                'check_runtime_ready(s.s3_result_root,s.cursor_signing_key.get_secret_value().encode(),s.s3_worker_image)')
             stopped = {}
             for name in (runner, api):
                 docker("stop", "--time", "15", name)
@@ -231,6 +245,7 @@ def main():
             manifest["entrypoint_smoke"] = dict(
                 api_ready=True,
                 runner_started=True,
+                web_runtime_preflight_without_docker=True,
                 stopped_exit_codes=stopped,
                 admission_paused=True,
                 formal_data_available=False,

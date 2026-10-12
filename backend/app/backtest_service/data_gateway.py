@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import numpy as np
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -137,6 +138,11 @@ class MarketBinding:
     extra_columns: tuple[str, ...] = ()
     derived_columns: tuple[str, ...] = ()
     selectors: tuple[tuple[str, str, object], ...] = ()
+    # Code-owned conversions for date-keyed formal nodes. These do not alter
+    # the CurrentStore quality gate or expose native keys to a strategy.
+    query_time_bounds: Callable | None = None
+    storage_securities: Callable | None = None
+    count_order: tuple[str, ...] | None = None
 
     def __post_init__(self):
         if (self.frequency not in ('1d', '1m', '5m', '15m', '30m', '60m', 'tick')
@@ -149,6 +155,9 @@ class MarketBinding:
                        for c, op, _ in self.selectors)
                 or self.time_column not in self.spec.schema.names):
             raise GatewayError('INVALID_CONTRACT', '数据投影契约无效')
+        if self.count_order is not None and (not self.count_order or
+                any(c not in self.spec.schema.names for c in self.count_order)):
+            raise GatewayError('INVALID_CONTRACT', '数据计数排序投影无效')
         object.__setattr__(self, 'fields', MappingProxyType(dict(self.fields)))
         object.__setattr__(self, 'constants', MappingProxyType(dict(self.constants)))
 
@@ -315,15 +324,23 @@ class RunDataGateway:
             # so waiting for a writer cannot leave a pre-lock stale snapshot.
             isolation = 'READ COMMITTED' if final else 'REPEATABLE READ'
             with self.store.catalog.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
+                configured_timeout = None
                 def checkpoint(*, query=False):
+                    nonlocal configured_timeout
                     if self.cancelled():
                         raise DataStoreError('OPERATION_CANCELLED')
                     remaining = int((deadline-time.monotonic())*1000)
                     if remaining <= 0:
                         raise DataStoreError('QUERY_TIMEOUT')
                     if query:
-                        connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
-                                           {'v': str(remaining)})
+                        # Round DOWN and reuse only an identical, still smaller
+                        # timeout. The deadline/cancellation checks still run at
+                        # every checkpoint; no query gains extra wall time.
+                        bounded_timeout = max(1, remaining//10*10)
+                        if bounded_timeout != configured_timeout:
+                            connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
+                                               {'v': str(bounded_timeout)})
+                            configured_timeout = bounded_timeout
                 checkpoint(query=True)
                 if final:
                     # Also coordinates quality-only/catalog updates, even writers
@@ -386,7 +403,15 @@ class RunDataGateway:
             return commit(connection)
 
     def _request(self, name, request, context):
-        self.declare(name, context)  # rechecks old dependencies before adding any
+        self._active(context)
+        if type(name) is not str or not name or len(name.encode()) > 128:
+            raise GatewayError('INVALID_CONTRACT', '数据绑定标识无效')
+        if name not in context.dependencies:
+            self.declare(name, context)  # recheck old dependencies before adding any
+        # This method validates shape/permission. read()/lookback() check before
+        # and after exposing buffers, and _pages() checks around EACH physical
+        # read. Re-validating an existing binding at every nested call does not
+        # require another identical SQL transaction before any work occurs.
         binding = self.bindings[name]
         if (type(request) is not dict or set(request) != {'securities','fields','frequency','start_ns',
                 'end_ns','count_per_security','adjustment'} or type(request['securities']) is not list
@@ -477,22 +502,35 @@ class RunDataGateway:
         if len(securities) > 1 and security_column not in binding.spec.schema.names:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '此身份投影尚不支持集合批量读取')
         # Time-first keys cannot delimit one security by physical bounds alone.
-        membership = ((security_column, 'in', securities),) if security_column in binding.spec.schema.names else ()
+        storage_securities = getattr(binding, 'storage_securities', None)
+        stored_securities = storage_securities(securities) if storage_securities else securities
+        if (type(stored_securities) is not tuple or len(stored_securities) != len(securities)
+                or len(set(stored_securities)) != len(stored_securities)
+                or any(type(s) is not str or not s for s in stored_securities)):
+            raise GatewayError('INVALID_CONTRACT', '存储身份映射缺失、重复或无效')
+        membership = ((security_column, 'in', stored_securities),) if security_column in binding.spec.schema.names else ()
         group_order = []
         if count is not None:
-            for field in ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'):
+            for field in (() if binding.count_order is not None else
+                          ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence')):
                 if field in binding.constants:
                     continue
                 column = binding.fields.get(field)
                 if column not in binding.spec.schema.names:
                     raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的完整事件排序投影')
                 group_order.append(column)
+            if binding.count_order is not None:
+                group_order.extend(binding.count_order)
             if security_column not in binding.spec.schema.names:
                 raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的标的集合投影')
+        query_time_bounds = getattr(binding, 'query_time_bounds', None)
+        time_lower, time_upper = (query_time_bounds(start, end)
+            if query_time_bounds else
+            (start-binding.time_offset_ns, end-binding.time_offset_ns))
         query = Query(partitions=tuple(partitions), lower=lower, upper=upper, columns=columns,
             page_size=rows, descending=count is not None,
-            filters=((binding.time_column, '>=', start-binding.time_offset_ns),
-                     (binding.time_column, '<=', end-binding.time_offset_ns), *binding.selectors, *membership),
+            filters=((binding.time_column, '>=', time_lower),
+                     (binding.time_column, '<=', time_upper), *binding.selectors, *membership),
             per_group=(security_column, count) if count is not None else None,
             group_order=tuple(dict.fromkeys(group_order)))
         remaining = count if len(securities) == 1 else None
@@ -563,6 +601,8 @@ class RunDataGateway:
 
     def read(self, name, request, context, *, page_rows=None):
         binding, start, end, count = self._request(name, request, context)
+        if count is None:
+            self.check(context)
         if count is None and start < end and len(request['securities']) > 1:
             # Single-page sorting cannot repair cross-page replay order. Bounded
             # count windows and a research query at one exact ns still support
@@ -622,6 +662,7 @@ class RunDataGateway:
     def lookback(self, name, request, context):
         """Bounded count window; same query reuses buffers, forward end reads delta."""
         binding, start, end, count = self._request(name, request, context)
+        self.check(context)
         if count is None or count*len(request['securities']) > self.cache_rows:
             raise GatewayError('RESOURCE_LIMIT', '历史窗口超过缓存预算')
         parts = []
@@ -644,14 +685,18 @@ class RunDataGateway:
                     ('source_session','ascending'),('channel','ascending'),('sequence','ascending'),
                     ('stable_input_sequence','ascending')])
                 if type(security) is tuple:
-                    ordered = table['security'].take(indices).to_pylist()
-                    taken, counts = [], {}
-                    for i in range(len(ordered)-1, -1, -1):
-                        s = ordered[i]
-                        if counts.get(s, 0) < count:
-                            taken.append(indices[i].as_py())
-                            counts[s] = counts.get(s, 0)+1
-                    indices = pa.array(taken[::-1], type=pa.uint64())
+                    # The admitted cache plus one bounded page is the entire
+                    # input. Arrow identifies contiguous security runs; NumPy
+                    # selects their tails without one Python object/scalar per
+                    # historical event. Retain the same full identity ordering,
+                    # including equal-ns events and shorter/missing groups.
+                    if not len(indices):
+                        return table.combine_chunks()
+                    ends = pc.run_end_encode(table['security'].take(indices).combine_chunks()).run_ends.to_numpy()
+                    starts = np.concatenate((np.array([0], dtype=ends.dtype), ends[:-1]))
+                    lower = np.maximum(starts, ends-count)
+                    keep = np.arange(len(indices)) >= np.repeat(lower, ends-starts)
+                    indices = pa.array(indices.to_numpy()[keep], type=pa.uint64())
                 else:
                     indices = indices.slice(max(0, len(indices)-count))
                 return table.take(indices).combine_chunks()

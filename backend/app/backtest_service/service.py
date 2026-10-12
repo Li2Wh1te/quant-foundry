@@ -45,15 +45,17 @@ def normalize(payload):
 
 
 class FormalProvider:
-    """Current D04 formal capability facts, with no synthetic/default fallback.
+    """One CurrentStore admission/runtime path for accepted formal node plans.
 
-    A code-owned accepted market/rule mapper implements check/binding here when
-    the upstream documented gaps are closed. D13 does not invent its missing
-    units, dated rules, calendar or permissions. Isolated integration supplies
-    an explicit provider using the very same D04/D12 ports and real database.
+    The default registry has no accepted raw execution/identity/session facts
+    yet. It explicitly refuses those facts. A trusted code-owned plan resolver
+    can compose accepted D02/D03/D04 DTOs; REST, parameters and account metadata
+    cannot choose a resolver, column, unit, path or execution fact. Isolated
+    tests exercise this provider itself against real E50/E70 node layouts.
     """
-    def __init__(self, settings):
-        self.settings = settings
+    def __init__(self, settings, *, engine=None, plan_resolver=None, store=None, process=None):
+        self.settings, self.engine = settings, engine
+        self.plan_resolver, self.store, self.process = plan_resolver, store, process
 
     def capabilities(self):
         from .market_projection import current_market_bindings
@@ -61,16 +63,89 @@ class FormalProvider:
                      reason=b.unavailable_reason, limitations=list(b.limitations))
                 for b in current_market_bindings()]
 
-    def check(self, work):
+    def _plan(self, work):
+        from .formal_runtime import AcceptedRunPlan
         from .market_projection import current_market_bindings
-        candidates = [b for b in current_market_bindings() if b.frequency == work.config["frequency"]]
-        if not candidates or all(b.unavailable_reason for b in candidates):
-            raise RuntimeFault("CAPABILITY_UNAVAILABLE", "所选频率的正式标识、会话与成交口径映射尚未就绪")
-        raise RuntimeFault("RULE_UNAVAILABLE", "所选日期的交易与费用事实映射尚未就绪")
+        if self.plan_resolver is None:
+            candidates = [b for b in current_market_bindings() if b.frequency == work.config['frequency']]
+            reasons = ', '.join(b.name + ':' + b.unavailable_reason for b in candidates if b.unavailable_reason)
+            raise RuntimeFault('CAPABILITY_UNAVAILABLE',
+                '缺少已接受的正式执行事实：' + (reasons or '该频率没有正式输入契约'))
+        plan = self.plan_resolver(work)
+        if not isinstance(plan, AcceptedRunPlan):
+            raise RuntimeFault('INVALID_CONTRACT', '可信正式事实解析器未返回受限运行计划')
+        if plan.spec.get('synthetic_model') and getattr(self.settings, 'environment', None) != 'test':
+            raise RuntimeFault('CAPABILITY_UNAVAILABLE', '合成执行事实只允许明确的隔离测试环境')
+        plan.validate(work)
+        return plan
+
+    def _preflight_process(self):
+        if self.process is not None:
+            self.process.daemon.preflight(self.process.image)
+            return
+        # Web has no daemon socket or host work mount. It consumes only the
+        # trusted runner's short-lived check in the existing shared result root.
+        from .runtime_readiness import check_runtime_ready
+        check_runtime_ready(self.settings.s3_result_root,
+            self.settings.cursor_signing_key.get_secret_value().encode(), self.settings.s3_worker_image)
+
+    def _gateway(self, work, run_id, stopped, plan):
+        from app.core.auth import AuthenticatedPrincipal
+        from app.data_store.storage import CurrentStore
+        from app.db.session import get_engine
+        from .data_gateway import AuthorizedRun
+        from .formal_runtime import FormalDailyGateway, RunStoreGateway
+        calendar = plan.spec['calendar']
+        owned = self.store is None
+        store = self.store or CurrentStore(self.engine or get_engine(), self.settings.data_store_root,
+            cursor_key=self.settings.cursor_signing_key.get_secret_value().encode(), initialize=False)
+        try:
+            kind=(FormalDailyGateway if plan.market.frequency=='1d' and plan.market.query_time_bounds
+                  else RunStoreGateway)
+            gateway = kind(store, AuthenticatedPrincipal(work.owner),
+                AuthorizedRun(run_id, work.owner, tuple(work.config['universe']),
+                    int(calendar[0]['before_open_ns']), int(calendar[-1]['after_close_ns'])),
+                (plan.market,), cancelled=stopped.is_set, owned_store=owned,
+                check_facts=lambda connection: plan.check_facts(work, connection=connection),
+                batch_rows=min(10000, store.limits.query_rows),cache_rows=100000,cache_bytes=64*1024*1024,
+                **({'calendar':calendar} if kind is FormalDailyGateway else {}))
+            context = gateway.open(dict(run_id=run_id, universe=work.config['universe']),
+                dependencies=(plan.market.name,))
+            return gateway, context
+        except BaseException:
+            if owned:
+                store.close()
+            raise
+
+    def check(self, work):
+        plan = self._plan(work)
+        self._preflight_process()
+        gateway, context = self._gateway(work, 'preflight-' + uuid4().hex, Event(), plan)
+        try:
+            request = plan.packet(work, 'preflight')['source']['request']
+            # No strategy import, run insertion, source mutation or full-history
+            # materialization. The first bounded source page uses the real gate.
+            stream = gateway.read(plan.market.name, request, context, page_rows=1)
+            try:
+                page = next(stream)
+                if not page.table.num_rows:
+                    raise RuntimeFault('CAPABILITY_UNAVAILABLE', '正式运行首个可见会话缺少行情')
+            finally:
+                stream.close()
+            gateway.check(context)
+        finally:
+            gateway.close(context)
+        return plan.spec['calendar_reference']
 
     def binding(self, work, claim, stopped):
-        self.check(work)
-        raise RuntimeFault("CAPABILITY_UNAVAILABLE", "正式运行映射尚未就绪")
+        from .supervisor import Binding
+        plan = self._plan(work)
+        self._preflight_process()
+        gateway, context = self._gateway(work, claim.run_id, stopped, plan)
+        packet = plan.packet(work, claim.run_id)
+        return Binding(packet, market_routes={work.config['frequency']: dict(binding=plan.market.name,
+            fields=packet['source']['request']['fields'])}, gateway=gateway, context=context,
+            session_facts=plan.session_facts)
 
 
 class RunService:

@@ -29,9 +29,9 @@ def owner(request):
 
 def service(request: Request):
     settings = request.app.state.settings
-    provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings)
     repository = getattr(request.app.state, "s3_repository", None) or DatabaseRunRepository(
         get_engine(), result_root=settings.s3_result_root)
+    provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings, engine=repository.engine)
     return RunService(repository, provider, accepting=settings.s3_accept_new_runs)
 
 

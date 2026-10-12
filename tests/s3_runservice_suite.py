@@ -596,16 +596,50 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         settings = self.settings.model_copy(update=dict(s3_work_root=work_root,
                 s3_daemon_work_root=Path(os.environ["QF_TEST_DAEMON_ROOT"])/work_root.relative_to(Path("/qf-work")),
                 s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"]))
-        repository, process, services = create_services(settings=settings, engine=self.engine, provider=self.provider, daemon=DockerDaemon())
-        self.provider.process = process
+        # This required container test now runs the production FormalProvider
+        # itself over the real E70 physical node layout. Only the explicitly
+        # named execution facts are synthetic; no native/source-table fallback.
+        from s3_formal_fixtures import nodes, MODEL
+        from app.backtest_service.formal_runtime import AcceptedRunPlan
+        from app.backtest_service.service import FormalProvider
+        market,self.template = nodes(self.store,securities=('A.SH',))
+        checked_connections = []
+        def resolve(work):
+            packet = deepcopy(self.template)
+            for fact in packet['facts']:
+                for side in ('buy','sell'):
+                    commission = commission_from_account_fee_schedule(
+                        work.specification['account_snapshot']['fee_schedule'],side=side,
+                        included_components=(),cost_overrides=work.config.get('cost_overrides'))
+                    fact[side+'_fees'].update({key:commission[key] for key in
+                        ('commission_rate','minimum_commission','settlement_scale','rounding')})
+            def check_facts(accepted, *, connection):
+                if accepted is not work or tuple(accepted.config['universe']) != ('A.SH',):
+                    raise RuntimeFault('DATA_RESTRICTED','private dated facts outside accepted scope')
+                if connection is not None:
+                    # A real final transaction, with no remote I/O or snapshot.
+                    self.assertTrue(connection.in_transaction())
+                    checked_connections.append(id(connection))
+            return AcceptedRunPlan(market,packet,check_facts=check_facts)
+        trusted = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
+        repository, process, services = create_services(settings=settings, engine=self.engine, provider=trusted, daemon=DockerDaemon())
+        trusted.process = process
+        self.provider = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
+        self.service = RunService(self.repository,self.provider)
+        self.app.state.s3_provider = self.provider
+        self.assertIsNone(self.provider.process,'web must not own Docker access')
+        services.readiness.refresh()
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
         source = """import time
-from quantfoundry.api import order, LimitOrder
+from quantfoundry.api import order, LimitOrder, get_price
 def before_trading_start(c):
     if not getattr(c.state, 'bought', False):
         c.state.bought = True
         assert order('A.SH', 100, style=LimitOrder('10')).accepted
 def handle_data(c, data):
+    frame=get_price(['A.SH'],count=2,fields=['close'])
+    assert list(frame.columns)==['security','time_ns','close']
+    assert all(type(value).__name__=='Decimal' for value in frame['close'])
     time.sleep(.65)
 """
         self.account, self.revision = catalogue(self.engine, source)
@@ -634,7 +668,7 @@ def handle_data(c, data):
                 Event().wait(.05)
             self.assertEqual(status["status"], "succeeded", status)
             self.assertTrue(live_progress,'real HTTP status stayed at zero throughout execution')
-            self.assertEqual(status['progress_completed'],len(self.template['source']['events']))
+            self.assertEqual(status['progress_completed'],3)
             self.assertEqual(status['progress']['completed_sessions'],len(self.template['calendar']))
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
             self.assertEqual(result.status_code, 200, result.text)
@@ -655,11 +689,16 @@ def handle_data(c, data):
                 self.assertEqual(next_page.status_code, 200, next_page.text)
                 self.assertNotEqual(next_page.json()["items"], page["items"])
             self.assertFalse(list(work_root.iterdir()))
+            self.assertTrue(checked_connections,'accepted facts were not checked inside final transaction')
             self.assertEqual(legacy_execution_rows(),protected, 'new Rust run wrote old roots/snapshots/events/results')
             (self.base/'retired-execution-writes.json').write_text(json.dumps(dict(production_executed=False,
-                real_runner_container=True,run_id=row['run_id'],before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
+                real_runner_container=True,formal_provider=True,formal_node_entry='E70',
+                execution_fact_model=MODEL,run_id=row['run_id'],before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
         finally:
-            supervisor.stop()
+            try:
+                supervisor.stop()
+            finally:
+                services.readiness.close()
 
 
 if __name__ == "__main__":

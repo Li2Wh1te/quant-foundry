@@ -31,8 +31,29 @@ QF_S3_FINAL=1 QF_S3_RUNTIME_EVIDENCE="$QF_S3_RELEASE_ROOT/full" bash scripts/tes
 
 ## P01 命令准备
 
-当前正式行情/单位、稳定身份/会话、按日期交易和费用事实、研究知识时间映射尚未齐备；`FormalProvider`明确拒绝，不能靠改配置启用。
-P01先关闭这些映射依赖，再以真实已可用数据验证。下面命令尚未在生产执行。
+`FormalProvider.check/binding` 和 E50/E70 原节点适配已实现，隔离 CurrentStore/SDK/Rust 路径已验证。
+默认正式 API 还缺底座已接受的小型执行事实解析器，不能靠改配置启用。
+P01需先落实下列依赖，再以真实已可用数据验证。下面命令尚未在生产执行。
+
+| 依赖 | 必需来源/字段和现有边界 |
+|---|---|
+| 执行价格和数量 | E50 已声明 unadjusted，但 CNY/原量到整数份额待接受；E70 yuan/lots 描述仍须 raw 依据和精确手转份规则，不能仅凭字段名取 100 |
+| 历史身份 | 既有 instruments 的稳定身份/来源代码和有效日期覆盖请求；当前名单/显示代码不能回填历史 |
+| 会话和规则 | 既有 calendars 已接受交易日/时区/午休区间，D03 CalendarSession；D02 日期适用状态、单位、价格限制和费用 DTO |
+| 公司行动与成本 | 实际会话的已接受状态/公司行动检查；受理时捕获账户佣金，法定费用不能填零；事实改变终止 DATA_CHANGED |
+| 研究知识时间 | 财务/估值/行业/成分可靠公开/生效边界；报告期/采集时间/当前快照不能替代。未发布 E40 不参与 |
+
+最小受支持接入为可信代码解析器返回 `AcceptedRunPlan(market, spec, session_facts, check_facts)`，
+用 `daily_node_binding` 显式传入已接受 representation/identities/calendar/shares_per_quantity/evidence，
+经 `FormalProvider(..., plan_resolver=...)` 接入原 `create_services`/API provider 端口。
+不新增 REST 字段、环境开关、行情副本或事实发布台账。`check_facts(work, connection=...)`
+须在最终提交的同一有界事务复核/锁定既有小型事实，普通读取也复核变化，不远程调用供应商。
+解析器尚未发布，上述接口不是生产可用声明。真实节点/逆序标识/分页/窗口/缺量/分数/溢出/
+质量变化/实际 FormalProvider → Rust/Python 回归见 `backend/tests/test_s3_formal_runtime.py`，
+实际 runner 容器路径见 `tests/s3_runservice_suite.py`。
+Web 只读现有结果根中的签名当前 runner 检查，五秒更新/三十秒过期，绑定 boot/固定
+worker 镜像；停止撤销自身值，崩溃后自动过期。无历史登记，Web/worker 不挂 Docker socket。
+原结果根必须已有批准的同 UID 权限，缺失/过期/不匹配明确拒绝；不自动修改权限。
 部署所有者需提供现有 Compose 项目身份、已获准 Docker daemon 访问、同一宿主工作根映射、结果根和既有 UID/GID。
 不得用 chmod/chown、额外宿主挂载、来源切换或 R01 reset代替依赖核验。
 

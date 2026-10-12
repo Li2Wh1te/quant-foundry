@@ -549,12 +549,15 @@ class RunnerSupervisor:
         else:
             code = getattr(error, "code", "STRATEGY_ERROR")
             if code not in (
+                "CAPABILITY_UNAVAILABLE",
                 "DATA_CHANGED",
                 "DATA_RESTRICTED",
+                "RULE_UNAVAILABLE",
+                "INVALID_CONTRACT",
+                "NUMERIC_RANGE_UNSUPPORTED",
+                "LOOKAHEAD_FORBIDDEN",
                 "RESOURCE_LIMIT",
                 "RESULT_BUDGET_EXCEEDED",
-                "CAPABILITY_UNAVAILABLE",
-                "INVALID_CONTRACT",
                 "CANCELLED",
                 "STRATEGY_ERROR",
             ):
@@ -563,7 +566,7 @@ class RunnerSupervisor:
                 code=code,
                 operation="supervisor",
                 message="运行或数据通道失败，请核对所示错误码",
-                scope={},
+                scope={"exception_type": type(error).__name__[:64]},
             )
         return dict(status="failed", error=diagnostic, partial=True)
 
@@ -651,12 +654,19 @@ class RunnerSupervisor:
                     self.repository.commit_outcome(claim, self._failure(error), None)
 
     def run_forever(self, *, stop_event):
+        readiness = getattr(self.services, 'readiness', None)
         try:
             while not stop_event.is_set():
+                if readiness is not None:
+                    readiness.refresh()
                 self.step()
                 stop_event.wait(0.05)
         finally:
-            self.stop()
+            try:
+                self.stop()
+            finally:
+                if readiness is not None:
+                    readiness.close()
 
     def stop(self):
         self.stopping = True

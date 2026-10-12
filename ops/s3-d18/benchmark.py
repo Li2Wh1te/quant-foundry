@@ -853,6 +853,8 @@ def validate(repository, provider, run_ids, telemetry, load, frequency):
                 independent_accounting=dict(
                     cash=str(cash), fees=str(fees), cash_conserved=True
                 ),
+                order_limit_rejections=(int(last_record['values']['order_limit_rejections']['value'])
+                    if load.name in ('B1','B4') else None),
             )
         )
     return results

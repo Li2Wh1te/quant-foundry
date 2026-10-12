@@ -1,11 +1,26 @@
 """Real Python workloads. Decimal signals, Rust orders/account/costs/results."""
 
-MOMENTUM = """from quantfoundry.api import get_price, order_target_percent, record
+MOMENTUM = """from quantfoundry.api import get_price, order_target_percent, record, log
 from decimal import Decimal
 
 def initialize(c):
     c.state.pool=tuple(c.params['securities'])
     c.state.calls=0
+    c.state.order_limit_rejections=0
+
+def checked_order(c,result):
+    if result.accepted:
+        return
+    # The fixed synthetic price path can compound beyond the unchanged dated
+    # rule's per-order maximum. A correct refusal is a business result, not a
+    # strategy crash. Keep EVERY target attempt, rule and callback; record the
+    # refusal explicitly. Other order/account/contract failures still abort.
+    if result.reason_code=='INVALID_ORDER' and result.message=='超过单笔申报数量上限':
+        c.state.order_limit_rejections+=1
+        log.warning(result.reason_code+': '+result.message)
+        return
+    log.error(result.reason_code+': '+result.message)
+    raise RuntimeError(result.reason_code)
 
 def handle_data(c,data):
     c.state.calls+=1
@@ -22,13 +37,14 @@ def handle_data(c,data):
         for security,position in positions.items():
             if security not in selected:
                 result=order_target_percent(security,'0')
-                if not result.accepted: raise RuntimeError(result.reason_code)
+                checked_order(c,result)
                 waiting|=position.quantity>0
         if not waiting:
             for security in sorted(selected):
                 result=order_target_percent(security,'0.15')
-                if not result.accepted: raise RuntimeError(result.reason_code)
-    record(callbacks=c.state.calls,equity=c.portfolio.total_value)
+                checked_order(c,result)
+    record(callbacks=c.state.calls,equity=c.portfolio.total_value,
+           order_limit_rejections=c.state.order_limit_rejections)
 """
 INTRADAY = """from quantfoundry.api import get_price, get_current_data, order_target_percent, record, log, LimitOrder
 

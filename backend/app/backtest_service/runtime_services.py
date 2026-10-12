@@ -10,6 +10,7 @@ def create_services(*, settings=None, engine=None, provider=None, daemon=None):
     from .repository import DatabaseRunRepository
     from .service import FormalProvider
     from .supervisor import DataRunServices
+    from .runtime_readiness import RuntimeReadiness
 
     settings = settings or get_settings()
     if not settings.s3_work_root or not settings.s3_daemon_work_root or not settings.s3_worker_image:
@@ -17,6 +18,8 @@ def create_services(*, settings=None, engine=None, provider=None, daemon=None):
     engine = engine or get_engine()
     repository = DatabaseRunRepository(engine, result_root=settings.s3_result_root)
     process = WorkerProcess(daemon or DockerDaemon(), WorkRoot(settings.s3_work_root, settings.s3_daemon_work_root), settings.s3_worker_image)
-    provider = provider or FormalProvider(settings)
+    provider = provider or FormalProvider(settings, engine=engine, process=process)
     services = DataRunServices(provider.binding, settings.s3_result_root)
+    services.readiness = RuntimeReadiness(settings.s3_result_root,
+        settings.cursor_signing_key.get_secret_value().encode(), process)
     return repository, process, services

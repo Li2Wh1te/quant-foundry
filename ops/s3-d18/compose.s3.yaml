@@ -8,6 +8,7 @@ services:
     environment:
       QF_S3_ACCEPT_NEW_RUNS: ${QF_S3_ACCEPT_NEW_RUNS:-false}
       QF_S3_RESULT_ROOT: /app/data/s3-results
+      QF_S3_WORKER_IMAGE: ${QF_S3_WORKER_IMAGE:?tested immutable worker image ID required}
     volumes:
       - type: bind
         source: ${QF_S3_HOST_RESULT_ROOT:?approved result root required}

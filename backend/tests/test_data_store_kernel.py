@@ -722,6 +722,29 @@ def test_wide_column_small_response_budget_fails_without_large_arrow_batch(store
         store.limits = old
 
 
+def test_large_flat_membership_keeps_complete_cursor_identity_and_limits(store):
+    contract=spec('large_membership')
+    store.register(contract)
+    store.upsert(contract,'default',batches(contract,0,20),source(store,contract.name),
+                 lower=(0,),upper=(20,),source_check=lambda _:True)
+    allowed=tuple(range(5000))
+    query=Query(page_size=3,filters=(('id','in',allowed),))
+    first=store.read_arrow(contract,query)
+    assert first.table['id'].to_pylist()==[0,1,2] and first.next_cursor
+    next_page=store.read_arrow(contract,replace(query,cursor=first.next_cursor))
+    assert next_page.table['id'].to_pylist()==[3,4,5]
+    # Changing even a value absent from the actual file invalidates the cursor;
+    # the signature must cover all 5000 values, not a truncated prefix/sample.
+    changed=replace(query,filters=(('id','in',(*allowed[:-1],999999)),),cursor=first.next_cursor)
+    assert_error('INVALID_CURSOR',lambda:store.read_arrow(contract,changed))
+    assert_error('INVALID_VALUE',lambda:Query(filters=(('id','in',tuple(range(10001))),)))
+    assert_error('INVALID_VALUE',lambda:Query(filters=(('id','in',(True,)),)))
+    assert_error('CONTROL_BUDGET_EXCEEDED',lambda:Query(filters=(('id','in',tuple('\\n'*100 for _ in range(10000))),)))
+    from app.data_store.values import control_json
+    # Generic recursive metadata gates remain EXACTLY as before this fix.
+    assert_error('CONTROL_BUDGET_EXCEEDED',lambda:control_json(allowed))
+
+
 def test_new_migration_only_downgrades_completely_unused_tables(database):
     import importlib.util
     from alembic.migration import MigrationContext
