@@ -1,177 +1,181 @@
 # S3-D18 集中验收与发行结果
 
-**尚未关单、未合并**：[PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 为 draft。
-精确 head `3b61a3cb402e855fbe6ed45d641dfb2850ecbb82` 的常规五 workflow/六 job
-及原生 ARM64 job 已通过；[完整 B1–B4](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486524)
-于 2026-10-12 07:19:55 UTC **失败**：B1、B2 分钟触及原 3,600 秒 worker wallcap。
-其余四项通过并保留来源；这些结果不冒充后续新源码的集中验收。
-短夹具、旧源码成绩和单元测试数量均不作为全量通过证据。
-可信资源接线、受理额度固定与实际两并发回归已保存为本地 `8d8109a`/`6141f2f`，
-尚未推送。已无冲突合并实际最新 main `81ad436a71d1e2871a7bff7266748aaab5b718d5`
-的 PR178 终态持久化修复与全部回归，保留 S2/S3 既有功能。
+**完整 B1–B4 和业务 head CI 已通过；文档最终 head/合并 main 待核。**
+[PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 仍为 draft。
+完整测量源为 `55cbb9e453b523327e733c44e25e9d126478087b`，
+[run38234261058](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261058)
+于 2026-10-12 14:21 UTC 成功结束。最终测试修正 head
+`0f0326a32e0dda7298329d13e3b26f5ecb1af723` 仅改两份独立测试文件；业务、测量与 native
+源码逐文件一致，0f 精确 head 六个 workflow/八个 job 全部通过。文档最终 head 与合并 main
+仍待核，尚未合并，也未执行 P01/C01。
 
-从 D17 main `5a14110668f240f183bf3e6a08f638fc4e3fc02f` 接续，已整合随后实际 main
-`dd7be607e106da06e927fecd165cae12a0b5b3bd`（已发布 S2 PR177）。原 v1.1 全包、
-D01–D17 RESULT/相关 CI 已阅读，无适用 AGENTS/skills。未混入未发布 S2/R01 E40 候选。
-本任务只写仓库和隔离合成环境，未访问生产/供应商，未改来源开关或 R01 数据。
+从 D17 main `5a14110668f240f183bf3e6a08f638fc4e3fc02f` 接续，已整合实际 main
+`81ad436a71d1e2871a7bff7266748aaab5b718d5`（含 S2 PR177、PR178 终态持久化修复）。
+原 v1.1 全包、D01–D17 RESULT/相关 CI 已阅读，无适用 AGENTS/skills。
+未访问生产/供应商、改 R01 数据或来源开关、混入未发布 S2/R01 E40 候选。
 
-## 完整负载和资源
+## 完整固定负载
 
-运行路径为 CurrentStore → 有界 Arrow IPC → 真实 runner 容器发起兄弟 worker →
-Rust/Python 策略 → PostgreSQL 队列与结果服务。B2 两频率共享唯一分钟源，60m 消费
-生产 `ResampledBarGateway`，不是基准独有实现；没有每 run 行情副本或逐事件成功台账。
+实际路径为 CurrentStore → 有界 Arrow IPC → 真实 runner 容器发起兄弟 worker →
+Rust/Python 策略 → PostgreSQL 队列与结果服务。没有每 run 行情副本或逐事件成功台账。
 
-| 测量项 | 必需输入、真实回调及结果 | 当前完整结果 |
-|---|---|---|
-| B1 | 5,000×2,520 = 12,600,000 日线；2,520 次 Python 20 日横截面查询，基准、订单、费用与完整结果 | 失败，6,835,000 事件/1,367 会话，测量 3,600.24 秒；不得标完整 |
-| B2 1m | 200×252×240 = 12,096,000 分钟；60,480 次 Python 回调 | 失败，11,467,601 事件/238 完成会话，测量 3,600.16 秒；不得标完整 |
-| B2 60m | 同一完整分钟源；201,600 小时事件、1,008 次回调；午休/会话分桶 | 通过，364.50 秒；结果 280,771 字节，非零费用/现金独立核对 |
-| B3 trade | 10,000,000 成交 Tick、同数逐 Tick Python 回调，成本/结果和修正探针 | 通过，1,415.81 秒；结果 185,621 字节，全部回调/费用/修正反例 |
-| B3 quote | 10,000,000 报价 Tick、同数逐 Tick Python 回调，双边保守额度和修正探针 | 通过，1,430.94 秒；结果 185,635 字节，全部回调/费用/修正反例 |
-| B4 | 16×30×1,260；最多两并发，故障项单独重跑，其他 15 项结果原值保留与比较 | 通过，3,102.99 秒；16 完整结果共 49,432,327 字节，故障/单项重跑/保留/比较均核对 |
+| 项 | 输入 / 实际引擎事件 / Python 行情回调 | 测量墙钟秒 | 结果字节 |
+|---|---|---:|---:|
+| B1 | 5,000×2,520 = 12,600,000 日线 / 同数 / 2,520 次真实 20 日横截面 | 3,154.17 | 4,857,007 |
+| B2 1m | 200×252×240 = 12,096,000 分钟 / 同数 / 60,480 | 2,706.90 | 4,713,683 |
+| B2 60m | 同一完整分钟源 / 201,600 / 1,008；生产 ResampledBarGateway 分桶 | 291.18 | 280,771 |
+| B3 trade | 10,000,000 成交 Tick / 同数 / 同数真实逐 Tick | 1,452.06 | 185,621 |
+| B3 quote | 10,000,000 报价 Tick / 同数 / 同数真实逐 Tick | 1,477.49 | 185,635 |
+| B4 | 16×30×1,260；每项 37,800 事件、1,260 回调；最多两并发 | 2,736.64 | 49,432,327 |
 
-全组硬限制 **4 CPU/8 GiB**：runner/gateway 1 CPU/2 GiB、DB 1 CPU/1 GiB、worker
-合计 2 CPU/5 GiB；B4 每 worker 1 CPU/2.5 GiB。Python/NumPy 线程均限制为 1。
-单 worker 3,600 秒预算和输入/回调/成本/结果门禁保持，预算到期算未完成。
-B1 在原 5 GiB worker 内分配 1 GiB 数据信用，仍受数据额度不超过 worker 内存一半
-的原约束；Arrow 单批 64 MiB，控制消息 1 MiB。多批窗口与单包信用分别计费，
-没有提高整组资源、外部配额或削弱 Rust 保守内存计费。
-基准显式使用该受限资源配置；发布 API 的原默认 1 CPU/512 MiB、60 秒 worker 未扩大。
-P01 还须提供与 AcceptedRunPlan 数据信用匹配的已批准服务配额，不能把测试配置
-冒充默认生产受理能力。
+全部必要结果写入和独立现金/费用核对通过。B1/B2/60m/两 Tick 的费用分别为
+700/2,520/45/100/100 CNY（明示合成费用模型），不是省掉成本的循环。
+对应订单/成交/权益/record 数分别为：B1 1,740/700/2,521/2,520；分钟
+5,040/2,520/253/504；60m 90/45/253/256；两 Tick 各 200/100/2/1。
+B4 共 30,859 订单、13,060 成交、20,176 权益点、20,160 record、49,787 日志。
+B1/B4 按原数量上限保留所有目标尝试并记录合法拒单，没有提高规则上限。
 
-自动输出 `final-result.json` 分开记录夹具构建、worker 启动、数据网关、转换、
-Rust/回调、结果写入、接单/验收读取与整体墙钟，附 1 秒采样整组 RSS/cgroup、
-各 worker 实际峰值、源/结果/tmp 字节及订单/成交/记录数。阶段包含嵌套调用，
-不能相加当总墙钟；selected_file_bytes 是逻辑选中预算，不是物理 SSD I/O。
-当前是构建后共享 OS 暖缓存，无冷缓存成绩或强制宿主页缓存清空。
+B4 实际峰值两 worker；一项注入故障后只创建该项新 run，其他 15 项已保存结果逐值
+保持，16 项最终核对与比较通过。两种 Tick 热修正探针各执行 100 次真实回调后
+以 DATA_CHANGED 失败，partial 明确；修正输入验证后各运行完整千万条。
+这些断言实际执行于上述成功完整 job，不引用旧局部数字代替。
 
-B1 夹具构建 751.51 秒、正式源 30,011,482 字节；B2 构建 1,186.75 秒、正式源
-50,592,153 字节，两频率共享。失败项整组采样峰值 cgroup 分别 1,397,309,440/
-959,598,592 字节，RSS 分别 1,207,525,376/688,087,040 字节；均为 wallcap，不是 OOM。
-被终止 worker 未留下完整阶段遥测，不能编造其 Rust/回调分解。
-[完整保留输出](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486524/artifacts/11731649265)
-SHA256 `2216f4fbbdc21fa9fc4a5c30b57f61aa128b54531d6d6b2f0578f0fb4fbd9b2c`。
-已完成 60m 的 driver 363.71 秒中 IPC 339.60 秒、SDK 回调 79.19 秒、Rust exclusive
-3.48 秒；父网关 read 156.33/check 74.16/Rust 重采样 89.39 秒均含嵌套，不能相加。
-同路径剖析确认事实组装、Pandas attrs 深拷贝和历史窗口 IPC 热点。新实际 wheel
-的串行同输入对照完成：B1 5,000×50，旧/新 128.27/81.14 秒；B2 200×3×240，
-旧/新 51.00/34.46 秒。两边订单/成交/记录数、费用/现金/收益结果相同；B1 行情
-IPC 635,506,584/74,924,800 字节，SDK 回调 54.80/16.34 秒。
-证据为本地 `perf-window-paired-diagnostic/result.json` 与 `run.log`，两组各只构建
-一份 CurrentStore 输入，明确开发文件系统探针和 `full_B1_B4=false`。
-这里旧/新双方均为 Rust 产品源码，不是退役 Python 内核的性能比较。
-另一次相同 wheel/输入的 B1 读取分块对照，单日/两日范围 82.53/68.14 秒，
-存储读取 55/28 次、SDK 查询/订单/成交/费用/收益一致；实际批次仍最多 10,000 行，
-并未提高 64 MiB 缓冲或 20,000 行回放缓存，Rust 可见时点裁剪及物理读前后门禁保留。
-证据为本地 `perf-source-window-paired-diagnostic/result.json`。
-不按短夹具外推全量通过，不提高 4 CPU/8 GiB/3,600 秒或删减业务。
+[完整自动输出和可安装 wheel](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261058/artifacts/11753395787)：
+3,223,834 字节，SHA256 `91fb1f7401025bf8705363b7b66ed08ddca9a95a4393080abd4c4e1c23f83069`。
+含完整 `final-result.json`、制品和构建/启动证据。完整 job 日志与六项测量已保存至
+本任务隔离证据目录 `ci/55cbb9e/`；本机代理拒绝 artifact 下载，未绕过代理/认证。
+官方 artifact、精确 digest 和成功 job/来源门禁保留，不假称已在本机解压核对。
 
-## 已修复的真实集成缺口
+## 资源、阶段和存储
 
-- 5,000 标的 IN 请求被通用元数据节点数误拒：分块验证并保留完整转义字节/游标摘要，
-  原 10,000 项/1 MiB 与通用门禁保持。SDK 的 64 MiB 单包信用又误用作整个多批窗口
-  上限：现独立预算。真实 5,000×25 日诊断完成 125,000 事件/25 次回调、100,000 行
-  20 日窗口、非零费用与资金核对；整组采样峰值 cgroup 967,450,624 字节，
-  RSS 905,560,064 字节。该诊断明确 smoke/开发文件系统探针，**不是完整 B1**。
-- 分钟路径重复检查/逐历史行裁剪慢：合并同一事务的小型限制查询，缓存不可变 schema，
-  以 Arrow/NumPy 有界裁剪替代逐行 Python；每次物理读取前后、缓存发布、新依赖、
-  取消和最终提交检查保留。原生小型正式节点、质量/变化/预算反例已验证。
-- 60m 执行流原先只在基准类接线：生产和基准现共享 D05 Rust 降采样模块，覆盖
-  5m/15m/30m/60m。缺分钟、价量或不足目标周期的末桶拒绝，不造完整 Bar。
-  新增 13 个实际安装 wheel 的回归本地通过，待本轮全量结束后纳入必需 CI。
-- B4 合成复利路径触发正确的单笔数量上限拒单：每次目标尝试/规则保留，仅精确
-  该拒单记日志与计数，其他错误仍失败；未放宽数量、资金或结果上限。
-- 真实进度采用每秒至多一次的当前计数/字符串纳秒，claim/租约保护数据库写入，
-  取消、终态和旧 claim 拒绝迟到写入。Web 只读签名当前 runner 检查，无 Docker
-  socket；缺失/过期/不同镜像/篡改/链接/FIFO/未知文件均拒绝，停止只撤销自身值。
-- 发布 REST 原先不能选择基准已批准的可信资源配置：新增可选服务端 JSON 配置，
-  默认 512 MiB/60 秒保持；超半内存数据信用受理前拒绝，客户端额度字段拒绝。
-  本地实际 HTTP/SDK → runner → worker 已核保存配置与 Docker 限额一致。
-  受理后改变可信默认配置仍按原额度启动；随后两项批次实际同时运行两名
-  1 CPU/2.5 GiB worker，费用使用各自受理时配置，首个成功结果原值保留。
-  当前队列未排空时不同整组配置仍拒绝；终态历史配置保留原值，不为配置切换删结果。
-  配置/正式节点/降采样 47 项及 22 子检查、仓储/队列 15 项（宿主 worker 1 项跳过）、
-  实际容器内 2 项通过；这些尚未进入当前 CI 的修复证据不冒充在跑 head 的 CI。
-- 查询元数据变为保留 JSON 形状的只读快照，避免 Pandas 反复深拷贝；事实页保留
-  全部逐标的值和不同买卖佣金。SDK 有界私有滚动窗口每次检查依赖、只请求新完成
-  的 raw Bar；同回调重复查询复用，公开表编辑不能污染缓存，超限先关闭流再执行
-  原 count 请求。四份缓存/转换峰值信用从既有数据预算扣除；Tick、复权、历史
-  end 和跨频率查询保持原路径，质量/权限/时间过滤与最终依赖校验均保留。
-  Rust 只省去已验证的 NULL 字段内部树节点，公开未知仍为 None，缺值降采样不造
-  完整 Bar。新 wheel 实际安装 88 项、Rust 235、clippy 与根 29 项本地通过。
+全组硬限制 **4 CPU/8 GiB**，含 runner/gateway 1 CPU/2 GiB、DB 1 CPU/1 GiB、
+worker 合计 2 CPU/5 GiB；B4 每 worker 1 CPU/2.5 GiB。Python/NumPy 线程均为 1。
+单 worker 原 3,600 秒、整组原运行预算未提高。B1 的 1 GiB 数据信用从原 5 GiB
+worker 内分配，仍须不超过 worker 内存一半；Arrow 单批 64 MiB、控制消息 1 MiB。
+四份窗口/转换信用从同一数据预算扣除，Rust 保守内存计费不减。
 
-[首次完整失败及保留输出](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38174415508)
-和后续失败仍可查阅，均不表示当前版本通过。原全量已完整结束，未重跑或取消；
-已保存本地资源接线修复，当前正诊断 B1/B2，最终证据必须核对新业务源。
-私有回调插桩仅用于定位，不作为产品成绩；上述性能修复已经实施并做同输入对照，
-完整新源码验收仍待执行。
+| 项 | 全组峰值 cgroup 字节 | 独立采样峰值 RSS 字节 | 夹具构建秒 | 唯一源字节 | 构建最大 tmp 字节 |
+|---|---:|---:|---:|---:|---:|
+| B1 | 793,034,752 | 606,543,872 | 752.46 | 30,011,482 | 1,480,641 |
+| B2 1m | 947,699,712 | 657,465,344 | 1,203.65 | 50,592,153 | 5,974,862 |
+| B2 60m | 883,666,944 | 545,820,672 | 共享上项 | 共享上项 | 共享上项 |
+| B3 trade | 1,004,658,688 | 694,198,272 | 582.75 | 34,459,396 | 1,774,679 |
+| B3 quote | 745,230,336 | 405,577,728 | 585.66 | 38,111,186 | 1,964,302 |
+| B4 | 895,700,992 | 478,195,712 | 12.39 | 97,107 | 4,423,193 |
 
-## T01–T12 当前验证入口
+自动输出按 1 秒采样，保留成员/配额和启动、gateway、转换、Rust、Python、结果写入
+及总体墙钟。下面阶段均有嵌套，不能相加；SDK 回调包含查询等待，Rust exclusive
+扣除这些等待，gateway 的读包含其内部检查/转换。
 
-| 族 | 真实实现与反例证据 |
+| 项 | driver 秒 | SDK 回调秒 | IPC 秒 | 源 Arrow 转换秒 | Rust exclusive 秒 | worker 结果写秒 |
+|---|---:|---:|---:|---:|---:|---:|
+| B1 | 3,149.79 | 825.78 | 1,737.64 | 170.06 | 513.25 | 2.31 |
+| B2 1m | 2,704.45 | 2,381.62 | 1,916.69 | 30.90 | 153.92 | 0.26 |
+| B2 60m | 290.41 | 41.23 | 273.02 | 0.67 | 3.47 | 0.03 |
+| B3 trade | 1,451.32 | 1,101.01 | 79.98 | 15.19 | 250.46 | 0.01 |
+| B3 quote | 1,476.82 | 1,110.66 | 82.15 | 16.67 | 262.53 | 0.01 |
+
+B1 gateway 1,263 物理读取、12,610,000 读取行、read 1,003.78/check 289.80/转换
+22.19 秒；分钟 1,766 次、13,102,400 行、read 874.57/check 1,412.19/转换46.70秒。
+60m gateway read151.58/check46.73/Rust 重采样及转换64.03秒，均包含嵌套。
+B4 逐 run 阶段/启动与两并发组、单项重跑分别存于原自动输出，不用首项代替16项。
+
+使用构建后共享 OS 暖缓存，无冷缓存成绩或宿主页缓存清空。source_bytes 为唯一
+正式合成源，B2 两频率共享；selected_file_bytes 是重复选中文件的逻辑读取预算，
+不是物理 SSD I/O。没有全历史事件对象入内存、未请求历史重复扫描或行情落盘缓存。
+本轮旧/新诊断双方均为 Rust 产品源码；未提供退役 Python 的可比全量速度数字。
+
+## 修复与 T01–T12
+
+- 原 `3b61a3c` 完整 B1/B2 触及 wallcap 的失败和输出保留，不算通过。修复只读
+  元数据深拷贝、同快照依赖 SQL、私有有界滚动窗口及 B1 两日存储分块；仍逐物理读
+  前后/缓存发布/动态依赖/最终提交检查，保留时间裁剪、权限、质量与原批次上限。
+  用户编辑返回表不能污染缓存；增量超限先关闭流再执行原 count；坏行数/schema
+  不作正常回退。NULL 内部省节点，公开未知仍为 None，缺值降采样不造完整 Bar。
+- 5,000 标的 IN 保留 10,000 项/1 MiB 及完整转义/游标摘要；多批窗口独立于
+  单包信用。60m 执行与产品共用生产降采样，覆盖 5m/15m/30m/60m。
+- 可选可信服务端额度接线保持默认 1 CPU/512 MiB/60 秒；客户端额度字段拒绝。
+  HTTP→runner 实测已受理额度/费用不随后续修改，随后两名 1 CPU/2.5 GiB worker
+  同时运行，既有成功结果不变。不同整组配置在队列未排空时拒绝，终态历史保留。
+- 唯一 CI 失败是独立内存夹具仍按旧单份缓存信用准入，在行情加载前 RESOURCE_LIMIT。
+  `0f0326a` 仅改测试：原总额度 1,218,445,312 字节不变，额外三份信用从 native view
+  扣除，保留105,000输入/210,000回放、RSS/保守工作集/重置断言并报告stderr。
+  本地复现 RSS618,192,896、工作集823,147,392≤view1,048,576,000、重置[0,0]，
+  精确失败阶段126项本地与0f CI全部通过；后续检查也实际完成，上传无文件不是根因。
+
+| 族 | 实际实现、独立反例与检查入口 |
 |---|---|
-| T01 数值 | Rust numeric/fees/accounting，循环小数成本与最后释放、half-even、整数数量、溢出拒绝；SDK Decimal/ns；独立现金/费用/权益核对 |
-| T02 时序 | Rust clock/bar/tick 屏障、同纳秒不同序号、分页稳定性；SDK 未来过滤、默认/显式订阅与过期视图 |
-| T03 订单 | Rust orders/account；目标幂等/原子替换、冻结/撤单/部分成交/DAY 下一会话、限价与非递归通知 |
-| T04 规则 | dated market_rules/fees/dividend_tax，沪深北/ETF/指数拒单/未知规则拒绝 |
-| T05 撮合 | Bar 独立手算案例；trade/quote 共享额度、重复同价同量不补量、双边数量与真实回调 |
-| T06 公司行动 | accounting corporate 与真实 SDK 分红登记/除权/支付；拆并/可卖日期、GTC 释放与配股政策 |
-| T07 数据 | 原生 CurrentStore CI；正式 E50/E70 节点与数据网关；权限/质量/generation/动态依赖/最终锁，非空问题集完整摘要 |
-| T08 研究 | research_api/indicators 独立样例；知识/生效边界、缺失/预热与缺历史能力拒绝；实际生产降采样回归 |
-| T09 SDK | 原 head CI 83 项、新 wheel 本地 88 项；真实 Python/Rust、GIL/Arrow 释放、固定表形/空表、分页、异常源码位置、示例与滚动缓存反例 |
-| T10 运行 | 实际 runner/worker 25 项、零跳过；秘密/网络/socket/目录隔离，崩溃/OOM/超时/取消/陈旧 claim/唯一终态；原 head 完整 B4 已通过，新源码待完整验收 |
-| T11 产品 | 同一 REST 的 Python/CLI/真实浏览器批次、失败重跑、比较、分页结果与实时进度；费用受理时固定 |
-| T12 退役 | 103 旧源路径物理缺席；空库迁移/非空旧库升级、十类历史关系逐列原值保护、29 cleanup 拒绝与实际镜像启动 |
+| T01 | Rust numeric/fees/accounting；循环小数成本/最后释放、half-even、整数商余数、溢出；SDK Decimal/ns与完整现金/费用核对 |
+| T02 | clock/bar/tick同刻屏障、合法同ns事件、批次稳定性；所有频率未来过滤，2日预取5,000标的仍只见已完成窗口 |
+| T03 | orders/account目标幂等/原子替换、冻结/撤单/部分成交/DAY下一会话、限价、非递归通知 |
+| T04 | dated market_rules/fees/dividend_tax，沪深北、ETF单位/回转、指数拒单和未知拒绝 |
+| T05 | Bar代理时间/共享量独立案例；trade/quote共享额度、重复报价不补量、双边量；完整逐tick回调 |
+| T06 | corporate与实际SDK分红登记/除权/支付、拆并/可卖日、GTC释放、配股政策/raw与复权区分 |
+| T07 | 原生CurrentStore跨容器CI、E50/E70正式节点、权限/质量/generation/动态依赖/最终锁与非空问题摘要 |
+| T08 | research_api/indicators知识/生效时点、缺失/预热、独立公式、缺能力拒绝及生产降采样 |
+| T09 | 实际安装88项SDK，GIL/Arrow释放、固定表形/空表、分页/异常位置、五示例、窗口/元数据/坏头反例 |
+| T10 | 精确55实际worker CI26项零跳过；秘密/网络/socket/目录、OOM/崩溃/超时/取消/陈旧claim/唯一终态、完整B4 |
+| T11 | 同REST的Python/CLI/真实浏览器；配置/资本/成本、参数批次/单失败重跑/比较/分页/进度 |
+| T12 | D17 103旧源路径物理缺席；空库/非空旧库迁移、十类非空历史关系逐列原值保护、29 cleanup拒绝与安装启动 |
 
-精确当前常规 CI：[Validate](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486389)
-后端 1,359 通过/19 跳过/90 子检查、根 29 项及前端 153 项/构建；
-[Rust/安装与共享业务](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486396)
-Rust 235、SDK 83、网关/正式节点 111、迁移/历史/CLI；
-[实际 worker](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486423)、
-[真实浏览器](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486528)、
-[原生 CurrentStore](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486382)均通过。
-这些是各族回归入口，完整验收仍必须等待六个全量项，不以数量代替业务完成。
+精确55 CI：[Validate](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261051)
+后端1396通过/19跳过/100子检查、根29、前端153/构建；
+[实际worker](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261026)、
+[浏览器](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261046)、
+[原生CurrentStore](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261030)均通过。
+[Rust综合](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261047)核心235/SDK88通过，
+55内存夹具125通过/1失败曾阻断后续步骤；
+[0f精确Rust/共享业务CI](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38262683046)
+已实际补齐：账户/历史54、网关/研究/正式节点126、队列8、D13 7通过/1宿主依赖跳过、
+D17 29、CLI 4通过/1宿主依赖跳过/6子检查。专门实际worker CI26项零跳过；
+0f六workflow/八jobs均通过，并无未解决review thread。
 
-## 可安装制品与运维交付
+## 制品、来源与运维
 
-Linux x86_64 本地干净 `8d8109a` 的 wheel/离线 backend/worker 镜像已独立安装、空库迁移、
-API readyz、暂停接单、Web 无 Docker 权限及 runner 启停通过。镜像归档实际 load
-核对原 ID：`/tmp/s3-d18-release-images/8d8109a-x86_64-images.tar.gz`，
-508,218,139 字节，SHA256
-`0d15f6f0cec71491bdde50efb2a49b435bca35fa377e4d66cc4badb284db3063`。
-worker ID `55c4814…` 与 `3b61a3c` 完全一致，复用了已验证 native/SDK；
-backend ID `57b6eb2…` 含可信配置修复。原生 ARM64 当前 CI 的 `3b61a3c` 构建、
-独立 wheel 安装、离线镜像与空库启动/停止通过；本地后端修复的 ARM 制品尚待 CI。
-[实际可安装制品](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38196486524/artifacts/11723568221)
-SHA256 `b9c658e67174adf1aa96909389377fdda7fb09128aad2a71cfcaf3b63f591d0b`。
-该 ARM 制品含 wheel/镜像与启动证明，未导出 ARM 镜像 tar；受支持路径为从该 wheel
-及锁定依赖构建已验证的离线镜像。双架构二进制不宣称相同。
+Linux x86_64/arm64均实际原生构建、独立安装wheel、离线镜像和空库API/runner启停。
+[ARM artifact](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261058/artifacts/11740322181)：
+3,074,952字节，SHA256 `5e13e3b365394360f828fc1a20263f7d216b6f4d6c9fe9beb7dfd5428bff8114`；
+含native wheel与镜像/启动证明，未导出ARM镜像tar。受支持路径为使用该wheel、锁定依赖和
+已验证Dockerfile构建离线镜像；不虚构双架构二进制相同。
 
-上述 `3b61a3c` 制品的 native/SDK 源摘要为
-`1554673bfe4db10528c4663730f9877322ec594437bb9fa8489b8b4fcf8667af`；
-该提交的业务/测量源摘要为
-`1055ea53feb7bf3d57af026a651833f8b86361a3e5b2fd6046fb697ea6aff437`。
-本地 `8d8109a` 业务/测量源摘要为
-`e16ded1fe3a42ad1a702b854b9fd049951bb4b9f907742511e911f3df5b6a76d`，native/SDK 摘要不变。
-每个制品保留自身构建/native 二进制摘要，当前测量提交另记，不借 wheel 提交冒充。
-只有相同业务/native 摘要且六项完整成功才可复用纯文档后的证据，失败/smoke/脏树拒绝。
-本地启动冒烟曾因磁盘满失败，保留原失败日志；核对本任务旧镜像归档 SHA 与无引用后，
-仅精确回收旧镜像及三个无共享引用的构建缓存，重试启动通过。无全局 prune 或其他任务删除。
+本地干净55 x86镜像归档实际load核原ID：
+`/tmp/s3-d18-release-images/55cbb9e-x86_64-images.tar.gz`，540,975,653字节，
+SHA256 `16bf13dc544599ff5b12aa6ecf739a9a55c2568819a159a3dd7ab648a28208f1`。
+backend `505ccccb38b1f247821c7c3a902d88a418a4d5af260907114925db00009083f6`，worker
+`51f631140f89118548e9bcdd99be16bf2262ad64410be7bd8ebee588fbae6fad`。
+原型/旧制品不混入最终源；只在核归档SHA/无引用后精确回收本任务可恢复缓存，
+没有全局prune、共享卷或其他任务资料删除。
 
-实际构建、导入、正常迁移、启动、停止接单、取消、逐页结果核对和 cleanup dry-run/apply
-命令及当前依赖见 [README](README.md)。Compose 合并配置已在私有副本验证，未启动生产。
+业务/测量源SHA `17012d12dc4c354ec5b3f88bcc0aa170f59f39ed34109ff427fa5a13abd9f187`；
+native/SDK源SHA `6046f7fe97b8453f1cb28a287fc94defb88c73f5e19a87dabaa268b630fc8a28`。
+本地native二进制SHA `64fc21e415c7ff2da4ba118e30db3a41ae1ab289734037fc6b692c1f9d55b07f`。
+每个CI制品保留其自身native/wheel/架构/编译器摘要，不能以本地二进制值替代。
+CI native二进制SHA `3d60385ec81ef6faba68fbca7cb669656465326ee5c4c89c8a23430d3bcbd01a`
+与本地值不同，按各自编译制品记录。
+[0f来源与二进制复用门禁](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38262683111/job/114856933078)
+已实际通过，逐项核完整负载、回调、热修正/失败重跑、同业务源与同CI native二进制，
+没有重跑全量。
+[0f x86制品与reuse.json](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38262683111/artifacts/11753656565)
+SHA256 `dc07e8b2c68b2f421622636b7a53e893d1c3d36f52d00e2dd5db4b4029cbafad`；
+[0f原生ARM制品](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38262683111/artifacts/11753183267)
+SHA256 `0c5470757d9e6da5d7f19418ac0b535c0324c17007f243c015e18a51b48f1ce1`。
+测量/构建提交分别记录；算法/schema变化需相关重测，纯文档或不影响业务/测量源的测试
+修正仅在来源与二进制门禁实测一致时复用完整成功证据，不拿失败/smoke/脏树复用。
 
-| 状态 | 当前结论及证据 |
+构建、导入、正常迁移、启动、停止接单、取消、分页结果核对与精确cleanup命令、
+当前依赖均见[README](README.md)，已在授权私有环境核验。生产部署所有者须先落实
+已有UID/GID、daemon访问/宿主映射/结果根和接受事实；不以改权限/来源/R01 reset替代。
+
+| 状态 | 当前结论与证据 |
 |---|---|
-| new_engine_code_ready | **false，D18 未完成**：B1/B2 wallcap 失败，优化与最终精确 head/合并 main CI 尚未完成 |
-| legacy_execution_removed | **true（源码/发行镜像）**：D17 103 旧路径物理删除；新双架构实际安装启动无旧执行 fallback |
-| data_ready | **false**：默认正式事实解析器尚未发布；合成及接受事实的隔离测试不表示生产覆盖 |
-| production_switched | **false**：未访问或部署生产，P01 未执行 |
-| runtime_cleanup_done | **false（旧生产残留）**：C01 未执行；新 worker 私有容器/tmp/IPC 日常自动回收另有证据 |
+| new_engine_code_ready | **业务代码验收通过，发行关单待文档最终head/mainCI**；固定完整B1–B4及0f全部必需CI通过 |
+| legacy_execution_removed | **true（源码/发行物）**；103旧路径删除，安装/共享业务不依赖旧计算，无fallback |
+| data_ready | **false**；默认正式事实解析器/接受事实和覆盖尚未发布，合成验证不代表生产数据就绪 |
+| production_switched | **false**；P01未执行，未访问或部署生产 |
+| runtime_cleanup_done | **false（旧生产残留）**；C01未执行；新worker容器/tmp/IPC日常自动回收另有证据 |
 
-正式依赖为底座接受的 E50 CNY/原量到整数份额、E70 raw 依据/精确手转份、稳定历史
-身份、日历、日期规则、状态、费用与公司行动，以及研究可靠知识/生效时间。
-可信 `AcceptedRunPlan`/`FormalProvider` 端口和 E50/E70 原节点读取已经实际实现并隔离
-验证，REST/账户 metadata 不能注入执行事实。E51 未锚定前复权不成交，E52 指数只作
-研究；未发布 E40 不参与。缺事实明确拒绝，不填零、查原生备用表或重建 R01。
+真实依赖为底座接受的E50 CNY/原量到整数份额、E70 raw依据/精确手转份、稳定历史
+身份、日历、日期规则、状态、费用/公司行动和研究可靠知识/生效时间。AcceptedRunPlan/
+FormalProvider/E50/E70端口已经实现并隔离验证，REST/account metadata不能注入执行事实。
+E51未锚定前复权不成交、E52指数只研究、未发布E40不参与。缺事实拒绝，不填零、
+查原生备用表或重建R01；未自行进入P01/C01。
