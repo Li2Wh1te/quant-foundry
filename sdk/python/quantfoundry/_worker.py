@@ -69,13 +69,13 @@ class _Host:
         self.callback_metrics = dict(count=0, seconds=0.0, by_kind={})
         total = spec['data_budget_bytes']
         self.packet_bytes = min(total // 8, 64*1024*1024)
-        cache_bytes = max(1, self.packet_bytes//8)
+        cache_bytes = max(1, self.packet_bytes//8, min(32*1024*1024,total//32))
         # The native source retains at most three packet buffers. Strategy
         # windows have a separate credit; equating the whole window to one
         # Arrow packet incorrectly rejected multi-batch cross sections.
         data_grant = total - 3*self.packet_bytes
         view_bytes = min(_native.MAX_VIEW_BYTES,
-                         data_grant - cache_bytes - 2*self.packet_bytes - 2*1024*1024)
+                         data_grant - 4*cache_bytes - 2*self.packet_bytes - 2*1024*1024)
         if view_bytes <= 0:
             raise _error('RESOURCE_LIMIT', '数据窗口和 IPC 未获得足够的完整运行预算')
         self.session = _DataSession(SimpleNamespace(channel=SimpleNamespace(arrow_budget=self.packet_bytes)),
@@ -133,6 +133,7 @@ class _Host:
     def close(self):
         self.session.cache.clear()
         self.session.cache_size = 0
+        self.session.window, self.session.window_size = None, 0
         self.callbacks.clear()
 
 def _run_module(module, spec, *, market_routes=None, research_routes=None, cancellation=None, _seeded=False, _progress=None):

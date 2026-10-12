@@ -169,7 +169,11 @@ class Provider:
             cache_rows=100000,
             cache_bytes=64 * 1024**2,
             cancelled=stopped.is_set,
-            replay_window_ns=5_000_000 if self.load.ticks else DAY,
+            # B1 fills the same 10k row credit with two 5k-security sessions.
+            # Rust still clips strategy visibility and every physical read
+            # retains CurrentStore gates. Time chunking creates no source copy.
+            replay_window_ns=(5_000_000 if self.load.ticks else
+                              2*DAY if self.load.name == 'B1' else DAY),
             replay_cache_rows=20000,
             **({"calendar": self.spec["calendar"]} if kind is HourlyGateway else {}),
         )

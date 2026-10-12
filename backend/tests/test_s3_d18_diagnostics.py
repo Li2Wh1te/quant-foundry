@@ -30,7 +30,7 @@ from app.data_store.schema import fingerprint
 from tests.test_s3_data_gateway import database, limits, store, formal
 from fixtures import Load, batches, dataset, template, facts
 from strategies import MOMENTUM
-from support_sdk import ipc_spec
+from support_sdk import ipc_spec, spec
 from s3_runservice_suite import account_payload
 from quantfoundry._transport import Channel
 from quantfoundry._worker import _run_module
@@ -39,9 +39,38 @@ from quantfoundry.data import _MarketRoute
 pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1', reason='isolated PG required')
 
 
+def test_fact_page_keeps_every_wire_value_and_distinct_side_commissions():
+    load=Load('fact-wire-diagnostic',30,3)
+    packet=template(load)
+    commissions={side:dict(commission_rate='0',minimum_commission='1',settlement_scale=2,rounding='half_up')
+                 for side in ('buy','sell')}
+    for calendar_row in packet['calendar']:
+        page=facts(load,calendar_row,3,11,commissions)
+        expected=[]
+        for security in load.universe[3:14]:
+            row=deepcopy(spec(days=1,securities=('S0000.SH',))['facts'][0])
+            row['instrument']['security']=row['day']['security']=security
+            row['day'].update(date=calendar_row['date'],session=calendar_row['session']['key'])
+            row['day']['listing'].update(first_trading_date='2010-01-01',verified_through='2030-12-31')
+            from fixtures import MODEL
+            row['origin']['reference']=MODEL
+            row['disposal_settlement_date']=calendar_row['date']
+            for side in ('buy','sell'):
+                row[side+'_fees'].update(synthetic_model=MODEL,**commissions[side])
+            expected.append(row)
+        assert json.dumps(page,sort_keys=True)==json.dumps(dict(
+            session=calendar_row['session']['key'],facts=expected,next_offset=14),sort_keys=True)
+        with pytest.raises(TypeError):page['facts'][0]['day']['listing']['first_trading_date']='future'
+        with pytest.raises(TypeError):page['facts'][0]['permissions']['buy']=False
+    asymmetric=dict(commissions,sell=dict(commissions['sell'],minimum_commission='9'))
+    page=facts(load,packet['calendar'][0],0,30,asymmetric)
+    assert all(row['buy_fees']['minimum_commission']=='1' and row['sell_fees']['minimum_commission']=='9'
+               for row in page['facts'])
+
+
 def test_b1_actual_currentstore_full_5000_scope_diagnostic(formal, tmp_path):
     from benchmark import Provider
-    load = Load('B1-admission-diagnostic', 5000, 2)
+    load = Load('B1', 5000, 2)
     spec = dataset(load)
     packet = template(load)
     formal.limits = replace(formal.limits, file_rows=10000)
@@ -54,10 +83,12 @@ def test_b1_actual_currentstore_full_5000_scope_diagnostic(formal, tmp_path):
     provider = Provider(formal, load, '1d', process, {})
     config = deepcopy(packet['config'])
     config['parameters'].update(securities=load.universe)
-    work = AcceptedWork('isolated-owner', config, MOMENTUM, WorkerLimits(),
+    work = AcceptedWork('isolated-owner', config, MOMENTUM,
+        WorkerLimits(cpu_millis=2000,memory_bytes=5*1024**3,wall_seconds=3600),
         dict(account_snapshot=dict(fee_schedule=account_payload())))
     assert provider.check(work) == packet['calendar_reference']
     bound = provider.binding(work, Claim('b1-scope-diagnostic','token',1), Event())
+    assert bound.gateway.replay_window_ns == 2*24*60*60*10**9
     endpoint = tmp_path/'data.sock'
     listener = socket.socket(socket.AF_UNIX);listener.bind(str(endpoint));listener.listen(1)
     bound.spec['source']['socket_path'] = str(endpoint)
@@ -70,7 +101,14 @@ def test_b1_actual_currentstore_full_5000_scope_diagnostic(formal, tmp_path):
         except BaseException as error:
             errors.append(error)
     thread = Thread(target=peer,daemon=True);thread.start()
-    source = MOMENTUM.replace("    ordered=frame.sort_values", "    assert len(frame)==c.state.calls*5000\n    ordered=frame.sort_values")
+    source = 'from quantfoundry.data import _ACTIVE as _read_active\n' + MOMENTUM.replace(
+        "    ordered=frame.sort_values",
+        "    assert len(frame)==c.state.calls*5000\n"
+        "    assert int(frame['time_ns'].max())<=c.now_ns\n"
+        "    session=_read_active.get().session\n"
+        "    assert session.window_size>0\n"
+        "    assert session.window_size+session.cache_size<=session.cache_bytes\n"
+        "    ordered=frame.sort_values")
     module = SimpleNamespace();exec(compile(source,'diagnostic_strategy.py','exec'),module.__dict__)
     result = None
     try:
@@ -79,7 +117,8 @@ def test_b1_actual_currentstore_full_5000_scope_diagnostic(formal, tmp_path):
         assert summary['outcome']['status'] == 'succeeded', (summary['outcome'],[(type(e).__name__,str(e)[:500]) for e in errors])
         assert summary['progress']['completed_events'] == 10000
         assert result._callback_metrics['by_kind']['handle_data']['count'] == 2
-        assert 0 < bound.gateway.stats['cache_rows'] <= 10000
+        assert 0 <= bound.gateway.stats['cache_rows'] <= 10000
+        assert bound.gateway.stats['storage_rows'] >= 10000
     finally:
         if result is not None:result.close()
         listener.close();thread.join(5);bound.gateway.close(bound.context)

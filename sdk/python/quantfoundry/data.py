@@ -20,6 +20,7 @@ from pandas import DataFrame
 from . import _native
 from .numeric import nanoseconds, _text
 from ._transport import TransportError
+from ._immutable import frozen_json
 
 TimeLike = datetime | str | int
 Frequency = Literal['1d', '1m', '5m', '15m', '30m', '60m', 'tick']
@@ -131,7 +132,10 @@ class _DataSession:
         # conversion. Cache and two IPC buffers must also fit the host's share
         # of the complete run budget; an enlarged view needs an explicit grant.
         packet_bytes = min(max_bytes, getattr(getattr(client, 'channel', None), 'arrow_budget', 64*1024*1024))
-        required = max_bytes + cache_bytes + 2*packet_bytes + 2*1024*1024
+        # Four cache credits include the retained private frame, caller output,
+        # and bounded concat/tail temporaries. This is a split of the existing
+        # run grant, never an extra memory allowance.
+        required = max_bytes + 4*cache_bytes + 2*packet_bytes + 2*1024*1024
         if run_data_budget_bytes is None:
             if max_bytes > 64*1024*1024:
                 raise _error('RESOURCE_LIMIT', '扩大研究窗口必须明确分配全 run 的数据预算')
@@ -149,6 +153,7 @@ class _DataSession:
         self.calendar = json.loads(calendar_text)
         self.max_rows, self.max_bytes, self.cache_bytes = max_rows, max_bytes, cache_bytes
         self.cache, self.cache_size = {}, 0
+        self.window, self.window_size = None, 0
         self.batch_rows = 1024
         self.units, self.limitations = {}, []
 
@@ -158,6 +163,7 @@ class _DataSession:
         except TransportError as error:
             self.cache.clear()
             self.cache_size = 0
+            self.window, self.window_size = None, 0
             raise _error(error.code, error.message, error.operation, error.scope) from None
 
     def check(self):
@@ -167,16 +173,42 @@ class _DataSession:
         self.batch_rows = response.body['limits']['batch_rows']
         return _json(response.body.get('context'))
 
-    def stream(self, binding, request, view, *, research=False):
+    def cache_value(self, key, encoded):
+        size = len(encoded.encode())
+        if self.window_size + size > self.cache_bytes:
+            return
+        if len(self.cache) >= 32 or self.cache_size + self.window_size + size > self.cache_bytes:
+            self.cache.clear()
+            self.cache_size = 0
+        if key not in self.cache:
+            self.cache[key] = encoded
+            self.cache_size += size
+
+    def stream(self, binding, request, view, *, research=False, bounded_delta=False):
         result = self.call('open_stream', dict(binding=binding, request=request, max_rows=min(self.batch_rows, self.max_rows)))
         stream_id = result.body.get('stream_id')
         if type(stream_id) is not str or not 0 < len(stream_id.encode()) <= 128:
             raise _error('INVALID_CONTRACT', '数据流标识无效')
+        delta_credit=bounded_delta if isinstance(bounded_delta,list) else [0,0]
         try:
             while True:
                 batch = self.call('next', dict(stream_id=stream_id))
                 if batch.status == 'eof':
                     break
+                if bounded_delta:
+                    rows = batch.body.get('rows')
+                    if (type(rows) is not int or not 0 <= rows <= min(self.batch_rows, self.max_rows)
+                            or batch.body.get('schema_id') != 'qf.market.v1'):
+                        raise _error('INVALID_CONTRACT', '增量批次行数或布局标识无效')
+                    delta_credit[0]+=rows
+                    delta_credit[1]+=6*len(batch.payload)+4096*rows
+                    if delta_credit[0]>self.max_rows or delta_credit[1]>min(self.max_bytes,self.cache_bytes):
+                        # Close a legitimately abandoned stream before native
+                        # admission fails. Retry only the original bounded
+                        # count request; data/quality errors remain terminal.
+                        self.call('close_stream',dict(stream_id=stream_id))
+                        view.reset()
+                        return False
                 self.limitations.extend(v for v in batch.body.get('limitations', ()) if v not in self.limitations)
                 if research:
                     for name, (_, unit) in batch.body['fields'].items():
@@ -190,6 +222,7 @@ class _DataSession:
                         elif f in ('interval_start_ns', 'interval_end_ns'):
                             self.units[f] = batch.body['time_unit']
                 (view.push_research if research else view.push_market)(_json(batch.body), batch.payload)
+            return True
         except BaseException:
             # A native decode/budget failure is terminal, and must release the
             # parent stream/locks immediately, without relying on Python GC.
@@ -292,16 +325,22 @@ def _frame(rows, columns, *, limitations=(), requested=None, units=None, adjustm
     frame = DataFrame(rows, columns=columns, dtype=object)
     if 'time_ns' in columns:
         frame['time_ns'] = frame['time_ns'].astype('int64')
+    return _frame_metadata(frame,limitations=limitations,requested=requested,units=units,adjustment=adjustment)
+
+
+def _frame_metadata(frame, *, limitations=(), requested=None, units=None, adjustment='none'):
     qf = dict(actual_scope=dict(start_ns=None if frame.empty else str(int(frame['time_ns'].min())),
         end_ns=None if frame.empty else str(int(frame['time_ns'].max())),
         securities=[] if frame.empty else sorted(frame['security'].unique().tolist())),
         limitations=list(dict.fromkeys(limitations)), requested_scope=requested or {},
         units=units or {}, adjustment=adjustment, precision='decimal_original', coverage='observed_rows_not_coverage')
-    frame.attrs['qf'] = qf
+    # Pandas repeatedly deep-copies attrs while sorting/selecting/grouping.
+    # Share this owned immutable snapshot, retaining all scopes and values.
+    frame.attrs['qf'] = frozen_json(qf)
     return frame
 
 
-def _market_fetch(active, securities, start, end, count, source, route, fields):
+def _market_fetch(active, securities, start, end, count, source, route, fields, *, bounded_delta=False):
     now = int(active.boundary['now_ns'])
     requests = []
     # Per-security count must be applied AFTER the complete publication-key
@@ -315,8 +354,11 @@ def _market_fetch(active, securities, start, end, count, source, route, fields):
     if end == now:
         requests.append(dict(securities=securities, fields=fields, frequency=source,
             start_ns=str(now), end_ns=str(now), count_per_security=None, adjustment='none'))
+    delta_credit=[0,0] if bounded_delta else False
     for request in requests:
-        active.session.stream(route.binding, request, active.view)
+        if active.session.stream(route.binding, request, active.view,bounded_delta=delta_credit) is False:
+            return False
+    return True
 
 
 def _research_fetch(active, kind, securities, fields, at):
@@ -351,6 +393,46 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
     if not securities:
         return _frame([], columns, requested=request, adjustment=adjustment)
     dependencies = active.session.check()
+    window_key=(tuple(securities),tuple(fields),frequency,adjustment,count,dependencies)
+    window=active.session.window
+    if (window is not None and window[0]==window_key and window[1]==end
+            and window[3]==_json(active.boundary)):
+        return window[2].copy(deep=True)
+    incremental=(count is not None and adjustment=='none' and frequency!='tick'
+        and set(fields)<=set(PRICE_FIELDS) and frequency in active.session.market_routes
+        and end==int(active.boundary['now_ns']) and window is not None
+        and window[0]==window_key and window[1]<end
+        and end-window[1]<=count*(86400*10**9 if frequency=='1d' else int(frequency[:-1])*60*10**9))
+    if incremental:
+        route=active.session.market_routes[frequency]
+        active.view.reset()
+        active.session.units,active.session.limitations={},[]
+        completed=_market_fetch(active,securities,window[1]+1,end,None,frequency,route,list(fields),bounded_delta=True)
+        if completed:
+            delta_request=dict(request,start_ns=str(window[1]+1),count_per_security=None)
+            raw=active.view.prices_json(_json(delta_request),frequency,'[]')
+            new_rows=json.loads(raw)
+            for row in new_rows:
+                for field in fields:
+                    if row[field] is not None:row[field]=Decimal(row[field])
+            delta=_frame(new_rows,columns)
+            combined=pd.concat([window[2],delta],ignore_index=True)
+            combined=combined.sort_values(['security','time_ns'],kind='stable')
+            selected=combined.groupby('security',sort=False).tail(count)
+            scope_units=dict(window[2].attrs['qf']['units'])
+            scope_units.update(active.session.units)
+            selected.reset_index(drop=True,inplace=True)
+            frame=_frame_metadata(selected,requested=request,adjustment=adjustment,
+                units=scope_units,limitations=(*window[2].attrs['qf']['limitations'],*active.session.limitations))
+            # Free merge temporaries before retaining another private frame;
+            # four conservative cache credits cover the peak above.
+            del combined,selected,delta,new_rows,raw
+            _short_window(frame,securities,count)
+            if active.session.check()!=dependencies:
+                raise _error('DATA_CHANGED','滚动窗口发布前依赖状态发生变化')
+            _retain_window(active.session,window_key,end,frame)
+            return frame
+        active.session.window,active.session.window_size=None,0
     key = ('price', _json(active.boundary), _json(request), dependencies)
     encoded = active.session.cache.get(key)
     if encoded is None:
@@ -394,11 +476,7 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
         del raw
         dependencies = active.session.check()
         key = ('price', _json(active.boundary), _json(request), dependencies)
-        if len(encoded.encode()) <= active.session.cache_bytes:
-            if len(active.session.cache) >= 32 or active.session.cache_size+len(encoded.encode()) > active.session.cache_bytes:
-                active.session.cache.clear(); active.session.cache_size = 0
-            active.session.cache[key] = encoded
-            active.session.cache_size += len(encoded.encode())
+        active.session.cache_value(key, encoded)
     stored = json.loads(encoded)
     rows = stored['rows']
     for row in rows:
@@ -411,9 +489,27 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
         limitations=(*stored['limitations'], 'current_revision_not_historical_snapshot', 'research_prices_are_not_matching_prices'),
         units={f: stored['units'][f] for f in fields if f in stored['units']})
     if count is not None:
-        counts = frame.groupby('security').size().to_dict()
-        frame.attrs['qf']['short_window'] = {s: counts.get(s, 0) for s in securities if counts.get(s, 0)<count}
+        _short_window(frame,securities,count)
+        if adjustment=='none' and frequency!='tick' and frequency in active.session.market_routes and set(fields)<=set(PRICE_FIELDS) and end==int(active.boundary['now_ns']):
+            window_key=(tuple(securities),tuple(fields),frequency,adjustment,count,dependencies)
+            _retain_window(active.session,window_key,end,frame)
     return frame
+
+
+def _short_window(frame,securities,count):
+    counts=frame.groupby('security').size().to_dict()
+    frame.attrs['qf']=frozen_json(dict(frame.attrs['qf'],short_window={s:counts.get(s,0) for s in securities if counts.get(s,0)<count}))
+
+
+def _retain_window(session,key,end,frame):
+    size=int(frame.memory_usage(index=True,deep=True).sum())+len(_json(frame.attrs['qf']).encode())+32768
+    if size>session.cache_bytes:
+        session.window,session.window_size=None,0
+        return
+    # Own column arrays: public DataFrame edits cannot corrupt later queries.
+    retained=frame.copy(deep=True)
+    session.cache.clear();session.cache_size=0
+    session.window=(key,end,retained,_json(_active().boundary));session.window_size=size
 
 
 def get_current_data(securities: Sequence[str] | None = None) -> Mapping[str, CurrentQuote]:
@@ -485,9 +581,7 @@ def get_current_data(securities: Sequence[str] | None = None) -> Mapping[str, Cu
     rows = json.loads(encoded)
     dependencies = active.session.check()
     cache_key = ('current', _json(active.boundary), _json(securities), dependencies)
-    if active.session.cache_size+len(encoded.encode()) <= active.session.cache_bytes and len(active.session.cache)<32:
-        active.session.cache[cache_key] = encoded
-        active.session.cache_size += len(encoded.encode())
+    active.session.cache_value(cache_key, encoded)
     return _quotes(rows)
 
 
@@ -532,12 +626,7 @@ def _research(kind, securities, fields, as_of, filters=(), order_by=(), limit=10
         encoded = active.view.research_json(_json(request))
         dependencies = active.session.check()
         cache_key = ('research', _json(active.boundary), _json(request), dependencies)
-        size = len(encoded.encode())
-        if size <= active.session.cache_bytes:
-            if len(active.session.cache)>=32 or active.session.cache_size+size>active.session.cache_bytes:
-                active.session.cache.clear(); active.session.cache_size = 0
-            active.session.cache[cache_key] = encoded
-            active.session.cache_size += size
+        active.session.cache_value(cache_key, encoded)
     rows = json.loads(encoded)
     units = {}
     for row in rows:

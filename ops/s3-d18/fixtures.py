@@ -127,21 +127,23 @@ def template(load):
 
 
 def facts(load, calendar_row, offset, maximum, commissions):
+    from quantfoundry._immutable import frozen_json
     seed = spec(days=1, securities=("S0000.SH",))["facts"][0]
+    # One owned template per response; the wire still includes every fact.
+    # Freeze shared fields so a row cannot modify another security's facts.
+    seed['day'].update(date=calendar_row['date'],session=calendar_row['session']['key'])
+    seed['day']['listing'].update(first_trading_date='2010-01-01',verified_through='2030-12-31')
+    seed['origin']['reference']=MODEL
+    seed['disposal_settlement_date']=calendar_row['date']
+    for side in ('buy','sell'):
+        # The synthetic seed aliases both sides. Own each actual commission
+        # separately; asymmetric rates must not overwrite the other side.
+        seed[side+'_fees']=dict(seed[side+'_fees'],synthetic_model=MODEL,**commissions[side])
+    common=frozen_json(seed)
     result = []
     for security in load.universe[offset : offset + maximum]:
-        row = deepcopy(seed)
-        row["instrument"]["security"] = row["day"]["security"] = security
-        row["day"].update(
-            date=calendar_row["date"], session=calendar_row["session"]["key"]
-        )
-        row["day"]["listing"].update(
-            first_trading_date="2010-01-01", verified_through="2030-12-31"
-        )
-        row["origin"]["reference"] = MODEL
-        row["disposal_settlement_date"] = calendar_row["date"]
-        for side in ("buy", "sell"):
-            row[side + "_fees"].update(synthetic_model=MODEL, **commissions[side])
+        row=dict(common,instrument=dict(common['instrument'],security=security),
+                 day=dict(common['day'],security=security))
         result.append(row)
     next_offset = offset + len(result)
     return dict(

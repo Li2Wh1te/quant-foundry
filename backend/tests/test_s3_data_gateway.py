@@ -675,43 +675,48 @@ def test_pre_d04_signed_cursor_remains_valid_for_json_and_arrow(formal):
         assert caught.value.code=='INVALID_CURSOR'
 
 def test_new_dependency_quality_capture_is_one_snapshot(formal,monkeypatch):
+    from sqlalchemy import event
     spec,gateway,ctx=setup(formal)
     other=contract('gateway_other'); formal.register(other)
     gateway.bindings['other']=binding(other,'other')
     gateway.declare('market',ctx)
     with gateway._state(('other',)) as (states,_):
         old_other=states['other']
-    original=formal.catalog.dataset
     changed=False
-    def dataset(name,c=None):
+    def after_metadata(c,cursor,statement,parameters,execution_context,executemany):
         nonlocal changed
         assert c is not None, 'capture must not open another connection'
-        if name==other.name and not changed:
+        if statement.startswith('SELECT d.generation,d.schema_id,d.rule,') and parameters.get('d')==other.name and not changed:
             changed=True
             with formal.catalog.engine.begin() as writer:
                 for target in (spec,other):
                     issue=Issue('quality','test','QUALITY_CHANGED',fingerprint('changed'),{}, {})
                     formal.catalog.change_issues(writer,target.name,(issue,),{})
-        return original(name,c)
-    monkeypatch.setattr(formal.catalog,'dataset',dataset)
-    gateway.declare('other',ctx)
+    event.listen(formal.catalog.engine,'after_cursor_execute',after_metadata)
+    try:
+        gateway.declare('other',ctx)
+    finally:
+        event.remove(formal.catalog.engine,'after_cursor_execute',after_metadata)
     assert changed and ctx.dependencies['other']==old_other
     error('DATA_CHANGED',lambda:gateway.check(ctx))
 
 def test_dependency_capture_uses_one_total_time_budget_and_releases_locks(formal,monkeypatch):
+    from sqlalchemy import event
     spec,gateway,ctx=setup(formal)
     other=contract('gateway_other'); formal.register(other)
     gateway.bindings['other']=binding(other,'other')
     formal.limits=replace(formal.limits,query_timeout_ms=250)
-    original=formal.catalog.dataset
-    def slow(name,c=None):
-        c.execute(text('SELECT pg_sleep(0.15)'))
-        return original(name,c)
-    monkeypatch.setattr(formal.catalog,'dataset',slow)
+    def slow_metadata(c,cursor,statement,parameters,execution_context,executemany):
+        if statement.startswith('SELECT d.generation,d.schema_id,d.rule,'):
+            c.execute(text('SELECT pg_sleep(0.15)'))
     def capture():
         with gateway._state(('market','other')):
             pytest.fail('two individually short queries cannot reset the total budget')
-    error('RESOURCE_LIMIT',capture,'QUERY_TIMEOUT')
+    event.listen(formal.catalog.engine,'before_cursor_execute',slow_metadata)
+    try:
+        error('RESOURCE_LIMIT',capture,'QUERY_TIMEOUT')
+    finally:
+        event.remove(formal.catalog.engine,'before_cursor_execute',slow_metadata)
     for target in (spec,other):
         with formal.locks.writer(target.name,timeout_ms=100) as guard:
             with guard.commit(timeout_ms=100):

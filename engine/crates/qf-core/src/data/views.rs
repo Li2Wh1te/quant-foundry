@@ -435,14 +435,21 @@ impl ReadView {
                 {
                     return Err(invalid("原价格精确表示无效"));
                 }
-                values.insert(field.into(), json!(value));
+                // Nullable unrequested columns need no tree entry. All source
+                // values are still validated; public getters retain explicit
+                // nulls and the existing conservative reservation is unchanged.
+                if let Some(value) = value {
+                    values.insert(field.into(), json!(value));
+                }
             }
             for field in ["quantity", "bid_quantity", "ask_quantity"] {
                 let value = integer(&input, field, row)?;
                 if value.is_some_and(|n| n < 0) {
                     return Err(invalid("份额不能为负"));
                 }
-                values.insert(field.into(), json!(value.map(|n| n.to_string())));
+                if let Some(value) = value {
+                    values.insert(field.into(), json!(value.to_string()));
+                }
             }
             values.insert("kind".into(), json!(kind));
             values.insert("channel".into(), json!(key.identity.channel));
@@ -1099,7 +1106,7 @@ impl ReadView {
             for (field, maximum) in [("high", true), ("low", false)] {
                 let values: Vec<&str> = rows
                     .iter()
-                    .filter_map(|r| r.values[field].as_str())
+                    .filter_map(|r| r.values.get(field).and_then(Value::as_str))
                     .collect();
                 let value = if maximum {
                     values.iter().max_by(|a, b| compare_decimal(a, b))
@@ -1111,7 +1118,7 @@ impl ReadView {
             let quantity =
                 rows.iter()
                     .try_fold(Some(0_i64), |total, r| -> QfResult<Option<i64>> {
-                        match (total, r.values["quantity"].as_str()) {
+                        match (total, r.values.get("quantity").and_then(Value::as_str)) {
                             (Some(a), Some(b)) => a
                                 .checked_add(b.parse::<i64>().map_err(|_| invalid("量无效"))?)
                                 .map(Some)
@@ -1126,7 +1133,7 @@ impl ReadView {
                 && rows.iter().all(|r| {
                     ["open", "high", "low", "close"]
                         .iter()
-                        .all(|f| !r.values[*f].is_null())
+                        .all(|f| r.values.get(*f).is_some_and(|value| !value.is_null()))
                 })
                 && rows
                     .windows(2)

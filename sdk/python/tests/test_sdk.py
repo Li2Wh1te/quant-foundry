@@ -35,6 +35,37 @@ class SDKTests(unittest.TestCase):
         self.assertEqual(report['cleanup_errors'],[])
         return report
 
+    def test_query_metadata_preserves_json_and_decimal_through_pandas_copies(self):
+        from copy import deepcopy
+        seen=[]
+        def bars(c,data):
+            frame=get_price(['A.SH','B.SH'],count=2,fields=['close'])
+            meta=frame.attrs['qf']
+            before=json.dumps(meta,sort_keys=True)
+            copied=frame.copy(deep=True).sort_values(['security','time_ns'])
+            grouped=copied.groupby('security',sort=True)['close'].agg(['size','first','last'])
+            self.assertEqual(json.dumps(copied.attrs['qf'],sort_keys=True),before)
+            self.assertEqual(meta['actual_scope']['securities'],['A.SH','B.SH'])
+            self.assertEqual(meta['requested_scope']['count_per_security'],2)
+            self.assertEqual(meta['short_window'],{'A.SH':1,'B.SH':1} if not seen else {})
+            self.assertTrue(all(isinstance(value,Decimal) for value in copied['close']))
+            self.assertEqual(set(grouped['last']),{Decimal('10')})
+            self.assertIs(deepcopy(meta),meta)
+            for mutate in (lambda:meta.update(extra='future'),
+                           lambda:meta['actual_scope'].__setitem__('end_ns','future'),
+                           lambda:meta['actual_scope']['securities'].append('future'),
+                           lambda:meta.__init__({'future':True}),
+                           lambda:meta['limitations'].clear()):
+                with self.assertRaises(TypeError):mutate()
+            self.assertEqual(json.dumps(meta,sort_keys=True),before)
+            copied.attrs['qf']={'user_annotation':'local only'}
+            self.assertEqual(json.dumps(frame.attrs['qf'],sort_keys=True),before)
+            seen.append(frame)
+        with ipc_spec(spec(days=2)) as (wired,gateway,routes):
+            self.assertSucceeded(self.run_strategy(SimpleNamespace(handle_data=bars),wired,market_routes=routes))
+        self.assertEqual(len(seen),2)
+        self.assertNotEqual(seen[0].attrs['qf']['actual_scope']['end_ns'],seen[1].attrs['qf']['actual_scope']['end_ns'])
+
     def test_host_window_is_separate_from_arrow_packets_and_stays_within_run_grant(self):
         from quantfoundry._worker import _Host
         packet = spec(days=1)
@@ -51,6 +82,114 @@ class SDKTests(unittest.TestCase):
         with self.assertRaises(ContractError) as invalid:
             _Host(SimpleNamespace(), packet, {}, {})
         self.assertEqual(invalid.exception.code, 'RESOURCE_LIMIT')
+
+    def test_rolling_window_matches_full_queries_and_cannot_be_poisoned_by_user_edits(self):
+        source=spec(days=7)
+        # Distinct prices, a missing B bar, and legitimate empty warmup make
+        # retaining stale rows or count-slicing the wrong symbol observable.
+        for event in source['source']['events']:
+            day=int(event['event']['session'][1:])
+            event['event']['close']=str(10+day+(1 if event['event']['security']=='B.SH' else 0))
+            event['event']['high']=str(int(event['event']['close'])+1)
+        source['source']['events']=[e for e in source['source']['events']
+            if not (e['event']['session']=='S3' and e['event']['security']=='B.SH')]
+        outputs=[]; requests=[]; counts=[]
+        for rolling in (False,True):
+            frames=[]
+            def bars(c,data):
+                session=READ_ACTIVE.get().session
+                if not rolling:
+                    session.window,session.window_size=None,0
+                frame=get_price(['B.SH','A.SH'],count=3,fields=['close'])
+                frames.append((frame.to_dict('records'),json.dumps(frame.attrs['qf'],sort_keys=True)))
+                if len(frames)==1:
+                    # Copies of materialized, exact prices are editable. The
+                    # next query must still read the engine's original values.
+                    frame.loc[:,'close']=Decimal('999')
+                    frame.loc[:,'time_ns']=0
+                    frame.attrs['qf']={'user':'edited'}
+                    before=gateway.calls['open_stream']
+                    reread=get_price(['B.SH','A.SH'],count=3,fields=['close'])
+                    self.assertEqual(reread.to_dict('records'),frames[-1][0])
+                    self.assertEqual(json.dumps(reread.attrs['qf'],sort_keys=True),frames[-1][1])
+                    self.assertEqual(gateway.calls['open_stream'],before)
+                if len(frames)==4:
+                    # Another request cannot cause the shared cache grant to
+                    # count the retained rolling frame twice or grow unbounded.
+                    get_price('A.SH',count=1)
+                self.assertLessEqual(session.cache_size+session.window_size,session.cache_bytes)
+                if len(frames)<7:
+                    self.assertTrue(order_target('A.SH',2).accepted)
+            with ipc_spec(source) as (wired,gateway,routes):
+                result=self.run_strategy(SimpleNamespace(handle_data=bars),wired,market_routes=routes)
+                report=self.assertSucceeded(result)
+                outputs.append((frames,page(result,'trades')['items'],report['results']['performance']))
+                requests.append(gateway.requests)
+                counts.append(gateway.calls['check'])
+        self.assertEqual(outputs[0],outputs[1])
+        self.assertTrue(any(q['count_per_security'] is None and q['start_ns'] is not None
+            and int(q['end_ns'])>int(q['start_ns']) for q in requests[1]))
+        self.assertTrue(any(q['count_per_security']==3 for q in requests[0]))
+        self.assertGreaterEqual(counts[1],counts[0])
+
+    def test_rolling_delta_over_budget_closes_stream_and_retries_original_count(self):
+        source=spec(days=1,frequency='1m',securities=('A.SH',))
+        # Many distinct completed bars become visible between two actual
+        # callbacks. Count=1 is valid even though the optional delta is larger
+        # than its credit; the fallback must not make the run fail.
+        from copy import deepcopy
+        first=deepcopy(source['source']['events'][0])
+        last=deepcopy(source['source']['events'][1])
+        first_ns=int(first['event']['interval_end_ns'])
+        last_ns=int(last['event']['interval_end_ns'])
+        hidden=[]
+        for index in range(100):
+            row=deepcopy(first)
+            at=first_ns+1+index
+            row['event'].update(interval_start_ns=str(at-1),interval_end_ns=str(at),close='12')
+            row['event']['identity'].update(sequence=str(1000+index),stable_input_sequence=str(1000+index))
+            hidden.append(row)
+        seen=[]
+        def bars(c,data):
+            session=READ_ACTIVE.get().session
+            # A smaller existing cache credit is enough for one retained row.
+            session.cache_bytes=40000
+            frame=get_price('A.SH',count=1)
+            seen.append(frame.to_dict('records'))
+        source['source']['events']=[first,last]
+        with ipc_spec(source,batch_rows=1) as (wired,gateway,routes):
+            # Engine stream stays two bars; history adds intervening records
+            # only after its initial source open has selected the two events.
+            original=bars
+            def callback(c,data):
+                if not seen:gateway.events.extend(hidden)
+                original(c,data)
+            report=self.assertSucceeded(self.run_strategy(SimpleNamespace(handle_data=callback),wired,market_routes=routes))
+            self.assertEqual(report['progress']['completed_events'],2)
+            self.assertGreaterEqual(gateway.calls['close_stream'],1)
+            self.assertEqual(seen[-1],[dict(security='A.SH',time_ns=last_ns,close=Decimal('10'))])
+            self.assertTrue(any(q['count_per_security']==1 and q['end_ns']==str(last_ns-1) for q in gateway.requests))
+
+    def test_optional_delta_rejects_bad_header_before_budget_fallback(self):
+        from quantfoundry.data import _DataSession
+        for bad in (dict(rows=True,schema_id='qf.market.v1'),
+                    dict(rows=10001,schema_id='qf.market.v1'),
+                    dict(rows=1,schema_id='unknown')):
+            with self.subTest(bad=bad):
+                calls=[]
+                def call(op,body):
+                    calls.append(op)
+                    return SimpleNamespace(body={'stream_id':'test'} if op=='open_stream' else bad,
+                        status='batch',payload=b'x'*2048)
+                session=_DataSession(SimpleNamespace(call=call,channel=SimpleNamespace(closed=False,arrow_budget=4096)),
+                    universe=('A.SH',),frequency='1d',market_routes={},max_rows=10,
+                    max_bytes=4096,cache_bytes=1024)
+                view=_native.ReadView(json.dumps(dict(now_ns='123',market_through=None)),10,4096)
+                with self.assertRaises(ContractError) as caught:
+                    session.stream('test',dict(fields=['close']),view,bounded_delta=True)
+                self.assertEqual(caught.exception.code,'INVALID_CONTRACT')
+                self.assertEqual(calls,['open_stream','next','close_stream'])
+                view.expire()
 
     def test_trusted_progress_is_live_bounded_and_finishes_with_actual_counters(self):
         progress=[]; callbacks=[]
@@ -331,11 +470,42 @@ class SDKTests(unittest.TestCase):
             def bars(c,d):
                 with self.assertRaises(ContractError) as caught: get_fundamentals(['A.SH'],fields=['revenue'])
                 self.assertEqual(caught.exception.code,'CAPABILITY_UNAVAILABLE')
+                get_price('A.SH',count=1)
+                self.assertIsNotNone(READ_ACTIVE.get().session.window)
                 gateway.changed=True
                 try: get_price('A.SH',count=1)
                 except ContractError: pass
             result=self.run_strategy(SimpleNamespace(handle_data=bars),wired,market_routes=routes)
             self.assertEqual(summary(result)['outcome']['error']['code'],'DATA_CHANGED')
+
+    def test_nullable_market_projection_and_resampling_keep_unknown_as_none(self):
+        from copy import deepcopy
+        from support_sdk import batch
+        source=spec(days=1,frequency='1m',securities=('A.SH',))
+        events=deepcopy(source['source']['events'])
+        fifth=deepcopy(events[-1])
+        fifth['event']['interval_start_ns']=events[-1]['event']['interval_end_ns']
+        fifth['event']['interval_end_ns']=str(int(fifth['event']['interval_start_ns'])+MINUTE)
+        fifth['event']['identity'].update(sequence='5',stable_input_sequence='5')
+        events.append(fifth)
+        events[2]['event'].update(high=None,quantity=None)
+        now=int(events[-1]['event']['interval_end_ns'])+1
+        view=_native.ReadView(json.dumps(dict(now_ns=str(now),market_through=None)),10,128*1024)
+        metadata=dict(schema_id='qf.market.v1',rows=5,time_unit='utc_nanoseconds',
+            price_currency='CNY',quantity_unit='shares',actual_scope=dict(
+                start_ns=events[0]['event']['interval_end_ns'],end_ns=events[-1]['event']['interval_end_ns'],securities=['A.SH']),limitations=[])
+        view.push_market(json.dumps(metadata),batch(events))
+        request=dict(securities=['A.SH'],fields=['high','quantity'],frequency='1m',
+            start_ns=events[0]['event']['interval_start_ns'],end_ns=str(now),count_per_security=None,adjustment='none')
+        rows=json.loads(view.prices_json(json.dumps(request),'1m','[]'))
+        self.assertEqual(rows[2]['high'],None)
+        self.assertEqual(rows[2]['quantity'],None)
+        request.update(frequency='5m',fields=['open','high','low','close','quantity','status'])
+        rows=json.loads(view.prices_json(json.dumps(request),'1m',json.dumps(source['calendar'])))
+        self.assertEqual(len(rows),1)
+        self.assertEqual(rows[0]['status'],'missing')
+        self.assertTrue(all(rows[0][field] is None for field in ('open','high','low','close','quantity')))
+        view.expire()
 
     def test_public_executable_signatures_match_contract(self):
         import quantfoundry.api as api

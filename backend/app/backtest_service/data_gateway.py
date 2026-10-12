@@ -260,27 +260,28 @@ class RunDataGateway:
             checkpoint(query=True)
             binding = self.bindings[name]
             previous = self.context.dependencies.get(name) if self.context else None
-            try:
-                state = self.store.catalog.dataset(binding.spec.name, connection)
-            except DataStoreError as error:
-                if previous is not None and error.code == 'DATASET_MISSING':
-                    raise DataStoreError('DATA_CHANGED') from None
-                raise
+            # One current metadata projection in THIS snapshot. Keep all
+            # readiness, descriptor, restriction and nonempty issue gates;
+            # avoid fetching an unused large descriptor in a separate query.
+            guard = connection.execute(text('SELECT d.generation,d.schema_id,d.rule,'
+                'EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
+                    'WHERE dataset=:d OR dataset IS NULL) AS legacy_restricted,'
+                'EXISTS(SELECT 1 FROM data_store_issues WHERE dataset=:d) AS issues_present,'
+                '(SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e) AS entry_summary '
+                'FROM data_store_datasets d WHERE d.name=:d'),
+                {'d': binding.spec.name, 'e': binding.spec.semantics.get('entry_id')}).mappings().first()
+            if guard is None:
+                raise DataStoreError('DATA_CHANGED' if previous is not None else 'DATASET_MISSING')
+            state = {key:guard[key] for key in ('generation','schema_id','rule')}
             if previous is not None and (previous['generation'] != str(state['generation'])
                     or state['schema_id'] != binding.spec.schema_id or state['rule'] != binding.spec.rule):
                 raise DataStoreError('DATA_CHANGED')
             self.store._spec_current(binding.spec, state)
-            checkpoint(query=True)
+            checkpoint()
             # Read small gate metadata together in THIS snapshot. The EXISTS
             # probe avoids a server-side cursor for an empty issue set; it is
             # never cached and never replaces the bounded, ordered digest when
             # any issue exists. Keep every dependency/check/finalization gate.
-            guard = connection.execute(text('SELECT '
-                'EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
-                    'WHERE dataset=:d OR dataset IS NULL) AS legacy_restricted,'
-                'EXISTS(SELECT 1 FROM data_store_issues WHERE dataset=:d) AS issues_present,'
-                '(SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e) AS entry_summary'),
-                {'d': binding.spec.name, 'e': binding.spec.semantics.get('entry_id')}).mappings().one()
             if guard['legacy_restricted']:
                 if self.context is not None and name in self.context.dependencies:
                     raise DataStoreError('DATA_CHANGED')

@@ -97,7 +97,7 @@ class Gateway:
     def __init__(self, spec, path, *, batch_rows=4, delay_seconds=0, facts_transform=None):
         self.spec,self.path,self.batch_rows=spec,path,batch_rows
         self.events=spec['source']['events']
-        self.calls=Counter(); self.streams={}; self.max_batch=0; self.failure=None; self.changed=False
+        self.calls=Counter(); self.requests=[]; self.streams={}; self.max_batch=0; self.failure=None; self.changed=False
         self.delay_seconds = delay_seconds
         self.facts_transform = facts_transform
         self.stopping = threading.Event()
@@ -129,6 +129,7 @@ class Gateway:
                             dict(code='RESOURCE_LIMIT',operation='data_gateway',message='synthetic stream credit exceeded',scope={})))
                         break
                     query=request.body['request']
+                    self.requests.append(deepcopy(query))
                     selected=[event for event in self.events if event['event']['security'] in query['securities']
                         and int(event['event'].get('time_ns',event['event'].get('interval_end_ns'))) <= int(query['end_ns'])
                         and (query['start_ns'] is None or int(event['event'].get('time_ns',event['event'].get('interval_end_ns'))) >= int(query['start_ns']))]
