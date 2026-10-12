@@ -82,6 +82,10 @@ def verify_full_record(record, context):
     assert not record.get("filesystem_probe_substitute")
     assert record["topology"] == "runner_container_to_sibling_workers"
     assert record["resource_budget"] == dict(cpu=4, memory_bytes=8 * 1024**3)
+    assert (
+        record["source"].get("measurement_worktree_dirty") is False
+        and context.get("measurement_worktree_dirty") is False
+    ), "dirty or unknown measurement checkout cannot be reused"
     assert record["source"]["measurement_source"] == context["measurement_source"]
     old, new = record["source"]["build"], context["build"]
     for key in ("native_source", "build_architecture", "python", "rust_compiler"):
@@ -160,11 +164,9 @@ def main():
             args.out,
             dict(
                 reused=True,
-                original_measurement_commit=record["source"]["build"][
-                    "checkout_commit"
-                ],
+                original_measurement_commit=record["source"]["measurement_checkout_commit"],
                 original_measurement_run=record.get("execution", {}).get("ci_run_url"),
-                verified_checkout_commit=manifest["build"]["checkout_commit"],
+                verified_checkout_commit=manifest["measurement_checkout_commit"],
                 measurement_source_sha256=manifest["measurement_source"]["sha256"],
                 record_sha256=digest(args.record.read_bytes()),
                 production_executed=False,
@@ -211,7 +213,11 @@ def main():
         assert (
             digest(args.wheel.read_bytes()) == manifest["wheel"]["sha256"]
         ), "wheel changed after build"
-        save(args.out, dict(build=manifest, measurement_source=sources(native=False)))
+        save(args.out, dict(build=manifest, measurement_source=sources(native=False),
+            measurement_checkout_commit=subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
+            measurement_worktree_dirty=bool(subprocess.check_output(
+                ["git", "status", "--porcelain"], cwd=ROOT, text=True))))
 
 
 if __name__ == "__main__":

@@ -885,6 +885,10 @@ def _main():
         old_engine_comparison="unavailable: final tree physically lacks legacy executable",
         status={},
     )
+    if not smoke:
+        assert evidence["source"].get("measurement_worktree_dirty") is False, (
+            "full measurement requires a clean, identified current checkout"
+        )
     emit(evidence)
     settings = get_settings()
     assert settings.environment == "test" and "test" in settings.database_name

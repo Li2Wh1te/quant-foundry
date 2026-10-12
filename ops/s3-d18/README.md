@@ -25,6 +25,8 @@ QF_S3_FINAL=1 QF_S3_RUNTIME_EVIDENCE="$QF_S3_RELEASE_ROOT/full" bash scripts/tes
 
 输出只有本次 `release.json`、`images.json`、wheel 和 `final-result.json`；不是部署历史台账。
 构建源、测量业务源及 native/wheel SHA 分别校验。算法/schema改变需重测相关负载；纯文档更新可核对源摘要后复用。
+复用 wheel 保留原 `build.checkout_commit`，当前业务/测量提交由
+`measurement_checkout_commit` 单独标识；完整测量与结果复用均拒绝脏/未知工作树状态。
 合成行情只写一份 CurrentStore，不按 run 复制或归档旧输入。结果分片是业务结果；正常 worker/tmp/IPC由 supervisor 自动回收。
 缓存为构建后共享 OS 暖缓存，没有强制清空宿主页缓存。阶段计时有嵌套关系，不能相加当总墙钟。
 `selected_file_bytes` 是正式读取器选中文件预算量，包含重复选中；不是宣称同等物理 SSD I/O。
