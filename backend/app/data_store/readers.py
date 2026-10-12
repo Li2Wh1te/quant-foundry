@@ -26,6 +26,30 @@ from .schema import DatasetSpec, api_value, fingerprint, identifier
 from .values import control_json
 
 
+def _membership_digest(values):
+    """One already typed flat set, within the existing 10k/1MiB contract.
+
+    Generic current metadata retains its 4096-node/depth/byte limits. An IN
+    predicate is not recursive metadata: validate finite chunks using that
+    unchanged encoder, count the complete escaped JSON bytes, and hash every
+    value in order. The cursor carries only the resulting small identity.
+    """
+    state = hashlib.sha256()
+    state.update(b'[')
+    size = 2
+    for start in range(0,len(values),1024):
+        encoded = control_json(values[start:start+1024],max_bytes=1024*1024).encode()[1:-1]
+        if start:
+            state.update(b',')
+            size += 1
+        size += len(encoded)
+        if size > 1024*1024:
+            raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
+        state.update(encoded)
+    state.update(b']')
+    return state.hexdigest()
+
+
 @dataclass(frozen=True)
 class Query:
     partitions: tuple[str, ...] = ('default',)
@@ -61,14 +85,17 @@ class Query:
                 raise DataStoreError('INVALID_VALUE')
         for p in self.partitions:
             identifier(p)
-        for item in self.filters:
+        memberships = {}
+        for i,item in enumerate(self.filters):
             if (type(item) is not tuple or len(item) != 3 or type(item[0]) is not str
                     or item[1] not in ('=', '>=', '<=', '>', '<', 'in')):
                 raise DataStoreError('INVALID_VALUE')
-            if item[1] == 'in' and (type(item[2]) is not tuple or not 1 <= len(item[2]) <= 10000
-                    or any(type(v) not in (str, int) for v in item[2])
-                    or len(control_json(item[2], max_bytes=1024*1024).encode()) > 1024*1024):
-                raise DataStoreError('INVALID_VALUE')
+            if item[1] == 'in':
+                if (type(item[2]) is not tuple or not 1 <= len(item[2]) <= 10000
+                        or any(type(v) not in (str, int) for v in item[2])):
+                    raise DataStoreError('INVALID_VALUE')
+                memberships[i] = _membership_digest(item[2])
+        object.__setattr__(self,'_membership_digests',memberships)
         if self.per_group is not None and (type(self.per_group) is not tuple
                 or len(self.per_group) != 2 or type(self.per_group[0]) is not str
                 or type(self.per_group[1]) is not int or not 1 <= self.per_group[1] <= 100000):
@@ -125,12 +152,31 @@ def _request(spec, query):
     # Existing default queries retain their signed cursor identity across this
     # additive projection change. New variants remain distinct and bound.
     if query.descending or query.filters:
-        request.update(descending=query.descending, filters=query.filters)
+        # Small existing requests keep their exact signed cursor identity.
+        # Large flat predicates bind every original value without embedding
+        # thousands of scalars in the small recursive metadata envelope.
+        filters = tuple((column,operator,dict(flat_membership_count=len(value),
+                    flat_membership_sha256=query._membership_digests[i]))
+                if operator=='in' and len(value)>1024 else (column,operator,value)
+                for i,(column,operator,value) in enumerate(query.filters))
+        request.update(descending=query.descending, filters=filters)
     if query.per_group is not None:
         request['per_group'] = query.per_group
     if query.group_order:
         request['group_order'] = query.group_order
-    return fingerprint(request)
+    try:
+        return fingerprint(request)
+    except DataStoreError as error:
+        if error.code != 'CONTROL_BUDGET_EXCEEDED' or not query._membership_digests:
+            raise
+        # Several smaller or long-string sets can also exceed SMALL metadata
+        # even though each IN set is within its original flat input contract.
+        # Preserve old cursor identities whenever their original encoding fits.
+        request['filters'] = tuple((column,operator,dict(flat_membership_count=len(value),
+                flat_membership_sha256=query._membership_digests[i]))
+            if operator=='in' else (column,operator,value)
+            for i,(column,operator,value) in enumerate(query.filters))
+        return fingerprint(request)
 
 
 def _encode(store, request, generations, last):

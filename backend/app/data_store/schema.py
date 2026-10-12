@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from functools import cached_property
 import base64
 import hashlib
 import json
@@ -104,8 +105,11 @@ class DatasetSpec:
         except (KeyError, TypeError, ValueError, pa.ArrowException):
             raise DataStoreError('REBUILD_REQUIRED') from None
 
-    @property
+    @cached_property
     def schema_id(self) -> str:
+        # Schema, key and the copied string-only semantics are immutable.
+        # Hashing this code-owned descriptor once does not cache any current
+        # catalog, generation, quality or permission state.
         d = self.descriptor()
         del d['rule']
         return fingerprint(d)

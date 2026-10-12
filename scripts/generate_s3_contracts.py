@@ -26,7 +26,7 @@ def rust_wire_stub() -> str:
     selected = {"EventIdentity", "MarketUnits", "Bar", "TradeTick", "QuoteTick", "EventKey",
                 "OrderIntent", "Order", "OrderResult", "Fill", "TradePage", "PositionView",
                 "AccountView", "RunConfigFields", "CostOverrides", "FeeConfig", "DatedFeeComponent",
-                "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
+                "CommissionConfig", "FeeScope", "Instrument", "EffectiveRange", "RunSummary", "RunProgress", "PreflightResponse", "AcceptedRunConfig", "Capabilities",
                 "DependencyState", "DependencyContext", "DataRequest", "ActualScope", "BatchMetadata", "RunScope",
                 "EquityPoint", "UserRecord", "LogRecord", "ResultBatch", "BatchRequest", "TradingSession", "QfError", "CorporateEffect", "CorporateActionEvent", "ExecutionModelDescription", "AnalysisPolicy", "BenchmarkPoint", "PerformanceSummary", "TradeStatistics", "AccountTotals", "OutputNotices", "ShardDescriptor", "ResultManifest"}
     aliases = {"String":"str", "bool":"bool", "u64":"int", "u32":"int", "u16":"int", "i64":"int",
@@ -91,7 +91,7 @@ def rust_wire_stub() -> str:
             if not match: raise ValueError(f"unmapped Rust field {name}: {field}")
             hint = convert(match[2])
             # Config defaults/omitted options are not required request keys.
-            optional = name == "CostOverrides" or (name == "RunConfigFields" and match[1] in {
+            optional = name == "CostOverrides" or (name == "RunSummary" and match[1] == "progress") or (name == "RunConfigFields" and match[1] in {
                 "benchmark", "currency", "reference_calendar", "seed", "participation_rate", "slippage_bps",
                 "risk_free_rate", "annualization_sessions", "result_sampling", "cost_overrides"})
             if optional:

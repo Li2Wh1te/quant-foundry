@@ -35,11 +35,23 @@ atomic terminal/result winner is authoritative. Crash attempts restart only
 after confirming the previous worker is stopped; no exactly-once execution or
 arbitrary Python state restoration promise. Failure/cancel outputs are partial.
 
+Status includes one current `progress` value: `completed_events`,
+`completed_sessions` and exact decimal-string `now_ns`, or null before a report.
+Rust sends bounded updates at most once per second and acknowledges the final
+session counter before sealing success. The trusted parent coalesces database
+writes and flushes the last counter before the terminal winner. Claim/fence,
+lease, cancellation and monotonicity checks apply. Reclaimed attempts start at
+zero; terminal counters cannot be rewritten. `progress_total` remains null when
+the total is unknown, so clients show completed counts without inventing a
+percentage. This is current run state, not a per-event ledger or checkpoint.
+
 Limits: control JSON 1MiB; parameters compact sorted UTF-8 <=64KiB, root container
 depth <=8 and root properties <=128; Arrow IPC <=64MiB per bounded batch; trade
 pages <=10000, cursor <=4096 bytes. Credits bound ResultSink records/bytes; blocked
 writers must unblock on cancel/close. Required result overflow is an error,
 user logs may truncate visibly. Finish writes and recheck dependency/readability
 before authoritative success. D04 owns encoding, D12 scheduling/isolation, D13
-persistence/API, D14 client transport. Those ports have no D01 production
-implementation; `capabilities()` advertises only numerics/shared contracts.
+persistence/API, D14 client transport. The installed SDK and isolated runtime
+implement those paths; the default formal market/rule mapping still refuses
+execution until its accepted data and mapping gaps are resolved. Capabilities
+keep implemented engine behavior separate from formal data availability.

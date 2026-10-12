@@ -687,9 +687,12 @@ def test_complete_membership_is_never_silently_truncated():
 
 def test_native_and_sdk_conversion_peak_fits_explicit_run_data_budget():
     result = subprocess.run([sys.executable, str(Path(__file__).parent/'fixtures'/'research_memory.py')],
-                            check=True, capture_output=True, text=True, timeout=90,
+                            capture_output=True, text=True, timeout=90,
                             env=dict(os.environ, OPENBLAS_NUM_THREADS='1', OMP_NUM_THREADS='1', MKL_NUM_THREADS='1'))
+    assert result.returncode == 0, dict(returncode=result.returncode,
+        stdout=result.stdout[-2000:], stderr=result.stderr[-6000:])
     report = json.loads(result.stdout)
+    assert report['allocated_data_bytes'] == (1024+8+2*64+2)*1024*1024
     assert report['points'] == 100000 and report['window_input_rows'] == 105000
     assert report['replayed_rows'] == 210000
     assert report['peak_rss_bytes'] < report['allocated_data_bytes']

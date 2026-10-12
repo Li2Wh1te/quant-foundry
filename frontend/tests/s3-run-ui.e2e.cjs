@@ -63,6 +63,9 @@ async function waitState(page,id,status){await page.waitForFunction(({id,status}
   const created=await submit(page);if(native)await waitState(page,created,'运行中');await page.getByRole('button',{name:'取消运行',exact:true}).waitFor();await page.getByRole('button',{name:'取消运行',exact:true}).dblclick();await waitState(page,created,'已取消');steps.push('create → preflight → queue/run → cancel; duplicate clicks');
   await page.getByRole('button',{name:'重新运行',exact:true}).click();await page.getByRole('dialog',{name:'按原配置重新预检'}).waitFor();assert.equal(await page.getByLabel('初始资金（CNY）',{exact:true}).inputValue(),config().initial_cash);await check(page);const rerun=await submit(page);assert.notEqual(created,rerun);
   if(native)await waitState(page,rerun,'已完成');else{rows.find(r=>r.run_id===rerun).status='succeeded';await page.getByRole('button',{name:'刷新',exact:true}).click();await waitState(page,rerun,'已完成')}
+  if(native){
+   const response=await context.request.get(manifest.url+`/api/admin/backtests/${rerun}`,{headers:{Authorization:'Bearer '+token}});assert.equal(response.status(),200);const status=await response.json();assert.ok(status.progress_completed>0);assert.equal(status.progress_completed,status.progress.completed_events);assert.ok(status.progress.completed_sessions>0);assert.equal(typeof status.progress.now_ns,'string');await page.getByText(/已处理 .* 条行情事件，完成 .* 个交易会话/).waitFor();steps.push('real Rust event/session counters appear in HTTP and browser without an invented total');
+  }
   steps.push('terminal rerun creates a new run from exact decimal config');
   await page.screenshot({path:path.join(output,'rerun-succeeded-1440.png')});
   await page.goBack();await page.waitForURL(url=>url.searchParams.get('run')===created);await waitState(page,created,'已取消');await page.goForward();await waitState(page,rerun,'已完成');steps.push('browser back/forward restore selected run');

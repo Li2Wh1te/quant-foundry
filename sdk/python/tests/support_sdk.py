@@ -94,11 +94,12 @@ def batch(events):
 
 class Gateway:
     """Test data-only peer for the actual D04 framing and Rust Arrow reader."""
-    def __init__(self, spec, path, *, batch_rows=4, delay_seconds=0):
+    def __init__(self, spec, path, *, batch_rows=4, delay_seconds=0, facts_transform=None):
         self.spec,self.path,self.batch_rows=spec,path,batch_rows
         self.events=spec['source']['events']
-        self.calls=Counter(); self.streams={}; self.max_batch=0; self.failure=None; self.changed=False
+        self.calls=Counter(); self.requests=[]; self.streams={}; self.max_batch=0; self.failure=None; self.changed=False
         self.delay_seconds = delay_seconds
+        self.facts_transform = facts_transform
         self.stopping = threading.Event()
         self.listener=socket.socket(socket.AF_UNIX); self.listener.bind(str(path)); self.listener.listen(1)
         self.thread=threading.Thread(target=self.serve,daemon=True); self.thread.start()
@@ -116,12 +117,19 @@ class Gateway:
                         status,body='error',dict(code='DATA_CHANGED',operation='data_gateway',message='synthetic dependency changed',scope={})
                     else:
                         body=dict(check='unchanged',limits=dict(batch_rows=self.batch_rows),context=dict(scope_id='synthetic-d10-scope',dependencies=[]))
+                elif request.op=='session_facts':
+                    session=request.body['session'];offset=request.body['offset']
+                    selected=[f for f in self.spec['facts'] if f['day']['session']==session]
+                    page=selected[offset:offset+256]
+                    body=dict(session=session,facts=page,next_offset=offset+len(page) if offset+len(page)<len(selected) else None)
+                    if self.facts_transform is not None:body=self.facts_transform(body)
                 elif request.op=='open_stream':
                     if len(self.streams) >= 2:
                         channel.send(Frame(request.run_id,request.request_id,request.op,'error',
                             dict(code='RESOURCE_LIMIT',operation='data_gateway',message='synthetic stream credit exceeded',scope={})))
                         break
                     query=request.body['request']
+                    self.requests.append(deepcopy(query))
                     selected=[event for event in self.events if event['event']['security'] in query['securities']
                         and int(event['event'].get('time_ns',event['event'].get('interval_end_ns'))) <= int(query['end_ns'])
                         and (query['start_ns'] is None or int(event['event'].get('time_ns',event['event'].get('interval_end_ns'))) >= int(query['start_ns']))]
@@ -163,9 +171,9 @@ class Gateway:
         if self.failure is not None: raise self.failure
 
 @contextmanager
-def ipc_spec(source_spec, *, batch_rows=4, delay_seconds=0):
+def ipc_spec(source_spec, *, batch_rows=4, delay_seconds=0, facts_transform=None):
     with tempfile.TemporaryDirectory(prefix='qf-d10-fixture-') as directory:
-        gateway=Gateway(deepcopy(source_spec),Path(directory)/'data.sock',batch_rows=batch_rows, delay_seconds=delay_seconds)
+        gateway=Gateway(deepcopy(source_spec),Path(directory)/'data.sock',batch_rows=batch_rows, delay_seconds=delay_seconds, facts_transform=facts_transform)
         wired=deepcopy(source_spec)
         fields=('price','quantity','bid','ask','bid_quantity','ask_quantity') if wired['config']['frequency']=='tick' else ('open','high','low','close','quantity')
         request=dict(securities=wired['config']['universe'],fields=list(fields),frequency=wired['config']['frequency'],

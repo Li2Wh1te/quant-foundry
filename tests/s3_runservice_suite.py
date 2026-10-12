@@ -41,7 +41,7 @@ from app.backtest_service.accounts.types import AccountProfileStatus
 from app.backtest_service.data_gateway import AuthorizedRun, MARKET_SCHEMA, MarketBinding, RunDataGateway
 from app.backtest_service.models import Run, RunResult
 from app.backtest_service.repository import DatabaseRunRepository, identity
-from app.backtest_service.runtime_contracts import Claim, RuntimeFault
+from app.backtest_service.runtime_contracts import Claim, RuntimeFault, GroupBudget, WorkerLimits
 from app.backtest_service.runtime_services import create_services
 from app.backtest_service.serialization import encoded
 from app.backtest_service.service import RunService, normalize
@@ -215,13 +215,39 @@ class D13Tests(unittest.TestCase):
         cls.original_values = cls.legacy_values()
         if any(not rows for rows in cls.original_values.values()):
             raise AssertionError('D17 historical preservation requires nonempty original samples in every protected relation')
+        # Also upgrade a nonempty previous S3 schema, including its immutable
+        # failed business run; adding progress must not rewrite its old values.
+        cls.migrate('20261012_01')
+        prior_id=uuid4()
+        prior_config=spec(days=1,securities=('A.SH',))['config']
+        prior_config.update(account_id=str(cls.old_account),strategy_revision_id=str(cls.old_revision),
+                            parameters={'original':'S3 原失败','time_ns':'1767225600000000123'})
+        with cls.engine.begin() as c:
+            c.execute(text('''INSERT INTO s3_runs
+                (id,owner,idempotency_key,request_hash,account_id,account_version,strategy_revision_id,
+                 config,accepted,strategy_source,limits,group_policy,status,outcome,finished_at)
+                VALUES (:id,:owner,:key,:hash,:account,1,:revision,CAST(:config AS jsonb),
+                    CAST(:accepted AS jsonb),:source,CAST(:limits AS jsonb),CAST(:policy AS jsonb),
+                    'failed',CAST(:outcome AS jsonb),CURRENT_TIMESTAMP)'''),
+                dict(id=prior_id,owner=OWNER,key=uuid4().hex,hash='c'*64,account=cls.old_account,
+                    revision=cls.old_revision,config=json.dumps(prior_config,ensure_ascii=False),
+                    accepted=json.dumps({'account_snapshot':{'fee_schedule':cls.old_fee_snapshot}},ensure_ascii=False),
+                    source='def initialize(c): pass # 原修订不改写',limits=json.dumps(vars(WorkerLimits())),
+                    policy=json.dumps(vars(GroupBudget())),outcome=json.dumps(dict(status='failed',partial=True,
+                        error=RuntimeFault('STRATEGY_ERROR','S3 原失败，不重新计算').diagnostic()),ensure_ascii=False)))
+            prior_values=dict(c.execute(text('SELECT * FROM s3_runs WHERE id=:id'),{'id':prior_id}).mappings().one())
         cls.migrate("head")
+        with cls.engine.connect() as c:
+            upgraded=dict(c.execute(text('SELECT * FROM s3_runs WHERE id=:id'),{'id':prior_id}).mappings().one())
+        if upgraded.pop('progress') is not None or upgraded!=prior_values:
+            raise AssertionError('S3 progress migration rewrote a retained prior run')
         if cls.legacy_values() != cls.original_values:
             raise AssertionError('D17 migration changed original IDs/text/money/associations')
         if os.environ.get('QF_D17_EVIDENCE'):
             evidence=Path(os.environ['QF_D17_EVIDENCE']);evidence.mkdir(parents=True,exist_ok=True)
             (evidence/'legacy-upgrade-values.json').write_text(json.dumps(dict(kind='isolated_old_database_upgrade',production_executed=False,
-                before=cls.original_values,after=cls.legacy_values(),retired_namespaces_blocked=True),ensure_ascii=False,indent=2,default=str)+'\n')
+                before=cls.original_values,after=cls.legacy_values(),retired_namespaces_blocked=True,
+                prior_s3_run_before=prior_values,prior_s3_run_after=upgraded),ensure_ascii=False,indent=2,default=str)+'\n')
         cls.base = Path(os.environ.get("QF_D13_TEST_ROOT") or tempfile.mkdtemp(prefix="qf-d13-service-"))
         cls.base.mkdir(exist_ok=True)
         cls.settings = Settings(api_token=TOKEN, cursor_signing_key=CURSOR, database_password="private",
@@ -334,6 +360,43 @@ main(sys.argv[1:])
         row = response.json(); self.runs.append(row["run_id"])
         return row, config
 
+    def test_admission_pause_preserves_status_cancel_and_authenticated_reads(self):
+        row,config=self.submit()
+        self.app.state.settings=self.settings.model_copy(update={'s3_accept_new_runs':False})
+        paused=self.http('POST',payload=config,key=uuid4().hex)
+        self.assertEqual(paused.status_code,503,paused.text)
+        self.assertEqual(self.http('POST','/batches',payload={'configs':[config]},key=uuid4().hex).status_code,503)
+        self.assertEqual(self.http('POST','/batches/'+str(uuid4())+'/retry-failed',key=uuid4().hex).status_code,503)
+        preview=self.http('POST','/preflight',payload=config).json()
+        self.assertFalse(preview['errors'])
+        self.assertIn('new_run_admission_paused',preview['warnings'])
+        self.assertEqual(self.http('GET','/'+row['run_id']).status_code,200)
+        self.assertEqual(self.http('POST','/'+row['run_id']+'/cancel').status_code,200)
+        self.assertEqual(self.http('GET','/capabilities',token=None).status_code,401)
+
+    def test_budget_change_requires_drained_queue_and_preserves_terminal_policy(self):
+        row,config=self.submit()
+        budget=GroupBudget(reserve_cpu_millis=2000,reserve_memory_bytes=3*1024**3,reserve_pids=96)
+        changed=DatabaseRunRepository(self.engine,budget=budget,result_root=self.settings.s3_result_root)
+        service=RunService(changed,self.provider)
+        with self.assertRaises(RuntimeFault) as refused:
+            service.submit(OWNER,config,uuid4().hex)
+        self.assertEqual(refused.exception.code,'RESOURCE_LIMIT')
+        with self.assertRaises(RuntimeFault):
+            changed.claim('mismatched-current-policy',time.time(),5)
+        self.repository.request_cancel(OWNER,row['run_id'])
+        with self.engine.connect() as connection:
+            original=dict(self.repository._row(connection,row['run_id']))
+        self.assertEqual(original['status'],'cancelled')
+        fresh=service.submit(OWNER,config,uuid4().hex)
+        self.runs.append(fresh['run_id'])
+        with self.assertRaises(RuntimeFault):
+            self.repository.claim('old-policy',time.time(),5)
+        with self.engine.connect() as connection:
+            self.assertEqual(dict(changed._row(connection,row['run_id'])),original)
+            self.assertEqual(changed._row(connection,fresh['run_id'])['group_policy'],vars(budget))
+        changed.request_cancel(OWNER,fresh['run_id'])
+
     def test_http_schema_idempotency_parameter_and_owner_boundaries(self):
         from app.backtest_service.openapi import RUN_SCHEMA
         if (self.repo_root/"contracts/run_request.schema.json").exists():
@@ -385,12 +448,18 @@ main(sys.argv[1:])
         self.assertEqual(claim.run_id, row["run_id"])
         work = self.repository.work(claim)
         self.assertEqual(work.specification["account_snapshot"]["fee_schedule"]["fee_rules"][0]["minimum"], "1")
+        progress = dict(completed_events=2, completed_sessions=1, now_ns="1767225600000000123")
+        self.assertTrue(self.repository.progress(claim, progress))
+        self.assertEqual(self.http("GET", "/"+claim.run_id).json()["progress_completed"],2)
+        with self.assertRaises(RuntimeFault):
+            self.repository.progress(claim, dict(progress, now_ns="1767225600000000122"))
         with Session(self.engine) as s:
             with self.assertRaises(AccountProfileReferencedError):
                 AccountProfileService(s).permanently_delete(self.account, expected_version=2)
         with self.assertRaises(RuntimeFault):
             self.repository.commit_outcome(claim, dict(status="succeeded", result_id=row["run_id"]), None)
         self.repository.request_cancel(OWNER, row["run_id"])
+        self.assertFalse(self.repository.progress(claim, dict(progress, completed_events=3)))
         gw, ctx = self.provider.gateway(work, claim.run_id, Event())
         writer = _native.TrustedResultWriter(str(self.settings.s3_result_root), claim.run_id, 1024*1024)
         # Cancel must reject success before retaining any candidate/pointer.
@@ -398,10 +467,16 @@ main(sys.argv[1:])
             dict(status="succeeded", result_id=claim.run_id), "candidate", c, lambda: "candidate")))
         self.assertTrue(self.repository.commit_outcome(claim, dict(status="cancelled", partial=True), None))
         self.assertEqual(self.repository.request_cancel(OWNER, claim.run_id)["status"], "cancelled")
+        self.assertEqual(self.repository.status(OWNER,claim.run_id)['progress'],progress)
+        self.assertFalse(self.repository.progress(claim, dict(progress, completed_events=4)))
+        with self.engine.begin() as c:
+            with self.assertRaises(Exception):
+                c.execute(update(Run).where(Run.id==identity(claim.run_id)).values(progress=None))
         self.assertIsNone(self.repository.result_pointer(OWNER, claim.run_id)[1])
         gw.close(ctx)
         other, _ = self.submit()
         stale = self.repository.claim("crashed", time.time(), 2)
+        self.assertTrue(self.repository.progress(stale,progress))
         with self.engine.begin() as c:
             c.execute(update(Run).where(Run.id == identity(stale.run_id)).values(lease_until=time.time()-1))
         restarted = DatabaseRunRepository(self.engine, result_root=self.settings.s3_result_root)
@@ -412,6 +487,9 @@ main(sys.argv[1:])
         current = restarted.claim("replacement", time.time(), 30)
         self.assertNotEqual(current.token, stale.token)
         self.assertGreater(current.fence, stale.fence)
+        self.assertIsNone(restarted.status(OWNER,current.run_id)['progress'])
+        self.assertFalse(restarted.progress(stale,progress))
+        self.assertTrue(restarted.progress(current,dict(progress,completed_events=1)))
         self.assertFalse(restarted.commit_outcome(stale, dict(status="cancelled", partial=True), None))
 
     def test_database_batch_admission_retries_and_parallel_claim_budget(self):
@@ -540,18 +618,68 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         work_root = self.base/"work"; work_root.mkdir()
         settings = self.settings.model_copy(update=dict(s3_work_root=work_root,
                 s3_daemon_work_root=Path(os.environ["QF_TEST_DAEMON_ROOT"])/work_root.relative_to(Path("/qf-work")),
-                s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"]))
-        repository, process, services = create_services(settings=settings, engine=self.engine, provider=self.provider, daemon=DockerDaemon())
-        self.provider.process = process
+                s3_worker_image=os.environ["QF_TEST_WORKER_IMAGE"],
+                s3_worker_limits=dict(cpu_millis=2000,memory_bytes=5*1024**3,pids=64,
+                    wall_seconds=3600,tmp_bytes=512*1024**2,file_bytes=256*1024**2,result_bytes=128*1024**2),
+                s3_group_budget=dict(reserve_cpu_millis=2000,reserve_memory_bytes=3*1024**3,reserve_pids=96)))
+        # This required container test now runs the production FormalProvider
+        # itself over the real E70 physical node layout. Only the explicitly
+        # named execution facts are synthetic; no native/source-table fallback.
+        from s3_formal_fixtures import nodes, MODEL
+        from app.backtest_service.formal_runtime import AcceptedRunPlan
+        from app.backtest_service.service import FormalProvider
+        market,self.template = nodes(self.store,securities=('A.SH',))
+        self.template['data_budget_bytes']=1024**3
+        checked_connections = []
+        def resolve(work):
+            packet = deepcopy(self.template)
+            for fact in packet['facts']:
+                for side in ('buy','sell'):
+                    commission = commission_from_account_fee_schedule(
+                        work.specification['account_snapshot']['fee_schedule'],side=side,
+                        included_components=(),cost_overrides=work.config.get('cost_overrides'))
+                    fact[side+'_fees'].update({key:commission[key] for key in
+                        ('commission_rate','minimum_commission','settlement_scale','rounding')})
+            def check_facts(accepted, *, connection):
+                if accepted is not work or tuple(accepted.config['universe']) != ('A.SH',):
+                    raise RuntimeFault('DATA_RESTRICTED','private dated facts outside accepted scope')
+                if connection is not None:
+                    # A real final transaction, with no remote I/O or snapshot.
+                    self.assertTrue(connection.in_transaction())
+                    checked_connections.append(id(connection))
+            return AcceptedRunPlan(market,packet,check_facts=check_facts)
+        trusted = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
+        repository, process, services = create_services(settings=settings, engine=self.engine, provider=trusted, daemon=DockerDaemon())
+        trusted.process = process
+        self.repository = repository
+        self.provider = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
+        from app.backtest_service.runtime_contracts import configured_budgets
+        approved_limits,_ = configured_budgets(settings.s3_worker_limits,settings.s3_group_budget)
+        self.service = RunService(self.repository,self.provider,limits=approved_limits)
+        self.app.state.settings=settings
+        self.app.state.s3_repository=repository
+        self.app.state.s3_provider = self.provider
+        self.assertIsNone(self.provider.process,'web must not own Docker access')
+        services.readiness.refresh()
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
-        source = """from quantfoundry.api import order, LimitOrder
+        source = """import time
+from quantfoundry.api import order, LimitOrder, get_price
 def before_trading_start(c):
     if not getattr(c.state, 'bought', False):
         c.state.bought = True
         assert order('A.SH', 100, style=LimitOrder('10')).accepted
+def handle_data(c, data):
+    frame=get_price(['A.SH'],count=2,fields=['close'])
+    assert list(frame.columns)==['security','time_ns','close']
+    assert all(type(value).__name__=='Decimal' for value in frame['close'])
+    time.sleep(c.params.get('callback_pause_seconds',.65))
 """
         self.account, self.revision = catalogue(self.engine, source)
         self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
+        refused=RunService(repository,self.provider).preflight(OWNER,self.template['config'])
+        self.assertEqual(refused['errors'][0]['code'],'RESOURCE_LIMIT')
+        bad=dict(self.template['config'],worker_limits=settings.s3_worker_limits)
+        self.assertEqual(self.http('POST',payload=bad,key=uuid4().hex).status_code,422)
         def legacy_execution_rows():
             from app.backtest_service.history import result_records
             tables = {'backtest_runs', *(getattr(result_records, name).__tablename__ for name in result_records.__all__)}
@@ -560,18 +688,40 @@ def before_trading_start(c):
                     for row in c.execute(text('SELECT * FROM "'+table+'"')).mappings()) for table in sorted(tables)}
         protected = legacy_execution_rows()
         row, config = self.submit()
+        with self.engine.connect() as connection:
+            saved=self.repository._row(connection,row['run_id'])
+            self.assertEqual(saved['limits'],vars(approved_limits))
+            self.assertEqual(saved['group_policy'],vars(repository.budget))
         with Session(self.engine) as session:
             AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
             session.commit()
+        # Queued work keeps its accepted quota after trusted defaults change.
+        parallel_limits=dict(settings.s3_worker_limits,cpu_millis=1000,memory_bytes=5*1024**3//2,
+            tmp_bytes=256*1024**2,file_bytes=128*1024**2)
+        self.app.state.settings=settings.model_copy(update={'s3_worker_limits':parallel_limits})
         try:
+            live_progress=[]
+            real_limits=[]
             deadline = time.monotonic()+30
             while time.monotonic() < deadline:
                 supervisor.step()
+                for task in supervisor.tasks.values():
+                    actual=process.daemon.inspect(task.name) if task.name else None
+                    if actual and actual['State']['Running']:
+                        host=actual['HostConfig']
+                        real_limits.append((host['Memory'],host['NanoCpus'],host['PidsLimit']))
                 status = self.http("GET", "/"+row["run_id"]).json()
+                if status['status']=='running' and status['progress_completed']>0:
+                    live_progress.append(status['progress_completed'])
                 if status["status"] in ("succeeded", "failed", "cancelled"):
                     break
                 Event().wait(.05)
             self.assertEqual(status["status"], "succeeded", status)
+            self.assertTrue(live_progress,'real HTTP status stayed at zero throughout execution')
+            self.assertTrue(real_limits,'configured HTTP run never started an actual worker')
+            self.assertEqual(set(real_limits),{(5*1024**3,2000*1_000_000,64)})
+            self.assertEqual(status['progress_completed'],3)
+            self.assertEqual(status['progress']['completed_sessions'],len(self.template['calendar']))
             result = self.http("GET", "/"+row["run_id"]+"/results/summary")
             self.assertEqual(result.status_code, 200, result.text)
             self.assertEqual(result.json()["performance"]["initial_equity"], "10000")
@@ -590,12 +740,50 @@ def before_trading_start(c):
                 next_page = self.http("GET", "/"+row["run_id"]+"/results/equity?limit=1&cursor="+page["next_cursor"])
                 self.assertEqual(next_page.status_code, 200, next_page.text)
                 self.assertNotEqual(next_page.json()["items"], page["items"])
+            first_result=result.json()
+            batch_configs=[dict(config,parameters={'candidate':i,'callback_pause_seconds':1}) for i in range(2)]
+            batch_response=self.http('POST','/batches',{'configs':batch_configs},key=uuid4().hex)
+            self.assertEqual(batch_response.status_code,202,batch_response.text)
+            child_ids=[item['run_id'] for item in batch_response.json()['items']]
+            self.assertEqual(len(child_ids),2)
+            self.runs.extend(child_ids)
+            peak=0; parallel_observed=[]
+            deadline=time.monotonic()+40
+            while time.monotonic()<deadline:
+                supervisor.step()
+                live=[]
+                for task in supervisor.tasks.values():
+                    actual=process.daemon.inspect(task.name) if task.name else None
+                    if actual and actual['State']['Running']:
+                        host=actual['HostConfig']
+                        live.append((host['Memory'],host['NanoCpus'],host['PidsLimit']))
+                peak=max(peak,len(live));parallel_observed.extend(live)
+                statuses=[self.http('GET','/'+child).json()['status'] for child in child_ids]
+                if all(value in ('succeeded','failed','cancelled') for value in statuses):break
+                Event().wait(.05)
+            self.assertEqual(statuses,['succeeded','succeeded'])
+            self.assertEqual(peak,2,'approved batch did not actually run two workers together')
+            self.assertEqual(set(parallel_observed),{(5*1024**3//2,1000*1_000_000,64)})
+            for child in child_ids:
+                summary=self.http('GET','/'+child+'/results/summary').json()
+                self.assertEqual(summary['performance']['trades']['fill_fees'],'9.00')
+                with self.engine.connect() as connection:
+                    self.assertEqual(self.repository._row(connection,child)['limits'],
+                        vars(WorkerLimits(**parallel_limits)))
+            self.assertEqual(self.http('GET','/'+row['run_id']+'/results/summary').json(),first_result)
             self.assertFalse(list(work_root.iterdir()))
+            self.assertTrue(checked_connections,'accepted facts were not checked inside final transaction')
             self.assertEqual(legacy_execution_rows(),protected, 'new Rust run wrote old roots/snapshots/events/results')
             (self.base/'retired-execution-writes.json').write_text(json.dumps(dict(production_executed=False,
-                real_runner_container=True,run_id=row['run_id'],before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
+                real_runner_container=True,formal_provider=True,formal_node_entry='E70',
+                execution_fact_model=MODEL,run_id=row['run_id'],accepted_quota_frozen=True,
+                parallel_run_ids=child_ids,actual_parallel_workers=peak,
+                before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
         finally:
-            supervisor.stop()
+            try:
+                supervisor.stop()
+            finally:
+                services.readiness.close()
 
 
 if __name__ == "__main__":

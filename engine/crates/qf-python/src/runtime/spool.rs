@@ -6,6 +6,7 @@ use qf_core::run::RunOutcome;
 use qf_core::{ErrorCode, QfError, QfResult};
 use serde_json::Value;
 use std::sync::{Arc, Mutex, atomic::AtomicBool};
+use std::time::Instant;
 fn failure() -> QfError {
     QfError::new(
         ErrorCode::ResultBudgetExceeded,
@@ -15,10 +16,12 @@ fn failure() -> QfError {
 }
 pub struct Spool {
     inner: FileResultSink,
+    pub write_seconds: f64,
 }
 impl Spool {
     pub fn new(run_id: &str, maximum: u64, cancelled: Arc<AtomicBool>) -> QfResult<Self> {
         Ok(Self {
+            write_seconds: 0.0,
             inner: FileResultSink::create(
                 &std::env::temp_dir(),
                 run_id,
@@ -63,7 +66,11 @@ impl ResultSink for Writer {
         self.0.lock().map_err(|_| failure())?.inner.credit()
     }
     fn write(&mut self, batch: &ResultBatch) -> QfResult<()> {
-        self.0.lock().map_err(|_| failure())?.inner.write(batch)
+        let mut spool = self.0.lock().map_err(|_| failure())?;
+        let started = Instant::now();
+        let result = spool.inner.write(batch);
+        spool.write_seconds += started.elapsed().as_secs_f64();
+        result
     }
     fn finalize(&mut self, outcome: &RunOutcome) -> QfResult<()> {
         self.0

@@ -140,7 +140,11 @@ impl Drop for SharedBatches {
 }
 pub enum Events {
     Fixture(VecDeque<MarketEvent>),
-    Ipc(Box<ArrowEventSource<SharedBatches>>),
+    Ipc {
+        source: Box<ArrowEventSource<SharedBatches>>,
+        gateway: Gateway,
+        conversion: Arc<Mutex<f64>>,
+    },
 }
 impl EventSource for Events {
     fn next_chunk(&mut self, max_events: usize) -> QfResult<Option<Vec<MarketEvent>>> {
@@ -152,7 +156,28 @@ impl EventSource for Events {
                     Ok(Some(events.drain(..max_events.min(events.len())).collect()))
                 }
             }
-            Self::Ipc(source) => source.next_chunk(max_events),
+            Self::Ipc {
+                source,
+                gateway,
+                conversion,
+            } => {
+                let before = gateway
+                    .lock()
+                    .map_err(|_| invalid("数据通道锁失败"))?
+                    .exchange_seconds;
+                let started = Instant::now();
+                let result = source.next_chunk(max_events);
+                let elapsed = started.elapsed().as_secs_f64();
+                let after = gateway
+                    .lock()
+                    .map_err(|_| invalid("数据通道锁失败"))?
+                    .exchange_seconds;
+                *conversion
+                    .lock()
+                    .map_err(|_| invalid("数据转换测量锁失败"))? +=
+                    (elapsed - (after - before)).max(0.0);
+                result
+            }
         }
     }
 }
@@ -169,6 +194,7 @@ pub fn connect(
         current: BTreeMap::new(),
         benchmark_origin: None,
         benchmark_security: None,
+        conversion_seconds: Arc::new(Mutex::new(0.0)),
     };
     let events = match source {
         Source::Fixture { events } => {
@@ -208,9 +234,13 @@ pub fn connect(
                 eof: false,
                 budget,
             };
-            data.gateway = Some(gateway);
+            data.gateway = Some(gateway.clone());
             data.context = Some(context);
-            Events::Ipc(Box::new(ArrowEventSource::new(batches, budget)?))
+            Events::Ipc {
+                source: Box::new(ArrowEventSource::new(batches, budget)?),
+                gateway,
+                conversion: data.conversion_seconds.clone(),
+            }
         }
     };
     Ok((events, data))
@@ -230,6 +260,7 @@ pub struct Data {
     current: BTreeMap<SecurityKey, MarketEvent>,
     pub benchmark_origin: Option<qf_core::analysis::BenchmarkPoint>,
     pub benchmark_security: Option<String>,
+    pub conversion_seconds: Arc<Mutex<f64>>,
 }
 impl StrategyDataPort for Data {
     type Frame = Frame;

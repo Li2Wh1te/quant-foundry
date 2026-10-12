@@ -11,7 +11,7 @@ from app.db.session import get_engine
 from .history.router import _cursor_signing_key
 from .models import Run
 from .repository import DatabaseRunRepository, summary
-from .runtime_contracts import RuntimeFault
+from .runtime_contracts import RuntimeFault, configured_budgets
 from .service import FormalProvider, RunService, normalize
 from .serialization import encoded
 from .openapi import RUN_BODY, BATCH_BODY, COMPARE_BODY
@@ -29,10 +29,13 @@ def owner(request):
 
 def service(request: Request):
     settings = request.app.state.settings
-    provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings)
+    limits, budget = configured_budgets(settings.s3_worker_limits, settings.s3_group_budget)
     repository = getattr(request.app.state, "s3_repository", None) or DatabaseRunRepository(
-        get_engine(), result_root=settings.s3_result_root)
-    return RunService(repository, provider)
+        get_engine(), budget=budget, result_root=settings.s3_result_root)
+    if settings.s3_group_budget is not None and repository.budget != budget:
+        raise fault(RuntimeFault('RESOURCE_LIMIT', 'API运行仓储与可信整组预算不一致'))
+    provider = getattr(request.app.state, "s3_provider", None) or FormalProvider(settings, engine=repository.engine)
+    return RunService(repository, provider, limits=limits, accepting=settings.s3_accept_new_runs)
 
 
 def fault(error):
@@ -150,6 +153,7 @@ def cancel_batch(batch_id: str, request: Request, s: RunService = Depends(servic
 @router.post("/batches/{batch_id}/retry-failed", status_code=202)
 def retry_batch(batch_id: str, request: Request, s: RunService = Depends(service), key: str | None = Header(None, alias="Idempotency-Key")):
     try:
+        s.require_admission()
         ids = s.repository.retry_failed(owner(request), batch_id, key)
         return dict(batch_id=batch_id, run_ids=ids)
     except RuntimeFault as error:

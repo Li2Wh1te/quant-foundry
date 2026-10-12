@@ -111,6 +111,32 @@ def quality(formal,spec):
         c.execute(text("INSERT INTO data_store_issues(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
             "VALUES(:d,'quality','test','QUALITY_CHANGED',:t,'{}','{}')"),{'d':spec.name,'t':fingerprint('changed')})
 
+
+def test_dependency_issue_digest_keeps_nonempty_count_and_byte_limits(formal):
+    spec,gateway,ctx=setup(formal)
+    quality(formal,spec)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_issues(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
+            "VALUES(:d,'quality-second','test','QUALITY_CHANGED',:t,'{}','{}')"),
+            {'d':spec.name,'t':fingerprint('second')})
+    formal.limits=replace(formal.limits,issue_count=1)
+    error('RESOURCE_LIMIT',lambda:gateway.declare('market',ctx),'ISSUE_BUDGET_EXCEEDED')
+    formal.limits=replace(formal.limits,issue_count=10)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text("UPDATE data_store_issues SET target_json=:large WHERE issue_key='quality'"),
+                  {'large':json.dumps({'diagnostic':'x'*20000})})
+    gateway.batch_bytes=16385
+    error('RESOURCE_LIMIT',lambda:gateway.declare('market',ctx),'CONTROL_BUDGET_EXCEEDED')
+
+
+def test_issue_removed_from_used_dependency_is_data_changed(formal):
+    spec,gateway,ctx=setup(formal)
+    quality(formal,spec)
+    gateway.declare('market',ctx)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text('DELETE FROM data_store_issues WHERE dataset=:d'),{'d':spec.name})
+    error('DATA_CHANGED',lambda:gateway.check(ctx))
+
 def test_real_arrow_exact_selective_projection(formal,monkeypatch):
     _,gateway,ctx=setup(formal,count=40)
     from app.data_store import readers
@@ -122,6 +148,58 @@ def test_real_arrow_exact_selective_projection(formal,monkeypatch):
     assert table['time_ns'].to_pylist()==[BASE+8,BASE+8,BASE+9,BASE+9]
     assert all(b.table.num_rows<=2 for b in batches)
     assert not list((formal.files.root/'.scratch').rglob('*.parquet'))
+
+def test_time_range_replay_keeps_same_ns_events_and_quality_gate(formal):
+    base=contract('gateway_time_first')
+    keys=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+    spec=replace(base,key=keys,schema=pa.schema([
+        pa.field(f.name,f.type,nullable=f.name not in keys,metadata=f.metadata)
+        for f in base.schema],metadata=base.schema.metadata))
+    formal.register(spec)
+    data=rows(40)
+    formal.upsert(spec,'default',[pa.RecordBatch.from_pylist(data,schema=spec.schema)],
+        SourceUpdate('test',fingerprint('time-first'),fingerprint('isolated-d18'),0),
+        lower=(BASE,),upper=(BASE+21,),source_check=lambda _:True)
+    route=MarketBinding('market',spec,'tick',{n:n for n in spec.schema.names},{},
+        lambda s,a,b:((a,),(b+1,)),'time_ns')
+    reference=make_gateway(formal,(route,))
+    bounded=make_gateway(formal,(route,),replay_window_ns=3)
+    scope=dict(run_id='isolated-run',universe=['A.SH'])
+    left=reference.open(scope);right=bounded.open(scope)
+    expected=pa.concat_tables([b.table for b in reference.read('market',request(),left)])
+    actual=pa.concat_tables([b.table for b in bounded.read('market',request(),right)])
+    assert expected.equals(actual) and actual.num_rows==40
+    assert actual['sequence'].to_pylist()==list(range(1,41))
+    stream=bounded.read('market',request(),right)
+    assert next(stream).table.num_rows==2
+    quality(formal,spec)
+    error('DATA_CHANGED',lambda:next(stream))
+
+def test_replay_buffer_reuses_only_complete_interior_and_never_skips_changed_gate(formal):
+    base=contract('gateway_replay_buffer')
+    keys=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+    spec=replace(base,key=keys,schema=pa.schema([
+        pa.field(f.name,f.type,nullable=f.name not in keys,metadata=f.metadata)
+        for f in base.schema],metadata=base.schema.metadata))
+    formal.register(spec)
+    formal.upsert(spec,'default',[pa.RecordBatch.from_pylist(rows(40),schema=spec.schema)],
+        SourceUpdate('test',fingerprint('buffer'),fingerprint('isolated-d18'),0),
+        lower=(BASE,),upper=(BASE+21,),source_check=lambda _:True)
+    route=MarketBinding('market',spec,'tick',{n:n for n in spec.schema.names},{},
+        lambda s,a,b:((a,),(b+1,)),'time_ns')
+    grant=AuthorizedRun('isolated-run','isolated-owner',('A.SH',),BASE-100,BASE+1000)
+    gateway=RunDataGateway(formal,AuthenticatedPrincipal('isolated-owner'),grant,(route,),
+        batch_rows=10,replay_cache_rows=20)
+    context=gateway.open(dict(run_id=grant.run_id,universe=['A.SH']))
+    assert sum(b.table.num_rows for b in gateway.read('market',request(),context))==40
+    calls=gateway.stats['storage_reads']
+    query=request(BASE+18,BASE+18,fields=('price',))
+    result=pa.concat_tables([b.table for b in gateway.read('market',query,context)])
+    assert result['sequence'].to_pylist()==[37,38] and result['quantity'].null_count==2
+    assert gateway.stats['storage_reads']==calls
+    assert gateway.replay_cache[2].num_rows<=20
+    quality(formal,spec)
+    error('DATA_CHANGED',lambda:list(gateway.read('market',query,context)))
 
 @pytest.mark.parametrize('quality_only',[False,True])
 def test_two_blocks_changed_never_commit_mixed_success(formal,quality_only):
@@ -597,43 +675,48 @@ def test_pre_d04_signed_cursor_remains_valid_for_json_and_arrow(formal):
         assert caught.value.code=='INVALID_CURSOR'
 
 def test_new_dependency_quality_capture_is_one_snapshot(formal,monkeypatch):
+    from sqlalchemy import event
     spec,gateway,ctx=setup(formal)
     other=contract('gateway_other'); formal.register(other)
     gateway.bindings['other']=binding(other,'other')
     gateway.declare('market',ctx)
     with gateway._state(('other',)) as (states,_):
         old_other=states['other']
-    original=formal.catalog.dataset
     changed=False
-    def dataset(name,c=None):
+    def after_metadata(c,cursor,statement,parameters,execution_context,executemany):
         nonlocal changed
         assert c is not None, 'capture must not open another connection'
-        if name==other.name and not changed:
+        if statement.startswith('SELECT d.generation,d.schema_id,d.rule,') and parameters.get('d')==other.name and not changed:
             changed=True
             with formal.catalog.engine.begin() as writer:
                 for target in (spec,other):
                     issue=Issue('quality','test','QUALITY_CHANGED',fingerprint('changed'),{}, {})
                     formal.catalog.change_issues(writer,target.name,(issue,),{})
-        return original(name,c)
-    monkeypatch.setattr(formal.catalog,'dataset',dataset)
-    gateway.declare('other',ctx)
+    event.listen(formal.catalog.engine,'after_cursor_execute',after_metadata)
+    try:
+        gateway.declare('other',ctx)
+    finally:
+        event.remove(formal.catalog.engine,'after_cursor_execute',after_metadata)
     assert changed and ctx.dependencies['other']==old_other
     error('DATA_CHANGED',lambda:gateway.check(ctx))
 
 def test_dependency_capture_uses_one_total_time_budget_and_releases_locks(formal,monkeypatch):
+    from sqlalchemy import event
     spec,gateway,ctx=setup(formal)
     other=contract('gateway_other'); formal.register(other)
     gateway.bindings['other']=binding(other,'other')
     formal.limits=replace(formal.limits,query_timeout_ms=250)
-    original=formal.catalog.dataset
-    def slow(name,c=None):
-        c.execute(text('SELECT pg_sleep(0.15)'))
-        return original(name,c)
-    monkeypatch.setattr(formal.catalog,'dataset',slow)
+    def slow_metadata(c,cursor,statement,parameters,execution_context,executemany):
+        if statement.startswith('SELECT d.generation,d.schema_id,d.rule,'):
+            c.execute(text('SELECT pg_sleep(0.15)'))
     def capture():
         with gateway._state(('market','other')):
             pytest.fail('two individually short queries cannot reset the total budget')
-    error('RESOURCE_LIMIT',capture,'QUERY_TIMEOUT')
+    event.listen(formal.catalog.engine,'before_cursor_execute',slow_metadata)
+    try:
+        error('RESOURCE_LIMIT',capture,'QUERY_TIMEOUT')
+    finally:
+        event.remove(formal.catalog.engine,'before_cursor_execute',slow_metadata)
     for target in (spec,other):
         with formal.locks.writer(target.name,timeout_ms=100) as guard:
             with guard.commit(timeout_ms=100):

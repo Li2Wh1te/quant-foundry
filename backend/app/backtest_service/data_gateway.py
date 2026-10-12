@@ -18,6 +18,7 @@ from uuid import uuid4
 
 import pyarrow as pa
 import pyarrow.compute as pc
+import numpy as np
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -137,6 +138,11 @@ class MarketBinding:
     extra_columns: tuple[str, ...] = ()
     derived_columns: tuple[str, ...] = ()
     selectors: tuple[tuple[str, str, object], ...] = ()
+    # Code-owned conversions for date-keyed formal nodes. These do not alter
+    # the CurrentStore quality gate or expose native keys to a strategy.
+    query_time_bounds: Callable | None = None
+    storage_securities: Callable | None = None
+    count_order: tuple[str, ...] | None = None
 
     def __post_init__(self):
         if (self.frequency not in ('1d', '1m', '5m', '15m', '30m', '60m', 'tick')
@@ -149,6 +155,9 @@ class MarketBinding:
                        for c, op, _ in self.selectors)
                 or self.time_column not in self.spec.schema.names):
             raise GatewayError('INVALID_CONTRACT', '数据投影契约无效')
+        if self.count_order is not None and (not self.count_order or
+                any(c not in self.spec.schema.names for c in self.count_order)):
+            raise GatewayError('INVALID_CONTRACT', '数据计数排序投影无效')
         object.__setattr__(self, 'fields', MappingProxyType(dict(self.fields)))
         object.__setattr__(self, 'constants', MappingProxyType(dict(self.constants)))
 
@@ -210,13 +219,16 @@ class RunDataGateway:
     def __init__(self, store, principal: AuthenticatedPrincipal, grant: AuthorizedRun,
                  bindings: tuple[MarketBinding, ...], *, cancelled=None,
                  batch_rows=1024, batch_bytes=64*1024*1024, cache_rows=10000,
-                 cache_bytes=16*1024*1024, cache_entries=1024):
+                 cache_bytes=16*1024*1024, cache_entries=1024, replay_window_ns=None,
+                 replay_cache_rows=0):
         if principal.owner_scope != grant.owner_scope:
             raise GatewayError('DATA_RESTRICTED', '运行所有者与认证身份不一致')
         if (not 1 <= batch_rows <= min(10000, store.limits.query_rows)
                 or not 16384 < batch_bytes <= 64*1024*1024
                 or not 1 <= cache_rows <= 100000 or not 16384 < cache_bytes <= 64*1024*1024
                 or type(cache_entries) is not int or not 1 <= cache_entries <= 10000
+                or replay_window_ns is not None and (type(replay_window_ns) is not int or not 1 <= replay_window_ns <= 366*86400*10**9)
+                or type(replay_cache_rows) is not int or not 0 <= replay_cache_rows <= 2*batch_rows
                 or not 1 <= len(bindings) <= 64 or len({b.name for b in bindings}) != len(bindings)):
             raise GatewayError('RESOURCE_LIMIT', '数据网关预算无效')
         self.store, self.grant = store, grant
@@ -225,9 +237,13 @@ class RunDataGateway:
         self.batch_rows, self.batch_bytes = batch_rows, batch_bytes
         self.cache_rows, self.cache_bytes = cache_rows, cache_bytes
         self.cache_entries = cache_entries
+        self.replay_window_ns = replay_window_ns
+        self.replay_cache_rows = replay_cache_rows
+        self.replay_cache = None
         self.context = None
         self.cache = {}
-        self.stats = dict(storage_reads=0, storage_rows=0, cache_rows=0)
+        self.stats = dict(storage_reads=0, storage_rows=0, cache_rows=0,
+                          selected_file_bytes=0, files_read=0, storage_scratch_peak_bytes=0)
 
     def _active(self, context):
         if context is not self.context or context is None or context.closed:
@@ -244,50 +260,57 @@ class RunDataGateway:
             checkpoint(query=True)
             binding = self.bindings[name]
             previous = self.context.dependencies.get(name) if self.context else None
-            try:
-                state = self.store.catalog.dataset(binding.spec.name, connection)
-            except DataStoreError as error:
-                if previous is not None and error.code == 'DATASET_MISSING':
-                    raise DataStoreError('DATA_CHANGED') from None
-                raise
+            # One current metadata projection in THIS snapshot. Keep all
+            # readiness, descriptor, restriction and nonempty issue gates;
+            # avoid fetching an unused large descriptor in a separate query.
+            guard = connection.execute(text('SELECT d.generation,d.schema_id,d.rule,'
+                'EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
+                    'WHERE dataset=:d OR dataset IS NULL) AS legacy_restricted,'
+                'EXISTS(SELECT 1 FROM data_store_issues WHERE dataset=:d) AS issues_present,'
+                '(SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e) AS entry_summary '
+                'FROM data_store_datasets d WHERE d.name=:d'),
+                {'d': binding.spec.name, 'e': binding.spec.semantics.get('entry_id')}).mappings().first()
+            if guard is None:
+                raise DataStoreError('DATA_CHANGED' if previous is not None else 'DATASET_MISSING')
+            state = {key:guard[key] for key in ('generation','schema_id','rule')}
             if previous is not None and (previous['generation'] != str(state['generation'])
                     or state['schema_id'] != binding.spec.schema_id or state['rule'] != binding.spec.rule):
                 raise DataStoreError('DATA_CHANGED')
             self.store._spec_current(binding.spec, state)
-            checkpoint(query=True)
-            legacy = connection.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
-                    'WHERE dataset=:d OR dataset IS NULL)'), {'d': binding.spec.name}).scalar_one()
-            if legacy:
+            checkpoint()
+            # Read small gate metadata together in THIS snapshot. The EXISTS
+            # probe avoids a server-side cursor for an empty issue set; it is
+            # never cached and never replaces the bounded, ordered digest when
+            # any issue exists. Keep every dependency/check/finalization gate.
+            if guard['legacy_restricted']:
                 if self.context is not None and name in self.context.dependencies:
                     raise DataStoreError('DATA_CHANGED')
                 raise DataStoreError('DATA_RESTRICTED')
             # Conservative dataset-wide readability token; no permanent row ledger.
             issue_digest = hashlib.sha256()
             issue_bytes = 0
-            checkpoint(query=True)
-            issues = connection.execution_options(stream_results=True, max_row_buffer=1).execute(
+            if guard['issues_present']:
+                checkpoint(query=True)
+                issues = connection.execution_options(stream_results=True, max_row_buffer=1).execute(
                     text('SELECT issue_key,reason,evidence_token,target_json,resolution_json '
                     'FROM data_store_issues WHERE dataset=:d ORDER BY issue_key LIMIT :n'),
                     {'d': binding.spec.name, 'n': self.store.limits.issue_count+1})
-            try:
-                for i, issue in enumerate(issues.mappings()):
-                    checkpoint()
-                    if i >= self.store.limits.issue_count:
-                        raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
-                    encoded = json.dumps(dict(issue), ensure_ascii=False, sort_keys=True,
-                                         separators=(',', ':')).encode()
-                    issue_bytes += len(encoded)
-                    if issue_bytes > min(self.batch_bytes, self.store.limits.query_bytes):
-                        raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
-                    issue_digest.update(encoded)
-                    issue_digest.update(b'\0')
-            finally:
-                issues.close()
-                connection.execution_options(stream_results=False)
-            entry_id = binding.spec.semantics.get('entry_id')
-            checkpoint(query=True)
-            summary = connection.execute(text('SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e'),
-                                         {'e': entry_id}).scalar_one_or_none()
+                try:
+                    for i, issue in enumerate(issues.mappings()):
+                        checkpoint()
+                        if i >= self.store.limits.issue_count:
+                            raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+                        encoded = json.dumps(dict(issue), ensure_ascii=False, sort_keys=True,
+                                             separators=(',', ':')).encode()
+                        issue_bytes += len(encoded)
+                        if issue_bytes > min(self.batch_bytes, self.store.limits.query_bytes):
+                            raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
+                        issue_digest.update(encoded)
+                        issue_digest.update(b'\0')
+                finally:
+                    issues.close()
+                    connection.execution_options(stream_results=False)
+            summary = guard['entry_summary']
             # Only this part of entry status participates in the formal reader
             # gate. Refresh progress/counters are operational, not quality.
             restriction = json.loads(summary).get('overflow_restriction', {}) if summary else {}
@@ -308,15 +331,23 @@ class RunDataGateway:
             # so waiting for a writer cannot leave a pre-lock stale snapshot.
             isolation = 'READ COMMITTED' if final else 'REPEATABLE READ'
             with self.store.catalog.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
+                configured_timeout = None
                 def checkpoint(*, query=False):
+                    nonlocal configured_timeout
                     if self.cancelled():
                         raise DataStoreError('OPERATION_CANCELLED')
                     remaining = int((deadline-time.monotonic())*1000)
                     if remaining <= 0:
                         raise DataStoreError('QUERY_TIMEOUT')
                     if query:
-                        connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
-                                           {'v': str(remaining)})
+                        # Round DOWN and reuse only an identical, still smaller
+                        # timeout. The deadline/cancellation checks still run at
+                        # every checkpoint; no query gains extra wall time.
+                        bounded_timeout = max(1, remaining//10*10)
+                        if bounded_timeout != configured_timeout:
+                            connection.execute(text("SELECT set_config('statement_timeout',:v,true)"),
+                                               {'v': str(bounded_timeout)})
+                            configured_timeout = bounded_timeout
                 checkpoint(query=True)
                 if final:
                     # Also coordinates quality-only/catalog updates, even writers
@@ -379,7 +410,15 @@ class RunDataGateway:
             return commit(connection)
 
     def _request(self, name, request, context):
-        self.declare(name, context)  # rechecks old dependencies before adding any
+        self._active(context)
+        if type(name) is not str or not name or len(name.encode()) > 128:
+            raise GatewayError('INVALID_CONTRACT', '数据绑定标识无效')
+        if name not in context.dependencies:
+            self.declare(name, context)  # recheck old dependencies before adding any
+        # This method validates shape/permission. read()/lookback() check before
+        # and after exposing buffers, and _pages() checks around EACH physical
+        # read. Re-validating an existing binding at every nested call does not
+        # require another identical SQL transaction before any work occurs.
         binding = self.bindings[name]
         if (type(request) is not dict or set(request) != {'securities','fields','frequency','start_ns',
                 'end_ns','count_per_security','adjustment'} or type(request['securities']) is not list
@@ -407,6 +446,25 @@ class RunDataGateway:
 
     def _pages(self, binding, security, start, end, context, fields, *, count=None, page_rows=None):
         securities = security if type(security) is tuple else (security,)
+        self.check(context)
+        cached=self.replay_cache
+        if cached is not None and cached[0]==binding.name and set(fields)<=cached[1]:
+            table=cached[2]
+            # Strict interior bounds exclude partially buffered same-ns groups.
+            # The buffer always originated from an admitted full-universe read.
+            if table.num_rows and int(table['time_ns'][0].as_py())<start<=end<int(table['time_ns'][-1].as_py()):
+                mask=pc.and_(pc.and_(pc.greater_equal(table['time_ns'],start),pc.less_equal(table['time_ns'],end)),
+                    pc.is_in(table['security'],value_set=pa.array(securities,type=pa.string())))
+                table=table.filter(mask)
+                wanted=set(fields)|IDENTITY_FIELDS
+                table=pa.Table.from_arrays([table[f.name] if f.name in wanted else pa.nulls(table.num_rows,f.type)
+                    for f in MARKET_SCHEMA],schema=MARKET_SCHEMA)
+                rows=min(page_rows or self.batch_rows,self.batch_rows)
+                for offset in range(0,max(1,table.num_rows),rows):
+                    self.check(context)
+                    yield self._batch(table.slice(offset,rows),binding)
+                self.check(context)
+                return
         bounds = [binding.bounds(s, start, end) for s in securities]
         lower = min((b[0] for b in bounds), key=binding.spec.key_bytes)
         upper = max((b[1] for b in bounds), key=binding.spec.key_bytes)
@@ -451,22 +509,35 @@ class RunDataGateway:
         if len(securities) > 1 and security_column not in binding.spec.schema.names:
             raise GatewayError('CAPABILITY_UNAVAILABLE', '此身份投影尚不支持集合批量读取')
         # Time-first keys cannot delimit one security by physical bounds alone.
-        membership = ((security_column, 'in', securities),) if security_column in binding.spec.schema.names else ()
+        storage_securities = getattr(binding, 'storage_securities', None)
+        stored_securities = storage_securities(securities) if storage_securities else securities
+        if (type(stored_securities) is not tuple or len(stored_securities) != len(securities)
+                or len(set(stored_securities)) != len(stored_securities)
+                or any(type(s) is not str or not s for s in stored_securities)):
+            raise GatewayError('INVALID_CONTRACT', '存储身份映射缺失、重复或无效')
+        membership = ((security_column, 'in', stored_securities),) if security_column in binding.spec.schema.names else ()
         group_order = []
         if count is not None:
-            for field in ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence'):
+            for field in (() if binding.count_order is not None else
+                          ('time_ns', 'source_session', 'channel', 'sequence', 'stable_input_sequence')):
                 if field in binding.constants:
                     continue
                 column = binding.fields.get(field)
                 if column not in binding.spec.schema.names:
                     raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的完整事件排序投影')
                 group_order.append(column)
+            if binding.count_order is not None:
+                group_order.extend(binding.count_order)
             if security_column not in binding.spec.schema.names:
                 raise GatewayError('CAPABILITY_UNAVAILABLE', '计数窗口缺少可验证的标的集合投影')
+        query_time_bounds = getattr(binding, 'query_time_bounds', None)
+        time_lower, time_upper = (query_time_bounds(start, end)
+            if query_time_bounds else
+            (start-binding.time_offset_ns, end-binding.time_offset_ns))
         query = Query(partitions=tuple(partitions), lower=lower, upper=upper, columns=columns,
             page_size=rows, descending=count is not None,
-            filters=((binding.time_column, '>=', start-binding.time_offset_ns),
-                     (binding.time_column, '<=', end-binding.time_offset_ns), *binding.selectors, *membership),
+            filters=((binding.time_column, '>=', time_lower),
+                     (binding.time_column, '<=', time_upper), *binding.selectors, *membership),
             per_group=(security_column, count) if count is not None else None,
             group_order=tuple(dict.fromkeys(group_order)))
         remaining = count if len(securities) == 1 else None
@@ -477,6 +548,10 @@ class RunDataGateway:
                     expected_generation=int(context.dependencies[binding.name]['generation']), cancelled=self.cancelled)
             self.stats['storage_reads'] += 1
             self.stats['storage_rows'] += page.table.num_rows
+            self.stats['selected_file_bytes'] += page.metrics.current_read_bytes
+            self.stats['files_read'] += page.metrics.files_read
+            self.stats['storage_scratch_peak_bytes'] = max(
+                self.stats['storage_scratch_peak_bytes'], page.metrics.scratch_peak_bytes)
             self.check(context)  # quality may change without generation during read
             with store_errors():
                 table = binding.project(page.table, set(fields) | identity)
@@ -487,11 +562,30 @@ class RunDataGateway:
                 table = table.slice(0, remaining)
                 remaining -= table.num_rows
             if table.num_rows or not page.next_cursor:
-                yield self._batch(table, binding)
+                result=self._batch(table, binding)
+                if (self.replay_cache_rows and count is None and start<end
+                        and set(securities)==set(self.grant.universe) and not hasattr(binding,'batch_metadata')):
+                    self._remember_replay(binding.name,set(fields),result.table)
+                yield result
             if not page.next_cursor or remaining == 0:
                 break
             query = replace(query, cursor=page.next_cursor)
         self.check(context)
+
+    def _remember_replay(self, name, fields, table):
+        if not table.num_rows:
+            return
+        cached=self.replay_cache
+        identity=('time_ns','security','source_session','channel','sequence','stable_input_sequence')
+        if (cached is not None and cached[0]==name and cached[1]==fields
+                and tuple(cached[2][k][-1].as_py() for k in identity)<tuple(table[k][0].as_py() for k in identity)):
+            table=pa.concat_tables([cached[2],table])
+        if table.num_rows>self.replay_cache_rows:
+            table=table.take(pa.array(range(table.num_rows-self.replay_cache_rows,table.num_rows),type=pa.uint64()))
+        table=table.combine_chunks()
+        if table.nbytes>2*self.batch_bytes:
+            raise GatewayError('RESOURCE_LIMIT','回放缓冲超过两批次预算')
+        self.replay_cache=(name,fields,table)
 
     def _batch(self, table, binding):
         if table.nbytes+16384 > self.batch_bytes:
@@ -514,6 +608,8 @@ class RunDataGateway:
 
     def read(self, name, request, context, *, page_rows=None):
         binding, start, end, count = self._request(name, request, context)
+        if count is None:
+            self.check(context)
         if count is None and start < end and len(request['securities']) > 1:
             # Single-page sorting cannot repair cross-page replay order. Bounded
             # count windows and a research query at one exact ns still support
@@ -539,13 +635,41 @@ class RunDataGateway:
             yield self._batch(pa.Table.from_batches([], schema=MARKET_SCHEMA), binding)
         if request['securities']:
             security = tuple(sorted(request['securities'])) if len(request['securities']) > 1 else request['securities'][0]
-            yield from self._pages(binding, security, start, end, context, request['fields'],
-                                   count=count, page_rows=page_rows)
+            if (self.replay_window_ns is not None and count is None and start < end
+                    and binding.spec.key[0] == binding.fields.get('time_ns')
+                    and pa.types.is_int64(binding.spec.schema.field(binding.spec.key[0]).type)):
+                # Time-first replay uses finite ranges through the SAME reader,
+                # locks, issues and generation gate. It does not repeatedly sort
+                # every future file to produce one page. File bounds are hints,
+                # never coverage or permission evidence.
+                with store_errors(), self.store.catalog.transaction() as c:
+                    bounds = c.execute(text('SELECT '
+                        '(SELECT key_min FROM data_store_files WHERE dataset=:d ORDER BY key_min LIMIT 1),'
+                        '(SELECT key_max FROM data_store_files WHERE dataset=:d ORDER BY key_max DESC LIMIT 1)'),
+                        {'d':binding.spec.name}).one()
+                if bounds[0] is not None:
+                    first = int.from_bytes(bytes(bounds[0])[:8],'big')-2**63+binding.time_offset_ns
+                    last = int.from_bytes(bytes(bounds[1])[:8],'big')-2**63+binding.time_offset_ns
+                    begin, finish = max(start,first), min(end,last)
+                    if begin <= finish:
+                        while begin <= finish:
+                            stop = min(finish,begin+self.replay_window_ns-1)
+                            yield from self._pages(binding, security, begin, stop, context, request['fields'],
+                                                   count=count, page_rows=page_rows)
+                            begin = stop+1
+                    else:
+                        yield from self._pages(binding,security,start,end,context,request['fields'],page_rows=page_rows)
+                else:
+                    yield from self._pages(binding,security,start,end,context,request['fields'],page_rows=page_rows)
+            else:
+                yield from self._pages(binding, security, start, end, context, request['fields'],
+                                       count=count, page_rows=page_rows)
         self.check(context)
 
     def lookback(self, name, request, context):
         """Bounded count window; same query reuses buffers, forward end reads delta."""
         binding, start, end, count = self._request(name, request, context)
+        self.check(context)
         if count is None or count*len(request['securities']) > self.cache_rows:
             raise GatewayError('RESOURCE_LIMIT', '历史窗口超过缓存预算')
         parts = []
@@ -568,14 +692,18 @@ class RunDataGateway:
                     ('source_session','ascending'),('channel','ascending'),('sequence','ascending'),
                     ('stable_input_sequence','ascending')])
                 if type(security) is tuple:
-                    ordered = table['security'].take(indices).to_pylist()
-                    taken, counts = [], {}
-                    for i in range(len(ordered)-1, -1, -1):
-                        s = ordered[i]
-                        if counts.get(s, 0) < count:
-                            taken.append(indices[i].as_py())
-                            counts[s] = counts.get(s, 0)+1
-                    indices = pa.array(taken[::-1], type=pa.uint64())
+                    # The admitted cache plus one bounded page is the entire
+                    # input. Arrow identifies contiguous security runs; NumPy
+                    # selects their tails without one Python object/scalar per
+                    # historical event. Retain the same full identity ordering,
+                    # including equal-ns events and shorter/missing groups.
+                    if not len(indices):
+                        return table.combine_chunks()
+                    ends = pc.run_end_encode(table['security'].take(indices).combine_chunks()).run_ends.to_numpy()
+                    starts = np.concatenate((np.array([0], dtype=ends.dtype), ends[:-1]))
+                    lower = np.maximum(starts, ends-count)
+                    keep = np.arange(len(indices)) >= np.repeat(lower, ends-starts)
+                    indices = pa.array(indices.to_numpy()[keep], type=pa.uint64())
                 else:
                     indices = indices.slice(max(0, len(indices)-count))
                 return table.take(indices).combine_chunks()
@@ -605,13 +733,14 @@ class RunDataGateway:
         return self._batch(pa.concat_tables(parts) if parts else pa.Table.from_batches([], schema=MARKET_SCHEMA), binding)
 
     def close(self, context):
+        self.replay_cache=None
         if context is self.context and context is not None:
             context.closed = True
             context.dependencies.clear()
             self.cache.clear()
 
 
-def serve(channel, gateway, context, *, close_context=True):
+def serve(channel, gateway, context, *, close_context=True, session_facts=None):
     """Run-private source/query streams; one credited response at a time.
 
     At most two generators retain buffers, with each emitted batch bounded by
@@ -664,6 +793,20 @@ def serve(channel, gateway, context, *, close_context=True):
                             streams.pop(stream_id)[0].close()
                             gateway.check(context)
                             status = 'eof'
+                elif frame.op == 'session_facts':
+                    if (session_facts is None or set(frame.body) != {'session', 'offset'}
+                            or type(frame.body['session']) is not str
+                            or not 1 <= len(frame.body['session'].encode()) <= 128
+                            or type(frame.body['offset']) is not int or not 0 <= frame.body['offset'] < 10000):
+                        raise GatewayError('INVALID_CONTRACT', '会话事实请求无效')
+                    gateway.check(context)
+                    body = session_facts(frame.body['session'], frame.body['offset'], 256)
+                    if (type(body) is not dict or set(body) != {'session', 'facts', 'next_offset'}
+                            or body['session'] != frame.body['session'] or type(body['facts']) is not list
+                            or not 1 <= len(body['facts']) <= 256
+                            or body['next_offset'] is not None and body['next_offset'] != frame.body['offset'] + len(body['facts'])):
+                        raise GatewayError('INVALID_CONTRACT', '会话事实信用或身份无效')
+                    gateway.check(context)
                 elif frame.op == 'check':
                     if frame.body:
                         raise GatewayError('INVALID_CONTRACT', '依赖检查不接受额外控制')

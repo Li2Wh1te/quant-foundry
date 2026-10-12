@@ -17,7 +17,7 @@ from uuid import uuid4
 
 from .local_queue import encoded
 from .process import attempt_name, container_name
-from .runtime_contracts import Claim, RuntimeFault
+from .runtime_contracts import Claim, RuntimeFault, checked_progress
 
 
 @dataclass
@@ -31,6 +31,8 @@ class Binding:
     channel: object = None
     listener: object = None
     error: BaseException | None = None
+    session_facts: object = None
+    telemetry: object = None
 
 
 class DataRunServices:
@@ -68,6 +70,7 @@ class DataRunServices:
                     binding.gateway,
                     binding.context,
                     close_context=False,
+                    session_facts=binding.session_facts,
                 )
             except BaseException as error:
                 if not stopped.is_set() and getattr(error, "code", None) != "CANCELLED":
@@ -151,6 +154,9 @@ class _Task:
     name: str | None = None
     last_heartbeat: float = 0
     heartbeat_thread: Thread | None = None
+    progress: dict | None = None
+    progress_saved_at: float = 0
+    progress_messages: int = 0
 
 
 class RunnerSupervisor:
@@ -210,7 +216,8 @@ class RunnerSupervisor:
                             "RESOURCE_LIMIT", "数据预算超过worker内存分配"
                         )
                     body = dict(
-                        spec=spec,
+                        spec=dict(spec, calendar=[]),
+                        calendar_rows=len(spec['calendar']),
                         strategy_sha256=hashlib.sha256(
                             task.work.strategy_source.encode()
                         ).hexdigest(),
@@ -218,6 +225,28 @@ class RunnerSupervisor:
                         research_routes=task.binding.research_routes,
                         output_bytes=task.work.limits.output_bytes,
                     )
+                elif frame.op == "calendar" and booted and set(frame.body) == {"offset"}:
+                    offset = frame.body['offset']
+                    calendar = task.binding.spec['calendar']
+                    if (type(offset) is not int or not 0 <= offset < len(calendar)
+                            or not 1 <= len(calendar) <= 10000):
+                        raise RuntimeFault('RESOURCE_LIMIT', '日历信用或范围无效')
+                    body = dict(rows=calendar[offset:offset+128])
+                elif frame.op == "metrics" and booted and set(frame.body) == {"metrics"}:
+                    if type(frame.body['metrics']) is not dict or len(encoded(frame.body)) > 64*1024:
+                        raise RuntimeFault('RESOURCE_LIMIT', '运行测量摘要超过预算')
+                    if task.binding.telemetry is not None:
+                        task.binding.telemetry(frame.body['metrics'])
+                elif frame.op == 'progress' and booted:
+                    task.progress = checked_progress(frame.body, task.progress)
+                    task.progress_messages += 1
+                    if task.progress_messages > 2*task.work.limits.wall_seconds+16:
+                        raise RuntimeFault('RESOURCE_LIMIT', '进度消息超过墙钟对应预算')
+                    now = time.monotonic()
+                    if now-task.progress_saved_at >= 1:
+                        if not self.repository.progress(task.claim, task.progress):
+                            raise RuntimeFault('STALE_CLAIM', '运行进度claim已失效')
+                        task.progress_saved_at = now
                 elif frame.op == "result" and booted and set(frame.body) == {"records"}:
                     records = frame.body["records"]
                     if type(records) is not list or not 1 <= len(records) <= 64:
@@ -454,6 +483,9 @@ class RunnerSupervisor:
         path.rmdir()
 
     def _finish(self, task, outcome):
+        if (task.binding.error is not None and not self.stopping
+                and not self.repository.cancelled(task.claim)):
+            outcome=self._failure(task.binding.error)
         if outcome["status"] != "succeeded":
             task.stopped.set()
         task.listener.close()
@@ -482,6 +514,10 @@ class RunnerSupervisor:
                     RuntimeFault("RESULT_BUDGET_EXCEEDED", "必需结果无法持久化")
                 )
         try:
+            # Flush the latest bounded counter once before the terminal winner.
+            # Cancellation/expiry refuses this mutation and preserves prior state.
+            if task.progress is not None:
+                self.repository.progress(task.claim, task.progress)
             commit = lambda connection=None: self.repository.commit_outcome(
                 task.claim, outcome, result, connection, publish
             )
@@ -513,12 +549,15 @@ class RunnerSupervisor:
         else:
             code = getattr(error, "code", "STRATEGY_ERROR")
             if code not in (
+                "CAPABILITY_UNAVAILABLE",
                 "DATA_CHANGED",
                 "DATA_RESTRICTED",
+                "RULE_UNAVAILABLE",
+                "INVALID_CONTRACT",
+                "NUMERIC_RANGE_UNSUPPORTED",
+                "LOOKAHEAD_FORBIDDEN",
                 "RESOURCE_LIMIT",
                 "RESULT_BUDGET_EXCEEDED",
-                "CAPABILITY_UNAVAILABLE",
-                "INVALID_CONTRACT",
                 "CANCELLED",
                 "STRATEGY_ERROR",
             ):
@@ -527,7 +566,7 @@ class RunnerSupervisor:
                 code=code,
                 operation="supervisor",
                 message="运行或数据通道失败，请核对所示错误码",
-                scope={},
+                scope={"exception_type": type(error).__name__[:64]},
             )
         return dict(status="failed", error=diagnostic, partial=True)
 
@@ -615,12 +654,19 @@ class RunnerSupervisor:
                     self.repository.commit_outcome(claim, self._failure(error), None)
 
     def run_forever(self, *, stop_event):
+        readiness = getattr(self.services, 'readiness', None)
         try:
             while not stop_event.is_set():
+                if readiness is not None:
+                    readiness.refresh()
                 self.step()
                 stop_event.wait(0.05)
         finally:
-            self.stop()
+            try:
+                self.stop()
+            finally:
+                if readiness is not None:
+                    readiness.close()
 
     def stop(self):
         self.stopping = True

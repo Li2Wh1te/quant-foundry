@@ -574,6 +574,15 @@ def initialize(c):
         # The old task's cleanup is safe after recovery; never kills the new one.
         first.step()
 
+    def test_data_channel_failure_keeps_data_changed_terminal(self):
+        self.services.ipc = True
+        run_id = self.enqueue(self.work("def initialize(c): pass"))
+        self.tick()
+        self.services.bindings[-1].gateway.changed = True
+        row = self.wait_runs([run_id])[0]
+        self.assertEqual(row['status'], 'failed')
+        self.assertEqual(row['outcome']['error']['code'], 'DATA_CHANGED')
+
     def test_path_injection_unknown_control_and_data_changed_commit(self):
         for bad in ["../x/code", "/tmp/code", "x/../ipc", "x/code/extra"]:
             with self.assertRaises(RuntimeFault):
@@ -776,14 +785,19 @@ if __name__ == "__main__":
     from s3_cli_suite import D14Tests
     assert os.environ.get("QF_D13_REAL_WORKER_REQUIRED") == "1", "D13 real DB integration is mandatory"
     assert os.environ.get("QF_D14_REAL_WORKER_REQUIRED") == "1", "D14 real HTTP/client/examples integration is mandatory"
-    suite = unittest.TestSuite([
-        unittest.defaultTestLoader.loadTestsFromTestCase(RuntimeTests),
-        unittest.defaultTestLoader.loadTestsFromTestCase(D13Tests),
-        unittest.defaultTestLoader.loadTestsFromTestCase(D14Tests),
-    ])
-    result = unittest.TextTestRunner(verbosity=2).run(suite)
-    EVIDENCE["d13_database_http_gateway_result_commit"] = True
-    EVIDENCE["d14_installed_cli_python_five_examples"] = True
+    classes=(RuntimeTests,D13Tests,D14Tests)
+    suites=[unittest.defaultTestLoader.loadTestsFromTestCase(cls) for cls in classes]
+    required={cls.__name__:{test.id() for test in cases} for cls,cases in zip(classes,suites)}
+    class ActualResult(unittest.TextTestResult):
+        def __init__(self,*args,**kwargs):
+            super().__init__(*args,**kwargs);self.passed_ids=set()
+        def addSuccess(self,test):
+            super().addSuccess(test);self.passed_ids.add(test.id())
+    result = unittest.TextTestRunner(verbosity=2,resultclass=ActualResult).run(unittest.TestSuite(suites))
+    EVIDENCE['families']={name:dict(required=len(ids),passed=len(ids & result.passed_ids),
+        completed=ids<=result.passed_ids) for name,ids in required.items()}
+    EVIDENCE["d13_database_http_gateway_result_commit"] = EVIDENCE['families']['D13Tests']['completed']
+    EVIDENCE["d14_installed_cli_python_five_examples"] = EVIDENCE['families']['D14Tests']['completed']
     EVIDENCE["skipped"] = len(result.skipped)
     EVIDENCE["success"] = result.wasSuccessful()
     EVIDENCE["test_count"] = result.testsRun

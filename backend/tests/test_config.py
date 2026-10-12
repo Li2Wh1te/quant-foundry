@@ -1,4 +1,5 @@
 import os
+import json
 import unittest
 from unittest.mock import patch
 
@@ -12,6 +13,51 @@ CURSOR_SIGNING_KEY = "b" * 64
 
 
 class SettingsTestCase(unittest.TestCase):
+    def test_trusted_s3_profile_keeps_defaults_and_accounts_for_the_whole_group(self):
+        from app.backtest_service.runtime_contracts import configured_budgets, WorkerLimits, GroupBudget
+        worker = dict(cpu_millis=2000, memory_bytes=5*1024**3, pids=64,
+            wall_seconds=3600, tmp_bytes=512*1024**2, file_bytes=256*1024**2, result_bytes=128*1024**2)
+        group = dict(reserve_cpu_millis=2000, reserve_memory_bytes=3*1024**3, reserve_pids=96)
+        with patch.dict(os.environ, {}, clear=True):
+            plain = Settings(api_token=API_TOKEN, cursor_signing_key=CURSOR_SIGNING_KEY,
+                database_password='test-secret', _env_file=None)
+            self.assertEqual(configured_budgets(plain.s3_worker_limits,plain.s3_group_budget), (WorkerLimits(),GroupBudget()))
+            with patch.dict(os.environ, {'QF_S3_WORKER_LIMITS':json.dumps(worker), 'QF_S3_GROUP_BUDGET':json.dumps(group)}):
+                configured = Settings(api_token=API_TOKEN, cursor_signing_key=CURSOR_SIGNING_KEY,
+                    database_password='test-secret', _env_file=None)
+            limits,budget=configured_budgets(configured.s3_worker_limits,configured.s3_group_budget)
+            self.assertTrue(budget.fits([limits]))
+            self.assertFalse(budget.fits([limits,limits]))
+            self.assertEqual(limits.memory_bytes+budget.reserve_memory_bytes,8*1024**3)
+            parallel=dict(worker,cpu_millis=1000,memory_bytes=5*1024**3//2,
+                tmp_bytes=256*1024**2,file_bytes=128*1024**2)
+            concurrent=Settings(api_token=API_TOKEN,cursor_signing_key=CURSOR_SIGNING_KEY,
+                database_password='test-secret',_env_file=None,
+                s3_worker_limits=parallel,s3_group_budget=group)
+            two,bounded=configured_budgets(concurrent.s3_worker_limits,concurrent.s3_group_budget)
+            self.assertTrue(bounded.fits([two,two]))
+            self.assertFalse(bounded.fits([two,two,two]))
+            self.assertEqual(2*two.memory_bytes+bounded.reserve_memory_bytes,8*1024**3)
+            with patch.dict(os.environ, {'QF_S3_WORKER_LIMITS':'null', 'QF_S3_GROUP_BUDGET':'null'}):
+                empty = Settings(api_token=API_TOKEN, cursor_signing_key=CURSOR_SIGNING_KEY,
+                    database_password='test-secret', _env_file=None)
+            self.assertEqual(configured_budgets(empty.s3_worker_limits,empty.s3_group_budget),(WorkerLimits(),GroupBudget()))
+
+    def test_invalid_s3_profiles_cannot_expand_or_omit_group_reservations(self):
+        worker=dict(memory_bytes=5*1024**3, cpu_millis=2000)
+        group=dict(reserve_cpu_millis=2000, reserve_memory_bytes=3*1024**3, reserve_pids=96)
+        invalid = ((worker,None), (dict(worker,memory_bytes=True),group),
+            (dict(worker,network='host'),group), (dict(worker,memory_bytes=6*1024**3),group),
+            (worker,dict(group,cpu_millis=5000)), (worker,dict(group,memory_bytes=9*1024**3)),
+            (worker,dict(group,concurrency=3)), (worker,dict(group,reserve_cpu_millis=1000)),
+            (worker,dict(group,reserve_memory_bytes=1024**3)), (worker,dict(group,reserve_pids=64)))
+        with patch.dict(os.environ, {}, clear=True):
+            for limits,budget in invalid:
+                with self.subTest(limits=limits,budget=budget),self.assertRaises(ValidationError):
+                    Settings(api_token=API_TOKEN,cursor_signing_key=CURSOR_SIGNING_KEY,
+                        database_password='test-secret',_env_file=None,
+                        s3_worker_limits=limits,s3_group_budget=budget)
+
     def test_defaults(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
             settings = Settings(

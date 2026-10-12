@@ -43,6 +43,8 @@ pub struct Host {
     pub gateway: Option<source::Gateway>,
     pub first_session: SessionKey,
     pub callback_count: u64,
+    pub callback_seconds: f64,
+    pub callback_gateway_seconds: f64,
     pub logs_truncated: bool,
     record_points: u64,
     log_bytes: usize,
@@ -98,6 +100,8 @@ impl Host {
             gateway,
             first_session,
             callback_count: 0,
+            callback_seconds: 0.0,
+            callback_gateway_seconds: 0.0,
             logs_truncated: false,
             record_points: 0,
             log_bytes: 0,
@@ -365,7 +369,21 @@ impl Host {
         self.callbacks.send(Callback { kind:kind.into(),payload:json!({"boundary":{"now_ns":visibility.now_ns,"market_through":visibility.market_through},"data":data}),requests:sender })
             .map_err(|_|QfError::new(ErrorCode::Cancelled,"strategy_callback","策略接收器已退出"))?;
         self.callback_count += 1;
-        self.serve(receiver, view, commands, registration)
+        let gateway_before = self
+            .gateway
+            .as_ref()
+            .and_then(|g| g.lock().ok())
+            .map_or(0.0, |g| g.exchange_seconds);
+        let started = Instant::now();
+        let result = self.serve(receiver, view, commands, registration);
+        self.callback_seconds += started.elapsed().as_secs_f64();
+        let gateway_after = self
+            .gateway
+            .as_ref()
+            .and_then(|g| g.lock().ok())
+            .map_or(0.0, |g| g.exchange_seconds);
+        self.callback_gateway_seconds += gateway_after - gateway_before;
+        result
     }
 }
 impl StrategyHost for Host {

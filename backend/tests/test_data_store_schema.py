@@ -62,6 +62,28 @@ def test_semantics_partition_rule_and_required_fields_never_implicitly_compatibl
     assert replace(s,schema=s.schema.append(pa.field('optional',pa.string(),True))).accepts(s)
 
 
+def test_schema_identity_remains_exact_after_immutable_contract_replacement():
+    from dataclasses import FrozenInstanceError, replace
+    from app.data_store.schema import fingerprint
+    supplied = {'unit':'CNY'}
+    spec = DatasetSpec('identity',pa.schema([pa.field('id',pa.int64(),False)]),('id',),'r1',supplied)
+    descriptor = spec.descriptor();del descriptor['rule']
+    expected = fingerprint(descriptor)
+    assert spec.schema_id == expected
+    supplied['unit']='USD'
+    assert spec.schema_id == expected and spec.semantics['unit']=='CNY'
+    with pytest.raises(TypeError):
+        spec.semantics['unit']='USD'
+    with pytest.raises(FrozenInstanceError):
+        spec.schema=pa.schema([pa.field('id',pa.uint64(),False)])
+    assert replace(spec,rule='r2').schema_id == expected
+    for changed in (replace(spec,semantics={'unit':'USD'}),
+                    replace(spec,partitioning='new'),
+                    replace(spec,schema=pa.schema([pa.field('id',pa.uint64(),False)]))):
+        actual=changed.descriptor();del actual['rule']
+        assert changed.schema_id == fingerprint(actual) and changed.schema_id != expected
+
+
 def test_variable_width_materialization_has_a_declared_byte_bound():
     text = pa.field('text',pa.string(),False)
     spec = DatasetSpec('wide',pa.schema([pa.field('id',pa.int64(),False),text]),('id',),'r1')

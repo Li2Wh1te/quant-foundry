@@ -59,7 +59,7 @@ import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
 for p in ['VERSION','backend/app','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
           'sdk/python/tests/support_sdk.py','ops/s3-d12','ops/s3-d15/isolated_server.py','tests/s3_runtime_suite.py',
-          'ops/s3-d16', 'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','examples/strategies','examples/http_workflow.py','docs/backtesting']:
+          'ops/s3-d16', 'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','tests/s3_formal_fixtures.py','tests/s3_final_suite.py','ops/s3-d18','examples/strategies','examples/http_workflow.py','docs/backtesting']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)
@@ -72,6 +72,7 @@ dockerfile=(target/'ops/s3-d12/runner-test.Dockerfile').read_text()
 PY
 docker build --network none -f "$qf_test_root/build/ops/s3-d12/worker.Dockerfile" -t "$qf_worker_tag" "$qf_test_root/build" > "$qf_evidence/worker-build.log" 2>&1
 qf_worker_id=$(docker image inspect --format '{{.Id}}' "$qf_worker_tag")
+printf '{}\n' > "$qf_test_root/build/s3-source.json"
 docker build --network none -f "$qf_test_root/build/runner.Dockerfile" -t "$qf_runner_tag" "$qf_test_root/build" > "$qf_evidence/runner-build.log" 2>&1
 qf_runner_id=$(docker image inspect --format '{{.Id}}' "$qf_runner_tag")
 chmod 777 "$qf_test_root/db-socket"
