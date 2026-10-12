@@ -111,6 +111,32 @@ def quality(formal,spec):
         c.execute(text("INSERT INTO data_store_issues(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
             "VALUES(:d,'quality','test','QUALITY_CHANGED',:t,'{}','{}')"),{'d':spec.name,'t':fingerprint('changed')})
 
+
+def test_dependency_issue_digest_keeps_nonempty_count_and_byte_limits(formal):
+    spec,gateway,ctx=setup(formal)
+    quality(formal,spec)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text("INSERT INTO data_store_issues(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) "
+            "VALUES(:d,'quality-second','test','QUALITY_CHANGED',:t,'{}','{}')"),
+            {'d':spec.name,'t':fingerprint('second')})
+    formal.limits=replace(formal.limits,issue_count=1)
+    error('RESOURCE_LIMIT',lambda:gateway.declare('market',ctx),'ISSUE_BUDGET_EXCEEDED')
+    formal.limits=replace(formal.limits,issue_count=10)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text("UPDATE data_store_issues SET target_json=:large WHERE issue_key='quality'"),
+                  {'large':json.dumps({'diagnostic':'x'*20000})})
+    gateway.batch_bytes=16385
+    error('RESOURCE_LIMIT',lambda:gateway.declare('market',ctx),'CONTROL_BUDGET_EXCEEDED')
+
+
+def test_issue_removed_from_used_dependency_is_data_changed(formal):
+    spec,gateway,ctx=setup(formal)
+    quality(formal,spec)
+    gateway.declare('market',ctx)
+    with formal.catalog.engine.begin() as c:
+        c.execute(text('DELETE FROM data_store_issues WHERE dataset=:d'),{'d':spec.name})
+    error('DATA_CHANGED',lambda:gateway.check(ctx))
+
 def test_real_arrow_exact_selective_projection(formal,monkeypatch):
     _,gateway,ctx=setup(formal,count=40)
     from app.data_store import readers

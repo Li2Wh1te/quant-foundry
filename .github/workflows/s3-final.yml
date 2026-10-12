@@ -22,7 +22,10 @@ permissions:
   contents: read
 concurrency:
   group: s3-final-${{ github.head_ref || github.ref }}
-  cancel-in-progress: false
+  # An unfinished measurement cannot validate a changed business head. Keep
+  # one run per branch and let the current source replace obsolete work;
+  # completed identical-source evidence is still verified before reuse.
+  cancel-in-progress: true
 jobs:
   full:
     name: Full B1-B4 in 4 CPU and 8 GiB group

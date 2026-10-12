@@ -271,39 +271,45 @@ class RunDataGateway:
                 raise DataStoreError('DATA_CHANGED')
             self.store._spec_current(binding.spec, state)
             checkpoint(query=True)
-            legacy = connection.execute(text('SELECT EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
-                    'WHERE dataset=:d OR dataset IS NULL)'), {'d': binding.spec.name}).scalar_one()
-            if legacy:
+            # Read small gate metadata together in THIS snapshot. The EXISTS
+            # probe avoids a server-side cursor for an empty issue set; it is
+            # never cached and never replaces the bounded, ordered digest when
+            # any issue exists. Keep every dependency/check/finalization gate.
+            guard = connection.execute(text('SELECT '
+                'EXISTS(SELECT 1 FROM data_store_legacy_restrictions '
+                    'WHERE dataset=:d OR dataset IS NULL) AS legacy_restricted,'
+                'EXISTS(SELECT 1 FROM data_store_issues WHERE dataset=:d) AS issues_present,'
+                '(SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e) AS entry_summary'),
+                {'d': binding.spec.name, 'e': binding.spec.semantics.get('entry_id')}).mappings().one()
+            if guard['legacy_restricted']:
                 if self.context is not None and name in self.context.dependencies:
                     raise DataStoreError('DATA_CHANGED')
                 raise DataStoreError('DATA_RESTRICTED')
             # Conservative dataset-wide readability token; no permanent row ledger.
             issue_digest = hashlib.sha256()
             issue_bytes = 0
-            checkpoint(query=True)
-            issues = connection.execution_options(stream_results=True, max_row_buffer=1).execute(
+            if guard['issues_present']:
+                checkpoint(query=True)
+                issues = connection.execution_options(stream_results=True, max_row_buffer=1).execute(
                     text('SELECT issue_key,reason,evidence_token,target_json,resolution_json '
                     'FROM data_store_issues WHERE dataset=:d ORDER BY issue_key LIMIT :n'),
                     {'d': binding.spec.name, 'n': self.store.limits.issue_count+1})
-            try:
-                for i, issue in enumerate(issues.mappings()):
-                    checkpoint()
-                    if i >= self.store.limits.issue_count:
-                        raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
-                    encoded = json.dumps(dict(issue), ensure_ascii=False, sort_keys=True,
-                                         separators=(',', ':')).encode()
-                    issue_bytes += len(encoded)
-                    if issue_bytes > min(self.batch_bytes, self.store.limits.query_bytes):
-                        raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
-                    issue_digest.update(encoded)
-                    issue_digest.update(b'\0')
-            finally:
-                issues.close()
-                connection.execution_options(stream_results=False)
-            entry_id = binding.spec.semantics.get('entry_id')
-            checkpoint(query=True)
-            summary = connection.execute(text('SELECT summary_json FROM data_store_entry_status WHERE entry_id=:e'),
-                                         {'e': entry_id}).scalar_one_or_none()
+                try:
+                    for i, issue in enumerate(issues.mappings()):
+                        checkpoint()
+                        if i >= self.store.limits.issue_count:
+                            raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+                        encoded = json.dumps(dict(issue), ensure_ascii=False, sort_keys=True,
+                                             separators=(',', ':')).encode()
+                        issue_bytes += len(encoded)
+                        if issue_bytes > min(self.batch_bytes, self.store.limits.query_bytes):
+                            raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
+                        issue_digest.update(encoded)
+                        issue_digest.update(b'\0')
+                finally:
+                    issues.close()
+                    connection.execution_options(stream_results=False)
+            summary = guard['entry_summary']
             # Only this part of entry status participates in the formal reader
             # gate. Refresh progress/counters are operational, not quality.
             restriction = json.loads(summary).get('overflow_restriction', {}) if summary else {}
