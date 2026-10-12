@@ -63,6 +63,9 @@ export interface PreviewSession {
 function cloneResult(result: PreviewResult | null): PreviewResult | null {
   return result && { ...result, rows: result.rows.map(row => ({ ...row })), actual_range: { ...result.actual_range },
     selected_partitions: [...result.selected_partitions], limitations: [...result.limitations],
+    // Evidence includes nested quality explanations. Each client/cache/caller
+    // boundary owns its copy, including on a retained page after refresh failure.
+    ...(result.current_read_evidence ? { current_read_evidence: structuredClone(result.current_read_evidence) } : {}),
     ...(result.semantics ? { semantics: { ...result.semantics } } : {}) };
 }
 

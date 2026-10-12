@@ -16,7 +16,7 @@ const { renderToStaticMarkup } = require('react-dom/server');
 const { MemoryRouter } = require('react-router-dom');
 const { AuthProvider } = require('../src/auth/AuthContext.tsx');
 const { PreviewPanel, defaultPreviewColumns, previewColumnOptions, previewScopeKey,
-  previewCellValue, previewEmptyMessage, retainPreviewOnFailure } = require('../src/features/data-assets/PreviewPanel.tsx');
+  previewCellValue, previewEmptyMessage, retainPreviewOnFailure, PriorValidReportNotice } = require('../src/features/data-assets/PreviewPanel.tsx');
 const { buildPreviewRequest, DataStoreApiError } = require('../src/features/data-assets/data/index.ts');
 const field = column => ({ column, type: 'string', meaning: 'Model.value', logical_type: 'typed_scalar', arithmetic: 'unsupported' });
 const dataset = overrides => ({ dataset: 'fixture.daily', name: '隔离示例', domain: 'fixture', source: 'loopback',
@@ -30,6 +30,17 @@ const dataset = overrides => ({ dataset: 'fixture.daily', name: '隔离示例', 
   ...overrides });
 const render = value => renderToStaticMarkup(createElement(MemoryRouter, { initialEntries: ['/?view=preview'] },
   createElement(AuthProvider, null, createElement(PreviewPanel, { dataset: value }))));
+
+test('whole-report evidence displays old confirmation, failed latest refresh and field limitations without full acceptance', () => {
+  const evidence = require('./fixtures/prior-valid-report.cjs')();
+  const html = renderToStaticMarkup(createElement(PriorValidReportNotice, { evidence, previousRead: false }));
+  assert.match(html, /旧有效报告.*本次服务端.*整份报告/);
+  assert.match(html, /本页仍是分页片段/); assert.match(html, /未取得新的来源确认/);
+  assert.match(html, /整域验收未通过/); assert.match(html, /SOURCE_VALUE_INVALID/);
+  assert.doesNotMatch(html, /00000000-0000|aaaaaaaa|bbbbbbbb/);
+  const stale = renderToStaticMarkup(createElement(PriorValidReportNotice, { evidence, previousRead: true }));
+  assert.match(stale, /上次成功读取时/); assert.doesNotMatch(stale, /本次服务端/);
+});
 
 test('defaults bound actual declared columns, retain node identity, and exclude internal confirmation columns', () => {
   const columns = defaultPreviewColumns(dataset());
