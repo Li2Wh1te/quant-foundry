@@ -59,8 +59,11 @@ class Replay:
 
 def main():
     replay = Replay()
-    view_bytes = 1024*1024*1024
-    allocated = view_bytes + 8*1024*1024 + 2*64*1024*1024 + 2*1024*1024
+    # Keep the original total grant. The SDK now reserves four cache credits,
+    # just as _Host does, so deduct the extra three from the native view rather
+    # than increasing this memory test's budget or dropping input/conversion.
+    allocated = 1024*1024*1024 + 8*1024*1024 + 2*64*1024*1024 + 2*1024*1024
+    view_bytes = allocated - 4*8*1024*1024 - 2*64*1024*1024 - 2*1024*1024
     for budget in (None, view_bytes):
         try:
             _DataSession(replay, universe=SYMBOLS, frequency='1d', market_routes={},
