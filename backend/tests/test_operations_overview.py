@@ -264,8 +264,7 @@ class SchedulerFairnessTest(OverviewTest):
         future = self.add_run(self.task(), 'queued', at=NOW+timedelta(hours=1))
         future.created_at = NOW-timedelta(days=8)
         self.session.flush()
-        with patch('app.scheduling.repository.datetime') as clock:
-            clock.now.return_value = NOW
+        with patch('app.scheduling.repository.SchedulerRepository.current_time', return_value=NOW):
             actual = SchedulerRepository(self.session).claim_queued_runs(3, task_types=[self.key])
         self.assertEqual(actual, [old.id, newer.id, fresh.id])
         self.assertEqual(old.priority, 0)
@@ -278,7 +277,6 @@ class SchedulerFairnessTest(OverviewTest):
         high = self.add_run(self.task(), 'queued', at=NOW-timedelta(minutes=1))
         high.priority = 100
         self.session.flush()
-        with patch('app.scheduling.repository.datetime') as clock:
-            clock.now.return_value = NOW
+        with patch('app.scheduling.repository.SchedulerRepository.current_time', return_value=NOW):
             actual = SchedulerRepository(self.session).claim_queued_runs(2, task_types=[self.key])
         self.assertEqual(actual, [high.id, low.id])

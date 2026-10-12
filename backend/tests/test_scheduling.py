@@ -441,8 +441,10 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
         ):
             repository_class.return_value.interrupt_running_runs.return_value = 0
             repository_class.return_value.list_active_task_ids.return_value = []
+            repository_class.return_value.list_running_run_ids.return_value = []
             runtime = SchedulerRuntime(settings)
             runtime.scheduler = Mock()
+            runtime.scheduler.state = 0
             runtime.start()
 
         self.assertEqual(runtime.scheduler.add_job.call_count, 1)
@@ -475,6 +477,8 @@ class SchedulerRuntimeTestCase(unittest.TestCase):
             status=RunStatus.FAILED,
             error_type="ConnectionError",
             error_message="Tushare connection dropped",
+            result=None, exit_code=None, completion_marker=None,
+            failure_phase="worker_crash",
         )
         runtime.stop()
 

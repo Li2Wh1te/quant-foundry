@@ -14,6 +14,7 @@ from app.data_sources.credentials import cipher, decrypt, encrypt
 from app.data_sources.models import DataSourceConfig
 from app.data_sources.providers import PROVIDERS, SourceError, require_provider
 from app.scheduling.models import ScheduledTask, TaskRun
+from app.scheduling.repository import SchedulerRepository
 if TYPE_CHECKING:
     from app.scheduling.registry import TaskRegistry
 
@@ -87,7 +88,7 @@ def skip_source_queue(session: Session, task_types: list[str], reason: str) -> i
     result = session.execute(update(TaskRun).where(
         TaskRun.task_type.in_(task_types), TaskRun.status == "queued"
     ).values(status="skipped", error_type="DataSourceUnavailable",
-             error_message=reason, finished_at=datetime.now(UTC)))
+             error_message=reason, finished_at=SchedulerRepository(session).current_time()))
     return result.rowcount or 0
 
 

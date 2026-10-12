@@ -8,7 +8,7 @@ callbacks without pretending that a missing heartbeat proves business failure.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Callable
 import time
 from uuid import UUID
@@ -56,17 +56,17 @@ class RunProgressReporter:
         self.run_id = run_id
         self.worker_id = worker_id
         self._last_ratio = 0.0
-        self._last_persisted_at: datetime | None = None
-        self._last_heartbeat_at: datetime | None = None
+        self._last_persisted_at: float | None = None
+        self._last_heartbeat_at: float | None = None
 
     def report(self, progress: FrozenTimelineProgress) -> None:
         if progress.ratio < self._last_ratio:
             raise ValueError("run progress must be monotonic")
-        now = datetime.now(UTC)
+        now = time.monotonic()
         # Step changes are persisted at most every five seconds; heartbeat
         # writes still occur within the fifteen-second liveness budget.
-        if self._last_persisted_at is not None and now - self._last_persisted_at < timedelta(seconds=5):
-            if self._last_heartbeat_at is None or now - self._last_heartbeat_at >= HEARTBEAT_INTERVAL:
+        if self._last_persisted_at is not None and now - self._last_persisted_at < 5:
+            if self._last_heartbeat_at is None or now - self._last_heartbeat_at >= HEARTBEAT_INTERVAL.total_seconds():
                 self.heartbeat()
             return
         with Session(get_engine()) as session:
@@ -91,7 +91,7 @@ class RunProgressReporter:
         with Session(get_engine()) as session:
             SchedulerRepository(session).heartbeat(self.run_id, worker_id=self.worker_id)
             session.commit()
-        self._last_heartbeat_at = datetime.now(UTC)
+        self._last_heartbeat_at = time.monotonic()
 
 
 class RunSupervisor:
@@ -106,9 +106,11 @@ class RunSupervisor:
         sleep: Callable[[float], None] = time.sleep,
         grace_seconds: float | None = None,
     ) -> tuple[UUID, ...]:
-        current = now or datetime.now(UTC)
         with Session(get_engine()) as session:
             repository = SchedulerRepository(session)
+            # Heartbeat and cutoff must use the same host clock. A faster API
+            # clock is not proof that a live worker has stopped reporting.
+            current = now or repository.current_time()
             run_ids = repository.list_lost_heartbeat_runs(
                 cutoff=current - LOST_HEARTBEAT_AFTER
             )

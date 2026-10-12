@@ -4,6 +4,7 @@ from copy import deepcopy
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
+import structlog
 from sqlalchemy import case, func, select, update
 from sqlalchemy.orm import Session
 
@@ -22,9 +23,41 @@ TERMINAL_RUN_STATUSES = (
 )
 
 
+logger = structlog.get_logger(__name__)
+
+
+class RunClockRegression(RuntimeError):
+    """The real persistence clock has not caught up with an earlier timestamp."""
+
+
 class SchedulerRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
+
+    def current_time(self) -> datetime:
+        # PostgreSQL now() is the transaction's start time, not the time of
+        # this transition. Application and database hosts can also have skew.
+        if self.session.get_bind().dialect.name == "postgresql":
+            return self.session.scalar(select(func.clock_timestamp()))
+        return datetime.now(UTC)
+
+    @staticmethod
+    def _check_time(run_id: UUID, now: datetime, **earlier: datetime | None) -> None:
+        for field, value in earlier.items():
+            if value is None:
+                continue
+            # SQLite drops timezone information; persisted lifecycle times
+            # are UTC. PostgreSQL returns aware timestamps.
+            normalized = value.replace(tzinfo=UTC) if value.tzinfo is None else value
+            if now < normalized:
+                logger.warning(
+                    "task_run_clock_regressed", run_id=str(run_id),
+                    observed_at=now.isoformat(), earlier_field=field,
+                    earlier_at=value.isoformat(), source="scheduler",
+                )
+                raise RunClockRegression(
+                    f"Persistence clock {now.isoformat()} precedes {field}={value.isoformat()} for run {run_id}"
+                )
 
     def get_task(self, task_id: UUID, *, for_update: bool = False) -> ScheduledTask | None:
         statement = select(ScheduledTask).where(ScheduledTask.id == task_id)
@@ -105,7 +138,7 @@ class SchedulerRepository:
         error_message: str | None = None,
         scheduled_at: datetime | None = None,
     ) -> TaskRun:
-        now = datetime.now(UTC)
+        now = self.current_time()
         run = TaskRun(
             task_id=task.id,
             task_version=task.version,
@@ -118,6 +151,7 @@ class SchedulerRepository:
             priority=task.priority,
             error_message=error_message,
             scheduled_at=scheduled_at,
+            created_at=now,
             available_at=now,
             finished_at=now if status == RunStatus.SKIPPED else None,
         )
@@ -129,7 +163,7 @@ class SchedulerRepository:
         if limit <= 0:
             return []
 
-        now = datetime.now(UTC)
+        now = self.current_time()
         running_counts = (
             select(
                 TaskRun.task_id.label("running_task_id"),
@@ -171,6 +205,7 @@ class SchedulerRepository:
             .where(
                 TaskRun.status == RunStatus.QUEUED.value,
                 TaskRun.available_at <= now,
+                TaskRun.created_at <= now,
                 ScheduledTask.state != TaskState.ARCHIVED.value,
                 running_count < ScheduledTask.concurrency_limit,
                 # Optional scoping is useful for provider-specific dispatch
@@ -197,11 +232,18 @@ class SchedulerRepository:
         )
         candidates = list(self.session.execute(statement).all())
 
+        # Sample after acquiring the row locks, and leave queued work eligible
+        # for a later dispatch if the database clock regressed.
+        started = self.current_time() if candidates else now
         claimed: list[UUID] = []
         for run, task in candidates:
+            try:
+                self._check_time(run.id, started, created_at=run.created_at)
+            except RunClockRegression:
+                continue
             run.status = RunStatus.RUNNING.value
-            run.started_at = now
-            run.last_heartbeat_at = now
+            run.started_at = started
+            run.last_heartbeat_at = started
             claimed.append(run.id)
         self.session.flush()
         return claimed
@@ -220,6 +262,17 @@ class SchedulerRepository:
     ) -> bool:
         if status.value not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"non-terminal run status: {status}")
+        # Lock before sampling the clock. A transaction begun before the claim
+        # must not use its transaction-start timestamp or stale ORM metadata.
+        observed = self.session.execute(
+            select(TaskRun.created_at, TaskRun.started_at)
+            .where(TaskRun.id == run_id, TaskRun.status == RunStatus.RUNNING.value)
+            .with_for_update()
+        ).one_or_none()
+        if observed is None:
+            return False
+        now = self.current_time()
+        self._check_time(run_id, now, created_at=observed.created_at, started_at=observed.started_at)
         values = dict(
             status=status.value,
             result=result,
@@ -228,7 +281,7 @@ class SchedulerRepository:
             exit_code=exit_code,
             completion_marker=completion_marker,
             failure_phase=failure_phase,
-            finished_at=datetime.now(UTC),
+            finished_at=now,
         )
         if status == RunStatus.SUCCEEDED:
             values["progress"] = 1.0
@@ -254,7 +307,7 @@ class SchedulerRepository:
         """Persist monotonic execution progress and a valid heartbeat atomically."""
         if not 0.0 <= progress <= 1.0:
             raise ValueError("progress must be between 0 and 1")
-        now = datetime.now(UTC)
+        now = self.current_time()
         statement = (
             update(TaskRun)
             .where(
@@ -276,7 +329,7 @@ class SchedulerRepository:
         statement = (
             update(TaskRun)
             .where(TaskRun.id == run_id, TaskRun.status == RunStatus.RUNNING.value)
-            .values(last_heartbeat_at=datetime.now(UTC), worker_id=worker_id)
+            .values(last_heartbeat_at=self.current_time(), worker_id=worker_id)
         )
         return (self.session.execute(statement).rowcount or 0) == 1
 
@@ -284,7 +337,7 @@ class SchedulerRepository:
         statement = (
             update(TaskRun)
             .where(TaskRun.id == run_id, TaskRun.status == RunStatus.RUNNING.value)
-            .values(cancellation_requested_at=datetime.now(UTC))
+            .values(cancellation_requested_at=self.current_time())
         )
         return (self.session.execute(statement).rowcount or 0) == 1
 
@@ -297,10 +350,11 @@ class SchedulerRepository:
         return list(self.session.scalars(statement))
 
     def interrupt_running_runs(self) -> int:
-        now = datetime.now(UTC)
+        now = self.current_time()
         result = self.session.execute(
             update(TaskRun)
-            .where(TaskRun.status == RunStatus.RUNNING.value)
+            .where(TaskRun.status == RunStatus.RUNNING.value,
+                   TaskRun.created_at <= now, TaskRun.started_at <= now)
             .values(
                 status=RunStatus.INTERRUPTED.value,
                 error_type="ProcessRestarted",
@@ -310,8 +364,13 @@ class SchedulerRepository:
         )
         return result.rowcount or 0
 
+    def list_running_run_ids(self) -> list[UUID]:
+        return list(self.session.scalars(
+            select(TaskRun.id).where(TaskRun.status == RunStatus.RUNNING.value)
+        ))
+
     def skip_queued_runs_for_archived_task(self, task_id: UUID) -> int:
-        now = datetime.now(UTC)
+        now = self.current_time()
         result = self.session.execute(
             update(TaskRun)
             .where(
