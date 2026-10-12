@@ -672,7 +672,7 @@ def handle_data(c, data):
     frame=get_price(['A.SH'],count=2,fields=['close'])
     assert list(frame.columns)==['security','time_ns','close']
     assert all(type(value).__name__=='Decimal' for value in frame['close'])
-    time.sleep(.65)
+    time.sleep(c.params.get('callback_pause_seconds',.65))
 """
         self.account, self.revision = catalogue(self.engine, source)
         self.template["config"].update(account_id=str(self.account), strategy_revision_id=str(self.revision))
@@ -695,6 +695,10 @@ def handle_data(c, data):
         with Session(self.engine) as session:
             AccountProfileService(session).update(self.account, expected_version=1, fee_schedule=account_payload("9"))
             session.commit()
+        # Queued work keeps its accepted quota after trusted defaults change.
+        parallel_limits=dict(settings.s3_worker_limits,cpu_millis=1000,memory_bytes=5*1024**3//2,
+            tmp_bytes=256*1024**2,file_bytes=128*1024**2)
+        self.app.state.settings=settings.model_copy(update={'s3_worker_limits':parallel_limits})
         try:
             live_progress=[]
             real_limits=[]
@@ -736,12 +740,45 @@ def handle_data(c, data):
                 next_page = self.http("GET", "/"+row["run_id"]+"/results/equity?limit=1&cursor="+page["next_cursor"])
                 self.assertEqual(next_page.status_code, 200, next_page.text)
                 self.assertNotEqual(next_page.json()["items"], page["items"])
+            first_result=result.json()
+            batch_configs=[dict(config,parameters={'candidate':i,'callback_pause_seconds':1}) for i in range(2)]
+            batch_response=self.http('POST','/batches',{'configs':batch_configs},key=uuid4().hex)
+            self.assertEqual(batch_response.status_code,202,batch_response.text)
+            child_ids=[item['run_id'] for item in batch_response.json()['items']]
+            self.assertEqual(len(child_ids),2)
+            self.runs.extend(child_ids)
+            peak=0; parallel_observed=[]
+            deadline=time.monotonic()+40
+            while time.monotonic()<deadline:
+                supervisor.step()
+                live=[]
+                for task in supervisor.tasks.values():
+                    actual=process.daemon.inspect(task.name) if task.name else None
+                    if actual and actual['State']['Running']:
+                        host=actual['HostConfig']
+                        live.append((host['Memory'],host['NanoCpus'],host['PidsLimit']))
+                peak=max(peak,len(live));parallel_observed.extend(live)
+                statuses=[self.http('GET','/'+child).json()['status'] for child in child_ids]
+                if all(value in ('succeeded','failed','cancelled') for value in statuses):break
+                Event().wait(.05)
+            self.assertEqual(statuses,['succeeded','succeeded'])
+            self.assertEqual(peak,2,'approved batch did not actually run two workers together')
+            self.assertEqual(set(parallel_observed),{(5*1024**3//2,1000*1_000_000,64)})
+            for child in child_ids:
+                summary=self.http('GET','/'+child+'/results/summary').json()
+                self.assertEqual(summary['performance']['trades']['fill_fees'],'9.00')
+                with self.engine.connect() as connection:
+                    self.assertEqual(self.repository._row(connection,child)['limits'],
+                        vars(WorkerLimits(**parallel_limits)))
+            self.assertEqual(self.http('GET','/'+row['run_id']+'/results/summary').json(),first_result)
             self.assertFalse(list(work_root.iterdir()))
             self.assertTrue(checked_connections,'accepted facts were not checked inside final transaction')
             self.assertEqual(legacy_execution_rows(),protected, 'new Rust run wrote old roots/snapshots/events/results')
             (self.base/'retired-execution-writes.json').write_text(json.dumps(dict(production_executed=False,
                 real_runner_container=True,formal_provider=True,formal_node_entry='E70',
-                execution_fact_model=MODEL,run_id=row['run_id'],before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
+                execution_fact_model=MODEL,run_id=row['run_id'],accepted_quota_frozen=True,
+                parallel_run_ids=child_ids,actual_parallel_workers=peak,
+                before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
         finally:
             try:
                 supervisor.stop()
