@@ -1,13 +1,16 @@
 # S3-D18 集中验收与发行结果
 
-**完整 B1–B4 和业务 head CI 已通过；文档最终 head/合并 main 待核。**
-[PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 仍为 draft。
+**S3-D18 代码验收与发行交付完成，PR176 已合并。**
+[PR176](https://github.com/Li2Wh1te/quant-foundry/pull/176) 已由 draft、代码复核、精确 head CI
+通过后合并，未执行生产操作。
 完整测量源为 `55cbb9e453b523327e733c44e25e9d126478087b`，
 [run38234261058](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38234261058)
 于 2026-10-12 14:21 UTC 成功结束。最终测试修正 head
 `0f0326a32e0dda7298329d13e3b26f5ecb1af723` 仅改两份独立测试文件；业务、测量与 native
-源码逐文件一致，0f 精确 head 六个 workflow/八个 job 全部通过。文档最终 head 与合并 main
-仍待核，尚未合并，也未执行 P01/C01。
+源码逐文件一致，0f 精确 head 六个 workflow/八个 job 全部通过。最终文档 head
+`e4b17044bb7b1767e8937f23127dd41e7531173e` 的六 workflow/八 jobs 全部通过；
+合并 main `ee22c781098799f89515c893cc3f9af2d0f1b3b4` 的四 workflow/五 jobs
+已于 2026-10-12 14:53 UTC 全部成功并逐 job 核精确 SHA。仍未执行 P01/C01。
 
 从 D17 main `5a14110668f240f183bf3e6a08f638fc4e3fc02f` 接续，已整合实际 main
 `81ad436a71d1e2871a7bff7266748aaab5b718d5`（含 S2 PR177、PR178 终态持久化修复）。
@@ -130,6 +133,13 @@ B4 逐 run 阶段/启动与两并发组、单项重跑分别存于原自动输�
 D17 29、CLI 4通过/1宿主依赖跳过/6子检查。专门实际worker CI26项零跳过；
 0f六workflow/八jobs均通过，并无未解决review thread。
 
+最终合并 CI：[Validate](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38265274737)、
+[实际worker](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38265274471)、
+[浏览器](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38265274491)、
+[Rust/共享业务](https://github.com/Li2Wh1te/quant-foundry/actions/runs/38265274740)。
+CurrentStore 与完整基准按既定配置仅 PR 触发，最终 head 已通过；不虚构 main 上重复运行。
+本地干净 main 业务/native/测量源仍与55完整来源逐文件一致。
+
 ## 制品、来源与运维
 
 Linux x86_64/arm64均实际原生构建、独立安装wheel、离线镜像和空库API/runner启停。
@@ -168,7 +178,7 @@ SHA256 `0c5470757d9e6da5d7f19418ac0b535c0324c17007f243c015e18a51b48f1ce1`。
 
 | 状态 | 当前结论与证据 |
 |---|---|
-| new_engine_code_ready | **业务代码验收通过，发行关单待文档最终head/mainCI**；固定完整B1–B4及0f全部必需CI通过 |
+| new_engine_code_ready | **true**；固定完整B1–B4、最终e4b精确head六workflow/八jobs、合并ee22精确main四workflow/五jobs通过 |
 | legacy_execution_removed | **true（源码/发行物）**；103旧路径删除，安装/共享业务不依赖旧计算，无fallback |
 | data_ready | **false**；默认正式事实解析器/接受事实和覆盖尚未发布，合成验证不代表生产数据就绪 |
 | production_switched | **false**；P01未执行，未访问或部署生产 |
