@@ -1,7 +1,7 @@
 import { invalidRequest, invalidResponse } from "./errors";
 import type {
   CurrentDataset, CurrentEntryStatus, CurrentField, CurrentIssue, CurrentUpdate,
-  CurrentValue, DatasetList, IssueList, PreviewRequest, PreviewResult, StatusList
+  CurrentValue, CurrentReadEvidence, QualityExplanation, DatasetList, IssueList, PreviewRequest, PreviewResult, StatusList
 } from "./types";
 
 type ObjectValue = Record<string, unknown>;
@@ -152,6 +152,54 @@ export function parseIssueList(value: unknown): IssueList {
         affected_objects: nullableCount(item.affected_objects, `${at}.affected_objects`) };
     }) };
 }
+function parseReadEvidence(value: unknown): CurrentReadEvidence {
+  const at = "preview.current_read_evidence", raw = object(value, at);
+  function literal<T extends string | boolean>(value: unknown, expected: T, field: string): T {
+    if (value !== expected) invalidResponse(`${at}.${field}`);
+    return expected;
+  }
+  function confirmation(value: unknown, field: string) {
+    const item = object(value, `${at}.${field}`);
+    const observed = text(item.observed_at, `${at}.${field}.observed_at`, true);
+    if (observed.length > 128 || !/^\d{4}-\d{2}-\d{2}T.*(?:Z|[+-]\d{2}:\d{2})$/.test(observed)
+      || !Number.isFinite(Date.parse(observed))) invalidResponse(`${at}.${field}.observed_at`);
+    const id = text(item.native_id, `${at}.${field}.native_id`, true);
+    if (id.length > 128) invalidResponse(`${at}.${field}.native_id`);
+    const hash = revision(item.content_hash, `${at}.${field}.content_hash`);
+    if (hash === null) invalidResponse(`${at}.${field}.content_hash`);
+    return { native_id: id, observed_at: observed, content_hash: hash };
+  }
+  // Keep the server's field explanations even when the projection omits root.
+  // Bound recursion and bytes before retaining any optional evidence payload.
+  let nodes = 0;
+  function explanation(value: unknown, depth = 0): QualityExplanation {
+    if (++nodes > 2000 || depth > 8) invalidResponse(`${at}.financial_quality_limitations`);
+    if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+    if (typeof value === "number" && Number.isSafeInteger(value)) return value;
+    if (Array.isArray(value)) return value.map(item => explanation(item, depth + 1));
+    return Object.fromEntries(Object.entries(object(value, `${at}.financial_quality_limitations`))
+      .map(([key, item]) => [key, explanation(item, depth + 1)]));
+  }
+  const quality = explanation(raw.financial_quality_limitations);
+  if (new TextEncoder().encode(JSON.stringify(quality)).length > 32768) invalidResponse(`${at}.financial_quality_limitations`);
+  const rows = count(raw.whole_report_rows, `${at}.whole_report_rows`);
+  if (rows === 0 || rows >= 1000) invalidResponse(`${at}.whole_report_rows`);
+  const failed = object(raw.failed_refresh, `${at}.failed_refresh`);
+  return {
+    method: literal(raw.method, "complete-prior-failed-refresh-read@1", "method"),
+    whole_report_rows: rows,
+    whole_report_verified: literal(raw.whole_report_verified, true, "whole_report_verified"),
+    current_confirmation: confirmation(raw.current_confirmation, "current_confirmation"),
+    failed_refresh: { ...confirmation(failed, "failed_refresh"),
+      reason: literal(failed.reason, "SOURCE_REFRESH_FAILED", "failed_refresh.reason"),
+      blocking: literal(failed.blocking, false, "failed_refresh.blocking") },
+    domain_read_restriction: text(raw.domain_read_restriction, `${at}.domain_read_restriction`, true),
+    financial_quality_limitations: quality,
+    latest_source_confirmation: literal(raw.latest_source_confirmation, false, "latest_source_confirmation"),
+    full_domain_accepted: literal(raw.full_domain_accepted, false, "full_domain_accepted")
+  };
+}
+
 export function parsePreview(value: unknown): PreviewResult {
   const raw = object(value, "preview");
   const rows = array(raw.rows, "preview.rows");
@@ -176,6 +224,7 @@ export function parsePreview(value: unknown): PreviewResult {
     limitations: strings(raw.limitations, "preview.limitations"),
     ...(raw.unresolved_issues === undefined ? {} : { unresolved_issues: count(raw.unresolved_issues, "preview.unresolved_issues") }),
     ...(raw.schema_id === undefined ? {} : { schema_id: text(raw.schema_id, "preview.schema_id", true) }),
+    ...(raw.current_read_evidence === undefined ? {} : { current_read_evidence: parseReadEvidence(raw.current_read_evidence) }),
     ...(semantics === undefined ? {} : { semantics: Object.fromEntries(Object.entries(semantics).map(([key, val]) => [key, text(val, `preview.semantics.${key}`)])) })
   };
 }
