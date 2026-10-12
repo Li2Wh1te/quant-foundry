@@ -391,6 +391,12 @@ class SchedulerRuntime:
                 status=RunStatus.FAILED, error_type=type(exc).__name__,
                 error_message=str(exc)[:10_000], failure_phase="handler",
             )
+        finally:
+            # Future retains an escaping BaseException and its traceback until
+            # terminal recovery succeeds. Release the business transaction even
+            # when that traceback still references this worker frame.
+            if ingestion_session is not None:
+                ingestion_session.close()
 
     def _on_run_future_done(self, future: Future[Any]) -> None:
         with self._futures_lock:

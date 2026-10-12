@@ -13,7 +13,7 @@ from uuid import uuid4
 
 from pydantic import BaseModel
 import pytest
-from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event, func, select
+from sqlalchemy import Column, Integer, MetaData, Table, create_engine, event, func, select, text
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 from sqlalchemy.schema import CreateSchema, DropSchema
@@ -593,3 +593,40 @@ def test_progress_throttling_uses_elapsed_time_despite_wall_clock_reversal(engin
         reporter.report(FrozenTimelineProgress(total_steps=10, completed_steps=2, current_step="second"))
     after = read_run(engine, run_id)
     assert after.progress == 0.2 and after.current_step == "second"
+
+
+def test_crashed_worker_releases_business_transaction_while_future_is_retained(engine, runtime, monkeypatch):
+    metadata = MetaData()
+    facts = Table("fixture_crash_facts", metadata, Column("id", Integer, primary_key=True))
+    checkpoints = Table("fixture_crash_checkpoints", metadata, Column("id", Integer, primary_key=True))
+    metadata.create_all(engine)
+    monkeypatch.setattr("app.scheduling.runtime.TushareClient", Mock(return_value=object()))
+
+    def handler(context, parameters):
+        context.session.execute(facts.insert().values(id=1))
+        context.session.execute(checkpoints.insert().values(id=1))
+        raise SystemExit("synthetic abrupt worker exit")
+
+    key = "data.sync_trading_status"
+    runtime.registry.register(TaskDefinition(key=key, name="异常事务测试", english_name="Crash transaction test",
+        parameters_model=EmptyParameters, handler=handler))
+    run_id = make_run(engine, key=key)
+    real_finish = SchedulerRepository.finish_run
+    monkeypatch.setattr(SchedulerRepository, "finish_run", Mock(side_effect=ConnectionError("DB unavailable")))
+    future = execute_to_future(runtime, run_id)
+    assert future.done() and future in runtime._futures
+    with Session(engine) as writer:
+        writer.execute(text("SET LOCAL lock_timeout = '500ms'"))
+        assert writer.scalar(select(func.count()).select_from(facts)) == 0
+        assert writer.scalar(select(func.count()).select_from(checkpoints)) == 0
+        # These keys would remain locked by an idle worker transaction even
+        # though its inserts were invisible to other READ COMMITTED sessions.
+        writer.execute(facts.insert().values(id=1))
+        writer.execute(checkpoints.insert().values(id=1))
+        writer.commit()
+    monkeypatch.setattr(SchedulerRepository, "finish_run", real_finish)
+    runtime.dispatch_queued_runs()
+    after = read_run(engine, run_id)
+    assert after.status == "failed" and after.error_type == "SystemExit"
+    assert after.failure_phase == "worker_crash" and after.result is None
+    assert future not in runtime._futures
