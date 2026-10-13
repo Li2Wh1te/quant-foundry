@@ -34,14 +34,16 @@ export function MarketDetailEntry({ children }: { children: ReactNode }) {
   const item = profile.data?.instrument;
   const profileOnly = params.get("tab") === "profile" || sourceInput;
   const identityFresh = stableInput || (!identity.pending && !identity.error && !identity.stale && identity.data !== null);
-  const canOpen = instrumentKey && item && !profile.stale && !profile.error && !profile.pending && identityFresh;
-  if (!profileOnly && canOpen && profile.data) {
-    return <MarketInstrumentContext.Provider value={{ instrumentKey, symbol: item.symbol,
+  const profileDenied = profile.error && [401, 403].includes(profile.error.status);
+  const canOpen = instrumentKey && identityFresh && !profileDenied;
+  const resolvedSymbol = item?.symbol ?? identity.data?.symbol ?? tsCode;
+  if (!profileOnly && canOpen) {
+    return <MarketInstrumentContext.Provider value={{ instrumentKey, symbol: resolvedSymbol,
       profile: profile.data, resolution: identity.data }}>{children}</MarketInstrumentContext.Provider>;
   }
 
   return <OverviewShell title="ETF 基础资料" section="MARKET DATA" className="qfm-root"><section className="qfm-content" aria-labelledby="qfm-profile-title">
-    <header className="qfo-page-head qfm-page-head"><div><Link className="qfm-code" to={returnTo}><ArrowLeft size={14} aria-hidden="true" /> 返回 ETF 列表</Link><h1 id="qfm-profile-title">{item?.name ?? "ETF 基础资料"}</h1><p className="qfo-page-desc">{item?.symbol ?? tsCode} · 当前正式资料{profile.stale ? " · 旧资料" : ""}</p></div><div className="qfo-page-actions"><button className="qfo-secondary-btn" type="button" disabled={profile.pending || identity.pending} onClick={() => setRevision(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />重新读取</button>{canOpen && <Link className="qfo-secondary-btn" to={`${MARKET_PATH}/${encodeURIComponent(item.symbol)}?tab=overview`} state={{ marketReturnTo: returnTo }}><ChartCandlestick size={16} aria-hidden="true" />查看 K 线</Link>}</div></header>
+    <header className="qfo-page-head qfm-page-head"><div><Link className="qfm-code" to={returnTo}><ArrowLeft size={14} aria-hidden="true" /> 返回 ETF 列表</Link><h1 id="qfm-profile-title">{item?.name ?? "ETF 基础资料"}</h1><p className="qfo-page-desc">{item?.symbol ?? tsCode} · 当前正式资料{profile.stale ? " · 旧资料" : ""}</p></div><div className="qfo-page-actions"><button className="qfo-secondary-btn" type="button" disabled={profile.pending || identity.pending} onClick={() => setRevision(value => value + 1)}><RefreshCw size={16} aria-hidden="true" />重新读取</button>{canOpen && <Link className="qfo-secondary-btn" to={`${MARKET_PATH}/${encodeURIComponent(resolvedSymbol)}?tab=overview`} state={{ marketReturnTo: returnTo }}><ChartCandlestick size={16} aria-hidden="true" />查看 K 线</Link>}</div></header>
     {identity.error && <div className="qfm-error" role="alert">身份解析：{identity.error.message}基础资料与历史图表分别判断。</div>}
     {identity.stale && <div className="qfm-error" role="status">身份为上次读取的旧资料，请重新读取后进入历史图表。</div>}
     {profile.error && <div className="qfm-error" role="alert">基础资料：{profile.error.message}{profile.stale && " 当前显示同条件旧资料。"}</div>}

@@ -406,11 +406,20 @@ class MarketReadService:
             metadata_known=known, request_checked=False, limitations=[Notice(
                 code='REQUEST_CHECK_REQUIRED' if known else 'IDENTITY_MAPPING_UNAVAILABLE',
                 message='具体代码须核验当前可信映射和合格正式资料。' if known else '可信身份映射资料暂不可用。')])
-        # Data interpretation and content endpoints remain independently owned
-        # by D09-D11. Do not advertise uninstalled endpoints or E51 as raw.
-        results['raw'] = Capability(name='raw', availability='unknown', request_checked=False,
-            metadata_known=results[ETF_DAILY].metadata_known,
-            limitations=[Notice(code='PRICE_BASIS_UNVERIFIED', message='E70正式模型声明来源报告口径，尚未证明未复权口径。')])
+        # D10 declares only the fixed E70 fund_daily display interpretation.
+        # A global namespace probe never admits an arbitrary instrument/window.
+        # Keep the formal provider_reported model and S3 execution rules intact.
+        from .series import RAW_NOTE
+        daily = results[ETF_DAILY]
+        uncertain = {'QUERY_BUDGET_EXCEEDED', 'CONTROL_BUDGET_EXCEEDED', 'QUERY_TIMEOUT',
+                     'LOCK_TIMEOUT', 'CATALOG_UNAVAILABLE', 'STORAGE_UNAVAILABLE'}
+        availability = 'unknown' if any(n.code in uncertain for n in daily.limitations) else daily.availability
+        results['raw'] = Capability(name='raw', availability=availability, request_checked=False,
+            mapping_implemented=True, metadata_known=daily.metadata_known,
+            limitations=[Notice(code='PRICE_BASIS_DECLARED', message=RAW_NOTE),
+                Notice(code='SCOPED_RAW_VIEW', message='仅本地正式ETF fund_daily 不复权显示视图；股票、指数及E51未加入此视图。'),
+                Notice(code='DERIVED_CALENDAR_REQUIRED', message='周/月/年完整性须另核验正式交易所资料、日历和具体日期；不保证任意窗口可读。'),
+                *daily.limitations])
         for name in ('pre', 'post'):
             results[name] = Capability(name=name, availability='unavailable', request_checked=False,
                 metadata_known=results[ETF_FACTORS].metadata_known,

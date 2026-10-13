@@ -5,7 +5,7 @@ import type { InstrumentDetail, InstrumentResolution } from "../data";
 export interface MarketInstrumentEntry {
   instrumentKey: string;
   symbol: string;
-  profile: InstrumentDetail;
+  profile: InstrumentDetail | null;
   resolution: InstrumentResolution | null;
 }
 export const MarketInstrumentContext = createContext<MarketInstrumentEntry | null>(null);

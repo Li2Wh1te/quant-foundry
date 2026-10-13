@@ -182,7 +182,8 @@ export function EtfDetailPage({ BasisControls, FactorTable }: DetailBasisSlots =
   const data = candidate && currentIdentity && matchesBarWindow(candidate, { instrument_key: identity!.instrument_key,
     period, adjustment: marketAdjustment, start: range.start || undefined, end: requestedEnd, as_of: requestedEnd }) ? candidate : null;
   const etf = currentIdentity ? formal.metadata.data?.instrument : undefined;
-  const displayCode = etf?.symbol ?? entry?.symbol ?? (tsCode.startsWith("instrument:") ? "ETF" : tsCode);
+  const entrySymbol = entry?.symbol?.startsWith("instrument:") ? null : entry?.symbol;
+  const displayCode = etf?.symbol ?? entrySymbol ?? (tsCode.startsWith("instrument:") ? "ETF" : tsCode);
   const loading = formal.prices.pending || formal.identity.pending;
   const error = formal.prices.error?.message ?? formal.identity.error?.message ?? "";
   const series = useMemo(() => data ? plotBars(data) : { bars: [], error: "", volumeMissing: false, gaps: false }, [data]);

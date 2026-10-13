@@ -2,7 +2,7 @@
 
 交付：[草稿 PR183](https://github.com/Li2Wh1te/quant-foundry/pull/183)，代码提交 `5a3f498086e71369f9c9608a7090e9e2201fcf16`。最终 head CI 交父核验；D10 未合并。
 
-当前状态：D10 自身实现、合成隔离验证及模拟 UI 已完成；组合入口窄修待父确认，因此当前 `code_ready=false`，`live_verified=false`，`deployed=false`。本包交草稿 PR，合并仍交父；没有部署、生产访问、供应商调用或真实用户/行情数据读取复制。
+当前状态：D10 自身实现、合成隔离验证及模拟 UI 已完成；父追加授权的入口与全局能力窄修已收口，当前 `code_ready=true`，`live_verified=false`，`deployed=false`。本包交草稿 PR，合并仍交父；没有部署、生产访问、供应商调用或真实用户/行情数据读取复制。
 
 D10 最初从 D08 精确 head `055a654e2aae7e6b7557b8b77d5b370615c1015d` 开始，后安全快进到 PR181 merge `96af283c49b5809561e62ddb524aadbfc91a7275`。按父追加授权，复核 D09 精确 head `48768ed0a22a12178b40c3376388cd68122ca814` 的四条 CI、最终差异和评审状态后合并 PR182；merge 为 `253e12ac5ae1e56908aa68d54e56d67f67d983ab`。D10 基线现为该合并提交，没有把未提交 D10 改动带入 D09。
 
@@ -21,11 +21,11 @@ E70 口径依据（显示契约推断，未改 R01 正式模型）：[官方 fun
 
 | 检查 | 实际结果 |
 | --- | --- |
-| 默认应用及关联后端 | **116 passed, 13 skipped**：D08、D09、D10、S3 网关、原自选和运营总览；合成正式输入经真实私有 PG/Parquet/DuckDB，不注入成功 provider/HTTP 结果。13 跳过需要 Rust IPC/安装 SDK，未算通过 |
+| 默认应用及关联后端 | **118 passed, 13 skipped**：D08、D09、D10、S3 网关、原自选和运营总览；合成正式输入经真实私有 PG/Parquet/DuckDB，不注入成功 provider/HTTP 结果。13 跳过需要 Rust IPC/安装 SDK，未算通过 |
 | 前端 baseline | **171 passed**，包括 8 项 D10 绘图/窗口测试 |
 | 前端 TypeScript/build | **通过**；现有大 bundle 提示仍在 |
 | 根测试 / release check | **29 passed**；版本一致 |
-| 模拟 Chromium | **12 组交互与限制检查、3 张截图**；[UI_RESULT.json](UI_RESULT.json)。三页、稳定键、回放延迟/取消、资料失败、网络标旧、DATA_CHANGED、401/403 及窄屏均验证，无旧详情价格/因子请求和 page error |
+| 模拟 Chromium | **14 组交互与限制检查、3 张截图**；[UI_RESULT.json](UI_RESULT.json)。三页、稳定键、回放延迟/取消、资料失败、网络标旧、DATA_CHANGED、401/403 及窄屏均验证，无旧详情价格/因子请求和 page error |
 
 截图：[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。浏览器成功数据全部来自明确标注的人工夹具/模拟接口，不能替代“默认正式服务→浏览器”的真实联调。test-only overlay 探针只验证隔离存储机制，不证明生产挂载。所选环境只沿用原会话，没有新 agent/开发会话或 fast。
 
@@ -40,8 +40,8 @@ QF_DEV_BACKEND_URL=http://127.0.0.1:8010 pnpm --dir frontend dev --host 127.0.0.
 # 浏览器自动检查：node ops/s2-d10/ui-check.mjs
 ```
 
-准确缺项与公共接缝：
+公共接缝与准确缺项：
 
-1. D09 的初始图表挂载仍要求 profile 成功，稳定身份有效但资料首次失败会挡住独立日图。本包已提交可审查的 [ENTRY_INTEGRATION.patch](ENTRY_INTEGRATION.patch)：仅使 Context.profile 可空、按可信身份挂载，保留 401/403 撤下和资料独立页。D09 文件有明确负责人，待父确认由谁应用；当前未应用，未把此场景算通过。已挂载图的资料失败则实际模拟通过。
-2. D08 全局 `/capabilities` 的 raw 仍为旧的 unknown；D10 `/series` 已有明确显示解释和逐请求状态。该公共能力描述应由父/D08对齐；本包未修改工厂/DTO/client/bindings。共享 router 仅追加 D10 域注册。
-3. 真实身份/正式数据联调、默认正式服务贯通浏览器、生产挂载、部署及全批退出验收均未执行。本轮用户明确禁止这些外部动作。D11 复权/因子接线、D12 共享旧路径退出不是本包完成项。
+- 父已追加授权 D10 完成本批依赖接缝整合：D09 Context.profile 可空，可信身份满足条件时不等待资料挂载图表；401/403 仍撤下。首次资料失败、显式 profile/source-directory 资料页及已挂载图的资料失败均实际模拟通过；没有改列表/日历领域实现或新建入口。
+- D08 全局 raw 描述现与 D10 的固定 E70 ETF 显示解释一致。全局 probe 不授予具体请求；预算/超时等不能判断的状态为 unknown。E51/股票/指数不加入该视图，因子策略保持未实现。测试包括只存在 E51 时 raw 不可用、E70 存在也不授予未知身份、全局探测超预算但小请求仍可读的真实隔离反例。工厂/DTO/client/bindings 未改。
+- 真实身份/正式数据联调、默认正式服务贯通浏览器、生产挂载、部署及全批退出验收均未执行。本轮用户明确禁止这些外部动作。D11 复权/因子接线、D12 共享旧路径退出不是本包完成项。

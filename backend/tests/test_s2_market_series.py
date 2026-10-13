@@ -210,3 +210,39 @@ def test_years_cross_partitions_keep_exact_extrema_and_no_half_year_pages(market
     assert Decimal(a['items'][0]['high']) == max(row.content['high'] for row in rows if row.content['trade_date'] >= '2026-01-01')
     assert all(page['items'][0]['completion'] == 'partial' for page in (a, b))
     assert b['next_cursor'] is None
+
+
+def test_global_raw_capability_is_etf_scoped_and_does_not_admit_arbitrary_requests(market):
+    client, current, _ = market
+    publish(current, 'E51')  # Formal forward_unanchored prices are not E70 raw.
+    result = client.get('/api/admin/market/capabilities', headers=HEADERS).json()
+    raw = next(cap for cap in result['capabilities'] if cap['name'] == 'raw')
+    assert raw['availability'] == 'unavailable' and raw['mapping_implemented']
+    assert raw['request_checked'] is False
+    assert any(n['code'] == 'SCOPED_RAW_VIEW' and 'E51' in n['message'] for n in raw['limitations'])
+    publish(current, 'E70')
+    result = client.get('/api/admin/market/capabilities', headers=HEADERS).json()
+    raw = next(cap for cap in result['capabilities'] if cap['name'] == 'raw')
+    assert raw['availability'] == 'available' and raw['metadata_known']
+    assert raw['request_checked'] is False
+    # A global support probe cannot manufacture identity or date permission.
+    response = get(client, 'instrument:11111111-1111-4111-8111-111111111111', end='2026-02-06')
+    assert response.status_code != 200 and response.json()['detail']['code'] == 'IDENTITY_UNAVAILABLE'
+
+
+def test_large_global_probe_is_unknown_while_a_small_real_request_can_read(market):
+    client, current, _ = market
+    key = identity(current)
+    inputs = []
+    for offset in range(65):
+        year, month = 2021 + offset // 12, offset % 12 + 1
+        inputs.append(ts('E70', '510300.SH', {'source': 'tushare', 'ts_code': '510300.SH',
+            'trade_date': date(year, month, 1).isoformat(), 'open': Decimal('4.1'),
+            'high': Decimal('4.2'), 'low': Decimal('4'), 'close': Decimal('4.15')}))
+    assert run_entry(current, BY_ID['E70'], Inputs(*inputs))['qualified']
+    result = client.get('/api/admin/market/capabilities', headers=HEADERS).json()
+    raw = next(cap for cap in result['capabilities'] if cap['name'] == 'raw')
+    assert raw['availability'] == 'unknown' and raw['request_checked'] is False
+    assert any(notice['code'] == 'QUERY_BUDGET_EXCEEDED' for notice in raw['limitations'])
+    small = get(client, key, start='2026-01-01', end='2026-01-02')
+    assert small.status_code == 200 and small.json()['items'][0]['close'] == '4.15'
