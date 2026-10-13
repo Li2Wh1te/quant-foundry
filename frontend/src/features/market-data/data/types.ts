@@ -73,5 +73,5 @@ export interface CatalogRequest extends RequestOptions {
 }
 export interface CalendarRequest extends RequestOptions { exchange: string; start: DateText; end: DateText; }
 export interface FactorRequest extends RequestOptions {
-  instrument_key: string; series_key: string; start: DateText; end: DateText; limit?: number; cursor?: string;
+  instrument_key: string; series_key: string; start: DateText; end: DateText; as_of?: DateText; limit?: number; cursor?: string;
 }

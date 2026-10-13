@@ -422,6 +422,7 @@ class MarketReadService:
                 *daily.limitations])
         for name in ('pre', 'post'):
             results[name] = Capability(name=name, availability='unavailable', request_checked=False,
+                mapping_implemented=False,
                 metadata_known=results[ETF_FACTORS].metadata_known,
                 limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='已保留因子事实；复权基准、覆盖及锚点策略须独立核验。')])
         return CapabilitiesResult(catalogs=[CatalogOption(catalog_key=ETF_CATALOG,

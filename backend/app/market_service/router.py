@@ -60,3 +60,5 @@ def resolve(request: Request, response: Response, symbol: Annotated[str, Query(m
 # D10 domain endpoints compose the sole authenticated market router/factory.
 from .series_router import router as series_router
 router.include_router(series_router)
+from .adjustments_router import router as adjustments_router
+router.include_router(adjustments_router)

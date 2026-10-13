@@ -34,6 +34,8 @@ import { useFormalDetail } from "../features/market-data/series/useFormalDetail"
 import { plotBars, exactBarValue } from "../features/market-data/series/plotting";
 import { matchesBarWindow, shanghaiBusinessDate } from "../features/market-data/series/window";
 import type { DetailBasisSlots } from "../features/market-data/series/basisSlot";
+import { BasisControls as DefaultBasisControls } from "../features/market-data/basis/BasisControls";
+import { FactorTable as DefaultFactorTable } from "../features/market-data/basis/FactorTable";
 import { useAuth } from "../auth/AuthContext";
 import { marketReturnTo } from "./market/marketPresentation";
 import {
@@ -84,7 +86,7 @@ function Kv({ label, children }: { label: string; children: React.ReactNode }) {
   );
 }
 
-export function EtfDetailPage({ BasisControls, FactorTable }: DetailBasisSlots = {}) {
+export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTable = DefaultFactorTable }: DetailBasisSlots = {}) {
   const entry = useMarketInstrument();
   const { tsCode = "" } = useParams(),
     navigate = useNavigate(),

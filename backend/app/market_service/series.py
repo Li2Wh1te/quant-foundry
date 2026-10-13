@@ -339,10 +339,10 @@ def series(service, key):
         option = SeriesOption(series_key=ETF_DAILY, label='ETF 不复权日线 · 本地正式数据', instrument_key=key,
             periods=['day', 'week', 'month', 'year'], adjustments=['none'], price_basis='unadjusted',
             adjustment_capabilities={'none': capability,
-                'pre': Capability(name='pre', availability='unavailable', request_checked=False,
-                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='复权接线由独立因子模块提供。')]),
-                'post': Capability(name='post', availability='unavailable', request_checked=False,
-                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='复权接线由独立因子模块提供。')])},
+                'pre': Capability(name='pre', availability='unavailable', request_checked=False, mapping_implemented=False,
+                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='正式E69未声明累计公式、逐日覆盖和查询锚点，前复权仍受限；因子原值可独立读取。')]),
+                'post': Capability(name='post', availability='unavailable', request_checked=False, mapping_implemented=False,
+                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='正式E69缺少原始归一化基准与累计公式，后复权仍受限；不能以首条现存因子替代。')])},
             units=service.bindings[ETF_DAILY].declared_units, capability=capability)
         scope.response(option)
     return [option]

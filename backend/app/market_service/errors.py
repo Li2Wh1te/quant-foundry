@@ -12,6 +12,7 @@ MESSAGES = {
     'PRICE_BASIS_UNVERIFIED': '所选价格口径尚未核验。',
     'UNIT_UNVERIFIED': '所选能力缺少已声明单位。',
     'FACTOR_ANCHOR_UNVERIFIED': '复权所需的基准或锚点尚未核验。',
+    'NUMERIC_RANGE_UNSUPPORTED': '复权数值超过共享精确算术范围，未输出近似价格。',
 }
 
 

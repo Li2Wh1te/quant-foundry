@@ -101,11 +101,14 @@ export function createMarketClient(transport: MarketTransport = marketTransport)
     },
     async factors(request) {
       range(request.start, request.end);
+      if (request.as_of && (requestValue(dateText, request.as_of) < request.end)) invalidRequest();
       const q = new URLSearchParams({ series_key: key(request.series_key), start: request.start, end: request.end,
         limit: String(limit(request.limit, 512, 2000)) });
+      if (request.as_of) q.set("as_of", request.as_of);
       if (request.cursor !== undefined) q.set("cursor", cursor(request.cursor));
       const result = await get(`/instruments/${encodeURIComponent(key(request.instrument_key))}/factors?${q}`, parseFactors, request);
-      if (result.items.length > Number(q.get("limit")) || result.items.some(f => f.trade_date < request.start || f.trade_date > request.end)) invalidResponse(); return result;
+      if (result.items.length > Number(q.get("limit")) || result.items.some(f => f.trade_date < request.start || f.trade_date > request.end)
+        || result.basis.as_of !== (request.as_of ?? request.end)) invalidResponse(); return result;
     }
   };
 }
