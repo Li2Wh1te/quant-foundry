@@ -1,6 +1,6 @@
 # S2/S3 review 修复状态
 
-基线：`main` `50db997f8f50b955a6a5fe0ce237543d33b5f60b`，继续前再次 fetch 核对主干未变化。草稿 [PR #180](https://github.com/Li2Wh1te/quant-foundry/pull/180)，不合并，交父核验。本会话未开子会话，未生产部署、写入/清理生产数据、调用供应商或操作凭据/权限。R01、S2 批次及旧核心退役边界保留。
+基线：`main` `50db997f8f50b955a6a5fe0ce237543d33b5f60b`，合并前再次 fetch 核对主干未变化。[PR #180](https://github.com/Li2Wh1te/quant-foundry/pull/180) 按用户 2026-10-13 明确授权走现有修复的 CI 与正常合并流程；这不授权刚暂停的新增真实业务数据闭环、窄事实生产者或 schema 工作。本会话未开子会话，未生产部署、写入/清理生产数据、调用供应商或操作凭据/权限。R01、S2 批次及旧核心退役边界保留。
 
 ## 提交与结果
 
@@ -67,12 +67,20 @@ artifact **11787148539**（run 38340962781），SHA-256 `18a36e84be40a1319dc9af9
 
 以上 CI 属于 af47；续修提交的精确 HEAD CI 另在同一草稿 PR/交接核验，不能用本节替代。
 
+## 现有修复代码 ed3120c 的已核终态
+
+`ed3120cf149b967087d45d9ee29a75edb660f197` 的 **5 workflows / 7 jobs 全成功**，见 [CI_ED3120.json](CI_ED3120.json)。Validate 38350814470/115142554297；UI 38350814457/115142554222；worker 38350814452/115142554456；Rust 38350814497/115142554851、115142554792；release 38350814474/115142554884、115142554510。解码 wheel 日志确认受影响 **171 项**和独立 SDK **93 项**通过；实际 worker **26 项**通过，保留受支持文件系统门禁。干净 ed3120c 的本地 Docker 26 项也通过，但本地仍仅能用既有 overlay 测试 probe，不能替代 CI 文件系统验收。
+
+该代码提交的隔离 B2/60m：12,096,000 来源事件，201,600 完成小时事件，准入/验收墙钟 **177.88049928099997s**，采样 cgroup 峰值 **720,211,968 B**，4 CPU/8 GiB 整组预算下独立 cash_conserved=true；equity/orders/trades/positions/records = 253/90/45/5/256。artifact **11791296939**，SHA-256 `402312f875c94d7e82704599f1881cd3b8a3f4cce3b7e95f149d8418acd89298`。数据来自精确 job 的解码日志和 artifact 元数据，未本地解析 ZIP。
+
+这是已有合成业务 oracle 的真实 PG/CurrentStore/固定镜像 runner/受限 worker 机械链检查，**不是新增真实业务数据联调，也不是默认真实成功验收**。仍为 full_B1_B4=false；保留原 B1/B3/B4 证据，没有全新全量声明，也没有将 d765/af47 的测量换标签。本次随后仅更新本目录的结果文档；业务/原生/测量代码不变，最新文档 HEAD 的必需 CI 和合并后 main 的精确 CI另核并报告。
+
 ## 未通过条件及下一范围
 
 **SR-01/SR-02 默认真实成功链仍未关闭。** `SqlFormalPlanResolver.__call__` 已有终装配分支，但当前源/执行事实生产者仍未定义，真实解析后按具体依赖拒绝。终装配代码和完整零行动投影已实现；正式研究 source mapping 的缺语义及非零行动适配仍分别保留。完整默认 API→runner→受限 worker→结果正例仍未通过，不能用隔离 DTO oracle、注入完整计划或成功 provider 代替。
 
 已确认确实未定义的事实包括 E50 价格币种/量单位、E70 provider_reported 到 raw/精确份额解释、Product 细分、ListingWindow/上市会话序号、实际上下限/fund_price_band/风险与盘中状态、费用/权限/税务 scope；E69 没可靠 public_ns/锚点，财务/估值/成分缺历史知识/集合语义。保持拒绝，不用 created_at、账户 metadata 标志或合成 MODEL 填这些空缺。
 
-达到默认真实成功所需最小新增生产者、源单位解释、涉及字段/文件及迁移/采集/费用边界见 [FACT_SCOPE.md](FACT_SCOPE.md)。已给父两个窄选项：先单 Product/1–3 标的/raw 日线/完整零行动区间，再可选一个研究 kind。未知真实权限、raw/份额解释、ListingWindow/实际限价及非零行动语义不伪造；本次未执行这些新增生产者或生产操作。
+达到默认真实成功所需最小新增生产者、源单位解释、涉及字段/文件及迁移/采集/费用边界见 [FACT_SCOPE.md](FACT_SCOPE.md)。单 Product/1–3 标的/raw 日线/完整零行动区间及再选一个研究 kind 仅保留为后续范围记录。用户本轮决定暂不开展新增真实数据闭环，窄生产者、局部 schema/迁移/采集开发均未获批准并暂缓。未知真实权限、raw/份额解释、ListingWindow/实际限价及非零行动语义继续拒绝；**合并现有修复不表示 SR-01/SR-02 默认真实成功已经验收**。
 
 路径交集：变更在 S3 backtest_service、Rust 只读适配、SDK及其测试/构建/CI；仅读 R01 共有身份、日历、状态、公司行动契约，未修改其模型、迁移、CurrentStore 实现或生产状态。

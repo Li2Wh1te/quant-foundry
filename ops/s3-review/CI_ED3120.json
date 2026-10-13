@@ -1,0 +1,126 @@
+{
+  "commit": "ed3120cf149b967087d45d9ee29a75edb660f197",
+  "verified_utc": "2026-10-13T05:38:50Z",
+  "workflows": [
+    {
+      "id": 38350814452,
+      "name": "S3 worker isolation",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38350814470,
+      "name": "Validate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38350814457,
+      "name": "S3 run UI",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38350814497,
+      "name": "S3 Rust contracts",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38350814474,
+      "name": "S3 full integration and release",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "jobs": [
+    {
+      "id": 115142554456,
+      "name": "Real runner to sibling worker and bounded parameter queue",
+      "run_id": 38350814452,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554297,
+      "name": "Test and validate release metadata",
+      "run_id": 38350814470,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554222,
+      "name": "Browser run lifecycle and real isolated service",
+      "run_id": 38350814457,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554792,
+      "name": "Python 3.12 wheel, numerics, contracts and shared tests",
+      "run_id": 38350814497,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554851,
+      "name": "Core without Python or database client",
+      "run_id": 38350814497,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554510,
+      "name": "Native Linux arm64 wheel install and smoke",
+      "run_id": 38350814474,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115142554884,
+      "name": "Affected full B2 60m in 4 CPU and 8 GiB group",
+      "run_id": 38350814474,
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "benchmark": {
+    "run": 38350814474,
+    "job": 115142554884,
+    "load": "B2",
+    "frequency": "60m",
+    "passed": true,
+    "full_B1_B4": false,
+    "source_rows": 12096000,
+    "completed_events": 201600,
+    "wall_with_admission_and_acceptance_reads_seconds": 177.88049928099997,
+    "sampled_cgroup_peak_bytes": 720211968,
+    "resource_budget": {
+      "cpu": 4,
+      "memory_bytes": 8589934592
+    },
+    "cash_conserved": true,
+    "counts": {
+      "equity": 253,
+      "orders": 90,
+      "trades": 45,
+      "positions": 5,
+      "records": 256,
+      "logs": 0
+    },
+    "artifact": {
+      "id": 11791296939,
+      "size_in_bytes": 3189325,
+      "digest": "sha256:402312f875c94d7e82704599f1881cd3b8a3f4cce3b7e95f149d8418acd89298",
+      "head_sha": "ed3120cf149b967087d45d9ee29a75edb660f197"
+    },
+    "provenance": "Decoded exact job logs and artifact metadata; ZIP not parsed locally.",
+    "proof_scope": "Existing isolated synthetic business oracle, affected full B2/60m only. Not real business-data integration or default real-success acceptance. B1/B3/B4 preserved."
+  },
+  "scope_status": {
+    "SR03": "fixed",
+    "SR01_SR02_default_real_success": "not_accepted",
+    "new_real_data_producer_schema_collection": "not_authorized_and_paused",
+    "deployment": false
+  }
+}
