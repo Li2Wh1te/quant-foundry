@@ -47,17 +47,21 @@ def normalize(payload):
 class FormalProvider:
     """One CurrentStore admission/runtime path for accepted formal node plans.
 
-    The default registry has no accepted raw execution/identity/session facts
-    yet. It explicitly refuses those facts. A trusted code-owned plan resolver
-    can compose accepted D02/D03/D04 DTOs; REST, parameters and account metadata
-    cannot choose a resolver, column, unit, path or execution fact. Isolated
-    tests exercise this provider itself against real E50/E70 node layouts.
+    The default SQL resolver reads the existing PIT identity/calendar/rule and
+    corporate-action contracts. Missing source or execution semantics remain
+    explicit refusals. REST, parameters and account metadata cannot choose a
+    resolver, column, unit, path or accepted execution fact.
     """
     def __init__(self, settings, *, engine=None, plan_resolver=None, store=None, process=None):
         self.settings, self.engine = settings, engine
-        self.plan_resolver, self.store, self.process = plan_resolver, store, process
+        from .formal_resolver import SqlFormalPlanResolver
+        self.plan_resolver = plan_resolver if plan_resolver is not None else SqlFormalPlanResolver(
+            settings, engine=engine or (store.catalog.engine if store is not None else None))
+        self.store, self.process = store, process
 
     def capabilities(self):
+        if hasattr(self.plan_resolver, 'capabilities'):
+            return self.plan_resolver.capabilities()
         from .market_projection import current_market_bindings
         return [dict(binding=b.name, frequency=b.frequency, available=False,
                      reason=b.unavailable_reason, limitations=list(b.limitations))
@@ -65,12 +69,6 @@ class FormalProvider:
 
     def _plan(self, work):
         from .formal_runtime import AcceptedRunPlan
-        from .market_projection import current_market_bindings
-        if self.plan_resolver is None:
-            candidates = [b for b in current_market_bindings() if b.frequency == work.config['frequency']]
-            reasons = ', '.join(b.name + ':' + b.unavailable_reason for b in candidates if b.unavailable_reason)
-            raise RuntimeFault('CAPABILITY_UNAVAILABLE',
-                '缺少已接受的正式执行事实：' + (reasons or '该频率没有正式输入契约'))
         plan = self.plan_resolver(work)
         if not isinstance(plan, AcceptedRunPlan):
             raise RuntimeFault('INVALID_CONTRACT', '可信正式事实解析器未返回受限运行计划')

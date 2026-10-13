@@ -35,6 +35,7 @@ from app.data_store.adapters.normalize import normalize
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.pipeline import run_entry
 from tests.test_s3_data_gateway import database, limits, store, formal, quality
+from tests.test_s3_sql_resolver import formal_facts
 
 pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1', reason='isolated PG required')
 SDK_TESTS = Path(__file__).resolve().parents[2]/'sdk/python/tests'
@@ -161,7 +162,7 @@ def test_missing_fractional_and_overflow_shares_never_coerced(formal, quantity, 
         gw.close(ctx)
 
 
-def test_default_provider_cannot_accept_user_metadata_as_execution_facts(formal):
+def test_default_provider_cannot_accept_user_metadata_as_execution_facts(formal, formal_facts):
     binding, packet, work = nodes(formal)
     work.specification.update(account_snapshot=dict(metadata=dict(raw=True,CNY=True,shares_per_lot=100)))
     settings = SimpleNamespace()
@@ -170,7 +171,9 @@ def test_default_provider_cannot_accept_user_metadata_as_execution_facts(formal)
         with pytest.raises(RuntimeFault) as blocked:
             operation()
         assert blocked.value.code == 'CAPABILITY_UNAVAILABLE'
-        assert 'E70:provider_reported_raw_basis_and_lot_to_share_conversion_unverified' in str(blocked.value)
+        facts = blocked.value.diagnostic()['scope']['facts']
+        assert any(item['binding'] == 'E70' and
+            item['missing'] == ['provider_reported_raw_basis_and_lot_to_share_conversion_unverified'] for item in facts)
     for missing in REQUIRED_EXECUTION_FACTS:
         with pytest.raises(GatewayError) as rejected:
             daily_node_binding('E70', representation=binding.constants['channel'], identities={'A.SH':('X','stable')},

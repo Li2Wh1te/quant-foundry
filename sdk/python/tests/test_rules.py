@@ -36,6 +36,26 @@ def saved_schedule():
 
 
 class RulesWheelTests(unittest.TestCase):
+    def test_trusted_composition_exports_the_existing_official_rule_book(self):
+        records = json.loads(_native.official_market_rules_json())
+        self.assertTrue(records)
+        self.assertLessEqual(len(records), 1024)
+        self.assertTrue(all(record['origin']['kind'] == 'official' for record in records))
+        self.assertTrue(all(record['effective']['from'] <= record['effective']['through'] for record in records))
+        self.assertTrue(any(record['product'] == 'bond_etf' for record in records))
+        self.assertTrue(any(record['effective']['from'] == '2023-04-10' for record in records))
+
+    def test_calendar_projection_uses_the_existing_rust_calendar_validator(self):
+        from support_sdk import spec
+        rows = spec(days=1)['calendar']
+        self.assertEqual(json.loads(_native.validate_formal_calendar_json(json.dumps(rows))), rows)
+        for field in ('week', 'month'):
+            invalid = deepcopy(rows)
+            invalid[0][field]['total_trading_days'] = 0
+            with self.assertRaises(ContractError) as failure:
+                _native.validate_formal_calendar_json(json.dumps(invalid))
+            self.assertEqual(failure.exception.code, 'RULE_UNAVAILABLE')
+
     def test_saved_commission_is_validated_by_rust_and_captured_as_a_small_copy(self):
         saved = saved_schedule()
         before = deepcopy(saved)

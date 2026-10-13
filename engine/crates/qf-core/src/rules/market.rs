@@ -430,6 +430,12 @@ pub struct RuleBook {
     records: Vec<TradingRule>,
 }
 impl RuleBook {
+    /// Reuse the validated offline catalog in trusted runtime composition.
+    /// Records are immutable; an export does not assert any TradeDayFacts.
+    pub fn records(&self) -> &[TradingRule] {
+        &self.records
+    }
+
     pub fn new(records: Vec<TradingRule>) -> QfResult<Self> {
         if records.len() > 1024 {
             return Err(QfError::new(

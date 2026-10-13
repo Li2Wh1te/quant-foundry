@@ -110,6 +110,33 @@ fn compose_official_fee_config_json(py: Python<'_>, input: &str) -> PyResult<Str
     }))
 }
 #[pyfunction]
+fn official_market_rules_json(py: Python<'_>) -> PyResult<String> {
+    convert(py.detach(|| {
+        let book = qf_core::rules::catalog::verified_market_rules()?;
+        serde_json::to_string(book.records()).map_err(|_| {
+            QfError::new(
+                qf_core::ErrorCode::InvalidContract,
+                "rule_book",
+                "正式规则目录序列化失败",
+            )
+        })
+    }))
+}
+#[pyfunction]
+fn validate_formal_calendar_json(py: Python<'_>, input: &str) -> PyResult<String> {
+    convert(py.detach(|| {
+        let rows: Vec<qf_core::clock::CalendarSession> = qf_core::data::views::bounded_json(input)?;
+        qf_core::clock::SessionCalendar::new("formal-sql-projection".into(), rows.clone(), None)?;
+        serde_json::to_string(&rows).map_err(|_| {
+            QfError::new(
+                qf_core::ErrorCode::InvalidContract,
+                "calendar",
+                "正式日历序列化失败",
+            )
+        })
+    }))
+}
+#[pyfunction]
 fn parse_decimal(input: &str) -> PyResult<String> {
     convert(input.parse::<ExactDecimal>()).map(|v| v.to_string())
 }
@@ -325,6 +352,8 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_market_event_json, m)?)?;
     m.add_function(wrap_pyfunction!(validate_commission_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(compose_official_fee_config_json, m)?)?;
+    m.add_function(wrap_pyfunction!(official_market_rules_json, m)?)?;
+    m.add_function(wrap_pyfunction!(validate_formal_calendar_json, m)?)?;
     m.add_function(wrap_pyfunction!(indicator_json, m)?)?;
     m.add("MAX_VIEW_ROWS", qf_core::data::views::MAX_VIEW_ROWS)?;
     m.add("MAX_VIEW_BYTES", qf_core::data::views::MAX_VIEW_BYTES)?;

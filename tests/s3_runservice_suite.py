@@ -622,6 +622,41 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
                 s3_worker_limits=dict(cpu_millis=2000,memory_bytes=5*1024**3,pids=64,
                     wall_seconds=3600,tmp_bytes=512*1024**2,file_bytes=256*1024**2,result_bytes=128*1024**2),
                 s3_group_budget=dict(reserve_cpu_millis=2000,reserve_memory_bytes=3*1024**3,reserve_pids=96)))
+        # Exercise the actual default runner factory and HTTP composition
+        # before installing the explicit isolated execution oracle below.
+        # No success plan/provider is supplied. The real Docker preflight is
+        # required; unknown formal source semantics must refuse before a claim.
+        from app.backtest_service.formal_resolver import SqlFormalPlanResolver
+        from app.backtest_service.runtime_contracts import configured_budgets
+        default_repository, default_process, default_services = create_services(settings=settings, engine=self.engine)
+        default_provider = default_services.builder.__self__
+        self.assertIsInstance(default_provider.plan_resolver, SqlFormalPlanResolver)
+        default_limits, _ = configured_budgets(settings.s3_worker_limits, settings.s3_group_budget)
+        default_service = RunService(default_repository, default_provider, limits=default_limits)
+        default_config = RunConfig(**deepcopy(self.template['config'])).to_dict()
+        default_work = default_service._capture(OWNER, default_config)
+        with self.assertRaises(RuntimeFault) as default_failure:
+            default_services.builder(default_work, Claim(str(uuid4()), 'private-default', 1), Event())
+        expected_default = default_failure.exception.diagnostic()
+        self.assertEqual(expected_default['code'], 'CAPABILITY_UNAVAILABLE')
+        self.assertTrue(any(item['binding'] == 'E70' and item['status'] == 'field_semantics_missing'
+                            for item in expected_default['scope']['facts']))
+        previous = self.app.state.settings, self.app.state.s3_repository, self.app.state.s3_provider
+        with self.engine.connect() as connection:
+            before_default = connection.scalar(text('SELECT COUNT(*) FROM s3_runs'))
+        try:
+            self.app.state.settings, self.app.state.s3_repository = settings, default_repository
+            del self.app.state.s3_provider
+            response = self.http('POST', '/preflight', default_config)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(response.json()['errors'], [expected_default])
+            response = self.http('POST', payload=default_config, key=uuid4().hex)
+            self.assertEqual(response.status_code, 503, response.text)
+            self.assertEqual(response.json()['detail'], expected_default)
+            with self.engine.connect() as connection:
+                self.assertEqual(connection.scalar(text('SELECT COUNT(*) FROM s3_runs')), before_default)
+        finally:
+            self.app.state.settings, self.app.state.s3_repository, self.app.state.s3_provider = previous
         # This required container test now runs the production FormalProvider
         # itself over the real E70 physical node layout. Only the explicitly
         # named execution facts are synthetic; no native/source-table fallback.
