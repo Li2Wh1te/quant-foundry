@@ -1,4 +1,5 @@
 import { readApiToken } from "../auth/tokenStorage";
+import { invalidateDataAssetsSession } from "../features/data-assets/data/lifecycle";
 import { DataCollectionApiError } from "./dataCollections";
 
 export interface WatchItem {
@@ -33,6 +34,10 @@ async function request<T>(
     cache: "no-store",
     headers: token ? { Authorization: `Bearer ${token}` } : {},
   });
+  if ([401, 403].includes(response.status)) {
+    invalidateDataAssetsSession(response.status === 401 ? "authentication" : "permission");
+    throw new DataCollectionApiError(response.status === 401 ? "登录状态已失效。" : "当前账号无权读取自选。", response.status);
+  }
   const body = await response.json().catch(() => null);
   if (!response.ok)
     throw new DataCollectionApiError(
@@ -42,6 +47,7 @@ async function request<T>(
       response.status,
     );
   signal?.throwIfAborted();
+  if (readApiToken() !== token) throw new DOMException("Credential changed", "AbortError");
   return body as T;
 }
 export const listWatchlist = (offset = 0, signal?: AbortSignal) =>

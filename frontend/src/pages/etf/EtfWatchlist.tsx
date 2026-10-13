@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { MoreHorizontal, Plus, X } from "lucide-react";
 import { listEtfs, type EtfCode } from "../../api/dataCollections";
+import { marketError, onMarketInvalidation } from "../../features/market-data/data";
 import {
   listWatchlist,
   setWatched,
@@ -38,6 +39,15 @@ export function EtfWatchlist({
     [revision, setRevision] = useState(0);
   const generation = useRef(0),
     mounted = useRef(true);
+  const activeReads = useRef(new Set<AbortController>());
+  useEffect(() => onMarketInvalidation(reason => {
+    generation.current++;
+    for (const controller of activeReads.current) controller.abort();
+    setRows([]); setMatches([]); setTotal(0); setPending("");
+    setLoading(false); setSearching(false);
+    setError(reason === "session" ? "" : "读取权限已改变，自选内容已撤下。");
+    if (reason === "authentication") onError(marketError(401));
+  }), [onError]);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -46,6 +56,7 @@ export function EtfWatchlist({
   }, []);
   useEffect(() => {
     const controller = new AbortController();
+    activeReads.current.add(controller);
     const version = ++generation.current;
     setLoading(true);
     setError("");
@@ -72,7 +83,7 @@ export function EtfWatchlist({
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    return () => controller.abort();
+    return () => { activeReads.current.delete(controller); controller.abort(); };
   }, [refresh, revision, onError]);
   useEffect(() => {
     if (anchor?.key !== "add" || !keyword.trim()) {
@@ -82,6 +93,7 @@ export function EtfWatchlist({
       return;
     }
     const controller = new AbortController();
+    activeReads.current.add(controller);
     setSearching(true);
     setSearchError("");
     setMatches([]);
@@ -106,6 +118,7 @@ export function EtfWatchlist({
     }, 250);
     return () => {
       clearTimeout(timer);
+      activeReads.current.delete(controller);
       controller.abort();
     };
   }, [keyword, searchOffset, anchor?.key, onError]);
@@ -163,6 +176,7 @@ export function EtfWatchlist({
           <X />
         </button>
       </div>
+      <p className="qfe-note">自选沿用现有保存与原生日收盘服务；独立于当前正式图表。</p>
       <div className="qfe-watch-scroll" aria-busy={loading}>
         <div className="qfe-watch-columns">
           <span>标的</span>

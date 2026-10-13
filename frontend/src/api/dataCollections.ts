@@ -1,42 +1,8 @@
+/** Shared native catalogue for existing watchlist selection/diagnostics.
+ * Formal market pages, prices, factors and overview use features/market-data/data.
+ */
 import { readApiToken } from "../auth/tokenStorage";
-
-export interface TradingCalendarDay {
-  exchange: string;
-  calendar_date: string;
-  is_open: boolean;
-  previous_trading_date: string | null;
-  updated_at: string;
-}
-
-export interface TradingCalendarDetail extends TradingCalendarDay {
-  next_trading_date: string | null;
-}
-
-export interface TradingCalendarPage {
-  items: TradingCalendarDay[];
-  total: number;
-  limit: number;
-  offset: number;
-}
-
-export interface TradingCalendarOverview {
-  total_records: number;
-  exchange_count: number;
-  open_day_count: number;
-  start_date: string | null;
-  end_date: string | null;
-  last_updated_at: string | null;
-  checkpoints: Record<string, string>;
-}
-
-export interface TradingCalendarFilters {
-  exchange?: string;
-  isOpen?: boolean;
-  startDate?: string;
-  endDate?: string;
-  limit?: number;
-  offset?: number;
-}
+import { invalidateDataAssetsSession } from "../features/data-assets/data/lifecycle";
 
 export interface EtfCode {
   instrument_id?: string;
@@ -62,17 +28,6 @@ export interface EtfPage {
   offset: number;
 }
 
-export interface EtfOverview {
-  total_records: number;
-  exchange_count: number;
-  listed_count: number;
-  first_list_date: string | null;
-  latest_list_date: string | null;
-  last_updated_at: string | null;
-  refreshed_at: string | null;
-  exchanges: string[];
-}
-
 export interface EtfFilters {
   instrumentId?: string;
   keyword?: string;
@@ -80,38 +35,6 @@ export interface EtfFilters {
   listStatus?: string;
   limit?: number;
   offset?: number;
-}
-
-export interface EtfDailyBar {
-  ts_code: string;
-  trade_date: string;
-  open: string | null;
-  high: string | null;
-  low: string | null;
-  close: string | null;
-  vol: string | null;
-  amount: string | null;
-  source: string;
-  updated_at: string;
-  pre_close?: string | null;
-  change?: string | null;
-  pct_chg?: string | null;
-  volume_unit?: string;
-  amount_unit?: string;
-}
-
-export interface EtfAdjustmentFactor {
-  ts_code: string;
-  trade_date: string;
-  adj_factor: string;
-  source: string;
-  updated_at: string;
-}
-
-export interface EtfTimeSeriesFilters {
-  startDate?: string;
-  endDate?: string;
-  limit?: number;
 }
 
 export class DataCollectionApiError extends Error {
@@ -127,9 +50,14 @@ function headers(): HeadersInit {
 }
 
 async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const token = readApiToken();
   // Refreshes inspect persisted facts again; cancellation also guards callers
   // against a response whose JSON finishes after the selection has changed.
   const response = await fetch(path, { headers: headers(), cache: "no-store", signal });
+  if ([401, 403].includes(response.status)) {
+    invalidateDataAssetsSession(response.status === 401 ? "authentication" : "permission");
+    throw new DataCollectionApiError(response.status === 401 ? "登录状态已失效。" : "当前账号无权读取标的目录。", response.status);
+  }
   if (!response.ok) {
     let message = `请求失败（HTTP ${response.status}）。`;
     try {
@@ -142,30 +70,8 @@ async function request<T>(path: string, signal?: AbortSignal): Promise<T> {
   }
   const value = await response.json() as T;
   signal?.throwIfAborted();
+  if (readApiToken() !== token) throw new DOMException("Credential changed", "AbortError");
   return value;
-}
-
-export function getTradingCalendarOverview(): Promise<TradingCalendarOverview> {
-  return request<TradingCalendarOverview>("/api/admin/data-collections/trading-calendar/overview");
-}
-
-export function listTradingCalendarDays(filters: TradingCalendarFilters, signal?: AbortSignal): Promise<TradingCalendarPage> {
-  const params = new URLSearchParams();
-  if (filters.exchange) params.set("exchange", filters.exchange);
-  if (filters.isOpen !== undefined) params.set("is_open", String(filters.isOpen));
-  if (filters.startDate) params.set("start_date", filters.startDate);
-  if (filters.endDate) params.set("end_date", filters.endDate);
-  params.set("limit", String(filters.limit ?? 50));
-  params.set("offset", String(filters.offset ?? 0));
-  return request<TradingCalendarPage>(`/api/admin/data-collections/trading-calendar?${params}`, signal);
-}
-
-export function getTradingCalendarDay(exchange: string, date: string, signal?: AbortSignal): Promise<TradingCalendarDetail> {
-  return request<TradingCalendarDetail>(`/api/admin/data-collections/trading-calendar/${encodeURIComponent(exchange)}/${encodeURIComponent(date)}`, signal);
-}
-
-export function getEtfOverview(signal?: AbortSignal): Promise<EtfOverview> {
-  return request<EtfOverview>("/api/admin/data-collections/etfs/overview", signal);
 }
 
 export function listEtfs(filters: EtfFilters, signal?: AbortSignal): Promise<EtfPage> {
@@ -177,38 +83,4 @@ export function listEtfs(filters: EtfFilters, signal?: AbortSignal): Promise<Etf
   params.set("limit", String(filters.limit ?? 50));
   params.set("offset", String(filters.offset ?? 0));
   return request<EtfPage>(`/api/admin/data-collections/etfs?${params}`, signal);
-}
-
-function timeSeriesParams(filters: EtfTimeSeriesFilters): string {
-  const params = new URLSearchParams();
-  if (filters.startDate) params.set("start_date", filters.startDate);
-  if (filters.endDate) params.set("end_date", filters.endDate);
-  if (filters.limit !== undefined) params.set("limit", String(filters.limit));
-  return params.toString();
-}
-
-export function getEtf(tsCode: string, signal?: AbortSignal): Promise<EtfCode> {
-  return request<EtfCode>(`/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}`, signal);
-}
-
-export function listEtfDailyBars(
-  tsCode: string,
-  filters: EtfTimeSeriesFilters,
-  signal?: AbortSignal
-): Promise<EtfDailyBar[]> {
-  const params = timeSeriesParams(filters);
-  return request<EtfDailyBar[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/daily-bars${params ? `?${params}` : ""}`, signal
-  );
-}
-
-export function listEtfAdjustmentFactors(
-  tsCode: string,
-  filters: EtfTimeSeriesFilters,
-  signal?: AbortSignal
-): Promise<EtfAdjustmentFactor[]> {
-  const params = timeSeriesParams(filters);
-  return request<EtfAdjustmentFactor[]>(
-    `/api/admin/data-collections/etfs/${encodeURIComponent(tsCode)}/adjustment-factors${params ? `?${params}` : ""}`, signal
-  );
 }

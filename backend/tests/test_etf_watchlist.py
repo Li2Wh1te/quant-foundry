@@ -76,7 +76,7 @@ def test_flat_market_is_not_missing():
 def test_no_bars_keeps_saved_instrument_visible():
     row = quote()
     row.update(trade_date=None, close=None, pre_close=None, change=None, pct_chg=None)
-    assert "尚未采集" in present_item(row).message
+    assert "原生日收盘暂无观测" in present_item(row).message
 
 
 def test_batch_query_is_scoped_and_does_not_skip_invalid_latest_rows():

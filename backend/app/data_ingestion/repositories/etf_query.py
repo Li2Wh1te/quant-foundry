@@ -1,15 +1,12 @@
-"""Read models for the operator-facing ETF reference-data page."""
+"""Shared source-scoped native catalogue for watchlist selection/diagnostics."""
 
-from dataclasses import dataclass
-from datetime import date, datetime
 from uuid import UUID
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from app.data_ingestion.constants import ETF_BASIC_SYNC_KEY, TUSHARE_SOURCE
+from app.data_ingestion.constants import TUSHARE_SOURCE
 from app.data_ingestion.models.etf import EtfCode
-from app.data_ingestion.models.sync_checkpoint import DataSyncCheckpoint
 
 
 # Tushare ETF-basic has historically returned both exchange-code conventions.
@@ -22,20 +19,6 @@ EXCHANGE_CODE_ALIASES = {
     "SZSE": ("SZSE", "SZ"),
     "SZ": ("SZSE", "SZ"),
 }
-
-
-@dataclass(frozen=True)
-class EtfOverview:
-    """Aggregated values shown above the ETF reference-data table."""
-
-    total_records: int
-    exchange_count: int
-    listed_count: int
-    first_list_date: date | None
-    latest_list_date: date | None
-    last_updated_at: datetime | None
-    refreshed_at: datetime | None
-    exchanges: list[str]
 
 
 class EtfQueryRepository:
@@ -75,40 +58,6 @@ class EtfQueryRepository:
         )
         return items, int(total or 0)
 
-    def overview(self) -> EtfOverview:
-        """Return source-scoped totals and the last successful refresh marker."""
-        summary = self.session.execute(
-            select(
-                func.count(EtfCode.ts_code),
-                func.count(EtfCode.ts_code).filter(EtfCode.list_status == "L"),
-                func.min(EtfCode.list_date),
-                func.max(EtfCode.list_date),
-                func.max(EtfCode.last_seen_at),
-            ).where(EtfCode.source == self.source)
-        ).one()
-        # Report actual source-scoped markets, normalizing legacy aliases before
-        # counting so SH/SSE and SZ/SZSE cannot appear as different exchanges.
-        exchanges = sorted({
-            self._exchange_codes(exchange)[0]
-            for exchange in self.session.scalars(
-                select(EtfCode.exchange).where(EtfCode.source == self.source).distinct()
-            )
-        })
-        checkpoint = self.session.get(
-            DataSyncCheckpoint,
-            {"sync_key": ETF_BASIC_SYNC_KEY, "scope_key": "market=CN"},
-        )
-        return EtfOverview(
-            total_records=int(summary[0] or 0),
-            exchange_count=len(exchanges),
-            listed_count=int(summary[1] or 0),
-            first_list_date=summary[2],
-            latest_list_date=summary[3],
-            last_updated_at=summary[4],
-            refreshed_at=self._refresh_timestamp(checkpoint),
-            exchanges=exchanges,
-        )
-
     def _filters(
         self,
         *,
@@ -139,16 +88,3 @@ class EtfQueryRepository:
         """Expand compatible Shanghai and Shenzhen source exchange codes."""
         normalized = exchange.upper()
         return EXCHANGE_CODE_ALIASES.get(normalized, (normalized,))
-
-    @staticmethod
-    def _refresh_timestamp(checkpoint: DataSyncCheckpoint | None) -> datetime | None:
-        """Ignore malformed historical cursors instead of breaking a read-only page."""
-        if checkpoint is None:
-            return None
-        refreshed_at = checkpoint.cursor.get("refreshed_at")
-        if not isinstance(refreshed_at, str):
-            return None
-        try:
-            return datetime.fromisoformat(refreshed_at)
-        except ValueError:
-            return None

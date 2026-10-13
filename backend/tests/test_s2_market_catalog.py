@@ -12,7 +12,6 @@ import pytest
 from sqlalchemy import event
 
 from app.data_ingestion.repositories.etf_query import EtfQueryRepository
-from app.data_ingestion.repositories.trading_calendar_query import TradingCalendarQueryRepository
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.errors import DataStoreError
 from app.data_store.limits import StoreLimits, MiB
@@ -68,7 +67,7 @@ def test_full_catalog_search_and_three_pages_use_default_formal_route(market, mo
         raise AssertionError('old market repository is blocked')
 
     monkeypatch.setattr(CurrentStore, 'read_many', observe)
-    for repository in (EtfQueryRepository, TradingCalendarQueryRepository):
+    for repository in (EtfQueryRepository,):
         for name in ('list_codes', 'overview', 'list_days', 'get_day'):
             if hasattr(repository, name):
                 monkeypatch.setattr(repository, name, deny)
@@ -204,11 +203,15 @@ def test_old_calendar_repository_blocked_and_independent_catalog_failure(market,
     def deny(*_args, **_kwargs):
         raise AssertionError('legacy date reader must not run')
 
-    for name in ('list_days', 'get_day', 'overview'):
-        if hasattr(TradingCalendarQueryRepository, name):
-            monkeypatch.setattr(TradingCalendarQueryRepository, name, deny)
-    assert get(client, '/instruments').status_code != 200
-    assert get(client, '/calendar/SSE/2026-01-02').json()['items'][0]['state'] == 'open'
+    def block(_conn, _cursor, statement, _params, _context, _many):
+        if 'trading_calendar_days' in statement.lower():
+            deny()
+    event.listen(current.catalog.engine, 'before_cursor_execute', block)
+    try:
+        assert get(client, '/instruments').status_code != 200
+        assert get(client, '/calendar/SSE/2026-01-02').json()['items'][0]['state'] == 'open'
+    finally:
+        event.remove(current.catalog.engine, 'before_cursor_execute', block)
 
 
 def test_data_change_and_quality_mutation_clear_continuation_without_old_content(market):

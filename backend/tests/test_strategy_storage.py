@@ -7,7 +7,7 @@ from unittest.mock import Mock
 from uuid import uuid4
 
 from sqlalchemy.dialects import postgresql
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import AddConstraint, CreateTable
 
 from app.strategies.models import Strategy, StrategyDraft, StrategyRevision
 from app.strategies.repository import StrategyRepository
@@ -50,10 +50,15 @@ class StrategyStorageModelTestCase(unittest.TestCase):
         )
 
         self.assertIn("current_revision_id UUID", strategy_sql)
+        # Prior PostgreSQL create_all may emit this cyclic FK through ALTER
+        # and mark it out of inline CREATE. Verify its actual DDL independently
+        # of metadata lifecycle, without changing the production constraint.
+        owned = next(constraint for constraint in Strategy.__table__.foreign_key_constraints
+                     if [column.name for column in constraint.columns] == ["id", "current_revision_id"])
         self.assertIn(
             "FOREIGN KEY(id, current_revision_id) REFERENCES strategy_revisions "
             "(strategy_id, id)",
-            strategy_sql,
+            str(AddConstraint(owned, isolate_from_table=False).compile(dialect=postgresql.dialect())),
         )
         self.assertIn("source_code TEXT NOT NULL", draft_sql)
         self.assertIn("source_code TEXT NOT NULL", revision_sql)

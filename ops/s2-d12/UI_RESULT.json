@@ -1,0 +1,35 @@
+{
+  "mode": "artificial preparation preview only",
+  "actualAccess": false,
+  "findings": [
+    "unconfigured source and failed update are separate from the readable artificial formal directory; dates and coverage remain unknown",
+    "three viewport screenshots show no horizontal overflow and preserve the existing shell",
+    "same-condition network failure marks only the directory stale, without removing operations",
+    "quality refusal withdraws the old directory count immediately; operations remain independent",
+    "unknown errors clear formal values and render only safe local copy",
+    "operations failure does not close a valid independent formal summary",
+    "permission invalidation withdraws all affected panels; keyboard refresh works"
+  ],
+  "errors": [],
+  "requests": [
+    "/api/auth/verify",
+    "/api/auth/verify",
+    "/api/system/version",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/overview"
+  ]
+}

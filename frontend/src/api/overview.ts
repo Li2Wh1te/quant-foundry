@@ -1,5 +1,6 @@
 import { readApiToken } from "../auth/tokenStorage";
-import type { EtfOverview, TradingCalendarOverview } from "./dataCollections";
+import type { MarketOverview, MarketReadState } from "../features/market-data/data";
+import { invalidateDataAssetsSession, registerRequest } from "../features/data-assets/data/lifecycle";
 
 export interface OverviewRun {
   id: string;
@@ -36,63 +37,46 @@ export interface OperationsOverview {
 
 export interface OverviewSnapshot {
   operations: OperationsOverview | null;
-  etfs: EtfOverview | null;
-  calendar: TradingCalendarOverview | null;
+  market: MarketReadState<MarketOverview>;
 }
 
 export class OverviewApiError extends Error {
   constructor(readonly status: number) {
-    // Never promote a raw proxy response or backend exception to operator copy.
-    super(`请求失败（HTTP ${status}）`);
+    super(status === 0 ? "运营服务连接失败。" : `运营请求失败（HTTP ${status}）`);
     this.name = "OverviewApiError";
   }
 }
 
-async function request<T>(path: string, signal: AbortSignal): Promise<T> {
-  const token = readApiToken();
-  const controller = new AbortController();
-  const abort = () => controller.abort();
+/** Operations facts remain separate from the page-owned formal market read. */
+export async function getOperationsOverview(signal: AbortSignal): Promise<OperationsOverview> {
+  signal.throwIfAborted();
+  const token = readApiToken(), controller = new AbortController();
+  const unregister = registerRequest(controller), abort = () => controller.abort();
   signal.addEventListener("abort", abort, { once: true });
-  if (signal.aborted) abort();
-  // A slow asset service must not discard successful scheduler responses.
-  const timeout = setTimeout(abort, 20000);
+  let timedOut = false;
+  const timeout = setTimeout(() => { timedOut = true; controller.abort(); }, 20000);
   try {
-    const response = await fetch(path, {
+    const response = await fetch("/api/admin/overview", {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
-      signal: controller.signal,
-      cache: "no-store"
+      signal: controller.signal, cache: "no-store"
     });
-    if (!response.ok) throw new OverviewApiError(response.status);
-    return await response.json() as T;
-  } finally {
-    clearTimeout(timeout);
-    signal.removeEventListener("abort", abort);
-  }
-}
-
-/** Each region retains its last successful value independently. The scheduler
- * snapshot is server-owned; asset counts come from their existing read APIs and
- * are deliberately not presented as part of the same database snapshot. */
-export async function loadOverviewSnapshot(previous: OverviewSnapshot, signal: AbortSignal) {
-  const results = await Promise.allSettled([
-    request<OperationsOverview>("/api/admin/overview", signal),
-    request<EtfOverview>("/api/admin/data-collections/etfs/overview", signal),
-    request<TradingCalendarOverview>("/api/admin/data-collections/trading-calendar/overview", signal)
-  ]);
-  if (signal.aborted) throw new DOMException("Request aborted", "AbortError");
-  for (const result of results) {
-    if (result.status === "rejected" && result.reason instanceof OverviewApiError && result.reason.status === 401) {
-      throw result.reason;
+    if ([401, 403].includes(response.status)) {
+      invalidateDataAssetsSession(response.status === 401 ? "authentication" : "permission", controller);
+      throw new OverviewApiError(response.status);
     }
+    signal.throwIfAborted();
+    if (readApiToken() !== token) throw new DOMException("Credential changed", "AbortError");
+    if (!response.ok) throw new OverviewApiError(response.status);
+    const result = await response.json();
+    signal.throwIfAborted();
+    if (readApiToken() !== token) throw new DOMException("Credential changed", "AbortError");
+    return result as OperationsOverview;
+  } catch (error) {
+    if (error instanceof OverviewApiError) throw error;
+    signal.throwIfAborted();
+    if (timedOut) throw new OverviewApiError(504);
+    throw new OverviewApiError(error instanceof TypeError ? 0 : 502);
+  } finally {
+    clearTimeout(timeout); signal.removeEventListener("abort", abort); unregister();
   }
-  const [operations, etfs, calendar] = results;
-  const labels = ["运营指标、数据源与运行记录", "ETF 资产", "交易日历资产"];
-  return {
-    snapshot: {
-      operations: operations.status === "fulfilled" ? operations.value : previous.operations,
-      etfs: etfs.status === "fulfilled" ? etfs.value : previous.etfs,
-      calendar: calendar.status === "fulfilled" ? calendar.value : previous.calendar
-    },
-    errors: results.flatMap((result, index) => result.status === "rejected" ? [labels[index]] : [])
-  };
 }
