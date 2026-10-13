@@ -42,7 +42,9 @@ class FormalResolutionFault(RuntimeFault):
         self.checks = checks
 
     def diagnostic(self):
-        return dict(super().diagnostic(), scope=dict(facts=self.checks))
+        # D01 ErrorDTO scope is map[str, str]. Keep the bounded fact report
+        # inside a JSON string rather than widening that shared contract.
+        return dict(super().diagnostic(), scope=dict(facts=encoded(self.checks).decode()))
 
 
 def _row_payload(item):

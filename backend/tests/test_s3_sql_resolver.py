@@ -24,7 +24,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
 import uvicorn
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.orm import Session
 
 if os.getenv('QF_S3_INTEGRATION_REQUIRED') == '1':
@@ -205,7 +205,7 @@ def test_default_provider_reads_supported_contracts_and_keeps_undefined_semantic
     assert statuses(facts)['execution_trade_days']['status'] == 'field_semantics_missing'
     with pytest.raises(RuntimeFault) as failure:
         provider._plan(work())
-    assert failure.value.diagnostic()['scope']['facts'] == list(facts.checks)
+    assert json.loads(failure.value.diagnostic()['scope']['facts']) == list(facts.checks)
 
 
 @pytest.mark.parametrize('missing', ['identity', 'calendar', 'rules', 'coverage', 'suspension'])
@@ -343,6 +343,15 @@ def test_fact_budgets_fail_without_truncating_or_advertising_short_coverage(form
             assert failure.value.code == 'RESOURCE_LIMIT'
 
 
+def test_real_pg_statement_timeout_is_reported_as_resource_limit(formal_facts):
+    resolver = FormalProvider(SimpleNamespace(), store=formal_facts).plan_resolver
+    with resolver._session() as (session, budget):
+        session.connection().execute(text("SET LOCAL statement_timeout = '1ms'"))
+        with pytest.raises(RuntimeFault) as failure:
+            session.execute(select(func.pg_sleep(0.05)))
+        assert failure.value.code == 'RESOURCE_LIMIT'
+
+
 def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_semantics(formal_facts, tmp_path):
     seed(formal_facts)
     settings = Settings(api_token=TOKEN, cursor_signing_key=CURSOR, database_password='isolated-test',
@@ -387,7 +396,8 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
         assert preflight.status_code == 200, preflight.text
         diagnostic = preflight.json()['errors'][0]
         assert diagnostic['code'] == 'CAPABILITY_UNAVAILABLE'
-        checks = {item['binding']: item for item in diagnostic['scope']['facts']}
+        assert all(type(value) is str for value in diagnostic['scope'].values())
+        checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
         assert checks['account_commission']['available']
         assert checks['identity']['available'] and checks['calendar_sessions']['available']
         assert checks['E70']['status'] == 'field_semantics_missing'

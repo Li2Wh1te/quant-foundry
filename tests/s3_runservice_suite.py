@@ -640,7 +640,7 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         expected_default = default_failure.exception.diagnostic()
         self.assertEqual(expected_default['code'], 'CAPABILITY_UNAVAILABLE')
         self.assertTrue(any(item['binding'] == 'E70' and item['status'] == 'field_semantics_missing'
-                            for item in expected_default['scope']['facts']))
+                            for item in json.loads(expected_default['scope']['facts'])))
         previous = self.app.state.settings, self.app.state.s3_repository, self.app.state.s3_provider
         with self.engine.connect() as connection:
             before_default = connection.scalar(text('SELECT COUNT(*) FROM s3_runs'))

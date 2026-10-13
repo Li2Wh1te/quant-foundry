@@ -171,7 +171,7 @@ def test_default_provider_cannot_accept_user_metadata_as_execution_facts(formal,
         with pytest.raises(RuntimeFault) as blocked:
             operation()
         assert blocked.value.code == 'CAPABILITY_UNAVAILABLE'
-        facts = blocked.value.diagnostic()['scope']['facts']
+        facts = json.loads(blocked.value.diagnostic()['scope']['facts'])
         assert any(item['binding'] == 'E70' and
             item['missing'] == ['provider_reported_raw_basis_and_lot_to_share_conversion_unverified'] for item in facts)
     for missing in REQUIRED_EXECUTION_FACTS:
