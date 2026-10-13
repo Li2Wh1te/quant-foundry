@@ -14,6 +14,7 @@ import { DashboardPage } from "./pages/DashboardPage";
 import { DataSourcesPage } from "./pages/DataSourcesPage";
 import { MarketPage } from "./pages/MarketPage";
 import { EtfDetailPage } from "./pages/EtfDetailPage";
+import { MarketDetailEntry } from "./pages/market/MarketDetailEntry";
 import { LoginPage } from "./pages/LoginPage";
 import { StrategyDataApiPage } from "./pages/StrategyDataApiPage";
 import { StrategiesPage } from "./pages/StrategiesPage";
@@ -64,11 +65,11 @@ export function App() {
       />
       <Route
         path="/admin/data/etf-basics"
-        element={<RequireAuth><OverviewShell title="A 股市场" section="MARKET DATA" className="qfm-root"><MarketPage /></OverviewShell></RequireAuth>}
+        element={<RequireAuth><OverviewShell title="ETF 市场" section="MARKET DATA" className="qfm-root"><MarketPage /></OverviewShell></RequireAuth>}
       />
       <Route
         path="/admin/data/etf-basics/:tsCode"
-        element={<RequireAuth><EtfDetailPage /></RequireAuth>}
+        element={<RequireAuth><MarketDetailEntry><EtfDetailPage /></MarketDetailEntry></RequireAuth>}
       />
       <Route
         path="/admin/strategy-data"
