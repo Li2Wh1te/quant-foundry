@@ -137,6 +137,45 @@ test('401/403 invalidate page sessions immediately without reading stalled error
   }
 });
 
+test('the originating session preserves 401/403 for the existing auth flow after clearing content', async () => {
+  for (const status of [401, 403]) {
+    const session = data.createMarketReadSession();
+    await session.read('same-query', async () => resolution());
+    await browser(async () => ({ status, ok: false }), async () => {
+      await assert.rejects(session.read('same-query', signal => data.marketClient.resolve('510300.SH', 'etf', { signal })),
+        fail(status === 401 ? 'AUTH_REQUIRED' : 'PERMISSION_DENIED'));
+      assert.equal(session.state.data, null); assert.equal(session.state.canContinue, false);
+      assert.equal(session.state.error.status, status);
+    });
+    session.dispose();
+  }
+});
+
+test('denial from another panel fences an injected late success without erasing the denial', async () => {
+  const session = data.createMarketReadSession(), late = deferred();
+  const result = session.read('same', async () => late.promise);
+  const cancelled = assert.rejects(result, error => error.name === 'AbortError');
+  lifecycle.invalidateDataAssetsSession('permission');
+  late.resolve(resolution()); await cancelled;
+  assert.equal(session.state.data, null); assert.equal(session.state.error.code, 'PERMISSION_DENIED');
+  assert.equal(session.state.canContinue, false); session.dispose();
+});
+
+test('credential rotation withdraws cached content and prevents stale retention under a new credential', async () => {
+  await browser(async () => json(resolution()), async changeToken => {
+    const session = data.createMarketReadSession();
+    await session.read('same', async () => resolution());
+    changeToken('new-credential');
+    assert.equal(session.state.data, null);
+    await assert.rejects(session.read('same', async () => { throw data.marketError(0, 'NETWORK_ERROR'); }), fail('NETWORK_ERROR'));
+    assert.equal(session.state.data, null); assert.equal(session.state.stale, false);
+    const late = deferred(), result = session.read('same', async () => late.promise);
+    const cancelled = assert.rejects(result, error => error.name === 'AbortError');
+    changeToken('another-credential'); late.resolve(resolution()); await cancelled;
+    assert.equal(session.state.data, null); session.dispose();
+  });
+});
+
 test('non-JSON and unknown backend errors expose no SQL, DSN, token or file path', async () => {
   for (const body of ['not JSON postgres://secret SQL /private/path', JSON.stringify({ detail: {
     code: 'SQL_PASSWORD_SECRET', message: 'Bearer confidential SELECT * FROM private', reason: '/secret' } })]) {

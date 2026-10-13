@@ -95,10 +95,12 @@ separate. Capability probes do not promise an arbitrary date/instrument request.
 
 Pass AbortSignal on each read; dispose the page-owned session on unmount. Use a
 condition key including catalog/filter/identity/series/period/basis/fixed window.
-A changed condition clears old results. Only network/timeout failures can retain
+A changed condition or credential clears old results. Only network/timeout failures can retain
 same-condition stale data, with `canContinue=false`; auth, quality, schema,
 maintenance, changed-data or unknown failures clear it. The session races late
 responses and listens to the existing logout/auth/permission invalidation bus.
+Originating 401/403 remains available to the caller's existing auth flow; use
+`onMarketInvalidation` to handle denial from another mounted panel as well.
 
 Decimal fields are checked text, not JSON numbers. `exactMarketValue` preserves
 tooltips/tables/copy values; only D10's checked plotting adapter may approximate
