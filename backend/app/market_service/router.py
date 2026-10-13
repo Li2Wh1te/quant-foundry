@@ -56,3 +56,7 @@ def resolve(request: Request, response: Response, symbol: Annotated[str, Query(m
         return service.resolve(symbol, asset_type)
     except (MarketError, DataStoreError, SQLAlchemyError) as error:
         raise http_error(error) from None
+
+# D10 domain endpoints compose the sole authenticated market router/factory.
+from .series_router import router as series_router
+router.include_router(series_router)

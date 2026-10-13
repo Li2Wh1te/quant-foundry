@@ -183,6 +183,27 @@ class Fixtures(DataRunServices):
         return self.builder(work, claim, stopped)
 
 
+class EvidenceDockerDaemon(DockerDaemon):
+    """Record bounded real inspect replies without changing runtime decisions."""
+
+    fault_case = None
+
+    def inspect(self, name):
+        row = super().inspect(name)
+        case = self.fault_case
+        if case is not None and row is not None and (row["Config"].get("Labels") or {}).get(LABEL) == "1":
+            state = row["State"]
+            facts = {key: state.get(key) for key in ("Running", "OOMKilled", "ExitCode", "StartedAt", "FinishedAt")}
+            states = case["docker_states"]
+            if not states or states[-1]["state"] != facts:
+                sample = dict(state=facts, elapsed_seconds=round(time.monotonic() - case["started"], 4))
+                if len(states) < 8:
+                    states.append(sample)
+                else:
+                    states[-1] = sample
+        return row
+
+
 class RuntimeTests(unittest.TestCase):
     def setUp(self):
         import hashlib
@@ -193,7 +214,7 @@ class RuntimeTests(unittest.TestCase):
         self.base.mkdir(mode=0o700)
         for p in ("queue", "work", "results"):
             (self.base / p).mkdir(mode=0o700)
-        self.daemon = DockerDaemon()
+        self.daemon = EvidenceDockerDaemon()
         self.repository = LocalRunRepository(self.base / "queue")
         root = WorkRoot(
             self.base / "work", Path(HOST) / self.base.relative_to(ROOT) / "work"
@@ -481,43 +502,59 @@ def initialize(c):
     def test_python_exception_ffi_crash_oom_wall_and_output(self):
         cases = [
             (
+                "python_exception",
                 'def initialize(c): raise ValueError("intentional")',
                 "STRATEGY_ERROR",
                 WorkerLimits(),
             ),
             (
+                "ffi_crash",
                 "import ctypes\ndef initialize(c): ctypes.string_at(0)",
                 "STRATEGY_ERROR",
                 WorkerLimits(),
             ),
             (
+                "oom",
                 "def initialize(c):\n    blobs=[]\n    while True: blobs.append(bytearray(8*1024*1024))",
                 "RESOURCE_LIMIT",
                 WorkerLimits(memory_bytes=256 * 1024**2),
             ),
             (
+                "wall",
                 "def initialize(c):\n    while True: pass",
                 "RESOURCE_LIMIT",
                 WorkerLimits(wall_seconds=2),
             ),
             (
+                "output",
                 'def initialize(c):\n    for i in range(10000):print("x"*1024)',
                 "succeeded",
                 WorkerLimits(output_bytes=4096),
             ),
         ]
-        for code, expected, limits in cases:
-            row = self.wait_runs([self.enqueue(self.work(code, limits=limits))])[0]
-            if expected == "succeeded":
-                self.assertEqual(row["status"], expected, row)
-                self.assertTrue(
-                    json.loads(self.reader(row).summary_json())["notices"][
-                        "logs_truncated"
-                    ]
-                )
-            else:
-                self.assertEqual(row["status"], "failed", row)
-                self.assertEqual(row["outcome"]["error"]["code"], expected, row)
+        for name, code, expected, limits in cases:
+            with self.subTest(case=name):
+                evidence = dict(expected=expected, memory_bytes=limits.memory_bytes,
+                                wall_seconds=limits.wall_seconds, docker_states=[], started=time.monotonic())
+                EVIDENCE.setdefault("fault_cases", {})[name] = evidence
+                self.daemon.fault_case = evidence
+                try:
+                    row = self.wait_runs([self.enqueue(self.work(code, limits=limits))])[0]
+                    evidence.update(status=row["status"], actual_code=row.get("outcome", {}).get("error", {}).get("code"))
+                    print("FAULT_CASE " + json.dumps(dict(case=name, **{k: v for k, v in evidence.items() if k != "started"})), flush=True)
+                    if expected == "succeeded":
+                        self.assertEqual(row["status"], expected, row)
+                        self.assertTrue(
+                            json.loads(self.reader(row).summary_json())["notices"][
+                                "logs_truncated"
+                            ]
+                        )
+                    else:
+                        self.assertEqual(row["status"], "failed", row)
+                        self.assertEqual(row["outcome"]["error"]["code"], expected, row)
+                finally:
+                    self.daemon.fault_case = None
+                    evidence.pop("started", None)
 
     def test_cancel_noncooperative_worker_and_batch_preserves_complete(self):
         done = self.wait_runs([self.enqueue(self.work("def initialize(c): pass"))])[0]

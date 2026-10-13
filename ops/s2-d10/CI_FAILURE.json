@@ -1,0 +1,24 @@
+{
+  "head": "4171597a1cc1f6a9bc6aa6e44d058ba12d335de7",
+  "workflow": "S3 worker isolation",
+  "run_id": 38374362934,
+  "job_id": 115218918353,
+  "job_url": "https://github.com/Li2Wh1te/quant-foundry/actions/runs/38374362934/job/115218918353",
+  "artifact_id": 11800443812,
+  "artifact_sha256": "de42512e1c2b44b9c4c365fb61a64b0be9ba5c165cb101d00d8c5c8f5b101403",
+  "failed_test": "RuntimeTests.test_python_exception_ffi_crash_oom_wall_and_output",
+  "expected": "RESOURCE_LIMIT",
+  "actual": "STRATEGY_ERROR",
+  "actual_message": "worker崩溃或FFI异常退出",
+  "tests_run": 26,
+  "failures": 1,
+  "baseline": {
+    "head": "48768ed0a22a12178b40c3376388cd68122ca814",
+    "run_id": 38364490348,
+    "job_id": 115186241767,
+    "conclusion": "success",
+    "same_runtime_sources_and_test": true
+  },
+  "diagnosis": "Original grouped assertion does not distinguish OOM from wall cases, and retained logs lack terminal Docker state. Baseline success alone does not prove intermittency. Add named subtests and bounded original Docker inspect-state evidence before any classification fix; keep all assertions and resource limits unchanged.",
+  "artifact_local_read": "Connector supplied ZIP reference; selected environment proxy denied download (403). Original artifact remains retained on GitHub. No production or market-data access attempted."
+}

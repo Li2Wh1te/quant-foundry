@@ -176,8 +176,10 @@ def test_independent_price_scope_without_factors_fees_accounts_or_worker(market)
     caps = {c['name']: c for c in capabilities['capabilities']}
     assert caps[ETF_DAILY]['availability'] == 'available'
     assert caps[ETF_FACTORS]['availability'] == 'unavailable'
-    assert caps['raw']['availability'] == 'unknown'
-    assert caps['raw']['limitations'][0]['code'] == 'PRICE_BASIS_UNVERIFIED'
+    assert caps['raw']['availability'] == 'available'
+    assert caps['raw']['limitations'][0]['code'] == 'PRICE_BASIS_DECLARED'
+    assert caps['raw']['request_checked'] is False
+    assert any(n['code'] == 'SCOPED_RAW_VIEW' for n in caps['raw']['limitations'])
     assert all('E51' not in c['name'] for c in caps.values())
     assert client.get('/api/admin/market/instruments/resolve?symbol=510300.SH', headers=HEADERS).status_code == 200
 
