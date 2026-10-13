@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createMarketReadSession, isCancellation, marketClient, type BarPage, type InstrumentDetail,
   type InstrumentResolution, type MarketReadState, type SeriesOption, type Adjustment, type Period } from "../data";
 import { createSeriesWindow } from "./window";
@@ -13,6 +13,10 @@ export function useFormalDetail(symbol: string, request: { period: Period; adjus
   const active = useRef<ReturnType<typeof createSeriesWindow> | null>(null);
   const refreshMetadata = useRef<(() => void) | null>(null), lastRefresh = useRef(request.refresh);
   const readCapabilities = useRef<((key: string, asOf: string) => void) | null>(null);
+  const factorError = useCallback((error: unknown) => {
+    void active.current?.factorFailed(error);
+    onError(error);
+  }, [onError]);
   useEffect(() => {
     const resolver = createMarketReadSession<DetailIdentity>(), profile = createMarketReadSession<InstrumentDetail>();
     const capabilities = createMarketReadSession<SeriesOption[]>(), window = createSeriesWindow();
@@ -52,7 +56,7 @@ export function useFormalDetail(symbol: string, request: { period: Period; adjus
       adjustment: request.adjustment, start: request.start, end: request.end, as_of: request.asOf, limit: 512 })
       .catch(error => { if (!isCancellation(error)) onError(error); });
   }, [key, request.period, request.adjustment, request.start, request.end, request.asOf, request.refresh, onError]);
-  return { identity, metadata, options, prices,
+  return { identity, metadata, options, prices, factorError,
     earlier: () => { void active.current?.earlier().catch(error => { if (!isCancellation(error)) onError(error); }); },
     release: () => { active.current?.clear(); } };
 }

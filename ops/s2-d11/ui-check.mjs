@@ -99,6 +99,15 @@ try {
   await page.locator('#qfb-price-basis').selectOption('post');
   await page.waitForFunction(() => !document.querySelector('.qfe-chart-empty') && document.querySelector('.qfe-chart-caption')?.textContent.includes('后复权'));
   findings.push('explicit UI-only constant-factor contract enables pre/post; basis switch withdraws old OHLC before a held reply');
+  mode = 'network'; await page.getByRole('button', { name: '重新读取因子', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.qfe-data-note')?.textContent.includes('旧数据'));
+  assert.equal(await page.getByRole('button', { name: '加载更早历史', exact: true }).isDisabled(), true);
+  mode = 'changed'; await page.getByRole('button', { name: '重新读取因子', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.qfe-chart-empty')?.textContent.includes('依赖已改变'));
+  assert.equal(await page.locator('#qfb-price-basis').inputValue(), 'post');
+  mode = 'normal'; await page.getByRole('button', { name: '刷新数据', exact: true }).click();
+  await page.waitForFunction(() => !document.querySelector('.qfe-chart-empty'));
+  findings.push('dependent factor network errors mark adjusted prices stale and stop continuation; changed factors withdraw the adjusted window');
   mode = 'basis-denied';
   await page.getByRole('button', { name: '刷新数据', exact: true }).click();
   await page.waitForFunction(() => document.querySelector('.qfe-chart-empty')?.textContent.includes('因子'));

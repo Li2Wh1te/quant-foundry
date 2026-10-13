@@ -1,4 +1,4 @@
-import { createMarketReadSession, marketClient, marketError, type BarPage, type BarRequest, type MarketClient } from "../data";
+import { createMarketReadSession, isCancellation, marketClient, marketError, retainStale, type BarPage, type BarRequest, type MarketClient } from "../data";
 
 export const MAX_RESIDENT_BARS = 10_000;
 /** Render gate closes the pre-effect frame when a cutoff/basis/period changes. */
@@ -45,6 +45,14 @@ export function createSeriesWindow(client: MarketClient = marketClient) {
       try { return await session.read(condition, async signal => joinBarPages(page,
         await client.bars({ ...active!, cursor }, { signal }))); }
       catch (error) { throw error; }
+    },
+    factorFailed(error: unknown) {
+      if (!active || active.adjustment === "none" || isCancellation(error)) return;
+      // A dependent panel failure uses the same session failure rules. Clear
+      // invalid content immediately; network/timeout retains only marked stale.
+      if (!retainStale(error)) session.clear();
+      used.clear();
+      return session.read(condition, async () => { throw error; }).catch(() => undefined);
     },
     clear() { active = null; used.clear(); session.clear(); },
     dispose() { active = null; used.clear(); session.dispose(); }

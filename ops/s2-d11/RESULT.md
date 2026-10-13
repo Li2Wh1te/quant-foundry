@@ -10,7 +10,7 @@ D11默认HTTP政策解析、共同读取窗口、固定锚点续页、独立因�
 - 代码声明的`PricePolicy`与默认HTTP bars接通；价格、因子、身份、适用日历及政策同一read_scope，全部DTO构造后最终短锁复核。pre取固定截止内最后被日历证明的open日期精确因子；post要求独立原始基准。撤销post基准不关闭pre/raw。当前政策/数据/质量变更不混接旧页。
 - 必要因子按有界输入批次预取，先逐日变换再日/周/月/年完整桶分页。512根默认窗口无需逐日重扫因子文件；原行/文件/扫描、共同100,000行/4MiB和30秒session限制保留。缺日不前填，未来因子不参与，量/成交额保持原值与元/手/千元单位。
 - 原S3 `checked_mul`再`div_rounded(12,HalfEven)`抽出为唯一公共纯函数，S2通过已安装的有界native批量边界调用。S3原有身份、公开/生效时点、原始锚点、研究及执行限制保持，SDK发行打包仍归D13。
-- 详情壳接入BasisControls/FactorTable，能力随回放截止刷新；资料、raw和因子模块独立。网络同条件旧值标旧禁续页，数据改变/失效游标/撤权撤下。口径切换先清旧图；拒绝不会暗中改成raw。tooltip/表格继续保留精确值，浏览器没有价格复权公式。
+- 详情壳接入BasisControls/FactorTable，能力随回放截止刷新；资料、raw和因子模块独立。因子面板失败同步约束依赖它的复权图：网络同条件旧图标旧禁续页/回放，依赖改变立即撤下；独立raw保留。数据改变/失效游标/撤权撤下，口径切换先清旧图；拒绝不会暗中改成raw。tooltip/表格继续保留精确值，浏览器没有价格复权公式。
 
 人工契约只允许test环境服务器声明，绑定独立业务键/variant；local/production拒绝配置，HTTP不接受公式/锚点或representation。它不替换生产E69/E70绑定，也不授予生产许可。官方来源核对及逐项恢复条件见[CONTRACT_REVIEW](CONTRACT_REVIEW.md)：pre需要累计关系/日期有效性和查询锚点；post另需原始基准。未知原始归一化日期不单独阻断pre，S3历史公开时点不成为当前浏览门槛。
 
@@ -24,9 +24,9 @@ D11默认HTTP政策解析、共同读取窗口、固定锚点续页、独立因�
 | 11-06 模块独立/失败 | 缺/坏因子不挡raw；post基准不挡pre；网络旧值禁续页、撤权清除、显式口径恢复 | 真实权限/质量联调 |
 | 11-07 共用数学/S3保护 | 同一Rust算术及独立Decimal对照，S3严格时间/原始基准拒绝仍通过 | 无需放松S3条件 |
 
-最终本地回归：D08/D09/D10/D11默认HTTP、S3研究/重采样/网关、自选及配置 **166 passed、22 subtests passed**；其中新增默认调整HTTP专项23个案例。`pnpm --dir frontend test` **176 passed**，build通过；根 **29 passed、13 subtests passed**。此前Rust1.90 core测试/fmt/clippy及正确SDK wheel **95 tests passed**，原生数学代码未再更改。输入全为人工隔离事实，未访问真实数据；精确head远端CI状态另同步PR正文。
+最终本地回归：D08/D09/D10/D11默认HTTP、S3研究/重采样/网关、自选及配置 **166 passed、22 subtests passed**；其中新增默认调整HTTP专项23个案例。`pnpm --dir frontend test` **177 passed**，build通过；根 **29 passed、13 subtests passed**。此前Rust1.90 core测试/fmt/clippy及正确SDK wheel **95 tests passed**，原生数学代码未再更改。输入全为人工隔离事实，未访问真实数据；精确head远端CI状态另同步PR正文。
 
-模拟Chromium10组交互/失效检查，0浏览器错误、0旧详情价格/因子请求：[UI_RESULT](UI_RESULT.json)、[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。模拟响应和可选常量F=1三口径只用于UI；不证明默认后端或生产语义。
+模拟Chromium11组交互/失效检查，0浏览器错误、0旧详情价格/因子请求：[UI_RESULT](UI_RESULT.json)、[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。模拟响应和可选常量F=1三口径只用于UI；不证明默认后端或生产语义。
 
 可交互人工预览：
 

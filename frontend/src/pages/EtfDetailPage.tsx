@@ -724,7 +724,7 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
                   {tab === "factors" && (FactorTable && formal.identity.data ? <FactorTable
                     instrumentKey={formal.identity.data.instrument_key} seriesKey="etf-daily-local" start={range.start || null}
                     end={cutoff ?? (range.end || fixedEnd)} asOf={cutoff ?? (range.end || fixedEnd)} adjustment={marketAdjustment}
-                    page={data} onError={authError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
+                    page={data} onError={formal.factorError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
                 </div>
               </div>
             </aside>

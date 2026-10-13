@@ -8,6 +8,7 @@ require.extensions['.ts'] = (module, filename) => module._compile(ts.transpileMo
 const { joinFactorPages, createFactorWindow, defaultFactorStart } = require('../src/features/market-data/basis/window.ts');
 const { MarketApiError } = require('../src/features/market-data/data/errors.ts');
 const { createMarketClient } = require('../src/features/market-data/data/client.ts');
+const { createSeriesWindow } = require('../src/features/market-data/series/window.ts');
 const row = (date, factor = '2.123456789123') => ({ trade_date: date, factor });
 const page = (items, extra = {}) => ({ items, next_cursor: 'older', basis: { adjustment: 'none', policy: 'observations',
   as_of: '2026-02-06', anchor: null, note: 'no normalization proof' }, meta: { read_token: 'a'.repeat(64), read_at: '2026-02-06T00:00:00Z',
@@ -67,4 +68,24 @@ test('series capability request binds the current display cutoff without alterin
   await client.series(request.instrument_key, { as_of: '2026-02-06' });
   assert.match(path, /series\?as_of=2026-02-06$/);
   await assert.rejects(client.series(request.instrument_key, { as_of: 'yesterday' }), e => e.code === 'INVALID_REQUEST');
+});
+
+test('factor failure withdraws dependent adjusted windows and stops stale paging; raw stays independent', async () => {
+  global.window = { sessionStorage: { getItem: () => 'synthetic-owner' } };
+  const bars = { items: [], next_cursor: 'older' };
+  const view = createSeriesWindow({ bars: async () => bars });
+  await view.load({ ...request, period: 'day', adjustment: 'pre' });
+  await view.factorFailed(new MarketApiError(503, 'NETWORK_ERROR', 'network'));
+  assert.equal(view.session.state.data, bars);
+  assert.equal(view.session.state.stale, true);
+  assert.equal(view.session.state.canContinue, false);
+  const withdrawn = view.factorFailed(new MarketApiError(409, 'DATA_CHANGED', 'changed'));
+  assert.equal(view.session.state.data, null); // No delayed-response frame with old prices.
+  await withdrawn;
+  assert.equal(view.session.state.error.code, 'DATA_CHANGED');
+  await view.load({ ...request, period: 'day', adjustment: 'none' });
+  await view.factorFailed(new MarketApiError(409, 'DATA_RESTRICTED', 'quality'));
+  assert.equal(view.session.state.data, bars);
+  assert.equal(view.session.state.stale, false);
+  view.dispose();
 });
