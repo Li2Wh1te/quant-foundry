@@ -14,12 +14,12 @@ from .series import bars, series
 router = APIRouter()
 
 @router.get('/instruments/{instrument_key}/series', response_model=list[SeriesOption])
-def get_series(request: Request, response: Response, instrument_key: str,
+def get_series(request: Request, response: Response, instrument_key: str, as_of: date | None=None,
                service: MarketReadService = Depends(get_market_service)):
     response.headers['Cache-Control'] = 'no-store'
     try:
-        _business_query(request, set())
-        return series(service, instrument_key)
+        _business_query(request, {'as_of'})
+        return series(service, instrument_key, as_of=as_of)
     except (MarketError, DataStoreError, SQLAlchemyError) as error:
         raise http_error(error) from None
 

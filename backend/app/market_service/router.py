@@ -34,7 +34,7 @@ def get_market_service(request: Request, session: Session = Depends(get_db_sessi
             return from_thread.run(request.is_disconnected, token=token)
 
     return create_market_service(request.app.state.settings, session.get_bind(),
-        owner_scope=request.state.owner_scope, cancelled=cancelled)
+        owner_scope=request.state.owner_scope, cancelled=cancelled, current_settings=lambda: request.app.state.settings)
 
 
 @router.get('/capabilities', response_model=CapabilitiesResult)
@@ -60,3 +60,5 @@ def resolve(request: Request, response: Response, symbol: Annotated[str, Query(m
 # D10 domain endpoints compose the sole authenticated market router/factory.
 from .series_router import router as series_router
 router.include_router(series_router)
+from .adjustments_router import router as adjustments_router
+router.include_router(adjustments_router)

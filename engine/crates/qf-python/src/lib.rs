@@ -170,6 +170,37 @@ fn divide_decimal(numerator: &str, denominator: &str, scale: u32) -> PyResult<St
     .map(|v| v.to_string())
 }
 #[pyfunction]
+fn adjust_prices_json(py: Python<'_>, input: &str) -> PyResult<String> {
+    convert(py.detach(|| {
+        let values: Vec<[String; 3]> = qf_core::data::views::bounded_json(input)?;
+        if values.len() > 8_000 {
+            return Err(QfError::new(
+                qf_core::ErrorCode::ResourceLimit,
+                "adjustment",
+                "价格变换批次超过预算",
+            ));
+        }
+        let result: Vec<String> = values
+            .iter()
+            .map(|[price, factor, anchor]| {
+                qf_core::data::adjustments::adjusted_price(
+                    price.parse()?,
+                    factor.parse()?,
+                    anchor.parse()?,
+                )
+                .map(|v| v.to_string())
+            })
+            .collect::<QfResult<_>>()?;
+        serde_json::to_string(&result).map_err(|_| {
+            QfError::new(
+                qf_core::ErrorCode::InvalidContract,
+                "adjustment",
+                "价格变换结果序列化失败",
+            )
+        })
+    }))
+}
+#[pyfunction]
 fn legal_quantity(
     quantity: &Bound<'_, PyAny>,
     numerator: &str,
@@ -352,6 +383,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(parse_price, m)?)?;
     m.add_function(wrap_pyfunction!(round_decimal, m)?)?;
     m.add_function(wrap_pyfunction!(divide_decimal, m)?)?;
+    m.add_function(wrap_pyfunction!(adjust_prices_json, m)?)?;
     m.add_function(wrap_pyfunction!(legal_quantity, m)?)?;
     m.add_function(wrap_pyfunction!(roundtrip_ns, m)?)?;
     m.add_function(wrap_pyfunction!(validate_market_event_json, m)?)?;

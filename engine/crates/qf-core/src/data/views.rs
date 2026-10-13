@@ -6,9 +6,7 @@ use crate::data::{Adjustment, DataRequest, MAX_ARROW_BATCH_BYTES};
 use crate::run::Frequency;
 use crate::types::keys::ChannelKey;
 use crate::types::market::EventPhase;
-use crate::types::{
-    EventIdentity, EventKey, ExactDecimal, Nanoseconds, RoundingPolicy, SecurityKey, SessionKey,
-};
+use crate::types::{EventIdentity, EventKey, ExactDecimal, Nanoseconds, SecurityKey, SessionKey};
 use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -924,10 +922,8 @@ impl ReadView {
                 if let Some(value) = price.values.get_mut(field)
                     && let Some(text) = value.as_str()
                 {
-                    let adjusted = text
-                        .parse::<ExactDecimal>()?
-                        .checked_mul(factor)?
-                        .div_rounded(basis, 12, RoundingPolicy::HalfEven)?;
+                    let adjusted =
+                        super::adjustments::adjusted_price(text.parse()?, factor, basis)?;
                     *value = json!(adjusted.to_string());
                 }
             }

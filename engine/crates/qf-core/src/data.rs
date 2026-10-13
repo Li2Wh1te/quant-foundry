@@ -3,6 +3,7 @@ use crate::types::{Nanoseconds, SecurityKey};
 use crate::{ErrorCode, QfError, QfResult};
 use serde::{Deserialize, Serialize};
 
+pub mod adjustments;
 pub mod arrow;
 pub mod ipc;
 pub mod views;

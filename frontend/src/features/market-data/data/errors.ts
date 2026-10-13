@@ -13,6 +13,7 @@ const messages: Record<string, string> = {
   IDENTITY_MAPPING_UNAVAILABLE: "身份映射资料暂不可读取。", CAPABILITY_UNAVAILABLE: "该业务能力尚未提供。",
   PRICE_BASIS_UNVERIFIED: "所选价格口径尚未核验。", UNIT_UNVERIFIED: "所选能力缺少已声明单位。",
   FACTOR_ANCHOR_UNVERIFIED: "复权基准或锚点尚未核验。", FACTOR_UNAVAILABLE: "所选复权模式缺少因子依据。",
+  NUMERIC_RANGE_UNSUPPORTED: "复权数值超过共享精确算术范围，未输出近似价格。",
   DATA_STORE_REBUILDING: "当前市场数据正在维护，暂不可读取。",
   DATA_STORE_NOT_INITIALIZED: "当前市场数据目录尚未初始化。", DATASET_MISSING: "尚未登记该正式数据。",
   DATA_RESTRICTED: "该市场读取受到数据质量限制。", REBUILD_REQUIRED: "数据结构或口径已改变，请重新读取。",

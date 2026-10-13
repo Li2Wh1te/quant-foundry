@@ -16,14 +16,13 @@ from zoneinfo import ZoneInfo
 
 from app.data_store.errors import DataStoreError
 from app.data_store.readers import Query
-from .bindings import ETF_CATALOG, ETF_DAILY, EXCHANGE_CALENDAR
+from .bindings import ETF_CATALOG, ETF_DAILY, EXCHANGE_CALENDAR, TEST_ETF_DAILY
 from .contracts import (Adjustment, BarPage, BarWindow, Capability, Coverage, MarketBar,
                         Notice, Period, PriceBasis, SeriesOption)
 from .errors import MarketError
 from .service import IdentityQuery, MarketReadService, parse_instrument_key
+from .policies import RAW_POLICY, RAW_NOTE, price_policy
 
-RAW_POLICY = 'tushare-fund-daily-unadjusted@1'
-RAW_NOTE = '本地正式 fund_daily 成交价，不施加复权；当前修订数据，不恢复历史当时所知。'
 ONE_DAY = timedelta(days=1)
 MIN_DATE = date(1900, 1, 1)
 
@@ -106,7 +105,7 @@ def _read(scope, binding_key, query):
     return page
 
 
-def read_observations(scope, binding_key, subject, start, end) -> Iterator[dict]:
+def read_observations(scope, binding_key, subject, start, end, *, on_batch=None) -> Iterator[dict]:
     """Read complete scalar objects in descending business-date order.
 
     Twelve actual formal partitions per input batch. Existing per-read row,
@@ -129,14 +128,17 @@ def read_observations(scope, binding_key, subject, start, end) -> Iterator[dict]
             filters=(('representation', '=', binding.representation),), require_qualified=True)
         while True:
             page = _read(scope, binding_key, query)
-            for item in scope.objects(binding_key, page):
+            objects = scope.objects(binding_key, page)
+            for item in objects:
                 day = item[binding.business_key]
                 if type(day) is str:
                     day = date.fromisoformat(day)
                 item[binding.business_key] = day
                 if item.get('source_code', item.get('exchange_scope')) != subject or not lower <= day <= upper:
                     raise DataStoreError('FILE_INVALID')
-                yield item
+            if on_batch is not None:
+                on_batch(objects)
+            yield from objects
             if not page.next_cursor:
                 break
             query = Query(
@@ -144,10 +146,10 @@ def read_observations(scope, binding_key, subject, start, end) -> Iterator[dict]
                 descending=True, filters=query.filters, cursor=page.next_cursor, require_qualified=True)
 
 
-def _history_start(service, key, end):
+def _history_start(service, key, end, binding_key=ETF_DAILY):
     # This metadata-only discovery selects an existing evidenced lifespan. The
     # actual price session recaptures/validates the complete selected mapping.
-    with service.read_scope((ETF_DAILY,), conditions={'operation': 'history-bound', 'key': key, 'end': end},
+    with service.read_scope((binding_key,), conditions={'operation': 'history-bound', 'key': key, 'end': end},
             identity=IdentityQuery(instrument_keys=(key,), start=MIN_DATE, end=end)) as scope:
         starts = [row['valid_from'] for row in scope.captured['identity']]
         if not starts:
@@ -213,25 +215,33 @@ def _untrusted_position(cursor):
 def bars(service: MarketReadService, key: str, *, series_key=ETF_DAILY, period: Period='day',
          adjustment: Adjustment='none', start=None, end=None, as_of=None, limit=512, cursor=None) -> BarPage:
     parse_instrument_key(key)
-    if series_key != ETF_DAILY:
-        raise MarketError('CAPABILITY_UNAVAILABLE')
-    if adjustment != 'none':
+    policy = price_policy(service.settings, series_key)
+    if adjustment != 'none' and policy.factor_key is None:
         raise MarketError('FACTOR_ANCHOR_UNVERIFIED')
     resumed = _untrusted_position(cursor) if cursor else None
     end = end or (resumed['end'] if resumed else as_of or datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).date())
     as_of = as_of or (resumed['as_of'] if resumed else end)
     if end > as_of or start and start > end or not 1 <= limit <= 2000 or end < MIN_DATE or as_of.year > 9998:
         raise DataStoreError('INVALID_VALUE')
-    read_start = start or (resumed['read_start'] if resumed else _history_start(service, key, end))
+    read_start = start or (resumed['read_start'] if resumed else _history_start(service, key, max(end, as_of), series_key))
     if read_start > end:
         raise DataStoreError('INVALID_CURSOR' if cursor else 'INVALID_VALUE')
-    keys = (ETF_DAILY,) if period == 'day' else (ETF_DAILY, ETF_CATALOG, EXCHANGE_CALENDAR)
+    keys = [series_key]
+    if adjustment != 'none':
+        keys.append(policy.factor_key)
+    if period != 'day' or adjustment == 'pre':
+        keys.extend((ETF_CATALOG, EXCHANGE_CALENDAR))
     conditions = {'instrument_key': key, 'series_key': series_key, 'period': period, 'adjustment': adjustment,
                   'start': start, 'read_start': read_start, 'end': end, 'as_of': as_of, 'limit': limit,
-                  'policy': RAW_POLICY}
-    identity = IdentityQuery(instrument_keys=(key,), start=read_start, end=end)
-    with service.read_scope(keys, conditions=conditions, identity=identity, cursor=cursor) as scope:
+                  'policy': policy.raw_policy if adjustment == 'none' else policy.adjustment_policy,
+                  'policy_token': policy.token_for(adjustment)}
+    lifespan_start = _history_start(service, key, max(end, as_of), series_key) if adjustment == 'pre' and start else read_start
+    identity_start = max(lifespan_start, min(read_start, max(MIN_DATE, as_of - timedelta(days=31)))) if adjustment == 'pre' else read_start
+    identity = IdentityQuery(instrument_keys=(key,), start=identity_start, end=max(end, as_of) if adjustment != 'none' else end)
+    with service.read_scope(tuple(keys), conditions=conditions, identity=identity, cursor=cursor) as scope:
         segments = scope.mapping_segments(key)
+        from .adjustments import AdjustmentContext
+        adjusted = AdjustmentContext(scope, segments, policy, adjustment, as_of, identity_start) if adjustment != 'none' else None
         before = end + ONE_DAY
         if scope.position:
             before = resumed['before']
@@ -246,13 +256,31 @@ def bars(service: MarketReadService, key: str, *, series_key=ETF_DAILY, period: 
                 return
             # Stream one complete OHLC bucket. Calendar completeness is
             # checked once over the selected output span, on the same scope.
-            result, _missing = aggregate_bucket(pending, period, start=read_start, end=end, sessions=None)
+            # The extra complete bucket only proves continuation. Its factors
+            # are checked when that older bucket is actually requested.
+            daily = adjusted.transform(pending) if adjusted and len(output) < limit else pending
+            result, _missing = aggregate_bucket(daily, period, start=read_start, end=end, sessions=None)
             output.append(result)
+        def prepare_batch(rows):
+            if adjusted is None or len(output) >= limit:
+                return
+            # Fetch one bounded factor span for the required complete buckets,
+            # rather than rescan a monthly factor file for each output day.
+            wanted, buckets = [], {bucket_bounds(pending[0]['trade_date'], period)[0]} if pending else set()
+            for row in rows:
+                bucket = bucket_bounds(row['trade_date'], period)[0]
+                if bucket not in buckets:
+                    if len(buckets) >= limit - len(output):
+                        break
+                    buckets.add(bucket)
+                wanted.append(row)
+            if wanted:
+                adjusted.prefetch(wanted)
         for segment in reversed(segments):
             low, high = max(read_start, segment.valid_from), min(stop, (segment.valid_to - ONE_DAY) if segment.valid_to else stop)
             if low > high:
                 continue
-            for item in read_observations(scope, ETF_DAILY, segment.source_code, low, high):
+            for item in read_observations(scope, series_key, segment.source_code, low, high, on_batch=prepare_batch if adjusted else None):
                 if item['price_basis'] != 'provider_reported' or item['price_unit'] != 'yuan':
                     raise MarketError('PRICE_BASIS_UNVERIFIED')
                 if pending and bucket_bounds(item['trade_date'], period)[0] != bucket_bounds(pending[0]['trade_date'], period)[0]:
@@ -268,12 +296,12 @@ def bars(service: MarketReadService, key: str, *, series_key=ETF_DAILY, period: 
             emit()
         more = len(output) > limit
         output = output[:limit]
-        notices = [Notice(code='CURRENT_REVISIONS', message=RAW_NOTE),
+        notices = [Notice(code='CURRENT_REVISIONS', message=policy.raw_note if not adjusted else policy.adjustment_note),
                    Notice(code='INDICATOR_WARMUP', message='指标只使用有界已加载输出；左端不足参数窗口时不可计算。')]
         # Include empty buckets between observed outputs, and the requested
         # edges on the final page. Missing whole weeks must not vanish.
         coverage_start = max(read_start, output[-1].bucket_start) if output and more else read_start
-        sessions = _calendar(scope, segments, coverage_start, stop) if period != 'day' else None
+        sessions = _calendar(scope, segments, coverage_start, stop) if period != 'day' or adjustment == 'pre' else None
         known_missing = set()
         if sessions is not None:
             for bar in output:
@@ -309,24 +337,24 @@ def bars(service: MarketReadService, key: str, *, series_key=ETF_DAILY, period: 
         result = BarPage(items=list(reversed(output)), series_key=series_key, instrument_key=key, period=period,
             next_cursor=scope.make_cursor({'before': output[-1].bucket_start.isoformat(), 'read_start': read_start.isoformat(),
                 'end': end.isoformat(), 'as_of': as_of.isoformat()}) if more else None,
-            units=service.bindings[ETF_DAILY].declared_units, window=BarWindow(start=start, end=end, as_of=as_of),
-            basis=PriceBasis(adjustment='none', policy=RAW_POLICY, as_of=as_of, note=RAW_NOTE), meta=meta)
+            units=service.bindings[series_key].declared_units, window=BarWindow(start=start, end=end, as_of=as_of),
+            basis=adjusted.basis if adjusted else PriceBasis(adjustment='none', policy=policy.raw_policy, as_of=as_of, note=policy.raw_note), meta=meta)
         scope.response(result)
     return result
 
 
-def series(service, key):
+def _series_option(service, key, series_key, end):
     parse_instrument_key(key)
-    end = datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).date()
-    start = _history_start(service, key, end)
-    with service.read_scope((ETF_DAILY,), conditions={'operation': 'series', 'key': key, 'start': start,
-            'end': end, 'policy': RAW_POLICY}, identity=IdentityQuery(instrument_keys=(key,), start=start, end=end)) as scope:
+    policy = price_policy(service.settings, series_key)
+    start = _history_start(service, key, end, series_key)
+    with service.read_scope((series_key,), conditions={'operation': 'series', 'key': key, 'start': start,
+            'end': end, 'policy_token': policy.token_for('none')}, identity=IdentityQuery(instrument_keys=(key,), start=start, end=end)) as scope:
         segments = scope.mapping_segments(key)
         observed = False
         for segment in reversed(segments):
             low, high = max(start, segment.valid_from), min(end, segment.valid_to - ONE_DAY if segment.valid_to else end)
             if low <= high:
-                row = next(read_observations(scope, ETF_DAILY, segment.source_code, low, high), None)
+                row = next(read_observations(scope, series_key, segment.source_code, low, high), None)
                 if row is not None:
                     if row['price_basis'] != 'provider_reported' or row['price_unit'] != 'yuan':
                         raise MarketError('PRICE_BASIS_UNVERIFIED')
@@ -334,15 +362,58 @@ def series(service, key):
                     break
         capability = Capability(name='raw', availability='available' if observed else 'unavailable',
             request_checked=True, metadata_known=True, limitations=[
-                Notice(code='CURRENT_REVISIONS', message=RAW_NOTE),
+                Notice(code='CURRENT_REVISIONS', message=policy.raw_note),
                 Notice(code='REQUEST_CHECK_REQUIRED', message='具体日期质量逐请求核查；周/月/年完整性另需正式交易所资料与日历。')])
-        option = SeriesOption(series_key=ETF_DAILY, label='ETF 不复权日线 · 本地正式数据', instrument_key=key,
-            periods=['day', 'week', 'month', 'year'], adjustments=['none'], price_basis='unadjusted',
+        option = SeriesOption(series_key=series_key, label='ETF 不复权日线 · 本地正式数据' if not policy.factor_key else '人工隔离累计契约 · 非生产价格许可', instrument_key=key,
+            periods=['day', 'week', 'month', 'year'], adjustments=['none'] if observed else [], price_basis='unadjusted',
             adjustment_capabilities={'none': capability,
-                'pre': Capability(name='pre', availability='unavailable', request_checked=False,
-                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='复权接线由独立因子模块提供。')]),
-                'post': Capability(name='post', availability='unavailable', request_checked=False,
-                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='复权接线由独立因子模块提供。')])},
-            units=service.bindings[ETF_DAILY].declared_units, capability=capability)
+                'pre': Capability(name='pre', availability='restricted', request_checked=False, mapping_implemented=True,
+                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='正式E69未声明累计公式、逐日覆盖和查询锚点，前复权仍受限；因子原值可独立读取。')]),
+                'post': Capability(name='post', availability='restricted', request_checked=False, mapping_implemented=True,
+                    limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='正式E69缺少原始归一化基准与累计公式，后复权仍受限；不能以首条现存因子替代。')])},
+            units=service.bindings[series_key].declared_units, capability=capability)
         scope.response(option)
-    return [option]
+    if policy.factor_key:
+        from .adjustments import AdjustmentContext
+        for mode in ('pre', 'post'):
+            try:
+                keys = [series_key, policy.factor_key]
+                if mode == 'pre':
+                    keys.extend((ETF_CATALOG, EXCHANGE_CALENDAR))
+                with service.read_scope(tuple(keys), conditions={'operation': 'basis-probe', 'instrument_key': key,
+                        'series_key': series_key, 'as_of': end, 'adjustment': mode, 'policy_token': policy.token_for(mode)},
+                        identity=IdentityQuery(instrument_keys=(key,), start=start, end=end)) as scope:
+                    segments = scope.mapping_segments(key)
+                    context = AdjustmentContext(scope, segments, policy, mode, end, start)
+                    sample = None
+                    for segment in reversed(segments):
+                        low, high = max(start, segment.valid_from), min(end, segment.valid_to - ONE_DAY if segment.valid_to else end)
+                        if low <= high:
+                            sample = next(read_observations(scope, series_key, segment.source_code, low, high), None)
+                            if sample is not None:
+                                break
+                    if sample is None:
+                        raise MarketError('FACTOR_UNAVAILABLE')
+                    context.transform([sample])
+                    cap = Capability(name=mode, availability='available', request_checked=False, metadata_known=True,
+                        limitations=[Notice(code='TEST_CONTRACT_ONLY', message=policy.adjustment_note),
+                            Notice(code='REQUEST_CHECK_REQUIRED', message='仅检查当前契约、对应查询锚点及一个观测；历史窗口因子覆盖仍逐请求核验。')])
+                    scope.response(cap)
+                option.adjustment_capabilities[mode] = cap
+                option.adjustments.append(mode)
+            except (MarketError, DataStoreError) as error:
+                availability = ('restricted' if error.code in {'DATA_RESTRICTED', 'REBUILD_REQUIRED'} else
+                    'unknown' if error.code in {'QUERY_TIMEOUT', 'QUERY_BUDGET_EXCEEDED', 'LOCK_TIMEOUT', 'CATALOG_UNAVAILABLE', 'STORAGE_UNAVAILABLE'} else 'unavailable')
+                option.adjustment_capabilities[mode] = Capability(name=mode, availability=availability,
+                    request_checked=False, mapping_implemented=True, limitations=[Notice(code=error.code, message=str(error))])
+    return option
+
+
+def series(service, key, as_of=None):
+    end = as_of or datetime.now(timezone.utc).astimezone(ZoneInfo('Asia/Shanghai')).date()
+    if end < MIN_DATE or end.year > 9998:
+        raise DataStoreError('INVALID_VALUE')
+    result = [_series_option(service, key, ETF_DAILY, end)]
+    if TEST_ETF_DAILY in service.bindings:
+        result.append(_series_option(service, key, TEST_ETF_DAILY, end))
+    return result

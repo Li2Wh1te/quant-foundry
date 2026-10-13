@@ -34,6 +34,8 @@ import { useFormalDetail } from "../features/market-data/series/useFormalDetail"
 import { plotBars, exactBarValue } from "../features/market-data/series/plotting";
 import { matchesBarWindow, shanghaiBusinessDate } from "../features/market-data/series/window";
 import type { DetailBasisSlots } from "../features/market-data/series/basisSlot";
+import { BasisControls as DefaultBasisControls } from "../features/market-data/basis/BasisControls";
+import { FactorTable as DefaultFactorTable } from "../features/market-data/basis/FactorTable";
 import { useAuth } from "../auth/AuthContext";
 import { marketReturnTo } from "./market/marketPresentation";
 import {
@@ -84,7 +86,7 @@ function Kv({ label, children }: { label: string; children: React.ReactNode }) {
   );
 }
 
-export function EtfDetailPage({ BasisControls, FactorTable }: DetailBasisSlots = {}) {
+export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTable = DefaultFactorTable }: DetailBasisSlots = {}) {
   const entry = useMarketInstrument();
   const { tsCode = "" } = useParams(),
     navigate = useNavigate(),
@@ -722,7 +724,7 @@ export function EtfDetailPage({ BasisControls, FactorTable }: DetailBasisSlots =
                   {tab === "factors" && (FactorTable && formal.identity.data ? <FactorTable
                     instrumentKey={formal.identity.data.instrument_key} seriesKey="etf-daily-local" start={range.start || null}
                     end={cutoff ?? (range.end || fixedEnd)} asOf={cutoff ?? (range.end || fixedEnd)} adjustment={marketAdjustment}
-                    page={data} onError={authError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
+                    page={data} onError={formal.factorError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
                 </div>
               </div>
             </aside>

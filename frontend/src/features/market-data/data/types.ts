@@ -68,10 +68,11 @@ export interface FactorRow { trade_date: DateText; factor: DecimalText; }
 export interface FactorPage { items: FactorRow[]; next_cursor: string | null; basis: PriceBasis; meta: ReadMeta; }
 export interface MarketFailure { detail: { code: string; message: string; reason?: string; scope?: string }; }
 export interface RequestOptions { signal?: AbortSignal; timeoutMs?: number; }
+export interface SeriesRequestOptions extends RequestOptions { as_of?: DateText; }
 export interface CatalogRequest extends RequestOptions {
   catalog_key: string; q?: string; exchange?: string; list_status?: string; limit?: number; cursor?: string;
 }
 export interface CalendarRequest extends RequestOptions { exchange: string; start: DateText; end: DateText; }
 export interface FactorRequest extends RequestOptions {
-  instrument_key: string; series_key: string; start: DateText; end: DateText; limit?: number; cursor?: string;
+  instrument_key: string; series_key: string; start: DateText; end: DateText; as_of?: DateText; limit?: number; cursor?: string;
 }
