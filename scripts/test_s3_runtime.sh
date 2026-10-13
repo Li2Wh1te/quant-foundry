@@ -97,7 +97,7 @@ import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
 for p in ['VERSION','backend/app','backend/pyproject.toml','backend/uv.lock','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
           'sdk/python/tests/support_sdk.py','ops/s3-d12','tests/s3_runtime_suite.py','tests/s3_runservice_suite.py',
-          'tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','tests/s3_formal_fixtures.py','tests/s3_final_suite.py','ops/s3-d18','examples/strategies','examples/http_workflow.py','docs/backtesting']:
+          'tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','tests/s3_formal_fixtures.py','tests/s3_research_fixtures.py','tests/s3_final_suite.py','ops/s3-d18','examples/strategies','examples/http_workflow.py','docs/backtesting']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)
@@ -136,6 +136,7 @@ docker run --name "$qf_runner" --network none --cpus 1 --memory "$qf_runner_memo
     --env "QF_TEST_DATABASE_NAME=$qf_database" \
     --env "QF_S3_FINAL_SMOKE=${QF_S3_FINAL_SMOKE:-0}" \
     --env "QF_S3_FINAL_CASES=${QF_S3_FINAL_CASES:-}" \
+    --env "QF_S3_FINAL_FREQUENCIES=${QF_S3_FINAL_FREQUENCIES:-}" \
     --env "QF_S3_CI_RUN_URL=${QF_S3_CI_RUN_URL:-}" \
     --env "LF_D01_ALLOW_OVERLAY_TEST=${LF_D01_ALLOW_OVERLAY_TEST:-0}" \
     --env OPENBLAS_NUM_THREADS=1 --env OMP_NUM_THREADS=1 --env MKL_NUM_THREADS=1 --env NUMEXPR_NUM_THREADS=1 \

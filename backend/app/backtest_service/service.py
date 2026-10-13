@@ -96,6 +96,7 @@ class FormalProvider:
         from .data_gateway import AuthorizedRun
         from .formal_runtime import FormalDailyGateway, RunStoreGateway
         from .resampling import ResampledBarGateway, can_resample
+        from .formal_research import with_research
         calendar = plan.spec['calendar']
         owned = self.store is None
         store = self.store or CurrentStore(self.engine or get_engine(), self.settings.data_store_root,
@@ -103,14 +104,19 @@ class FormalProvider:
         try:
             kind=(ResampledBarGateway if can_resample(plan.market.frequency, work.config['frequency']) else
                   FormalDailyGateway if plan.market.frequency=='1d' and plan.market.query_time_bounds else RunStoreGateway)
+            if plan.research:
+                # D05 dispatch and the existing market reader share ONE store,
+                # dependency context, small-fact checks and final transaction.
+                kind = with_research(kind)
             gateway = kind(store, AuthenticatedPrincipal(work.owner),
                 AuthorizedRun(run_id, work.owner, tuple(work.config['universe']),
                     int(calendar[0]['before_open_ns']), int(calendar[-1]['after_close_ns'])),
-                (plan.market,), cancelled=stopped.is_set, owned_store=owned,
+                (plan.market, *plan.research), cancelled=stopped.is_set, owned_store=owned,
                 check_facts=lambda connection: plan.check_facts(work, connection=connection),
                 batch_rows=min(10000, store.limits.query_rows),cache_rows=100000,cache_bytes=64*1024*1024,
-                **({'calendar':calendar, 'target_frequency':work.config['frequency']} if kind is ResampledBarGateway else
-                   {'calendar':calendar} if kind is FormalDailyGateway else {}))
+                **({'reference_indices':plan.reference_indices} if plan.research else {}),
+                **({'calendar':calendar, 'target_frequency':work.config['frequency']} if issubclass(kind, ResampledBarGateway) else
+                   {'calendar':calendar} if issubclass(kind, FormalDailyGateway) else {}))
             context = gateway.open(dict(run_id=run_id, universe=work.config['universe']),
                 dependencies=(plan.market.name,))
             return gateway, context
@@ -147,7 +153,8 @@ class FormalProvider:
         packet = plan.packet(work, claim.run_id)
         routes = {frequency: dict(binding=plan.market.name, fields=packet['source']['request']['fields'])
                   for frequency in (work.config['frequency'], plan.market.frequency)}
-        return Binding(packet, market_routes=routes, gateway=gateway, context=context,
+        research_routes = {binding.kind: binding.name for binding in plan.research}
+        return Binding(packet, market_routes=routes, research_routes=research_routes, gateway=gateway, context=context,
             session_facts=plan.session_facts)
 
 

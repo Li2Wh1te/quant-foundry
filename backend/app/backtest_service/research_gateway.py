@@ -148,7 +148,11 @@ class ResearchDataGateway(RunDataGateway):
                 or len(set(request['securities'])) != len(request['securities'])
                 or len(set(request['fields'])) != len(request['fields'])):
             raise GatewayError('INVALID_CONTRACT', '研究请求契约无效')
-        allowed = self.reference_indices if binding.kind == 'index_stocks' else frozenset(self.grant.universe)
+        allowed = frozenset(self.grant.universe)
+        if binding.kind == 'index_stocks':
+            allowed = self.reference_indices
+        elif binding.kind == 'price':
+            allowed |= self.reference_indices
         if not set(request['securities']) <= allowed:
             raise GatewayError('DATA_RESTRICTED', '研究标的超出本运行授权/参考范围')
         if not set(request['fields']) <= set(binding.field_contract):

@@ -626,9 +626,11 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         # itself over the real E70 physical node layout. Only the explicitly
         # named execution facts are synthetic; no native/source-table fallback.
         from s3_formal_fixtures import nodes, MODEL
+        from s3_research_fixtures import research_nodes
         from app.backtest_service.formal_runtime import AcceptedRunPlan
         from app.backtest_service.service import FormalProvider
         market,self.template = nodes(self.store,securities=('A.SH',))
+        research = research_nodes(self.store, self.template['calendar'])
         self.template['data_budget_bytes']=1024**3
         checked_connections = []
         def resolve(work):
@@ -647,7 +649,8 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
                     # A real final transaction, with no remote I/O or snapshot.
                     self.assertTrue(connection.in_transaction())
                     checked_connections.append(id(connection))
-            return AcceptedRunPlan(market,packet,check_facts=check_facts)
+            return AcceptedRunPlan(market,packet,check_facts=check_facts,
+                                   research=research,reference_indices=('REF',))
         trusted = FormalProvider(settings,engine=self.engine,store=self.store,plan_resolver=resolve)
         repository, process, services = create_services(settings=settings, engine=self.engine, provider=trusted, daemon=DockerDaemon())
         trusted.process = process
@@ -663,7 +666,8 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         services.readiness.refresh()
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
         source = """import time
-from quantfoundry.api import order, LimitOrder, get_price
+from quantfoundry.api import (order, LimitOrder, get_price, get_fundamentals,
+                             get_valuation, get_industry, get_instruments, get_index_stocks)
 def before_trading_start(c):
     if not getattr(c.state, 'bought', False):
         c.state.bought = True
@@ -672,6 +676,16 @@ def handle_data(c, data):
     frame=get_price(['A.SH'],count=2,fields=['close'])
     assert list(frame.columns)==['security','time_ns','close']
     assert all(type(value).__name__=='Decimal' for value in frame['close'])
+    assert str(get_fundamentals(['A.SH'],fields=['net_profit']).iloc[0]['net_profit'])=='120'
+    assert str(get_valuation(['A.SH'],fields=['pe_ratio']).iloc[0]['pe_ratio'])=='12'
+    assert get_industry(['A.SH']).iloc[0]['industry_code']=='I1'
+    assert get_instruments(['A.SH']).iloc[0]['name']=='Fixture A'
+    assert get_index_stocks('REF')==('A.SH',)
+    reference=get_price('REF',count=1)
+    assert str(reference.iloc[0]['close'])=='3000.125'
+    assert reference.attrs['qf']['units']['close']=='index_points'
+    adjusted=get_price(['A.SH'],count=2,adjustment='post')
+    assert all(str(value)=='20' for value in adjusted['close'])
     time.sleep(c.params.get('callback_pause_seconds',.65))
 """
         self.account, self.revision = catalogue(self.engine, source)
@@ -771,12 +785,42 @@ def handle_data(c, data):
                     self.assertEqual(self.repository._row(connection,child)['limits'],
                         vars(WorkerLimits(**parallel_limits)))
             self.assertEqual(self.http('GET','/'+row['run_id']+'/results/summary').json(),first_result)
+            # The same real worker has USED the research dependency before a
+            # quality-only change. It must terminate instead of mixing cached
+            # research facts with unchanged market data and committing success.
+            changed, _ = self.submit(parameters={'callback_pause_seconds': 1})
+            changed_quality = False
+            changed_status = None
+            research_name = next(b.name for b in research if b.kind == 'fundamentals')
+            research_dataset = next(b.spec.name for b in research if b.kind == 'fundamentals')
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                supervisor.step()
+                task = supervisor.tasks.get(changed['run_id'])
+                if (not changed_quality and task is not None and task.binding is not None
+                        and research_name in task.binding.context.dependencies):
+                    with self.engine.begin() as connection:
+                        connection.execute(text('INSERT INTO data_store_issues '
+                            '(dataset,issue_key,scope_key,reason,evidence_token,target_json,resolution_json) '
+                            "VALUES (:d,'isolated-review-quality','test','QUALITY_CHANGED',:t,'{}','{}')"),
+                            {'d': research_dataset, 't': fingerprint('isolated-review-change')})
+                    changed_quality = True
+                changed_status = self.http('GET', '/' + changed['run_id']).json()
+                if changed_status['status'] in ('succeeded', 'failed', 'cancelled'):
+                    break
+                Event().wait(.05)
+            self.assertTrue(changed_quality, 'research was never captured by the actual worker')
+            self.assertEqual(changed_status['status'], 'failed', changed_status)
+            self.assertEqual(changed_status['error']['code'], 'DATA_CHANGED', changed_status)
+            self.assertEqual(self.http('GET','/'+row['run_id']+'/results/summary').json(),first_result)
             self.assertFalse(list(work_root.iterdir()))
             self.assertTrue(checked_connections,'accepted facts were not checked inside final transaction')
             self.assertEqual(legacy_execution_rows(),protected, 'new Rust run wrote old roots/snapshots/events/results')
             (self.base/'retired-execution-writes.json').write_text(json.dumps(dict(production_executed=False,
                 real_runner_container=True,formal_provider=True,formal_node_entry='E70',
                 execution_fact_model=MODEL,run_id=row['run_id'],accepted_quota_frozen=True,
+                research_functions=7,default_fact_resolver=False,
+                quality_change_run_id=changed['run_id'],quality_change_status=changed_status,
                 parallel_run_ids=child_ids,actual_parallel_workers=peak,
                 before=protected,after=legacy_execution_rows()),ensure_ascii=False,indent=2)+'\n')
         finally:

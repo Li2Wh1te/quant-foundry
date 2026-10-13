@@ -227,9 +227,20 @@ class AcceptedRunPlan:
     spec: dict
     session_facts: object = None
     check_facts: object = None
+    research: tuple = ()
+    reference_indices: tuple[str, ...] = ()
 
     def validate(self, work):
         from .resampling import can_resample
+        from .research_gateway import ResearchBinding
+        if (type(self.research) is not tuple or len(self.research) > 32
+                or any(not isinstance(b, ResearchBinding) for b in self.research)
+                or len({b.name for b in (self.market, *self.research)}) != 1 + len(self.research)
+                or len({b.kind for b in self.research}) != len(self.research)
+                or type(self.reference_indices) is not tuple or len(self.reference_indices) > 128
+                or any(type(s) is not str or not s or len(s.encode()) > 128 for s in self.reference_indices)
+                or len(set(self.reference_indices)) != len(self.reference_indices)):
+            raise RuntimeFault('INVALID_CONTRACT', '正式研究映射或参考指数集合无效')
         if (self.market.unavailable_reason or (self.market.frequency != work.config['frequency']
                 and not can_resample(self.market.frequency, work.config['frequency']))
                 or work.config['frequency'] not in ('1d','1m','5m','15m','30m','60m','tick') or not self.spec.get('calendar')
