@@ -60,3 +60,11 @@ test('typed factor client binds fixed as_of and rejects response/request cutoff 
   const changed = createMarketClient(async () => page([], { basis: { ...page([]).basis, as_of: '2026-02-07' } }));
   await assert.rejects(changed.factors(request), e => e.code === 'INVALID_RESPONSE');
 });
+
+test('series capability request binds the current display cutoff without altering identity', async () => {
+  let path;
+  const client = createMarketClient(async url => { path = url; return []; });
+  await client.series(request.instrument_key, { as_of: '2026-02-06' });
+  assert.match(path, /series\?as_of=2026-02-06$/);
+  await assert.rejects(client.series(request.instrument_key, { as_of: 'yesterday' }), e => e.code === 'INVALID_REQUEST');
+});

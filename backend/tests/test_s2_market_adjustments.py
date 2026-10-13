@@ -143,3 +143,16 @@ def test_explicit_math_oracle_adjusts_daily_before_bucket_and_preserves_quantiti
     bar, missing = aggregate_bucket(daily, 'month', start=date(2026, 1, 1), end=date(2026, 1, 31), sessions=None)
     assert (Decimal(bar.open), Decimal(bar.high), Decimal(bar.low), Decimal(bar.close)) == (Decimal('50'), Decimal('65'), Decimal('45'), Decimal('60'))
     assert (bar.volume, bar.amount) == ('30', '70') and missing is None
+
+
+def test_server_fixture_contract_cannot_be_enabled_outside_test_or_via_unpaired_anchor():
+    from app.core.config import Settings
+    base = dict(api_token='a' * 64, cursor_signing_key='b' * 64, database_password='isolated-only')
+    for environment in ('local', 'production'):
+        with pytest.raises(ValueError):
+            Settings(**base, environment=environment, market_test_adjustment_contract='cumulative-exact-date-fixture@1')
+    with pytest.raises(ValueError):
+        Settings(**base, environment='test', market_test_post_anchor_factor='1')
+    with pytest.raises(ValueError):
+        Settings(**base, environment='test', market_test_adjustment_contract='cumulative-exact-date-fixture@1',
+            market_test_post_anchor_factor='0', market_test_post_anchor_date='2025-01-01')

@@ -4,7 +4,7 @@ import { adjustment, assetType, cursorText, dateText, keyText, parseBars, parseC
   parseDetail, parseFactors, parseInstruments, parseOverview, parseResolution, parseSeries, period } from "./validation";
 import type { AssetType, BarPage, BarRequest, CalendarRequest, CalendarResult, CapabilitiesResult, CatalogRequest,
   FactorPage, FactorRequest, InstrumentDetail, InstrumentPage, InstrumentResolution, MarketOverview,
-  RequestOptions, SeriesOption } from "./types";
+  RequestOptions, SeriesOption, SeriesRequestOptions } from "./types";
 
 function requestValue<T>(parse: (v: unknown) => T, value: unknown): T {
   try { return parse(value); } catch { invalidRequest(); }
@@ -27,7 +27,7 @@ export interface MarketClient {
   overview(catalog_key: string, options?: RequestOptions): Promise<MarketOverview>;
   calendar(request: CalendarRequest): Promise<CalendarResult>;
   calendarDay(exchange: string, date: string, options?: RequestOptions): Promise<CalendarResult>;
-  series(instrument_key: string, options?: RequestOptions): Promise<SeriesOption[]>;
+  series(instrument_key: string, options?: SeriesRequestOptions): Promise<SeriesOption[]>;
   bars(request: BarRequest, options?: RequestOptions): Promise<BarPage>;
   factors(request: FactorRequest): Promise<FactorPage>;
 }
@@ -79,7 +79,7 @@ export function createMarketClient(transport: MarketTransport = marketTransport)
       if (result.items.length !== 1 || result.items[0].exchange !== exchange || result.items[0].date !== day) invalidResponse(); return result;
     },
     async series(instrument_key, options = {}) {
-      const result = await get(`/instruments/${encodeURIComponent(key(instrument_key))}/series`, parseSeries, options);
+      const result = await get(`/instruments/${encodeURIComponent(key(instrument_key))}/series${options.as_of ? `?as_of=${date(options.as_of)}` : ""}`, parseSeries, options);
       if (result.some(s => s.instrument_key !== instrument_key)) invalidResponse(); return result;
     },
     async bars(request, options = {}) {

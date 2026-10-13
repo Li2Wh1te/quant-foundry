@@ -1,43 +1,44 @@
-# S2-D11 RESULT — 部分交付，复权政策仍缺依据
+# S2-D11 RESULT
 
-依赖 D10 已按父授权复核并合并：[PR183](https://github.com/Li2Wh1te/quant-foundry/pull/183)，merge `e6ab8ea745032328301cdbf6be96e3d0349bddd2`。精确 head `07f96039b66a2ad763d07d038911589c3f246c06` 的四条 CI 全通过，原 worker 失败及根因未定记录保留于 `ops/s2-d10/CI_FAILURE.json`。D11 从该 merge 建分支 `s2/d11-formal-adjustments`，仍在同一 Standard 会话，没有新 agent/session 或 fast。
+D11默认HTTP政策解析、共同读取窗口、固定锚点续页、独立因子表及口径控件已实现。`code_ready=true`指这套工程链在**明示人工隔离契约**下通过默认应用验证；**生产E69的pre/post仍restricted，生产口径验收未完成**。`live_verified=false`，`deployed=false`。草稿[PR184](https://github.com/Li2Wh1te/quant-foundry/pull/184)不合并、不部署，父决定剩余来源契约下的阶段验收。
 
-**本包不是完整复权接入完成。** `code_ready=false`（完整 D11 默认 pre/post 正例及相关一致性接线未完成），`live_verified=false`，`deployed=false`。下列因子读取、UI 与公共算术已实现并隔离验证；草稿 PR 不合并、不部署。
+依赖D10已按父授权合并[PR183](https://github.com/Li2Wh1te/quant-foundry/pull/183)，merge `e6ab8ea745032328301cdbf6be96e3d0349bddd2`，精确head四条CI通过。原worker失败与根因未定证据保留`ops/s2-d10/CI_FAILURE.json`。D11仍为同一Standard会话，无新agent/session、无fast。
 
-父追加授权后完成[有界契约核对](CONTRACT_REVIEW.md)：只读官方说明页与源码，精确区分生产来源依据、默认路由/算法缺项及恢复条件。增加明示人工契约的共同read_scope集成证明，不把测试契约授予生产E69；pre原始归一化日期未知并非独立阻断原因，S3历史公开时点未知也不是当前修订浏览的独立门槛。
+实现：
 
-核对增补与原因子专项合跑 **13 passed**，只改测试/说明。保存为本地提交并同步PR正文，未推送重新启动当前全量CI；远端PR184仍是 `a99c00b443149171473a05941ac9f227536703b4` 的四条常规CI成功状态，增补不能算远端验收。
+- 复用D08唯一factory及真实DB/CurrentStore准入，精确representation、完整对象和可信身份有效窗口。因子默认512/最多2000，签名向前游标、升序精确Decimal、固定start/end/as_of、10,000条浏览器驻留上限。
+- 代码声明的`PricePolicy`与默认HTTP bars接通；价格、因子、身份、适用日历及政策同一read_scope，全部DTO构造后最终短锁复核。pre取固定截止内最后被日历证明的open日期精确因子；post要求独立原始基准。撤销post基准不关闭pre/raw。当前政策/数据/质量变更不混接旧页。
+- 必要因子按有界输入批次预取，先逐日变换再日/周/月/年完整桶分页。512根默认窗口无需逐日重扫因子文件；原行/文件/扫描、共同100,000行/4MiB和30秒session限制保留。缺日不前填，未来因子不参与，量/成交额保持原值与元/手/千元单位。
+- 原S3 `checked_mul`再`div_rounded(12,HalfEven)`抽出为唯一公共纯函数，S2通过已安装的有界native批量边界调用。S3原有身份、公开/生效时点、原始锚点、研究及执行限制保持，SDK发行打包仍归D13。
+- 详情壳接入BasisControls/FactorTable，能力随回放截止刷新；资料、raw和因子模块独立。网络同条件旧值标旧禁续页，数据改变/失效游标/撤权撤下。口径切换先清旧图；拒绝不会暗中改成raw。tooltip/表格继续保留精确值，浏览器没有价格复权公式。
 
-已实现：
+人工契约只允许test环境服务器声明，绑定独立业务键/variant；local/production拒绝配置，HTTP不接受公式/锚点或representation。它不替换生产E69/E70绑定，也不授予生产许可。官方来源核对及逐项恢复条件见[CONTRACT_REVIEW](CONTRACT_REVIEW.md)：pre需要累计关系/日期有效性和查询锚点；post另需原始基准。未知原始归一化日期不单独阻断pre，S3历史公开时点不成为当前浏览门槛。
 
-- 默认应用的有界 `/api/admin/market/instruments/{key}/factors`，复用 D08 唯一工厂、真实 DB、CurrentStore 请求准入、完整对象、精确 representation 与既有身份有效窗口。固定 start/end/as_of，默认512、最多2000，向更早日期的签名游标；Decimal 原文、升序、同名其他 variant 不替换、更新/质量变化使旧游标失效。不读取采集行情、供应商或执行资料。
-- 因子原值表独立于 raw：日期范围、分页、重新读取、基准/截至/来源及未知覆盖说明，10,000条内存上限。网络同条件旧值标旧禁分页；日期/口径改变和 DATA_CHANGED/失效游标撤下；401/403 使用既有全页失效机制。原图表与自选功能保留，浏览器没有复权公式。
-- BasisControls 通过 D10 插槽接入，键盘选择和说明/Escape可用，只有实际可用口径可选；pre/post 的 `mapping_implemented=false` 与缺项明示，没有暗中改选 raw。三尺寸截图复用既有深色图表布局、字体和控件。
-- 抽出原 S3 `price.checked_mul(factor)?.div_rounded(anchor,12,HalfEven)` 为 `qf_core::data::adjustments::adjusted_price`，S3 原调用者使用同一函数；增加有界 native `adjust_prices_json` 与 S2 内部薄边界。S3 公开/生效时间、身份、原始锚点、覆盖、未来因子/执行限制均未放宽。纯数学示例与先调整日线再聚合、量额保持原值有独立 Decimal 对照。
+| 验收项 | 工程/隔离验证 | 尚未取得的生产结论 |
+| --- | --- | --- |
+| 11-01 默认应用pre/post | 默认create_app→真实人工正式文件→HTTP成功；无成功provider或结果注入 | E69生产基金变换许可及真实浏览器联调 |
+| 11-02 固定锚点/分页 | pre/post日周月年真实续页、重复游标、扩大输出窗口一致，跨年完整/partial桶 | 真实源契约下的窗口 |
+| 11-03 共同依赖/改变 | 价格/因子/身份/适用日历/政策同一窗口；因子、价格及配置在读取或提交时变更拒绝 | 生产数据联调 |
+| 11-04 禁止错误来源/二次复权 | E51、其他来源/variant/HTTPrepresentation拒绝；默认E69不能补测试variant | 无新增来源许可 |
+| 11-05 回放/变换顺序 | 固定as_of、不用未来因子，先变换日线再聚合，量额不缩放 | 生产累计关系/日期有效性 |
+| 11-06 模块独立/失败 | 缺/坏因子不挡raw；post基准不挡pre；网络旧值禁续页、撤权清除、显式口径恢复 | 真实权限/质量联调 |
+| 11-07 共用数学/S3保护 | 同一Rust算术及独立Decimal对照，S3严格时间/原始基准拒绝仍通过 | 无需放松S3条件 |
 
-必要事实与准确缺项：
+最终本地回归：D08/D09/D10/D11默认HTTP、S3研究/重采样/网关、自选及配置 **166 passed、22 subtests passed**；其中新增默认调整HTTP专项23个案例。`pnpm --dir frontend test` **176 passed**，build通过；根 **29 passed、13 subtests passed**。此前Rust1.90 core测试/fmt/clippy及正确SDK wheel **95 tests passed**，原生数学代码未再更改。输入全为人工隔离事实，未访问真实数据；精确head远端CI状态另同步PR正文。
 
-- `backend/app/data_store/adapters/record_schemas.py:AdjustmentFactor` 只承诺来源因子原值，声明 `adjustment_anchor_unverified / adjusted_price_derivation_not_supported`；`record_adapters.py` 始终写入 `anchor_date=None`。S3 `ResearchBinding` 也明确保持 E69 因子公式／原始基准／公开时点未核验。现有资料不能证明 E69 的累计模型、逐日或分段有效覆盖及归一化基准。
-- 未从字段名、首条/末条因子、同名代码、股票 SDK 公式或合成数值推断基金源语义，也未新造政策审批/事实表、改 R01 正式模型或注入成功 provider。已向父询问既有获准依据；当前没有新增可靠依据。本轮禁止真实供应商/行情/生产访问，不能为补证而访问它们。
-- 因此 **11-01 默认 pre/post 正例未完成；11-02 复权固定锚点翻页、11-03 价格+因子共同复权窗口、11-05 截止内因子变换后周/月聚合未完成**。仅因子原值分页和 S3 已有严格拒绝/数学回归通过，不将其代替这些验收。
-- 11-04 已验证 E51/其他序列拒绝及同名其他 variant 不替换；11-06 因子缺失/坏值/网络/改变不关闭独立 raw；11-07 共享算术同输入 Decimal 对照及 S3 严格研究回归通过。未声明生产行情或默认正式服务贯通浏览器。
+模拟Chromium10组交互/失效检查，0浏览器错误、0旧详情价格/因子请求：[UI_RESULT](UI_RESULT.json)、[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。模拟响应和可选常量F=1三口径只用于UI；不证明默认后端或生产语义。
 
-实际检查（最终精确 head CI 以草稿 PR checks 为准）：
-
-- 关联后端 D08/D09/D10/D11/S3 网关/聚合：102 passed、11 skipped；最后能力标记变更后 D08/D10/D11 34 passed，新增专项最终 **7 passed**。全部正式输入来自人工合成，真实私有 PG/Parquet/DuckDB，不注入成功查询结果。
-- S3 研究 API／正式研究运行：39 passed，包含公开时间、原始锚点、过期/未来因子及跨有效边界保护。
-- 锁定 Rust1.90：core 全部测试、fmt、clippy通过；安装的正确 SDK wheel **95 tests passed**（含2个新增数值对照），根29测试／版本检查通过。wheel只为隔离检查构建安装，实际发布打包仍交D13，没有请求时编译/安装。
-- `pnpm --dir frontend test`：175 passed；最终 build通过。
-- 模拟 Chromium：8组交互/失效检查，0浏览器错误、0旧详情价格/因子请求。[UI_RESULT.json](UI_RESULT.json)、[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。浏览器成功响应全为明示人工模拟，不能作为真实联调证据。
-
-可交互模拟预览：
+可交互人工预览：
 
 ```sh
 node ops/s2-d11/mock-api.mjs
+# 可选三口径UI模拟：QF_D11_UI_CONTRACT=1 node ops/s2-d11/mock-api.mjs
 QF_DEV_BACKEND_URL=http://127.0.0.1:8010 pnpm --dir frontend dev --host 127.0.0.1
 # http://127.0.0.1:5173/admin/data/etf-basics/510300.SH?tab=factors
-# 登录只输入合成测试 token；不读取真实账户或行情。
+# 仅合成token/数据。
 node ops/s2-d11/ui-check.mjs
 ```
 
-保留原采集后端、`dataCollections` 共享客户端、自选、S2/S3/R01；旧浏览器复权/全历史算法已在 D10 删除，本包没有再建一套。无生产/供应商调用、真实数据读复制、部署、reset/rebuild、采集或数据写入端点。补齐获准政策事实后才能关闭上述 D11 缺项。
+D10已移除旧浏览器复权/全历史算法，本包没有再建一套。保留原采集后端、共享dataCollections、自选、S2/S3/R01；未删除未迁移共享路径。没有真实行情/用户数据读复制、供应商数据请求、生产访问、部署、采集、reset/rebuild或写入端点。仅普通CI新增已安装wheel下的D11默认HTTP验证；未改部署配置、全量workflow触发/并发或模型并发。
+
+额外全量CI独立于上述工程收口；旧head ARM smoke已通过，全量基准仍待结果。先前取消请求遭环境403后只读观察，无再取消/凭据或路由绕行。必要源代码提交会依现有同步规则触发新head检查，不把旧head通过状态转移到新提交。

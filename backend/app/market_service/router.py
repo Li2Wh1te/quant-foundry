@@ -34,7 +34,7 @@ def get_market_service(request: Request, session: Session = Depends(get_db_sessi
             return from_thread.run(request.is_disconnected, token=token)
 
     return create_market_service(request.app.state.settings, session.get_bind(),
-        owner_scope=request.state.owner_scope, cancelled=cancelled)
+        owner_scope=request.state.owner_scope, cancelled=cancelled, current_settings=lambda: request.app.state.settings)
 
 
 @router.get('/capabilities', response_model=CapabilitiesResult)

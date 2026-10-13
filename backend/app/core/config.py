@@ -1,5 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
+from datetime import date
+from decimal import Decimal
 import re
 from typing import Literal
 
@@ -48,6 +50,11 @@ class Settings(BaseSettings):
     # Both API and runner resolve this to the same host bind mount. The old
     # foundation settings are accepted only for existing .env compatibility.
     data_store_root: Path = PROJECT_ROOT / "data" / "current-store"
+    # Explicit synthetic contract; cannot license the production E69 namespace.
+    market_test_adjustment_contract: Literal['cumulative-exact-date-fixture@1'] | None = None
+    market_test_post_anchor_date: date | None = None
+    market_test_post_anchor_factor: str | None = Field(default=None,
+        pattern=r'^(0|[1-9][0-9]*)(\.[0-9]+)?$', max_length=64)
     # Trusted D12 topology only. Never accepted from a RunConfig/strategy.
     s3_result_root: Path = PROJECT_ROOT / "data" / "s3-results"
     s3_work_root: Path | None = None
@@ -87,6 +94,19 @@ class Settings(BaseSettings):
         if not isinstance(raw, str) or re.fullmatch(r"[0-9a-fA-F]{64}", raw) is None:
             raise ValueError("data source encryption key must contain 64 hexadecimal characters")
         return value
+
+    @model_validator(mode="after")
+    def validate_market_test_contract(self):
+        declared = self.market_test_adjustment_contract is not None
+        has_date = self.market_test_post_anchor_date is not None
+        has_factor = self.market_test_post_anchor_factor is not None
+        if (declared and self.environment != 'test' or has_date != has_factor
+                or (has_date or has_factor) and not declared):
+            raise ValueError('market fixture contract is restricted to the test environment with a paired baseline')
+        if has_factor and (Decimal(self.market_test_post_anchor_factor) <= 0
+                or not date(1900, 1, 1) <= self.market_test_post_anchor_date <= date(9998, 12, 31)):
+            raise ValueError('market fixture baseline must have a positive exact factor and bounded business date')
+        return self
 
     @model_validator(mode="after")
     def validate_s3_budgets(self):

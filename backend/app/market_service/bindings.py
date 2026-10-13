@@ -4,7 +4,7 @@ No request selects SQL, source, representation or layout columns. These maps
 preserve current supplier meaning; raw execution and adjusted-price claims
 require independent evidence in their respective domain modules.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
 
 from app.data_store.adapters.contracts import digest
@@ -15,6 +15,9 @@ ETF_CATALOG = 'etf-current'
 ETF_DAILY = 'etf-daily-local'
 ETF_FACTORS = 'etf-factors-local'
 EXCHANGE_CALENDAR = 'exchange-calendar-local'
+TEST_ETF_DAILY = 'isolated-etf-daily'
+TEST_ETF_FACTORS = 'isolated-etf-factors'
+TEST_VARIANT = 's2-cumulative-exact-date-fixture-v1'
 
 
 @dataclass(frozen=True)
@@ -71,3 +74,14 @@ BINDINGS = MappingProxyType({
 
 # Intentionally no E40 fallback and no E51 registration as raw. E70's existing
 # provider_reported basis does not by itself prove an unadjusted price contract.
+
+
+def installed_bindings(settings):
+    """Only test-server configuration installs the distinct fixture namespaces."""
+    if settings.environment != 'test' or settings.market_test_adjustment_contract is None:
+        return BINDINGS
+    return MappingProxyType({**BINDINGS,
+        TEST_ETF_DAILY: replace(BINDINGS[ETF_DAILY], key=TEST_ETF_DAILY, variant=TEST_VARIANT,
+            label='人工隔离契约 · 正式日线测试输入（非真实行情）'),
+        TEST_ETF_FACTORS: replace(BINDINGS[ETF_FACTORS], key=TEST_ETF_FACTORS, variant=TEST_VARIANT,
+            label='人工隔离契约 · 正式因子测试输入（不授予生产E69许可）')})

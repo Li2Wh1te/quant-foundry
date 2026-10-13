@@ -10,11 +10,15 @@ let release = null;
 try {
   const directory = new URL('./screenshots/', import.meta.url); await mkdir(directory, { recursive: true });
   const findings = [], errors = [], requests = [];
-  let mode = 'normal', hold = false;
+  let mode = 'normal', hold = false, testBasis = false, holdPrice = false;
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, timezoneId: 'America/Los_Angeles' });
   page.on('pageerror', e => errors.push(e.message));
   await page.route(url => url.pathname.startsWith('/api/'), async route => {
     const url = new URL(route.request().url()), path = url.pathname + url.search; requests.push(path);
+    if (testBasis && url.pathname.endsWith('/bars') && mode === 'basis-denied') {
+      await route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ detail: { code: 'FACTOR_UNAVAILABLE' } }) }); return;
+    }
+    if (holdPrice && url.pathname.endsWith('/bars')) await new Promise(resolve => { release = resolve; });
     if (url.pathname.endsWith('/factors')) {
       if (mode === 'network') { await route.abort('failed'); return; }
       if (['changed', 'invalid', 'permission'].includes(mode)) {
@@ -23,7 +27,7 @@ try {
       }
       if (hold) await new Promise(resolve => { release = resolve; });
     }
-    const [status, value] = responseFor(path, route.request().method());
+    const [status, value] = responseFor(path, route.request().method(), testBasis);
     await route.fulfill({ status, contentType: 'application/json', body: value === null ? '' : JSON.stringify(value) });
   });
   await page.addInitScript(() => sessionStorage.setItem('quant-foundry.api-token', 'synthetic-d11-only'));
@@ -84,6 +88,24 @@ try {
   await page.waitForFunction(() => !document.querySelector('.qfb-factors tbody') &&
     (!document.querySelector('.qfe-chart canvas') || document.querySelector('.qfe-chart-empty')));
   findings.push('403 from factor panel uses the shared invalidation bus and withdraws all affected market panels');
+  mode = 'normal'; testBasis = true;
+  await page.goto(url); await page.locator('.qfb-factors tbody tr').first().waitFor();
+  holdPrice = true;
+  await page.locator('#qfb-price-basis').selectOption('pre');
+  await page.waitForFunction(() => document.querySelector('.qfe-chart-empty') &&
+    [...document.querySelectorAll('.qfe-ohlc strong')].every(node => node.textContent.trim() === '—'));
+  holdPrice = false; release?.(); release = null;
+  await page.waitForFunction(() => !document.querySelector('.qfe-chart-empty') && document.querySelector('.qfe-chart-caption')?.textContent.includes('前复权'));
+  await page.locator('#qfb-price-basis').selectOption('post');
+  await page.waitForFunction(() => !document.querySelector('.qfe-chart-empty') && document.querySelector('.qfe-chart-caption')?.textContent.includes('后复权'));
+  findings.push('explicit UI-only constant-factor contract enables pre/post; basis switch withdraws old OHLC before a held reply');
+  mode = 'basis-denied';
+  await page.getByRole('button', { name: '刷新数据', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('.qfe-chart-empty')?.textContent.includes('因子'));
+  assert.equal(await page.locator('#qfb-price-basis').inputValue(), 'post');
+  mode = 'normal'; await page.locator('#qfb-price-basis').selectOption('none');
+  await page.waitForFunction(() => !document.querySelector('.qfe-chart-empty'));
+  findings.push('adjusted denial does not silently select raw; explicit raw choice restores its independent simulated view');
   assert.equal(requests.filter(p => /data-collections.*(daily-bars|adjustment-factors)/.test(p)).length, 0);
   assert.equal(errors.length, 0, JSON.stringify(errors));
   await writeFile(new URL('./UI_RESULT.json', import.meta.url), JSON.stringify({ mode: 'artificial fixture / simulated API only',

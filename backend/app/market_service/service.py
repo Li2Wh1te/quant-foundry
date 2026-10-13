@@ -36,7 +36,7 @@ from app.data_store.storage import CurrentStore
 from app.data_store.values import control_json
 from app.instruments.domain import InstrumentCodeMapping, order_mapping_segments
 
-from .bindings import BINDINGS, ETF_CATALOG, ETF_DAILY, ETF_FACTORS, EXCHANGE_CALENDAR, MarketBinding
+from .bindings import ETF_CATALOG, ETF_DAILY, ETF_FACTORS, EXCHANGE_CALENDAR, MarketBinding, installed_bindings, TEST_ETF_DAILY, TEST_ETF_FACTORS
 from .contracts import Capability, CapabilitiesResult, CatalogOption, InstrumentResolution, Notice, ReadMeta
 from .errors import MarketError
 
@@ -226,11 +226,13 @@ class MarketReadScope:
 
 
 class MarketReadService:
-    def __init__(self, settings: Settings, engine, *, owner_scope: str, cancelled: Callable[[], bool] | None = None):
+    def __init__(self, settings: Settings, engine, *, owner_scope: str, cancelled: Callable[[], bool] | None = None, current_settings=None):
         self.settings, self.engine, self.owner_scope = settings, engine, owner_scope
         self.signing_key = settings.cursor_signing_key.get_secret_value().encode()
         self.cancelled = cancelled or (lambda: False)
-        self.bindings = BINDINGS
+        self.bindings = installed_bindings(settings)
+        # Trusted application configuration observer, never a provider/result.
+        self.current_settings = current_settings or (lambda: self.settings)
 
     def _identities(self, session: Session, query: IdentityQuery, read_at: datetime) -> list[dict]:
         """Fold corrections BEFORE applying symbol/effective predicates.
@@ -276,7 +278,7 @@ class MarketReadService:
             raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
         return rows
 
-    def _capture(self, store, keys, identity, read_at, *, deadline: float, final=False) -> dict:
+    def _capture(self, store, keys, identity, read_at, *, deadline: float, final=False, policy_adjustment='none') -> dict:
         with store.locks.read_many([self.bindings[k].entry.spec.name for k in keys],
                 timeout_ms=store.limits.lock_timeout_ms, cancelled=self.cancelled):
             isolation = 'READ COMMITTED' if final else 'REPEATABLE READ'
@@ -328,7 +330,14 @@ class MarketReadService:
                     checkpoint()
                     mappings = self._identities(session, identity, read_at) if identity else None
                     checkpoint()
-                    return {'datasets': states, 'identity': mappings}
+                    captured = {'datasets': states, 'identity': mappings}
+                    if any(key in (TEST_ETF_DAILY, TEST_ETF_FACTORS) for key in keys):
+                        from .policies import price_policy
+                        try:
+                            captured['display_policy'] = price_policy(self.current_settings(), TEST_ETF_DAILY).token_for(policy_adjustment)
+                        except MarketError:
+                            captured['display_policy'] = 'unavailable'
+                    return captured
 
     @contextmanager
     def read_scope(self, keys: tuple[str, ...], *, conditions: dict, identity: IdentityQuery | None = None,
@@ -350,7 +359,10 @@ class MarketReadService:
             raise DataStoreError('INVALID_VALUE')
         with CurrentStore(self.engine, self.settings.data_store_root,
                           cursor_key=self.signing_key, initialize=False) as store:
-            captured = self._capture(store, keys, identity, read_at, deadline=deadline)
+            policy_adjustment = conditions.get('adjustment', 'none')
+            captured = self._capture(store, keys, identity, read_at, deadline=deadline, policy_adjustment=policy_adjustment)
+            if 'display_policy' in captured and conditions.get('policy_token') is not None and conditions['policy_token'] != captured['display_policy']:
+                raise DataStoreError('DATA_CHANGED')
             scope = MarketReadScope(self, store, keys, conditions, identity, captured, read_at, deadline)
             try:
                 previous = _cursor(self.signing_key, cursor, scope.condition) if cursor else None
@@ -362,7 +374,7 @@ class MarketReadService:
                 yield scope
                 scope.check()
                 try:
-                    latest = self._capture(store, keys, identity, read_at, deadline=deadline, final=True)
+                    latest = self._capture(store, keys, identity, read_at, deadline=deadline, final=True, policy_adjustment=policy_adjustment)
                 except (DataStoreError, MarketError) as error:
                     if error.code in {'DATA_STORE_REBUILDING', 'DATASET_MISSING', 'REBUILD_REQUIRED',
                                       'IDENTITY_MAPPING_UNAVAILABLE'}:
@@ -421,8 +433,8 @@ class MarketReadService:
                 Notice(code='DERIVED_CALENDAR_REQUIRED', message='周/月/年完整性须另核验正式交易所资料、日历和具体日期；不保证任意窗口可读。'),
                 *daily.limitations])
         for name in ('pre', 'post'):
-            results[name] = Capability(name=name, availability='unavailable', request_checked=False,
-                mapping_implemented=False,
+            results[name] = Capability(name=name, availability='restricted', request_checked=False,
+                mapping_implemented=True,
                 metadata_known=results[ETF_FACTORS].metadata_known,
                 limitations=[Notice(code='FACTOR_ANCHOR_UNVERIFIED', message='已保留因子事实；复权基准、覆盖及锚点策略须独立核验。')])
         return CapabilitiesResult(catalogs=[CatalogOption(catalog_key=ETF_CATALOG,
@@ -461,6 +473,6 @@ class MarketReadService:
         return result
 
 
-def create_market_service(settings: Settings, engine, *, owner_scope: str, cancelled=None) -> MarketReadService:
+def create_market_service(settings: Settings, engine, *, owner_scope: str, cancelled=None, current_settings=None) -> MarketReadService:
     """The single application/domain factory; no success resolver injection."""
-    return MarketReadService(settings, engine, owner_scope=owner_scope, cancelled=cancelled)
+    return MarketReadService(settings, engine, owner_scope=owner_scope, cancelled=cancelled, current_settings=current_settings)
