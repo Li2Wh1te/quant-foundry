@@ -55,11 +55,11 @@ def present_item(row) -> WatchlistItem:
         value is not None and value.is_finite() for value in (change, pct)
     )
     if row["trade_date"] is None:
-        message = "尚未采集该 ETF 的日线行情，请检查采集任务。"
+        message = "自选原生日收盘暂无观测；当前正式图表独立读取。"
     elif not valid_close:
         message = f"{row['trade_date']} 的收盘价缺失或无效，请检查数据源。"
     elif not valid_change:
-        message = f"显示 {row['trade_date']} 的收盘价；数据源涨跌字段缺失，待日线重新采集。"
+        message = f"显示 {row['trade_date']} 的收盘价；原生涨跌字段缺失，当前正式图表独立读取。"
     else:
         message = f"显示 {row['trade_date']} 的收盘价与数据源涨跌数据，非实时行情。"
     return WatchlistItem(

@@ -6,7 +6,7 @@ import sqlite3
 
 import pytest
 
-from tests.test_data_store_kernel import database, limits, store, KEY
+from tests.test_data_store_kernel import database, limits, store, KEY, probe
 from tests.test_data_store_local_pipeline import ready, Inputs, company
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.budget import Budget
@@ -41,7 +41,7 @@ def test_issue_overflow_uses_control_budget_and_can_drain_without_losing_issues(
     source=Inputs(*(company(subject='C'+str(i),failure='SOURCE_REFRESH_FAILED') for i in range(20)))
     root=tmp_path/'current';root.mkdir()
     with database[0].begin() as c:entry_status.create(c)
-    with CurrentStore(database[0],root,cursor_key=KEY,initialize=True,
+    with probe(), CurrentStore(database[0],root,cursor_key=KEY,initialize=True,
                       limits=replace(StoreLimits(),issue_count=1)) as constrained:
         with pytest.raises(DataStoreError) as error:
             run_entry(constrained,entry,source)
@@ -65,7 +65,7 @@ def test_issue_overflow_uses_control_budget_and_can_drain_without_losing_issues(
         assert changed['current']['issue_count']==100
     # The same sealed scan is drained with a reviewed finite issue capacity.
     # Existing input errors stay visible; accepting capacity is not accepting data.
-    with CurrentStore(database[0],root,cursor_key=KEY) as reopened:
+    with probe(), CurrentStore(database[0],root,cursor_key=KEY) as reopened:
         assert reopened.limits.issue_count==100
         def no_scan(entry):raise AssertionError('A sealed continuation must not rescan')
         source.iter_entry=no_scan
@@ -216,7 +216,7 @@ def test_issue_limited_entry_does_not_starve_unrelated_entry(database,tmp_path):
     policy=replace(StoreLimits(),scratch_bytes=64*MiB,duckdb_memory_bytes=16*MiB,
                    pipeline_spill_bytes=32*MiB,query_bytes=8*MiB,batch_bytes=16*MiB,
                    commit_bytes=MiB,operation_slots=3,issue_count=1)
-    with CurrentStore(database[0],root,cursor_key=KEY,initialize=True,limits=policy) as current:
+    with probe(), CurrentStore(database[0],root,cursor_key=KEY,initialize=True,limits=policy) as current:
         source=Inputs(*(company(subject='C'+str(i),failure='SOURCE_REFRESH_FAILED') for i in range(20)))
         with pytest.raises(DataStoreError) as error:
             run_entry(current,BY_ID['E41'],source)

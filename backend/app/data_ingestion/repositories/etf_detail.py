@@ -1,14 +1,10 @@
-"""Read models for one operator-selected ETF and its time-series data."""
-
-from datetime import date
+"""Shared native code lookup required by existing watchlist mutations."""
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.data_ingestion.constants import TUSHARE_SOURCE
 from app.data_ingestion.models.etf import EtfCode
-from app.data_ingestion.models.etf_adjustment import EtfAdjustmentFactor
-from app.data_ingestion.models.etf_daily import EtfDailyBar
 
 
 class EtfDetailQueryRepository:
@@ -31,47 +27,3 @@ class EtfDetailQueryRepository:
                 EtfCode.ts_code == ts_code,
             )
         )
-
-    def list_daily_bars(
-        self,
-        *,
-        ts_code: str,
-        start_date: date | None,
-        end_date: date | None,
-        limit: int | None,
-    ) -> list[EtfDailyBar]:
-        """Return oldest-first raw bars so callers can draw an ordered chart."""
-        filters: list[object] = [
-            EtfDailyBar.source == self.source,
-            EtfDailyBar.ts_code == ts_code,
-        ]
-        if start_date is not None:
-            filters.append(EtfDailyBar.trade_date >= start_date)
-        if end_date is not None:
-            filters.append(EtfDailyBar.trade_date <= end_date)
-        statement = select(EtfDailyBar).where(*filters).order_by(EtfDailyBar.trade_date.asc())
-        if limit is not None:
-            statement = statement.limit(limit)
-        return self.session.scalars(statement).all()
-
-    def list_adjustment_factors(
-        self,
-        *,
-        ts_code: str,
-        start_date: date | None,
-        end_date: date | None,
-        limit: int | None,
-    ) -> list[EtfAdjustmentFactor]:
-        """Return oldest-first factors aligned with daily-bar chart dates."""
-        filters: list[object] = [
-            EtfAdjustmentFactor.source == self.source,
-            EtfAdjustmentFactor.ts_code == ts_code,
-        ]
-        if start_date is not None:
-            filters.append(EtfAdjustmentFactor.trade_date >= start_date)
-        if end_date is not None:
-            filters.append(EtfAdjustmentFactor.trade_date <= end_date)
-        statement = select(EtfAdjustmentFactor).where(*filters).order_by(EtfAdjustmentFactor.trade_date.asc())
-        if limit is not None:
-            statement = statement.limit(limit)
-        return self.session.scalars(statement).all()

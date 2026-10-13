@@ -1,4 +1,4 @@
-"""Run market workspace queries against real rows, using PostgreSQL in CI.
+"""Protect shared native watchlist catalogue queries with synthetic rows.
 
 Local column mirrors follow the existing overview tests because checkpoint
 constraints use PostgreSQL JSON operators. PostgreSQL uses the migrated schema;
@@ -7,26 +7,18 @@ fixtures are isolated by source/exchange and rolled back after every test.
 
 import os
 import unittest
-from datetime import UTC, date, datetime, timedelta
+from datetime import UTC, date, datetime
 from unittest.mock import patch
 from uuid import uuid4
 
-from fastapi import HTTPException
 from sqlalchemy import Column, JSON, MetaData, Table, create_engine
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
 from app.data_ingestion.models.etf import EtfCode, EtfEntity
-from app.data_ingestion.models.sync_checkpoint import DataSyncCheckpoint
-from app.data_ingestion.models.trading_calendar import TradingCalendarDay
 from app.data_ingestion.repositories.etf_query import EtfQueryRepository
-from app.data_ingestion.router import (
-    get_etf_overview,
-    get_trading_calendar_day,
-    list_etfs,
-    list_trading_calendar_days,
-)
+from app.data_ingestion.router import list_etfs
 from app.instruments.models import Instrument
 
 
@@ -39,7 +31,7 @@ class MarketWorkspaceTest(unittest.TestCase):
         self.engine = create_engine(get_settings().database_url if postgres else "sqlite://")
         if not postgres:
             metadata = MetaData()
-            for model in (Instrument, EtfEntity, EtfCode, TradingCalendarDay, DataSyncCheckpoint):
+            for model in (Instrument, EtfEntity, EtfCode):
                 Table(model.__tablename__, metadata, *[
                     Column(column.name, JSON() if isinstance(column.type, JSONB) else column.type,
                            primary_key=column.primary_key)
@@ -50,7 +42,6 @@ class MarketWorkspaceTest(unittest.TestCase):
         self.transaction = self.connection.begin()
         self.session = Session(self.connection)
         self.source = "market-test." + uuid4().hex[:16]
-        self.exchange = "T" + uuid4().hex[:10]
         self.repository = EtfQueryRepository(self.session, source=self.source)
 
     def tearDown(self):
@@ -82,16 +73,6 @@ class MarketWorkspaceTest(unittest.TestCase):
         # fixture totals from any other source in the disposable PostgreSQL DB.
         with patch("app.data_ingestion.router.EtfQueryRepository", return_value=self.repository):
             return list_etfs(session=self.session, **options)
-
-    def calendar(self, day, *, open=False, exchange=None, previous=None):
-        result = TradingCalendarDay(exchange=exchange or self.exchange, calendar_date=day,
-            is_open=open, previous_trading_date=previous, created_at=NOW, updated_at=NOW)
-        self.session.add(result)
-        self.session.flush()
-        return result
-
-    def detail(self, day):
-        return get_trading_calendar_day(self.exchange, day, self.session)
 
     def test_picker_returns_persisted_identity_and_filters_without_cross_source_leaks(self):
         first = self.etf("510001.SH", csname="沪深300ETF")
@@ -133,62 +114,6 @@ class MarketWorkspaceTest(unittest.TestCase):
         for keyword in ("%", "_", "/", "%_B/"):
             with self.subTest(keyword=keyword):
                 self.assertEqual([item.ts_code for item in self.query(keyword=keyword).items], ["510001.SH"])
-
-    def test_overview_returns_normalized_source_scoped_exchanges(self):
-        for index, exchange in enumerate(("SH", "SSE", "SZ", "SZSE")):
-            self.etf(f"{index:06}.SH", exchange=exchange, list_status="L" if index < 2 else "P")
-        self.etf("999999.SH", source=self.source + "x", exchange="OTHER")
-        with patch("app.data_ingestion.router.EtfQueryRepository", return_value=self.repository):
-            result = get_etf_overview(self.session)
-        self.assertEqual(result.exchanges, ["SSE", "SZSE"])
-        self.assertEqual((result.total_records, result.listed_count, result.exchange_count), (4, 2, 2))
-        empty = EtfQueryRepository(self.session, source="empty-" + uuid4().hex[:16]).overview()
-        self.assertEqual((empty.total_records, empty.exchanges, empty.exchange_count), (0, [], 0))
-        self.assertIsNone(empty.first_list_date)
-
-    def test_calendar_details_cross_holidays_months_and_years(self):
-        for start, distance in ((date(2026, 9, 30), 9), (date(2026, 12, 31), 4)):
-            with self.subTest(start=start):
-                self.calendar(start, open=True, previous=start - timedelta(days=1))
-                for offset in range(1, distance):
-                    self.calendar(start + timedelta(days=offset), previous=start)
-                next_day = start + timedelta(days=distance)
-                self.calendar(next_day, open=True, previous=start)
-                first = self.detail(start)
-                self.assertEqual(first.previous_trading_date, start - timedelta(days=1))
-                self.assertEqual(first.next_trading_date, next_day)
-                closed = self.detail(start + timedelta(days=1))
-                self.assertFalse(closed.is_open)
-                self.assertEqual(closed.next_trading_date, next_day)
-                self.assertIn("updated_at", closed.model_dump())
-
-    def test_calendar_missing_coverage_does_not_guess_next_trading_day(self):
-        start = date(2026, 10, 8)
-        self.calendar(start, open=True)
-        self.calendar(start + timedelta(days=2), open=True)
-        # Another exchange's row cannot fill the selected exchange's gap.
-        self.calendar(start + timedelta(days=1), exchange="X" + self.exchange)
-        self.assertIsNone(self.detail(start).next_trading_date)
-        self.calendar(start + timedelta(days=1))
-        # This fixture marks Saturday open: persisted facts must beat weekdays.
-        self.assertEqual(self.detail(start).next_trading_date, date(2026, 10, 10))
-        self.assertIsNone(self.detail(date(2026, 10, 10)).next_trading_date)
-        with self.assertRaises(HTTPException) as raised:
-            self.detail(date(2026, 10, 11))
-        self.assertEqual(raised.exception.status_code, 404)
-        self.assertIn("尚未采集", raised.exception.detail)
-
-    def test_calendar_list_keeps_missing_dates_absent_and_validates_ranges(self):
-        self.calendar(date(2026, 9, 1), open=True)
-        self.calendar(date(2026, 9, 3))
-        filters = dict(session=self.session, exchange=self.exchange, is_open=None,
-                       start_date=date(2026, 9, 1), end_date=date(2026, 9, 30), limit=42, offset=0)
-        result = list_trading_calendar_days(**filters)
-        self.assertEqual(result.total, 2)
-        self.assertEqual([item.calendar_date.day for item in result.items], [3, 1])
-        with self.assertRaises(HTTPException) as raised:
-            list_trading_calendar_days(**{**filters, "start_date": date(2026, 10, 1)})
-        self.assertEqual(raised.exception.status_code, 422)
 
 
 if __name__ == "__main__":

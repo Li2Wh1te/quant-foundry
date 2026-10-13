@@ -1,0 +1,33 @@
+{
+  "mode": "default app / real isolated formal storage / artificial inputs only",
+  "live_verified": false,
+  "deployed": false,
+  "findings": [
+    "formal summary count matches directory despite additional unselected physical representation",
+    "default summary → market → formal calendar → legacy symbol profile → raw K-line works with old market HTTP and SQL reads blocked",
+    "raw real response contains 10 bars; production pre/post remain disabled; no successful HTTP response fabricated",
+    "shared native watchlist mutation/read still works; injected permission failure withdraws both saved quotes and formal graph"
+  ],
+  "requests": [
+    "/api/auth/verify",
+    "/api/system/version",
+    "/api/admin/market/overview",
+    "/api/admin/overview",
+    "/api/admin/market/instruments",
+    "/api/admin/market/overview",
+    "/api/admin/market/calendar",
+    "/api/admin/market/calendar/SSE/2026-10-13",
+    "/api/admin/market/instruments/resolve",
+    "/api/admin/market/instruments/etf-current%3A510300.SH",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789",
+    "/api/admin/etf-watchlist",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789/series",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789/bars",
+    "/api/admin/etf-watchlist",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789/series",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789/bars",
+    "/api/admin/market/instruments/instrument%3Aaee9dfa8-80ec-4578-aaca-41dede866789"
+  ],
+  "errors": []
+}

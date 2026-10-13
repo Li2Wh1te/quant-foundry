@@ -16,9 +16,14 @@ const { createElement } = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { MemoryRouter } = require('react-router-dom');
 const { OverviewContent } = require('../src/components/OverviewContent.tsx');
-const { loadOverviewSnapshot, OverviewApiError } = require('../src/api/overview.ts');
+const { getOperationsOverview, OverviewApiError } = require('../src/api/overview.ts');
 const { overviewTime, overviewDuration, RUN_LABELS } = require('../src/components/overviewPresentation.ts');
-const empty = { operations: null, etfs: null, calendar: null };
+const emptyRead = { data: null, error: null, pending: false, stale: false, canContinue: false };
+const empty = { operations: null, market: emptyRead };
+const summary = { catalog_key: 'etf-current', total_instruments: 17, listed_count: null, exchanges: ['SSE'],
+  first_list_date: '2020-01-01', latest_list_date: '2026-01-02', meta: { business_as_of: null,
+    read_at: '2026-10-13T08:00:00Z', source_labels: ['人工隔离契约'], coverage: { verified: false, state: 'unknown', missing_dates: null, note: '未核验' } } };
+const marketRead = (extra = {}) => ({ ...emptyRead, data: summary, canContinue: true, ...extra });
 const run = {
   id: 'run-1', task_id: 'task-1', task_name: '日历同步', task_type: 'internal_task_key',
   task_type_name: '交易日历同步', task_type_english_name: 'Trading Calendar Sync', source_key: 'tushare',
@@ -68,10 +73,31 @@ test('all statuses remain distinguishable and successful empty state is explicit
   assert.match(render({ ...empty, operations: { ...operations, recent_runs: [] } }), /暂无运行记录/);
 });
 
-test('asset count uses open records and failures visibly preserve stale numbers', () => {
-  const html = render({ operations, etfs: { total_records: 1775 }, calendar: { total_records: 25871, open_day_count: 16002 } }, { errors: ['ETF 资产'] });
-  assert.match(html, /1,775/); assert.match(html, /16,002/); assert.doesNotMatch(html, /25,871/);
-  assert.match(html, /加载失败，已保留已有数据/); assert.match(html, /刷新失败/);
+test('formal directory objects and listing dates never become physical rows, a global market total or price coverage', () => {
+  const html = render({ operations, market: marketRead() });
+  assert.match(html, />17<\/b>/); assert.match(html, /个目录对象/);
+  assert.match(html, /非物理行数或全市场证券数/);
+  assert.match(html, /2020-01-01 → 2026-01-02/);
+  assert.match(html, /业务截至：未知/); assert.match(html, /覆盖未核验/);
+  assert.match(html, /全局开市数量未声明/);
+  assert.doesNotMatch(html, /条开市记录|最近更新|条记录/);
+});
+
+test('network stale is local and explicit; restricted formal results do not preserve asset numbers', () => {
+  const stale = render({ operations, market: marketRead({ stale: true,
+    error: { message: '网络失败', code: 'NETWORK_ERROR' }, canContinue: false }) });
+  assert.match(stale, /同条件旧摘要/); assert.match(stale, />17<\/b>/);
+  const denied = render({ operations, market: { ...emptyRead, error: { message: '质量限制', code: 'DATA_RESTRICTED' } } });
+  assert.doesNotMatch(denied, />17<\/b>/); assert.match(denied, /质量限制/);
+  assert.match(denied, /120 次成功/); // Independent operations remain visible.
+});
+
+test('unconfigured source and failed operations do not close an independently readable formal directory', () => {
+  const html = render({ operations: { ...operations, sources: [{ ...operations.sources[0], configured: false }] },
+    market: marketRead() }, { errors: ['运营指标、数据源与运行记录'] });
+  assert.match(html, /未配置/); assert.match(html, />17<\/b>/);
+  assert.match(html, /来源配置与采集结果不决定已有合格本地数据的读取许可/);
+  assert.match(html, /上次快照/); assert.match(html, /本次目录摘要已读取/);
 });
 
 test('time formatting uses Shanghai across midnight and supports long durations', () => {
@@ -81,23 +107,13 @@ test('time formatting uses Shanghai across midnight and supports long durations'
   assert.equal(overviewDuration(3661), '1 时 1 分');
 });
 
-test('partial failures retain only failed regions and all reads bypass caches', async () => {
-  const originalFetch = global.fetch;
-  const requests = [];
-  global.fetch = async (path, options) => {
-    requests.push({ path, options });
-    if (path.includes('/etfs/')) return { ok: false, status: 503 };
-    return { ok: true, json: async () => path === '/api/admin/overview' ? operations : { open_day_count: 99 } };
-  };
+test('operations request is read-only and separate from formal assets, with no legacy asset calls', async () => {
+  const originalFetch = global.fetch, requests = [];
+  global.fetch = async (path, options) => { requests.push({ path, options }); return { ok: true, json: async () => operations }; };
   try {
-    const previous = { ...empty, etfs: { total_records: 1775 } };
-    const result = await loadOverviewSnapshot(previous, new AbortController().signal);
-    assert.strictEqual(result.snapshot.etfs, previous.etfs);
-    assert.strictEqual(result.snapshot.operations, operations);
-    assert.equal(result.snapshot.calendar.open_day_count, 99);
-    assert.deepEqual(result.errors, ['ETF 资产']);
-    assert.equal(requests.length, 3);
-    for (const { options } of requests) { assert.equal(options.cache, 'no-store'); assert.ok(options.signal); }
+    assert.strictEqual(await getOperationsOverview(new AbortController().signal), operations);
+    assert.equal(requests.length, 1); assert.equal(requests[0].path, '/api/admin/overview');
+    assert.equal(requests[0].options.cache, 'no-store'); assert.ok(requests[0].options.signal);
   } finally { global.fetch = originalFetch; }
 });
 
@@ -105,7 +121,7 @@ test('a 401 invalidates the aggregate instead of preserving an apparently valid 
   const originalFetch = global.fetch;
   global.fetch = async () => ({ ok: false, status: 401 });
   try {
-    await assert.rejects(loadOverviewSnapshot({ ...empty, operations }, new AbortController().signal), error => error instanceof OverviewApiError && error.status === 401);
+    await assert.rejects(getOperationsOverview(new AbortController().signal), error => error instanceof OverviewApiError && error.status === 401);
   } finally { global.fetch = originalFetch; }
 });
 
@@ -114,8 +130,22 @@ test('superseded requests cannot return a snapshot even if a fetch ignores cance
   const controller = new AbortController();
   global.fetch = async () => ({ ok: true, json: async () => ({}) });
   try {
-    const pending = loadOverviewSnapshot(empty, controller.signal);
+    const pending = getOperationsOverview(controller.signal);
     controller.abort();
     await assert.rejects(pending, { name: 'AbortError' });
   } finally { global.fetch = originalFetch; }
+});
+
+
+test('shared watchlist permission failures invalidate formal panels before any slow error body', async () => {
+  const { listWatchlist } = require('../src/api/etfWatchlist.ts');
+  const { onDataAssetsInvalidation } = require('../src/features/data-assets/data/lifecycle.ts');
+  const originalFetch = global.fetch;
+  let reason, bodyRead = false;
+  const stop = onDataAssetsInvalidation(value => { reason = value; });
+  global.fetch = async () => ({ ok: false, status: 403, json: () => { bodyRead = true; return new Promise(() => {}); } });
+  try {
+    await assert.rejects(listWatchlist(), error => error.status === 403);
+    assert.equal(reason, 'permission'); assert.equal(bodyRead, false);
+  } finally { stop(); global.fetch = originalFetch; }
 });

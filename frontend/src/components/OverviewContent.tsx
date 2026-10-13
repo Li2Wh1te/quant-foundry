@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import type { OverviewSnapshot } from "../api/overview";
 import { overviewDuration, overviewTime, RUN_LABELS, runTone, taskTypeLabel } from "./overviewPresentation";
 
-const count = (value: number | undefined) => value === undefined ? "—" : value.toLocaleString("zh-CN");
+const count = (value: number | null | undefined) => value == null ? "—" : value.toLocaleString("zh-CN");
 
 function Timestamp({ value }: { value: string | null | undefined }) {
   return <time dateTime={value ?? undefined} title={value ? `${overviewTime(value, true)}（上海时间）` : "暂无记录"}>{overviewTime(value)}</time>;
@@ -16,14 +16,16 @@ export function OverviewContent({ snapshot, loading, errors, refreshed, onRefres
 }) {
   const operations = snapshot.operations;
   const metrics = operations?.metrics;
+  const market = snapshot.market, asset = market.data;
+  const failures = [...errors, ...(market.error ? ["正式目录摘要"] : [])];
   const pending = loading ? "正在加载…" : "数据暂不可用，请刷新重试";
   return <div className="qfo-content" aria-busy={loading}>
     <div className="qfo-page-head">
       <div><div className="qfo-eyebrow">Operations Overview</div><h1>数据运营总览</h1><p className="qfo-page-desc">查看数据采集、运行任务和数据资产的当前状态。</p></div>
       <div className="qfo-page-actions"><button className="qfo-secondary-btn" type="button" disabled={loading} onClick={onRefresh}><RefreshCw aria-hidden="true" /><span>{loading ? "刷新中" : "刷新状态"}</span></button><Link className="qfo-primary-btn" to="/admin/tasks"><span>采集任务</span><ArrowRight aria-hidden="true" /></Link></div>
     </div>
-    {errors.length > 0 && <div className="qfo-review-error" role="alert">{errors.join("、")}加载失败，已保留已有数据；尚未加载的数据以“—”显示。请刷新重试。</div>}
-    <div className="qfo-sr-only" role="status">{loading ? "正在刷新总览" : errors.length ? "部分数据未能刷新" : refreshed ? "总览状态已刷新" : ""}</div>
+    {failures.length > 0 && <div className="qfo-review-error" role="alert">{failures.join("、")}读取失败。各区块单独说明旧值或限制；未知数量以“—”显示。</div>}
+    <div className="qfo-sr-only" role="status">{loading ? "正在刷新总览" : failures.length ? "部分数据未能刷新" : refreshed ? "总览状态已刷新" : ""}</div>
     <section className="qfo-metric-band" aria-label="运营指标">
       <div className="qfo-metric"><div className="qfo-metric-label"><Database aria-hidden="true" />已配置数据源</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.configured_sources)}</div><div className="qfo-metric-unit">/ {count(metrics?.total_sources)}</div><div className="qfo-metric-note">{metrics ? "配置状态汇总" : "等待数据"}</div></div></div>
       <div className="qfo-metric"><div className="qfo-metric-label"><Clock3 aria-hidden="true" />启用采集任务</div><div className="qfo-metric-line"><div className="qfo-metric-value">{count(metrics?.active_tasks)}</div><div className="qfo-metric-note">{metrics ? `${count(metrics.queued_runs)} 项等待 · ${count(metrics.running_runs)} 项运行中` : "等待数据"}</div></div></div>
@@ -39,7 +41,7 @@ export function OverviewContent({ snapshot, loading, errors, refreshed, onRefres
           <div className="qfo-source-stat"><span>启用任务</span><b>{count(source.active_tasks)}</b></div>
           <div className="qfo-source-stat"><span>最近成功同步</span><b><Timestamp value={source.last_success_at} /></b></div>
         </div>) : <div className="qfo-empty-body">暂无数据源</div> : <div className="qfo-empty-body">{pending}</div>}</div>
-        <p className="qfo-source-extra">已配置不代表连接可用；请在数据源管理中查看检查结果或测试连接。</p>
+        <p className="qfo-source-extra">已配置不代表连接可用；来源配置与采集结果不决定已有合格本地数据的读取许可。正式数据逐请求核查。</p>
       </section>
       <section className="qfo-sheet qfo-attention" aria-labelledby="overview-attention-title">
         <div className="qfo-sheet-head"><h2 className="qfo-sheet-title" id="overview-attention-title">需要处理</h2><Link className="qfo-sheet-link" to="/admin/tasks">查看任务<ArrowRight aria-hidden="true" /></Link></div>
@@ -56,8 +58,9 @@ export function OverviewContent({ snapshot, loading, errors, refreshed, onRefres
       </section>
       <section className="qfo-sheet qfo-side-summary" aria-label="数据资产与快速入口">
         <div className="qfo-summary-section"><div className="qfo-summary-head"><h2 className="qfo-summary-title">数据资产</h2><button className="qfo-summary-link" type="button" aria-disabled="true" title="资产汇总页尚未开放，请使用下方资产入口">查看全部</button></div>
-          <Link className="qfo-asset-row" to="/admin/data/etf-basics"><div><div className="qfo-asset-name">ETF 基础信息</div><div className="qfo-asset-meta">{errors.includes("ETF 资产") ? "刷新失败 · " : ""}最近更新 <Timestamp value={snapshot.etfs?.refreshed_at ?? snapshot.etfs?.last_updated_at} /></div></div><div className="qfo-asset-value"><b>{count(snapshot.etfs?.total_records)}</b><span>条记录</span></div></Link>
-          <Link className="qfo-asset-row" to="/admin/data/trading-calendar"><div><div className="qfo-asset-name">交易日历</div><div className="qfo-asset-meta">{errors.includes("交易日历资产") ? "刷新失败 · " : ""}按交易所计数 · 更新 <Timestamp value={snapshot.calendar?.last_updated_at} /></div></div><div className="qfo-asset-value"><b>{count(snapshot.calendar?.open_day_count)}</b><span>条开市记录</span></div></Link>
+          <Link className="qfo-asset-row" to="/admin/data/etf-basics" aria-busy={market.pending}><div><div className="qfo-asset-name">当前正式 ETF 目录</div><div className="qfo-asset-meta">{market.stale ? "同条件旧摘要 · 不能判断当前可读" : market.error ? market.error.message : market.pending ? "正在读取正式摘要…" : asset ? "本次目录摘要已读取 · 行情另行核查" : "等待读取"}</div></div><div className="qfo-asset-value"><b>{count(asset?.total_instruments)}</b><span>个目录对象</span></div></Link>
+          {asset && <div className="qfo-asset-meta" aria-label="正式目录范围"><p>来源：{asset.meta.source_labels.join(" · ")}。来源目录业务对象，非物理行数或全市场证券数。上市日期：{asset.first_list_date ?? "未知"} → {asset.latest_list_date ?? "未知"}；不代表行情覆盖。</p><p>业务截至：{asset.meta.business_as_of ?? "未知"} · 读取于 <Timestamp value={asset.meta.read_at} />。{asset.meta.coverage.verified ? asset.meta.coverage.note : "覆盖未核验。"}</p></div>}
+          <Link className="qfo-asset-row" to="/admin/data/trading-calendar"><div><div className="qfo-asset-name">正式交易日期事实</div><div className="qfo-asset-meta">按交易所与有界日期查看 · 全局开市数量未声明</div></div><div className="qfo-asset-value"><b>—</b><span>待选择范围</span></div></Link>
         </div>
         <div className="qfo-summary-section"><div className="qfo-summary-head"><h2 className="qfo-summary-title">快速入口</h2></div><div className="qfo-shortcut-row">
           <Link className="qfo-shortcut" to="/admin/strategies"><div className="qfo-shortcut-icon"><Code2 aria-hidden="true" /></div><div><div className="qfo-shortcut-title">策略工作台</div><div className="qfo-shortcut-desc">策略研究与回测</div></div></Link>

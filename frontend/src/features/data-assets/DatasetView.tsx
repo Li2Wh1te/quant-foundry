@@ -57,7 +57,7 @@ function DatasetOverview({ dataset }: DatasetViewProps) {
       <p><strong>当前状态：{display.current.label}</strong></p>
       <p className="qf-dataset-state-explanation">{stateExplanation(dataset.status)}</p>
       <p>数据集说明可查看时，仍需由服务端判断实际对象与范围的读取权限。可通过页面顶部的“查看当前数据”进入预览。</p>
-      <p>单位、币种、价格基准与业务日期完整覆盖未声明。字段的技术类型或 Schema 存在，不代表业务语义已全部确认。</p>
+      <p>本页通用存储说明不提供完整业务口径；市场视图的单位、价格基准与日期范围以其明确声明和实际读取为准。字段类型或 Schema 不证明完整业务覆盖。</p>
       {describedLimitations.length > 0 && <ul aria-label="服务端声明的限制">{describedLimitations.map((limitation, index) =>
           <li key={index}>{limitation.trim() ? limitation : "此项限制未提供说明。"}</li>)}</ul>
       }
