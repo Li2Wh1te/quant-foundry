@@ -170,6 +170,8 @@ interface Props {
   volumeMissing: boolean;
   replay: boolean;
   range: { start: string; end: string };
+  onEarlier?: () => void;
+  canLoadEarlier?: boolean;
   onInspect: (bar: Bar | null) => void;
   onRange: (value: string) => void;
   onDrawEnd: () => void;
@@ -181,6 +183,7 @@ export const EtfChart = forwardRef<ChartHandle, Props>(
       chartRef = useRef<Chart | null>(null),
       current = useRef(props);
     current.current = props;
+    const historyGesture = useRef(false);
     const drawings = useRef(new Map<string, OverlayCreate[]>()),
       selected = useRef<string | null>(null);
     const [drawingInput, setDrawingInput] = useState<DrawingInput | null>(null);
@@ -273,6 +276,9 @@ export const EtfChart = forwardRef<ChartHandle, Props>(
           data = current.current.bars;
         const a = Math.max(0, Math.floor(r.from)),
           b = Math.min(data.length - 1, Math.ceil(r.to) - 1);
+        if (historyGesture.current && r.from < 20 && current.current.canLoadEarlier) {
+          historyGesture.current = false; current.current.onEarlier?.();
+        }
         current.current.onRange(
           data[a] && data[b]
             ? `${data[a].date.replaceAll("-", "/")} — ${data[b].date.replaceAll("-", "/")} · ${b - a + 1} 根 K 线`
@@ -290,7 +296,7 @@ export const EtfChart = forwardRef<ChartHandle, Props>(
         previous.current = { code: "", basis: "", period: "", replay: false };
       };
     }, []);
-    useEffect(() => {
+    useLayoutEffect(() => {
       const c = chartRef.current;
       if (!c) return;
       cancel();
@@ -453,7 +459,7 @@ export const EtfChart = forwardRef<ChartHandle, Props>(
         c.scrollToTimestamp(subset.at(-1)!.timestamp);
       });
       return () => cancelAnimationFrame(frame);
-    }, [props.range, props.period, props.code]);
+    }, [props.range, props.period, props.code, props.bars]);
     return (
       <>
         <div
@@ -462,6 +468,8 @@ export const EtfChart = forwardRef<ChartHandle, Props>(
           tabIndex={0}
           role="img"
           aria-label="ETF K线与指标图。滚轮缩放，拖拽回看。聚焦后按左右方向键查看各根行情。"
+          onWheel={() => { historyGesture.current = true; }}
+          onPointerDown={() => { historyGesture.current = true; }}
           onMouseLeave={() => props.onInspect(null)}
           onKeyDown={(event) => {
             if (event.key === "Escape") {

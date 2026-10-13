@@ -27,29 +27,22 @@ import {
   ChevronsUpDown,
   ChartCandlestick,
 } from "lucide-react";
-import {
-  DataCollectionApiError,
-  getEtf,
-  listEtfAdjustmentFactors,
-  listEtfDailyBars,
-  type EtfAdjustmentFactor,
-  type EtfCode,
-  type EtfDailyBar,
-} from "../api/dataCollections";
+import { DataCollectionApiError } from "../api/dataCollections";
+import { MarketApiError, exactMarketValue, type Adjustment as MarketAdjustment } from "../features/market-data/data";
+import { useMarketInstrument } from "../features/market-data/catalog/MarketInstrumentContext";
+import { useFormalDetail } from "../features/market-data/series/useFormalDetail";
+import { plotBars, exactBarValue } from "../features/market-data/series/plotting";
+import { matchesBarWindow, shanghaiBusinessDate } from "../features/market-data/series/window";
+import type { DetailBasisSlots } from "../features/market-data/series/basisSlot";
 import { useAuth } from "../auth/AuthContext";
 import { marketReturnTo } from "./market/marketPresentation";
 import {
   ADJUSTMENTS,
-  buildSeries,
   dateText,
   DEFAULT_INDICATORS,
-  direction,
   exchangeName,
   MA_COLORS,
-  numberText,
-  numeric,
   PERIODS,
-  signed,
   timeText,
   validParams,
   type Adjustment,
@@ -61,16 +54,8 @@ import { EtfChart, type ChartHandle } from "./etf/EtfChart";
 import { EtfPopover, type PopoverAnchor } from "./etf/EtfPopover";
 import { EtfWatchlist } from "./etf/EtfWatchlist";
 import "./etf/EtfWorkspace.css";
+import "../features/market-data/series/series.css";
 
-interface Snapshot {
-  code: string;
-  etf: EtfCode;
-  daily: EtfDailyBar[];
-  factors: EtfAdjustmentFactor[];
-  factorError: string;
-}
-const EMPTY_DAILY: EtfDailyBar[] = [],
-  EMPTY_FACTORS: EtfAdjustmentFactor[] = [];
 const TOOL_LABELS: Record<string, string> = {
   cursor: "光标",
   segment: "趋势线",
@@ -99,7 +84,8 @@ function Kv({ label, children }: { label: string; children: React.ReactNode }) {
   );
 }
 
-export function EtfDetailPage() {
+export function EtfDetailPage({ BasisControls, FactorTable }: DetailBasisSlots = {}) {
+  const entry = useMarketInstrument();
   const { tsCode = "" } = useParams(),
     navigate = useNavigate(),
     location = useLocation(),
@@ -111,10 +97,9 @@ export function EtfDetailPage() {
       : searchParams.get("tab") === "overview"
         ? "overview"
         : "basic";
-  const [snapshot, setSnapshot] = useState<Snapshot | null>(null),
-    [loading, setLoading] = useState(true),
-    [error, setError] = useState(""),
-    [refresh, setRefresh] = useState(0);
+  const [refresh, setRefresh] = useState(0);
+  const [fixedEnd, setFixedEnd] = useState(shanghaiBusinessDate);
+  const [replaySteps, setReplaySteps] = useState<{ code: string; dates: string[] }>({ code: "", dates: [] });
   const [period, setPeriod] = useState<Period>("day"),
     [adjustment, setAdjustment] = useState<Adjustment>("raw"),
     [indicators, setIndicators] =
@@ -138,13 +123,13 @@ export function EtfDetailPage() {
     [notice, setNotice] = useState("");
   const [inspected, setInspected] = useState<Bar | null>(null),
     [visibleRange, setVisibleRange] = useState(""),
-    [factorPage, setFactorPage] = useState(0);
+    [exactTable, setExactTable] = useState(false);
   const root = useRef<HTMLElement>(null),
     chart = useRef<ChartHandle>(null),
     sideTrigger = useRef<HTMLButtonElement>(null);
   const authError = useCallback(
     (caught: unknown) => {
-      if (caught instanceof DataCollectionApiError && caught.status === 401) {
+      if ((caught instanceof DataCollectionApiError || caught instanceof MarketApiError) && caught.status === 401) {
         logout();
         navigate("/login", { replace: true });
       }
@@ -152,59 +137,15 @@ export function EtfDetailPage() {
     [logout, navigate],
   );
   useEffect(() => {
-    const controller = new AbortController();
-    setLoading(true);
-    setError("");
-    void (async () => {
-      const results = await Promise.allSettled([
-        getEtf(tsCode, controller.signal),
-        listEtfDailyBars(tsCode, {}, controller.signal),
-        listEtfAdjustmentFactors(tsCode, {}, controller.signal),
-      ]);
-      if (controller.signal.aborted) return;
-      for (const result of results)
-        if (result.status === "rejected") authError(result.reason);
-      if (results[0].status === "rejected") throw results[0].reason;
-      if (results[1].status === "rejected") throw results[1].reason;
-      const etf = results[0].value,
-        daily = [...results[1].value].sort((a, b) =>
-          a.trade_date.localeCompare(b.trade_date),
-        );
-      const factorResult = results[2];
-      setSnapshot((prior) => ({
-        code: tsCode,
-        etf,
-        daily,
-        factors:
-          factorResult.status === "fulfilled"
-            ? factorResult.value
-            : prior?.code === tsCode
-              ? prior.factors
-              : [],
-        factorError:
-          factorResult.status === "fulfilled"
-            ? ""
-            : `复权因子刷新失败：${message(factorResult.reason)}`,
-      }));
-    })()
-      .catch((caught) => {
-        if (!controller.signal.aborted) setError(message(caught));
-      })
-      .finally(() => {
-        if (!controller.signal.aborted) setLoading(false);
-      });
-    return () => controller.abort();
-  }, [tsCode, refresh, authError]);
-  useEffect(() => {
     setReplay(null);
     setPlaying(false);
     setInspected(null);
     setRange({ start: "", end: "" });
-    setFactorPage(0);
+    setExactTable(false);
     setAnchor(null);
     setTool("cursor");
     setNotice("");
-  }, [tsCode]);
+  }, [tsCode, entry?.instrumentKey]);
   useEffect(() => {
     const sync = () =>
       setFullscreen(document.fullscreenElement === root.current);
@@ -229,65 +170,40 @@ export function EtfDetailPage() {
     document.addEventListener("keydown", escape);
     return () => document.removeEventListener("keydown", escape);
   }, [anchor, side]);
-  const data = snapshot?.code === tsCode ? snapshot : null,
-    etf = data?.etf;
-  const daily = data?.daily ?? EMPTY_DAILY,
-    factors = data?.factors ?? EMPTY_FACTORS;
   const cutoff = replay?.code === tsCode ? replay.date : undefined;
-  const replayIndex = cutoff
-    ? daily.findIndex((row) => row.trade_date === cutoff)
-    : -1;
+  const marketAdjustment: MarketAdjustment = adjustment === "raw" ? "none" : adjustment === "forward" ? "pre" : "post";
+  const requestedEnd = cutoff ?? (range.end || fixedEnd);
+  const selectedIdentity = entry?.instrumentKey ?? tsCode;
+  const formal = useFormalDetail(selectedIdentity, { period, adjustment: marketAdjustment, start: range.start || undefined,
+    end: requestedEnd, asOf: requestedEnd, refresh }, authError);
+  const identity = formal.identity.data;
+  const currentIdentity = identity?.requestedSymbol === selectedIdentity;
+  const candidate = formal.prices.data;
+  const data = candidate && currentIdentity && matchesBarWindow(candidate, { instrument_key: identity!.instrument_key,
+    period, adjustment: marketAdjustment, start: range.start || undefined, end: requestedEnd, as_of: requestedEnd }) ? candidate : null;
+  const etf = currentIdentity ? formal.metadata.data?.instrument : undefined;
+  const displayCode = etf?.symbol ?? entry?.symbol ?? (tsCode.startsWith("instrument:") ? "ETF" : tsCode);
+  const loading = formal.prices.pending || formal.identity.pending;
+  const error = formal.prices.error?.message ?? formal.identity.error?.message ?? "";
+  const series = useMemo(() => data ? plotBars(data) : { bars: [], error: "", volumeMissing: false, gaps: false }, [data]);
+  const daily = (replaySteps.code === tsCode ? replaySteps.dates : []).map(trade_date => ({ trade_date }));
   useEffect(() => {
-    if (!playing || !cutoff || replayIndex < 0) return;
-    if (replayIndex >= daily.length - 1) {
-      setPlaying(false);
-      return;
-    }
-    const timer = setTimeout(
-      () =>
-        setReplay({ code: tsCode, date: daily[replayIndex + 1].trade_date }),
-      1000 / speed,
-    );
+    if (data && data.period === "day" && !cutoff && !formal.prices.stale)
+      setReplaySteps({ code: tsCode, dates: data.items.map(row => row.last_trade_date) });
+  }, [data, cutoff, formal.prices.stale, tsCode]);
+  useEffect(() => {
+    if (formal.prices.error) { setPlaying(false); setInspected(null); }
+    if (!data) setInspected(null);
+  }, [formal.prices.error, formal.prices.stale, data]);
+  const replayIndex = cutoff ? daily.findIndex(row => row.trade_date === cutoff) : -1;
+  useEffect(() => {
+    if (!playing || !cutoff || replayIndex < 0 || loading) return;
+    if (replayIndex >= daily.length - 1 || formal.prices.stale || !data) { setPlaying(false); return; }
+    const timer = setTimeout(() => setReplay({ code: tsCode, date: daily[replayIndex + 1].trade_date }), 1000 / speed);
     return () => clearTimeout(timer);
-  }, [playing, cutoff, daily, replayIndex, speed, tsCode]);
-  const series = useMemo(
-    () => buildSeries(daily, factors, adjustment, period, cutoff),
-    [daily, factors, adjustment, period, cutoff],
-  );
-  const dailyVisible = useMemo(
-    () => daily.filter((row) => !cutoff || row.trade_date <= cutoff),
-    [daily, cutoff],
-  );
-  const latest = dailyVisible.at(-1),
-    bar =
-      inspected &&
-      series.bars.some((item) => item.timestamp === inspected.timestamp)
-        ? inspected
-        : series.bars.at(-1);
-  const visibleFactors = useMemo(
-    () =>
-      factors
-        .filter(
-          (row) =>
-            (!cutoff || row.trade_date <= cutoff) &&
-            (!range.start || row.trade_date >= range.start) &&
-            (!range.end || row.trade_date <= range.end),
-        )
-        .sort((a, b) => b.trade_date.localeCompare(a.trade_date)),
-    [factors, cutoff, range],
-  );
-  useEffect(() => {
-    setFactorPage((page) =>
-      Math.min(page, Math.max(0, Math.ceil(visibleFactors.length / 20) - 1)),
-    );
-  }, [visibleFactors.length]);
-  const inRange =
-    Boolean(cutoff) ||
-    series.bars.some(
-      (row) =>
-        (!range.start || row.date >= range.start) &&
-        (!range.end || row.date <= range.end),
-    );
+  }, [playing, cutoff, replayIndex, daily, speed, tsCode, loading, formal.prices.stale, data]);
+  const latest = series.bars.at(-1), bar = inspected && series.bars.some(item => item.timestamp === inspected.timestamp) ? inspected : latest;
+  const inRange = Boolean(series.bars.length);
   const open = (key: string, element: HTMLElement) => {
     setFormError("");
     setAnchor((prior) => (prior?.key === key ? null : { key, element }));
@@ -361,7 +277,7 @@ export function EtfDetailPage() {
             买 <strong>—</strong>
           </span>
         </div>
-        <div className="qfe-symbol">{tsCode}</div>
+        <div className="qfe-symbol">{displayCode}</div>
         <div className="qfe-top-actions">
           <button
             ref={sideTrigger}
@@ -391,6 +307,7 @@ export function EtfDetailPage() {
             disabled={loading}
             onClick={() => {
               setPlaying(false);
+              if (!cutoff && !range.end) setFixedEnd(shanghaiBusinessDate());
               setRefresh((v) => v + 1);
             }}
           >
@@ -510,14 +427,14 @@ export function EtfDetailPage() {
           >
             <Expand />
           </button>
-          <button onClick={(e) => open("adjust", e.currentTarget)}>
-            {ADJUSTMENTS[adjustment]}
-            <ChevronDown />
-          </button>
+          {BasisControls && formal.identity.data ? <BasisControls instrumentKey={formal.identity.data.instrument_key}
+            series={formal.options.data?.[0] ?? null} adjustment={marketAdjustment} asOf={cutoff ?? (range.end || fixedEnd)}
+            disabled={loading} onChange={value => { setAdjustment(value === "none" ? "raw" : value === "pre" ? "forward" : "backward"); setPlaying(false); setInspected(null); }} /> :
+            <button onClick={(e) => open("adjust", e.currentTarget)}>{ADJUSTMENTS[adjustment]}<ChevronDown /></button>}
         </div>
         <main className="qfe-stage" aria-busy={loading}>
           <div className="qfe-chart-caption">
-            <strong>{tsCode}</strong>
+            <strong>{displayCode}</strong>
             <span>
               {ADJUSTMENTS[adjustment]} · {PERIODS[period]}线
               {cutoff ? ` · 回放至 ${dateText(cutoff)}` : ""}
@@ -532,31 +449,33 @@ export function EtfDetailPage() {
                 ["低", bar?.low],
                 ["收", bar?.close],
               ] as const
-            ).map(([label, value]) => (
+            ).map(([label]) => (
               <span key={label}>
-                {label} <strong>{numberText(value)}</strong>
+                {label} <strong>{exactMarketValue(bar?.exact?.[label === "开" ? "open" : label === "高" ? "high" : label === "低" ? "low" : "close"] ?? null)}</strong>
               </span>
             ))}
             <span>
-              量 <strong>{numberText(bar?.volume, 2)}</strong> 手
+              量 <strong>{exactBarValue(bar, "volume")}</strong> {data?.units.volume ?? ""}
             </span>
             <span>
-              额 <strong>{numberText(bar?.turnover, 2)}</strong> 千元
+              额 <strong>{exactBarValue(bar, "amount")}</strong> {data?.units.amount ?? ""}
             </span>
           </div>
           <div className="qfe-plot">
             <EtfChart
               ref={chart}
               bars={series.bars}
-              code={tsCode}
+              code={displayCode}
               basis={adjustment}
               period={period}
-              indicators={indicators}
-              volumeMissing={series.volumeMissing}
+              indicators={series.gaps ? { ...indicators, MA: false, MACD: false, RSI: false } : indicators}
+              volumeMissing={series.volumeMissing || series.gaps}
               replay={Boolean(cutoff)}
               range={range}
               onInspect={setInspected}
               onRange={setVisibleRange}
+              onEarlier={formal.earlier}
+              canLoadEarlier={Boolean(data?.next_cursor && formal.prices.canContinue && !loading)}
               onDrawEnd={() => setTool("cursor")}
               onSelection={setSelected}
             />
@@ -571,7 +490,7 @@ export function EtfDetailPage() {
                     : error || "ETF 数据不可用。"
                   : series.error ||
                     (!series.bars.length
-                      ? "尚未采集日线行情。"
+                      ? "该窗口内没有可读取的正式日线。"
                       : "所选范围内没有行情，请调整日期范围。")}
               </div>
             )}
@@ -618,6 +537,7 @@ export function EtfDetailPage() {
                 <button
                   aria-label={playing ? "暂停回放" : "播放回放"}
                   disabled={
+                    !data || loading || formal.prices.stale ||
                     replayIndex < 0 ||
                     replayIndex >= daily.length - 1 ||
                     Boolean(series.error)
@@ -629,6 +549,7 @@ export function EtfDetailPage() {
                 <button
                   aria-label="前进一根日线"
                   disabled={
+                    !data || loading || formal.prices.stale ||
                     replayIndex < 0 ||
                     replayIndex >= daily.length - 1 ||
                     Boolean(series.error)
@@ -669,19 +590,24 @@ export function EtfDetailPage() {
               </div>
             )}
           </div>
-          {((error && data) ||
-            data?.factorError ||
-            series.volumeMissing ||
-            (loading && data)) && (
-            <div className="qfe-data-note" role={error ? "alert" : "status"}>
-              {error && data
-                ? `${error} 当前保留上次成功加载的数据。`
-                : loading
-                  ? "正在刷新，当前显示上次成功加载的数据。"
-                  : data?.factorError ||
-                    "部分成交量缺失，成交量副图暂不显示；价格图仍可查看。"}
-            </div>
-          )}
+          <div className="qfe-data-note" role={error ? "alert" : "status"}>
+            {error ? `${error}${formal.prices.stale ? " 显示同条件旧数据，已停止分页与回放。" : ""}` : loading ? "正在读取正式数据…" : series.error ||
+              (series.gaps ? "正式日历发现缺日；未补值，连续指标与量能副图暂停。" : data?.meta.coverage.note ?? "价格与资料分别加载。")}
+            {series.volumeMissing && " 部分量能无法显示；精确量额可在原值表查看。"}
+            {data?.items.some(item => item.completion === "partial") && " 部分周期未完成或缺少必要日线。"}
+          </div>
+          <div className="qfe-history-actions">
+            <button disabled={!data?.next_cursor || !formal.prices.canContinue || loading || data.items.length > 9488}
+              onClick={formal.earlier}>加载更早历史</button>
+            <button disabled={!data?.items.length} onClick={() => setExactTable(value => !value)}>精确值表</button>
+            <span>{data?.items.length ?? 0} / 10,000 根 · 指标左端须满参数窗口</span>
+            {data && data.items.length > 9488 && <button onClick={() => { formal.release(); setRange({ start: "", end: "" }); setRefresh(value => value + 1); }}>释放窗口并重读</button>}
+          </div>
+          {exactTable && data && <div className="qfe-exact-values" tabIndex={0} aria-label="精确价格与量额">
+            <table><thead><tr><th>业务日</th><th>开</th><th>高</th><th>低</th><th>收</th><th>量 ({data.units.volume})</th><th>额 ({data.units.amount})</th><th>周期状态</th></tr></thead>
+              <tbody>{data.items.slice(-100).map(item => <tr key={item.bucket_start}><td>{item.last_trade_date}</td>
+                {[item.open, item.high, item.low, item.close, item.volume, item.amount].map((value, index) => <td key={index}>{exactMarketValue(value)}</td>)}<td>{({ complete: "完整", partial: "部分", unknown: "未知" })[item.completion]}</td></tr>)}</tbody></table>
+            <small>当前窗口最近 100 根原始精确值，可选择复制。</small></div>}
         </main>
         {side && (
           <>
@@ -695,7 +621,7 @@ export function EtfDetailPage() {
             />
             <aside className="qfe-right" aria-label="ETF 资料与自选">
               <EtfWatchlist
-                code={tsCode}
+                code={displayCode}
                 replay={Boolean(cutoff)}
                 refresh={refresh}
                 onSelect={selectCode}
@@ -710,39 +636,30 @@ export function EtfDetailPage() {
                   <div className="qfe-summary-top">
                     <span className="qfe-token">ETF</span>
                     <div>
-                      <h1>{tsCode}</h1>
+                      <h1>{displayCode}</h1>
                       <p>
                         {exchangeName(etf?.exchange)} ·{" "}
-                        {etf?.csname ?? etf?.extname ?? "ETF"}
+                        {etf?.name ?? "ETF"}
                       </p>
                     </div>
                   </div>
                   <div className="qfe-summary-price">
-                    <strong>{numberText(latest?.close)}</strong>
-                    <span className={direction(latest?.change)}>
-                      {signed(latest?.change)}
-                    </span>
-                    <span className={direction(latest?.pct_chg)}>
-                      {numeric(latest?.pct_chg) === null
-                        ? "—"
-                        : `${signed(latest?.pct_chg, 2)}%`}
-                    </span>
+                    <strong>{exactBarValue(latest, "close")}</strong>
+                    <span>涨跌字段未知</span>
                   </div>
                   <p className="qfe-price-basis">
-                    {dateText(latest?.trade_date)} · 不复权日收盘
+                    {dateText(latest?.date)} · {ADJUSTMENTS[adjustment]}{PERIODS[period]}收盘
                     {cutoff ? " · 回放" : ""}
                   </p>
-                  {latest && numeric(latest.pct_chg) === null && (
-                    <p className="qfe-price-basis">历史涨跌字段未采集</p>
-                  )}
+                  {formal.metadata.error && <p className="qfe-error">资料：{formal.metadata.error.message}{formal.metadata.stale ? " 当前显示同条件旧资料。" : ""}</p>}
                   <dl className="qfe-summary-grid">
                     <Kv label="跟踪指数">{etf?.index_name ?? "—"}</Kv>
-                    <Kv label="基金管理人">{etf?.mgr_name ?? "—"}</Kv>
+                    <Kv label="基金管理人">{etf?.manager_name ?? "—"}</Kv>
                     <Kv label="上市日期">{dateText(etf?.list_date)}</Kv>
                     <Kv label="管理费率">
-                      {numeric(etf?.mgt_fee) === null
+                      {etf?.management_fee == null
                         ? "—"
-                        : `${numberText(etf?.mgt_fee, 2)}%`}
+                        : `${etf?.management_fee} ${etf?.management_fee_unit ?? ""}`}
                     </Kv>
                   </dl>
                 </div>
@@ -778,12 +695,12 @@ export function EtfDetailPage() {
                 >
                   {tab === "basic" && (
                     <dl className="qfe-kv">
-                      <Kv label="基金代码">{tsCode}</Kv>
+                      <Kv label="基金代码">{displayCode}</Kv>
                       <Kv label="基金名称">
-                        {etf?.cname ?? etf?.extname ?? etf?.csname ?? "—"}
+                        {etf?.name ?? "—"}
                       </Kv>
                       <Kv label="交易所">{exchangeName(etf?.exchange)}</Kv>
-                      <Kv label="指数代码">{etf?.index_code ?? "—"}</Kv>
+                      <Kv label="指数代码">{etf?.index_name ?? "—"}</Kv>
                       <Kv label="上市状态">
                         {({ L: "上市", D: "退市", P: "发行" }[
                           etf?.list_status ?? ""
@@ -791,93 +708,20 @@ export function EtfDetailPage() {
                           etf?.list_status) ||
                           "—"}
                       </Kv>
-                      <Kv label="ETF 类型">{etf?.etf_type ?? "—"}</Kv>
+                      <Kv label="ETF 类型">{etf?.asset_type ?? "—"}</Kv>
                     </dl>
                   )}
-                  {tab === "overview" && (
-                    <>
-                      <p className="qfe-note">
-                        加载全部已采集历史，默认显示最近 200 根 K
-                        线。滚轮缩放，横向拖拽回看；日期范围只调整视口。盘口与价格警报尚未接入。
-                      </p>
-                      <dl className="qfe-kv">
-                        <Kv label="日线记录">{dailyVisible.length} 条</Kv>
-                        <Kv label="复权因子">
-                          {
-                            factors.filter(
-                              (row) => !cutoff || row.trade_date <= cutoff,
-                            ).length
-                          }{" "}
-                          条
-                        </Kv>
-                        <Kv label="日线覆盖">
-                          {dateText(dailyVisible[0]?.trade_date)} —{" "}
-                          {dateText(latest?.trade_date)}
-                        </Kv>
-                        <Kv label="数据来源">{latest?.source ?? "—"}</Kv>
-                        <Kv label="最近同步">{timeText(latest?.updated_at)}</Kv>
-                        <Kv label="量额单位">成交量：手 · 成交额：千元</Kv>
-                      </dl>
-                    </>
-                  )}
-                  {tab === "factors" && (
-                    <>
-                      {data?.factorError && (
-                        <p className="qfe-error">{data.factorError}</p>
-                      )}
-                      <p className="qfe-price-basis">
-                        按日期倒序 · {visibleFactors.length} 条
-                        {cutoff ? " · 已隐藏未来日期" : ""}
-                      </p>
-                      <table className="qfe-factor-table">
-                        <thead>
-                          <tr>
-                            <th>交易日期</th>
-                            <th>复权因子</th>
-                            <th>更新时间</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {visibleFactors
-                            .slice(factorPage * 20, factorPage * 20 + 20)
-                            .map((row) => (
-                              <tr key={row.trade_date}>
-                                <td>{dateText(row.trade_date)}</td>
-                                <td title={`${row.adj_factor} · ${row.source}`}>
-                                  {numberText(row.adj_factor, 6)}
-                                </td>
-                                <td>{timeText(row.updated_at)}</td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                      {!visibleFactors.length && (
-                        <p className="qfe-note">该范围内没有复权因子。</p>
-                      )}
-                      {visibleFactors.length > 20 && (
-                        <div className="qfe-actions">
-                          <button
-                            disabled={!factorPage}
-                            onClick={() => setFactorPage((v) => v - 1)}
-                          >
-                            上一页
-                          </button>
-                          <span>
-                            {factorPage + 1} /{" "}
-                            {Math.ceil(visibleFactors.length / 20)}
-                          </span>
-                          <button
-                            disabled={
-                              (factorPage + 1) * 20 >= visibleFactors.length
-                            }
-                            onClick={() => setFactorPage((v) => v + 1)}
-                          >
-                            下一页
-                          </button>
-                        </div>
-                      )}
-                    </>
-                  )}
+                  {tab === "overview" && <>
+                    <p className="qfe-note">默认请求最近 512 根输出，向左回看按需加载。日期范围重新读取有界历史；均线只计算已加载且满参数的窗口。回放查询当前修订数据，未到截止日的行情不会出现。</p>
+                    <dl className="qfe-kv"><Kv label="已加载输出">{data?.items.length ?? 0} 根</Kv>
+                      <Kv label="业务截至">{dateText(data?.meta.business_as_of)}</Kv><Kv label="读取时点">{timeText(data?.meta.read_at)}</Kv>
+                      <Kv label="来源">{data?.meta.source_labels.join(" · ") ?? "—"}</Kv>
+                      <Kv label="日期覆盖">{data?.meta.coverage.note ?? "未知"}</Kv></dl>
+                  </>}
+                  {tab === "factors" && (FactorTable && formal.identity.data ? <FactorTable
+                    instrumentKey={formal.identity.data.instrument_key} seriesKey="etf-daily-local" start={range.start || null}
+                    end={cutoff ?? (range.end || fixedEnd)} asOf={cutoff ?? (range.end || fixedEnd)} adjustment={marketAdjustment}
+                    page={data} onError={authError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
                 </div>
               </div>
             </aside>
@@ -933,6 +777,8 @@ export function EtfDetailPage() {
                 className="qfe-menu-item"
                 aria-pressed={adjustment === key}
                 key={key}
+                disabled={key !== "raw"}
+                title={key === "raw" ? "正式不复权成交价" : "独立复权模块尚未接入"}
                 onClick={() => {
                   setAdjustment(key);
                   setInspected(null);
@@ -1074,12 +920,12 @@ export function EtfDetailPage() {
                   }
                 />
               </label>
-              <p>留空表示全部历史。仅改变视口，指标保留历史预热。</p>
+              <p>留空读取最近 512 根；明确日期范围仍分页读取。视口以所选范围定位，左端不足参数窗口时指标不可计算。</p>
               <div className="qfe-actions">
                 <button
                   onClick={() => {
                     setRange({ start: "", end: "" });
-                    setFactorPage(0);
+                    setExactTable(false);
                     chart.current?.reset();
                     close();
                   }}
@@ -1098,7 +944,7 @@ export function EtfDetailPage() {
                       return;
                     }
                     setRange(rangeDraft);
-                    setFactorPage(0);
+                    setExactTable(false);
                     close();
                   }}
                 >
@@ -1120,13 +966,17 @@ export function EtfDetailPage() {
                 />
               </label>
               <p>
-                从所选日期起的首个已采集交易日开始。每一步前进一条真实日线，周/月/年线随之更新。
+                从已加载日线的首个日期开始；每步按截止日重新读取当前修订数据，周/月/年线同步更新。切换周期前可先用日线加载所需回放日期。
               </p>
               <div className="qfe-actions">
                 <button onClick={close}>取消</button>
                 <button
                   className="qfe-primary"
                   onClick={() => {
+                    if (range.start && replayDate < range.start) {
+                      setFormError("回放截止不能早于查询开始日期。");
+                      return;
+                    }
                     const first = daily.find(
                       (row) => row.trade_date >= replayDate,
                     );
@@ -1135,12 +985,12 @@ export function EtfDetailPage() {
                       !first ||
                       replayDate < daily[0].trade_date
                     ) {
-                      setFormError("请选择已采集历史覆盖内的日期。");
+                      setFormError("请选择已加载日线范围内的日期。");
                       return;
                     }
                     setPlaying(false);
                     setReplay({ code: tsCode, date: first.trade_date });
-                    setFactorPage(0);
+                    setExactTable(false);
                     setInspected(null);
                     close();
                   }}

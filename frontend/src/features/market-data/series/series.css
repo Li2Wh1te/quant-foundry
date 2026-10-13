@@ -1,0 +1,7 @@
+.qfe-history-actions { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:7px 12px; color:var(--qfe-muted, #aab4c4); font-size:13px; border-top:1px solid #232833; }
+.qfe-history-actions button { background:#202734; border:1px solid #354050; color:#dce3ec; padding:5px 9px; border-radius:4px; cursor:pointer; }
+.qfe-history-actions button:disabled { opacity:.4; cursor:default; }
+.qfe-exact-values { max-height:180px; overflow:auto; padding:8px; font-size:12px; }
+.qfe-exact-values table { border-collapse:collapse; white-space:nowrap; width:100%; }
+.qfe-exact-values td,.qfe-exact-values th { padding:4px 8px; text-align:right; border-bottom:1px solid #2a313c; }
+.qfe-ohlc { overflow-x:auto; white-space:nowrap; scrollbar-width:thin; }
