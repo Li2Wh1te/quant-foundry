@@ -39,7 +39,8 @@ def limits(gateway_limits):
     return replace(gateway_limits, file_rows=1000)
 
 
-def accepted_minutes(formal, *, target='60m', missing=False, short=False, missing_quantity=False, invalid_calendar=False):
+def accepted_minutes(formal, *, target='60m', missing=False, short=False, missing_quantity=False, invalid_calendar=False,
+                     absent_buckets=None):
     packet = spec(days=2, frequency=target)
     if invalid_calendar:
         packet['calendar'][0]['week']['trading_day'] = 0
@@ -59,6 +60,8 @@ def accepted_minutes(formal, *, target='60m', missing=False, short=False, missin
             begin, end = int(window['start_ns']), int(window['end_ns'])
             for start in range(begin, end, MINUTE):
                 for security in packet['config']['universe']:
+                    if ordinal // 60 in (absent_buckets or {}).get(security, ()):
+                        continue
                     if missing and ordinal == 20 and security == 'A.SH':
                         continue
                     rows.append(dict(kind='bar', security=security, session=session['session']['key'],
@@ -85,6 +88,102 @@ def accepted_minutes(formal, *, target='60m', missing=False, short=False, missin
     provider = FormalProvider(SimpleNamespace(environment='test'), store=formal,
         plan_resolver=lambda _: plan, process=process)
     return provider, work, dataset, checks
+
+
+def test_count_reads_recent_actual_bars_for_each_security(formal, tmp_path):
+    # H1/H2 are the morning windows, H3 is after lunch. B has no H3.
+    provider, work, _, _ = accepted_minutes(formal, absent_buckets={'B.SH': (2,)})
+    actual = provider.binding(work, Claim('per-security-hours', 'token', 1), Event())
+    gw, ctx = actual.gateway, actual.context
+    calendar = actual.spec['calendar']
+    end = int(calendar[0]['bar_windows'][1]['start_ns']) + 60 * MINUTE
+    closes = [int(calendar[0]['bar_windows'][0]['start_ns']) + 60 * MINUTE,
+              int(calendar[0]['bar_windows'][0]['end_ns']), end]
+    query = dict(actual.spec['source']['request'], start_ns=None, end_ns=str(end), count_per_security=2)
+    try:
+        table = pa.concat_tables([b.table for b in gw.read('accepted-minutes', query, ctx, page_rows=1)])
+        observed = {s: [r['time_ns'] for r in table.to_pylist() if r['security'] == s]
+                    for s in ('A.SH', 'B.SH')}
+        assert observed == {'A.SH': closes[1:], 'B.SH': closes[:2]}
+        # Actual maintained IPC/SDK and Rust view, using the provider's routes.
+        from tests.test_s3_research_api import session, boundary
+        from quantfoundry.data import _MarketRoute, _callback
+        from quantfoundry.api import get_price
+        # session owns a fresh context; close this one before opening it.
+        gw.close(ctx)
+        gw.context = None
+        routes = {f: _MarketRoute(r['binding'], tuple(r['fields'])) for f, r in actual.market_routes.items()}
+        with session(gw, market_routes=routes, frequency='60m', calendar=calendar) as (data, _):
+            with _callback(data, boundary(now=end + 1)):
+                frame = get_price(['A.SH', 'B.SH'], frequency='60m', count=2, fields=['close'])
+                assert {s: frame.loc[frame.security == s, 'time_ns'].tolist() for s in ('A.SH', 'B.SH')} == observed
+                assert not frame.attrs['qf']['short_window']
+    finally:
+        if gw.context is not None and not gw.context.closed:
+            gw.close(gw.context)
+
+
+@pytest.mark.parametrize('absent,expected', [
+    ({'B.SH': (0, 1, 2)}, {'A.SH': (1, 2), 'B.SH': ()}),
+    ({'A.SH': (1,), 'B.SH': (2,)}, {'A.SH': (0, 2), 'B.SH': (0, 1)}),
+])
+def test_count_distinguishes_short_history_and_multiple_gaps(formal, absent, expected):
+    provider, work, _, _ = accepted_minutes(formal, absent_buckets=absent)
+    actual = provider.binding(work, Claim('short-and-gaps', 'token', 1), Event())
+    gw, ctx = actual.gateway, actual.context
+    windows = actual.spec['calendar'][0]['bar_windows']
+    closes = [int(windows[0]['start_ns']) + 60 * MINUTE, int(windows[0]['end_ns']),
+              int(windows[1]['start_ns']) + 60 * MINUTE]
+    query = dict(actual.spec['source']['request'], start_ns=None, end_ns=str(closes[-1]), count_per_security=2)
+    try:
+        rows = pa.concat_tables([b.table for b in gw.read('accepted-minutes', query, ctx)]).to_pylist()
+        assert {s: [r['time_ns'] for r in rows if r['security'] == s] for s in expected} == {
+            s: [closes[i] for i in indices] for s, indices in expected.items()}
+        assert all(row['quantity'] == 60000 for row in rows)
+    finally:
+        gw.close(ctx)
+
+
+@pytest.mark.parametrize('budget', ['query_files', 'query_scan_bytes', 'query_rows'])
+def test_count_budget_exhaustion_is_not_a_short_window(formal, budget):
+    provider, work, _, _ = accepted_minutes(formal, absent_buckets={'B.SH': (2,)})
+    actual = provider.binding(work, Claim('budgeted-count', 'token', 1), Event())
+    gw, ctx = actual.gateway, actual.context
+    end = int(actual.spec['calendar'][0]['bar_windows'][1]['start_ns']) + 60 * MINUTE
+    query = dict(actual.spec['source']['request'], start_ns=None, end_ns=str(end), count_per_security=2)
+    try:
+        formal.limits = replace(formal.limits, **{budget: 1})
+        with pytest.raises(GatewayError) as rejected:
+            list(gw.read('accepted-minutes', query, ctx))
+        assert rejected.value.code == 'RESOURCE_LIMIT'
+        assert gw.resampled_query is None
+    finally:
+        gw.close(ctx)
+
+
+def test_count_keeps_authorization_cancellation_and_quality_guards(formal):
+    provider, work, dataset, _ = accepted_minutes(formal, absent_buckets={'B.SH': (2,)})
+    stopped = Event()
+    actual = provider.binding(work, Claim('guarded-count', 'token', 1), stopped)
+    gw, ctx = actual.gateway, actual.context
+    end = int(actual.spec['calendar'][0]['bar_windows'][1]['start_ns']) + 60 * MINUTE
+    query = dict(actual.spec['source']['request'], start_ns=None, end_ns=str(end), count_per_security=2)
+    try:
+        # The earlier valid H1 is outside this grant; it cannot be backfilled.
+        gw.grant = replace(gw.grant, start_ns=int(actual.spec['calendar'][0]['bar_windows'][0]['start_ns']) + 60 * MINUTE)
+        rows = pa.concat_tables([b.table for b in gw.read('accepted-minutes', query, ctx)]).to_pylist()
+        assert len([r for r in rows if r['security'] == 'B.SH']) == 1
+        stopped.set()
+        with pytest.raises(GatewayError) as cancelled:
+            list(gw.read('accepted-minutes', query, ctx))
+        assert cancelled.value.code == 'CANCELLED'
+        stopped.clear()
+        quality(formal, dataset)
+        with pytest.raises(GatewayError) as changed:
+            list(gw.read('accepted-minutes', query, ctx))
+        assert changed.value.code == 'DATA_CHANGED'
+    finally:
+        gw.close(ctx)
 
 
 @pytest.mark.parametrize('frequency', ['5m', '15m', '30m', '60m'])
