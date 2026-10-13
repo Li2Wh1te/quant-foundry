@@ -73,13 +73,16 @@ to null. Domains provide actual scope, dates and proven coverage separately.
 `scope.position`. Conditions must include all filters and the fixed window/basis.
 No cursor reads old content. Tokens bind auth owner, identities, code mapping,
 selected bindings, generation/schema/rule, request admission, object-quality
-mutations (including xmin changes without generation), and overflow restrictions.
+mutations (including xmin changes without generation), coverage proof/pending
+inputs, and overflow restrictions.
 All reads and DTO construction finish before the short final locked recheck.
 
 Per-store row/file/scan limits continue to apply. The shared session additionally
 bounds cumulative input to 100,000 rows / min(4 MiB, store query_bytes) and output
 to min(4 MiB, store query_bytes). A larger history must return a budget error or
 be implemented as an explicitly budgeted domain stream, never bypass these limits.
+The complete session has a 30-second deadline; SQL checkpoints use the smaller
+remaining time or the existing 5-second metadata budget.
 
 ## Frontend composition
 

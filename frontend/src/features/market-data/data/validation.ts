@@ -70,7 +70,9 @@ function coverage(v: unknown): Coverage {
   const o = object(v), result: Coverage = { verified: boolean(o.verified),
     state: enumeration(o.state, ["verified", "partial", "unknown"]),
     missing_dates: nullable(o.missing_dates, v => unique(array(v, dateText, 2000))), note: text(o.note, 1024) };
-  if (result.verified !== (result.state === "verified") || !result.verified && result.missing_dates?.length === 0) invalidResponse();
+  // A verified partial range can carry proved gaps. Do not turn that into a
+  // claim that the full business range is complete.
+  if (result.state === "verified" && !result.verified || result.state === "unknown" && (result.verified || result.missing_dates !== null)) invalidResponse();
   return result;
 }
 export function readMeta(v: unknown): ReadMeta {

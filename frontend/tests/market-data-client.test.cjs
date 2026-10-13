@@ -116,6 +116,14 @@ test('catalog/calendar parsers keep unknown business facts and cannot mistake no
   assert.equal(calendar.items[0].state, 'unknown'); assert.equal(calendar.items[0].next_trading_date, null);
 });
 
+test('verified partial coverage preserves proved gaps without declaring complete coverage', () => {
+  const value = bars();
+  value.meta.coverage = { verified: true, state: 'partial', missing_dates: ['2026-01-07'], note: '已核验范围存在缺日' };
+  const parsed = validation.parseBars(value);
+  assert.equal(parsed.meta.coverage.state, 'partial');
+  assert.deepEqual(parsed.meta.coverage.missing_dates, ['2026-01-07']);
+});
+
 test('401/403 invalidate page sessions immediately without reading stalled error bodies', async () => {
   for (const status of [401, 403]) {
     const session = data.createMarketReadSession();
