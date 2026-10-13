@@ -543,9 +543,19 @@ class RunDataGateway:
         remaining = count if len(securities) == 1 else None
         while True:
             self.check(context)
-            with store_errors():
-                page = self.store.read_arrow(binding.spec, query,
-                    expected_generation=int(context.dependencies[binding.name]['generation']), cancelled=self.cancelled)
+            try:
+                with store_errors():
+                    page = self.store.read_arrow(binding.spec, query,
+                        expected_generation=int(context.dependencies[binding.name]['generation']), cancelled=self.cancelled)
+            except GatewayError as error:
+                if error.code == 'DATA_RESTRICTED':
+                    # Quality can change after the pre-read context check and
+                    # before the reader's own issue gate. Keep the original
+                    # refusal; a changed already-captured dependency must also
+                    # become the terminal DATA_CHANGED signal, even if strategy
+                    # code catches an ordinary known restriction.
+                    self.check(context)
+                raise
             self.stats['storage_reads'] += 1
             self.stats['storage_rows'] += page.table.num_rows
             self.stats['selected_file_bytes'] += page.metrics.current_read_bytes

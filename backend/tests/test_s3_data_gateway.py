@@ -215,12 +215,16 @@ def test_two_blocks_changed_never_commit_mixed_success(formal,quality_only):
     error('DATA_CHANGED',lambda:next(stream))
     error('DATA_CHANGED',lambda:gateway.finalize(ctx,lambda c:pytest.fail('cannot commit mixed success')))
 
-def test_quality_change_during_real_read_before_return(formal,monkeypatch):
+@pytest.mark.parametrize('before_read', [False, True])
+def test_quality_change_during_real_read_before_return(formal,monkeypatch,before_read):
     spec,gateway,ctx=setup(formal)
     original=formal.read_arrow
     def changed(*a,**kw):
+        if before_read:
+            quality(formal,spec)
         result=original(*a,**kw)
-        quality(formal,spec)
+        if not before_read:
+            quality(formal,spec)
         return result
     monkeypatch.setattr(formal,'read_arrow',changed)
     error('DATA_CHANGED',lambda:next(gateway.read('market',request(),ctx)))

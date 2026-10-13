@@ -399,6 +399,7 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
             and window[3]==_json(active.boundary)):
         return window[2].copy(deep=True)
     incremental=(count is not None and adjustment=='none' and frequency!='tick'
+        and set(securities)<=active.session.allowed_securities
         and set(fields)<=set(PRICE_FIELDS) and frequency in active.session.market_routes
         and end==int(active.boundary['now_ns']) and window is not None
         and window[0]==window_key and window[1]<end
@@ -439,6 +440,11 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
         active.view.reset()
         active.session.units, active.session.limitations = {}, []
         route = active.session.market_routes.get(frequency)
+        # Daily reference indices use the D05 points/knowledge-time mapping.
+        # The parent still authorizes its bounded reference set. They must not
+        # be sent through the universe's CNY/share execution projection.
+        if frequency == '1d' and not set(securities) <= active.session.allowed_securities:
+            route = None
         source = frequency
         if route is None and frequency not in ('1d', 'tick'):
             candidates = [f for f in active.session.market_routes if f not in ('1d', 'tick')
@@ -490,7 +496,7 @@ def get_price(securities: str | Sequence[str], *, start: TimeLike | None = None,
         units={f: stored['units'][f] for f in fields if f in stored['units']})
     if count is not None:
         _short_window(frame,securities,count)
-        if adjustment=='none' and frequency!='tick' and frequency in active.session.market_routes and set(fields)<=set(PRICE_FIELDS) and end==int(active.boundary['now_ns']):
+        if adjustment=='none' and frequency!='tick' and frequency in active.session.market_routes and set(securities)<=active.session.allowed_securities and set(fields)<=set(PRICE_FIELDS) and end==int(active.boundary['now_ns']):
             window_key=(tuple(securities),tuple(fields),frequency,adjustment,count,dependencies)
             _retain_window(active.session,window_key,end,frame)
     return frame

@@ -4,14 +4,13 @@ OHLC/quantity and completeness are computed by the existing Rust D05
 resampler. Only one declared calendar bucket is buffered; no market copy is
 written. Source reads, cached answers and finalization keep the normal gates.
 """
-from collections import deque
 import json
 import time
 
 import pyarrow as pa
 import pyarrow.compute as pc
 
-from .data_gateway import GatewayError, MARKET_SCHEMA
+from .data_gateway import GatewayError, MARKET_SCHEMA, MarketBinding
 from .formal_runtime import RunStoreGateway
 
 MINUTE_NS = 60_000_000_000
@@ -28,12 +27,13 @@ def can_resample(source, target):
 class ResampledBarGateway(RunStoreGateway):
     def __init__(self, *args, calendar, target_frequency, **kwargs):
         super().__init__(*args, **kwargs)
-        if (len(self.bindings) != 1 or not 1 <= len(calendar) <= 10000
-                or not can_resample(next(iter(self.bindings.values())).frequency, target_frequency)):
+        markets = [b for b in self.bindings.values() if isinstance(b, MarketBinding)]
+        if (len(markets) != 1 or not 1 <= len(calendar) <= 10000
+                or not can_resample(markets[0].frequency, target_frequency)):
             raise GatewayError('CAPABILITY_UNAVAILABLE', '降采样需要已接受的细粒度行情和会话')
         self.calendar = tuple(calendar)
         self.target_frequency = target_frequency
-        self.source_frequency = next(iter(self.bindings.values())).frequency
+        self.source_frequency = markets[0].frequency
         self.resampled_cache = {}
         self.resampled_query = None
         self.input_rows = self.output_rows = 0
@@ -47,17 +47,70 @@ class ResampledBarGateway(RunStoreGateway):
 
     def _buckets(self, start, end, count):
         duration = int(self.target_frequency[:-1]) * MINUTE_NS
-        def intervals():
-            for session in self.calendar:
-                for window in session['bar_windows']:
-                    begin, stop = int(window['start_ns']), int(window['end_ns'])
-                    while begin < stop:
-                        finish = min(begin + duration, stop)
-                        if start <= finish <= end:
-                            yield session, begin, finish
-                        begin = finish
-        # Only small calendar coordinates, never event objects or market rows.
-        return iter(deque(intervals(), maxlen=count)) if count is not None else intervals()
+        # A count window searches backwards until EACH security has enough
+        # observed complete bars. Calendar buckets are candidates, not bars.
+        # Generate coordinates lazily, including long calendars; do not first
+        # allocate all intervals or discard valid older per-security history.
+        sessions = reversed(self.calendar) if count is not None else self.calendar
+        for session in sessions:
+            windows = reversed(session['bar_windows']) if count is not None else session['bar_windows']
+            for window in windows:
+                begin, stop = int(window['start_ns']), int(window['end_ns'])
+                if stop < start or begin >= end or stop <= self.grant.start_ns:
+                    continue
+                buckets = (stop - begin + duration - 1) // duration
+                first = max(0, (start - begin + duration - 1) // duration - 1,
+                            (self.grant.start_ns - begin + duration - 1) // duration)
+                last = buckets - 1 if stop <= end else min(buckets - 1, (end - begin) // duration - 1)
+                indices = range(last, first - 1, -1) if count is not None else range(first, last + 1)
+                for index in indices:
+                    lower = begin + index * duration
+                    finish = min(lower + duration, stop)
+                    if start <= finish <= end and lower >= self.grant.start_ns:
+                        yield session, lower, finish
+
+    def _count_window(self, name, request, context, start, end, count):
+        remaining = {s: count for s in request['securities']}
+        parts, rows, size = [], 0, 0
+        initial_bytes = self.stats['selected_file_bytes']
+        initial_files = self.stats['files_read']
+        deadline = time.monotonic() + self.store.limits.query_timeout_ms / 1000
+        for index, (session, begin, finish) in enumerate(self._buckets(start, end, count)):
+            if not remaining:
+                break
+            self.check(context)
+            if index >= self.store.limits.query_rows or time.monotonic() >= deadline:
+                raise GatewayError('RESOURCE_LIMIT', '逐标的降采样补取超过查询桶数或时间预算')
+            wanted = tuple(sorted(remaining))
+            table = self.resampled_cache.get(finish)
+            if table is not None:
+                table = table.filter(pc.is_in(table['security'], value_set=pa.array(wanted, type=pa.string())))
+            else:
+                table = self._bucket(name, dict(request, securities=list(wanted)), context,
+                                     session, begin, finish, False)
+            if (self.stats['selected_file_bytes'] - initial_bytes > self.store.limits.query_scan_bytes
+                    or self.stats['files_read'] - initial_files > self.store.limits.query_files
+                    or time.monotonic() >= deadline):
+                raise GatewayError('RESOURCE_LIMIT', '逐标的降采样补取超过累计读取预算')
+            # _bucket retains the existing Rust completeness/quality refusal.
+            # An absent bucket contributes nothing; a damaged bucket still fails.
+            for security in table['security'].to_pylist():
+                remaining[security] -= 1
+                if remaining[security] == 0:
+                    del remaining[security]
+            if table.num_rows:
+                parts.append(table)
+                rows += table.num_rows
+                size += table.nbytes
+                if rows > self.cache_rows or size > self.cache_bytes:
+                    raise GatewayError('RESOURCE_LIMIT', '降采样历史窗口超过内存预算')
+        self.check(context)
+        # Reaching the authorized beginning is a genuine short history. Budget
+        # exhaustion above raises and must never publish/cache a short answer.
+        table = pa.concat_tables(parts) if parts else pa.Table.from_batches([], schema=MARKET_SCHEMA)
+        if table.num_rows:
+            table = table.sort_by([('time_ns', 'ascending'), ('security', 'ascending')])
+        return table
 
     def _trim_cache(self):
         def usage():
@@ -164,6 +217,8 @@ class ResampledBarGateway(RunStoreGateway):
         parts = []
         if count is not None and self.resampled_query is not None and self.resampled_query[0] == key:
             parts = [self.resampled_query[1]]
+        elif count is not None:
+            parts = [self._count_window(name, request, context, start, end, count)]
         else:
             for session, begin, finish in self._buckets(start, end, count):
                 self.check(context)
@@ -175,15 +230,9 @@ class ResampledBarGateway(RunStoreGateway):
                     if source:
                         self.resampled_cache[finish] = table
                         self._trim_cache()
-                if count is not None:
-                    parts.append(table)
-                    if (sum(t.num_rows for t in parts) > self.cache_rows
-                            or sum(t.nbytes for t in parts) > self.cache_bytes):
-                        raise GatewayError('RESOURCE_LIMIT', '降采样历史窗口超过内存预算')
-                else:
-                    for offset in range(0, table.num_rows, min(page_rows or self.batch_rows, self.batch_rows)):
-                        self.check(context)
-                        yield self._batch(table.slice(offset, min(page_rows or self.batch_rows, self.batch_rows)), binding)
+                for offset in range(0, table.num_rows, min(page_rows or self.batch_rows, self.batch_rows)):
+                    self.check(context)
+                    yield self._batch(table.slice(offset, min(page_rows or self.batch_rows, self.batch_rows)), binding)
         if count is not None:
             table = pa.concat_tables(parts) if parts else pa.Table.from_batches([], schema=MARKET_SCHEMA)
             self.resampled_query = (key, table)

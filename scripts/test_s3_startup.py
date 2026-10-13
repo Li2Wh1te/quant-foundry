@@ -204,7 +204,15 @@ def main():
                 )
             )
             assert capabilities["engine"]["installed"]
-            assert all(not x["available"] for x in capabilities["actual_data"])
+            actual = {item["binding"]: item for item in capabilities["actual_data"]}
+            # A real installed offline RuleBook is available independently of
+            # an empty market/identity catalogue. Do not reintroduce the old
+            # fixed-False capability policy as an empty-DB startup assertion.
+            assert actual["official_market_rules"]["available"]
+            assert actual["official_market_rules"]["scope"]["kind"] == "offline_catalog_only"
+            assert all(not actual[name]["available"] for name in (
+                "E50", "E51", "E52", "E70", "identity", "calendar_sessions",
+                "instrument_rule_package", "suspension_facts", "corporate_actions", "execution_plan_assembly"))
             docker(
                 "run",
                 "-d",

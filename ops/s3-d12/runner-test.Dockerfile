@@ -9,6 +9,7 @@ COPY tests/s3_runservice_suite.py /app/s3_runservice_suite.py
 COPY tests/s3_cli_suite.py /app/s3_cli_suite.py
 COPY tests/s3_cli_fixtures.py /app/s3_cli_fixtures.py
 COPY tests/s3_formal_fixtures.py /app/s3_formal_fixtures.py
+COPY tests/s3_research_fixtures.py /app/s3_research_fixtures.py
 COPY tests/s3_final_suite.py /app/s3_final_suite.py
 COPY ops/s3-d18 /app/d18
 COPY examples/strategies /app/examples/strategies

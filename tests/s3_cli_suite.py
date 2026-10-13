@@ -260,7 +260,7 @@ class D14Tests(unittest.TestCase):
             self.assertEqual(len(retried["run_ids"]), 2)
             self.assertTrue(self.cli("result", result["items"][0]["run_id"])["partial"])
             self.cli("compare", *(i["run_id"] for i in result["items"]))
-            self.app.state.s3_provider = FormalProvider(self.settings)
+            self.app.state.s3_provider = FormalProvider(self.settings, engine=self.engine)
             self.assertEqual(self.cli("preflight", path, expected=2)["errors"][0]["code"], "CAPABILITY_UNAVAILABLE")
 
     def assert_rotation(self, trades, config):

@@ -35,7 +35,89 @@ def saved_schedule():
     }
 
 
+def session_input():
+    """Explicit DTO oracle, not an authority for a real security/date."""
+    commission = ADAPTER.commission_from_account_fee_schedule(saved_schedule(),
+        side='buy', included_components=[])
+    return dict(instrument=dict(security='isolated-session-oracle', exchange='shanghai', product='equity_etf'),
+        day=dict(security='isolated-session-oracle', date='2026-07-06', session='isolated-session',
+            listing=dict(first_trading_date='2000-01-01', last_trading_date=None,
+                verified_through='2026-12-31', kind='other', session_ordinal=1000),
+            status='trading', risk='normal', price_limit=dict(kind='limited', rate='0.1', lower='9', upper='11'),
+            fund_price_band='ten_percent', underlying_same_session=None, delisting_session_ordinal=None),
+        permissions=dict(buy=True, sell=True, product_buy=True, risk_disclosure=None,
+            delisting_buy=None, risk_bought_or_open=None), submission_reference=None,
+        investor='resident_individual', sale_proceeds='next_session',
+        sale_proceeds_basis='isolated-explicit-cash-timing', disposal_settlement_date='2026-07-07',
+        holding_bands={}, buy_commission=commission, sell_commission=commission)
+
+
 class RulesWheelTests(unittest.TestCase):
+    def test_official_session_composition_reuses_rules_fees_and_preserves_known_permissions(self):
+        request = session_input()
+        request['permissions']['buy'] = False
+        request['cost_overrides'] = dict(commission_rate='0.0002', minimum_commission='1')
+        result = json.loads(_native.compose_official_session_fact_json(json.dumps(request)))
+        self.assertEqual(result['day'], request['day'])
+        self.assertFalse(result['permissions']['buy'])
+        self.assertEqual(result['origin']['kind'], 'official')
+        self.assertEqual(result['sale_proceeds_basis'], request['sale_proceeds_basis'])
+        for side in ('buy', 'sell'):
+            fees = result[side+'_fees']
+            self.assertIsNone(fees['synthetic_model'])
+            self.assertEqual(fees['commission_rate'], '0.0002')
+            self.assertEqual(fees['minimum_commission'], '1')
+            self.assertEqual({c['kind'] for c in fees['components']},
+                {'stamp_duty', 'transfer_fee', 'handling_fee', 'regulatory_fee'})
+
+    def test_official_session_unknown_facts_and_scope_are_refused_before_execution(self):
+        for case in ('product', 'listing', 'price_limit', 'permission', 'investor', 'cash_timing', 'date'):
+            with self.subTest(case=case):
+                request = session_input()
+                if case == 'product': request['instrument']['product'] = 'unknown'
+                elif case == 'listing': request['day']['listing'] = None
+                elif case == 'price_limit': request['day']['price_limit'] = dict(kind='unknown')
+                elif case == 'permission': request['permissions']['product_buy'] = None
+                elif case == 'investor': request['investor'] = 'unknown'
+                elif case == 'cash_timing': request['sale_proceeds'] = 'unknown'
+                else: request['day']['date'] = '2000-01-01'
+                with self.assertRaises(ContractError) as caught:
+                    _native.compose_official_session_fact_json(json.dumps(request))
+                self.assertEqual(caught.exception.code, 'RULE_UNAVAILABLE')
+                self.assertEqual(caught.exception.scope['security'], 'isolated-session-oracle')
+
+    def test_official_session_boundary_forbids_fee_origin_and_unknown_input_injection(self):
+        for field, value in [('origin', dict(kind='synthetic', reference='fake')),
+                             ('buy_fees', {}), ('accepted', True), ('private', 'safe-marker')]:
+            request = session_input()
+            request[field] = value
+            with self.assertRaises(ContractError) as caught:
+                _native.compose_official_session_fact_json(json.dumps(request))
+            self.assertNotIn('safe-marker', str(caught.exception))
+        with self.assertRaises(ContractError) as caught:
+            _native.compose_official_session_fact_json(' '*(1024*1024+1))
+        self.assertEqual(caught.exception.code, 'RESOURCE_LIMIT')
+
+    def test_trusted_composition_exports_the_existing_official_rule_book(self):
+        records = json.loads(_native.official_market_rules_json())
+        self.assertTrue(records)
+        self.assertLessEqual(len(records), 1024)
+        self.assertTrue(all(record['origin']['kind'] == 'official' for record in records))
+        self.assertTrue(all(record['effective']['from'] <= record['effective']['through'] for record in records))
+        self.assertTrue(any(record['product'] == 'bond_etf' for record in records))
+        self.assertTrue(any(record['effective']['from'] == '2023-04-10' for record in records))
+
+    def test_calendar_projection_uses_the_existing_rust_calendar_validator(self):
+        from support_sdk import spec
+        rows = spec(days=1)['calendar']
+        self.assertEqual(json.loads(_native.validate_formal_calendar_json(json.dumps(rows))), rows)
+        for field in ('week', 'month'):
+            invalid = deepcopy(rows)
+            invalid[0][field]['total_trading_days'] = 0
+            with self.assertRaises(ContractError) as failure:
+                _native.validate_formal_calendar_json(json.dumps(invalid))
+            self.assertEqual(failure.exception.code, 'RULE_UNAVAILABLE')
+
     def test_saved_commission_is_validated_by_rust_and_captured_as_a_small_copy(self):
         saved = saved_schedule()
         before = deepcopy(saved)
