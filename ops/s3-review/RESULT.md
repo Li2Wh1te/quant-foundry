@@ -1,31 +1,58 @@
 # S2/S3 review 修复状态
 
-基线：最新 `main` `50db997f8f50b955a6a5fe0ce237543d33b5f60b`。本会话未开开发子会话，未进行生产部署、生产数据写入/清理、供应商调用或生产凭据/权限操作；R01、S2 批次和旧核心退役边界保留。
+基线：`main` `50db997f8f50b955a6a5fe0ce237543d33b5f60b`，继续前再次 fetch 核对主干未变化。草稿 [PR #180](https://github.com/Li2Wh1te/quant-foundry/pull/180)，不合并，交父核验。本会话未开子会话，未生产部署、写入/清理生产数据、调用供应商或操作凭据/权限。R01、S2 批次及旧核心退役边界保留。
 
-## 已实现
+## 提交与结果
 
-- **SR-03**：`d47f308ab34cc6d4f8cefbf8796ee9d5f5ed387f`。真实 PostgreSQL/Parquet/Rust 反例先复现 B 仅 H2；修复按各标的实际完整 Bar 倒序补取，保留授权起点/午休/完整性/质量/取消门禁。累计文件、字节、桶数、时间及缓存不足抛 `RESOURCE_LIMIT`，不缓存或发布短历史伪成功。真实历史耗尽保持短窗口，无前填/补零。
-- **SR-02 装配部分**：`995c5a74dc636adf6bd9e1e7532dd04b711d0b8d`。`AcceptedRunPlan` 携带有界研究 bindings 和参考指数集合；普通 `FormalProvider.binding` 派生 worker routes，D05 dispatch 与日线/降采样 reader 共用一个 CurrentStore、依赖 context、小事实检查和最终事务。参考指数日线走原 D05 研究价格口径，保留 `index_points`，不进入股票成交来源；SDK 不把它送往 CNY/份额 market route。
-- 受影响完整规模重测：`daf479c784519b75fe2c6dcc685bdf476c46e5c3`。本修复分支的 CI 只重跑 **完整 B2 / 60m**；明确记录 `full_B1_B4=false`，不进入完整来源复用缓存。此前 B1–B4 证据保留；其他分支原全套策略不变。
+| 项目 | 精确代码提交 | 结果 |
+|---|---|---|
+| SR-03 逐标的完整 Bar count | `d47f308ab34cc6d4f8cefbf8796ee9d5f5ed387f` | A 取 H2/H3，B 取 H1/H2；有界向前补取，历史耗尽与预算不足分开；无前填/补零 |
+| SR-02 普通 FormalProvider 研究装配 | `995c5a74dc636adf6bd9e1e7532dd04b711d0b8d` | 路由由 plan 的有界 bindings 派生；D05、行情、研究和最终事务共用 CurrentStore/context；参考指数保留 index_points |
+| 受影响完整 B2/60m 选择 | `daf479c784519b75fe2c6dcc685bdf476c46e5c3` | 保留已证明的 B1–B4；本分支只重测完整 B2/60m，明确 full_B1_B4=false |
+| 并发质量变化终态/测试镜像上下文 | `d765607a9542272363218bd7193274cab308069c` | 已接受 context 发生变化时保留 DATA_CHANGED 终态；修正研究 fixture 的 UI 镜像上下文 |
+| SR-01 默认 SQL 桥接/动态诊断 | `b7963c0b56317c4cf7b05affd7f3cc6eea0c66c5` | API/runner 默认安装同一 SQL resolver；现有事实可解析；能力不再整体固定 False；完整默认成功仍未关闭 |
+| SQL 预算/CLI 隔离 DB 与诊断契约 | `953076d7b35f85886a7e6ffa2c133051f0437e93`、`55bde7ed363e05f237618a36be1b4165bbb26ec9` | SQL timeout 报 RESOURCE_LIMIT；CLI 用私有 DB；有界事实诊断编码于 ErrorDTO 字符串 scope，不扩大共享协议 |
 
-## 本地证据及限制
+## 默认桥接的真实范围
 
-Python 3.12.2、锁定 Rust 1.90.0、本地独立安装的真实 wheel，真实隔离 PostgreSQL 和 CurrentStore/Parquet/IPC/Rust/SDK：
+`formal_resolver.py` 通过现有 repository/解析器读取身份和代码映射、严格命名日历、ETF 规则包、停牌事实/覆盖、公司行动/覆盖及已捕获的账户佣金。保留 validity、known_at、质量、版本及证据；不从代码后缀猜身份、从身份有效期猜上市日、从 ETF 大类猜 Product 或从缺停牌行猜可交易。
 
-- SR-03 gateway/IPC/SDK 用例 20 通过，覆盖 H1/H2/H3、多个不同缺口、授权起点、短历史、累计读取预算、取消和质量变化；原有 5/15/30/60m、跨日、完整性与实际回调回归保留。
-- 相关当前存储/研究/正式节点/降采样/就绪检查合计 139 项完成。最初 11 项缺独立 Rust consumer，编译后对应 11 项重跑通过；其余 128 项已通过。参考指数 SDK 分支补充后，对应研究/装配/降采样 58 项重跑通过，另新增组合降采样与研究用例。
-- 独立 consumer 中 SDK 88 项通过，根测试 29 项通过。
-- 这些本地 CurrentStore 测试使用既有、仅测试启用的文件系统 probe；宿主与 Docker 卷真实类型均为 **overlay**。无 probe 的实际 worker 套件在 CurrentStore 初始化处按原门禁 `UNSUPPORTED_FILESYSTEM` 拒绝，不算受支持文件系统通过。真实受限 worker、无 probe PG/Parquet 和完整 B2/60m 结果以精确提交 CI 为准。
-- 研究正例使用明确的合成 accepted-fact DTO，测试通过普通 FormalProvider 派生 routes，没有手工构造 `Binding(research_routes=...)`。验证五个研究函数、复权、参考指数价格、缺公开时间/锚点/集合完整性、未来查询/越权、质量变化与最终提交拒绝。这仍不是默认解析器的产品验收。
+日历补齐已有输入可完成的代码：整周/月显式自然日覆盖产生交易序号、午休区间、下一/随后会话和稳定 reference；Rust 原 SessionCalendar 校验该投影。回调边界是源窗口相邻的逻辑时点，不添加未给出的竞价事实。Rust RuleBook 只读导出复用原官方目录，没有第二份 Python 规则/费用计算。佣金复用现有 Rust 校验；法定费用的具体产品/投资者 scope 仍缺。
 
-## 未通过条件
+读取使用有界只读 REPEATABLE READ、行/字节/时间/控制预算及事实指纹。`check_facts(..., connection=...)` 在最终事务使用现有事实表 SHARE 锁及同一 connection 重新核验。没有新批准台账、治理层、行情快照或生产写入。
 
-**SR-01 未修复，SR-02 默认成功链未关闭。** main 的默认 API/`create_services` 仍未装配正式 `plan_resolver`；`FormalProvider.capabilities` 固定 False 的问题仍存在。不能把这两点写成仅 `data_ready=false`，也不能用显式注入的隔离计划宣称默认 API→runner→受限 worker 成功。
+诊断区分 `available`、`fact_missing`、`fact_invalid`、`field_semantics_missing`、`adapter_missing`。无请求 capabilities 的可用项明确标明有界样本及 current-knowledge scope，不宣称全部标的/日期可运行；每次预检/绑定仍按模拟日知识边界重新读取。财务或成分的历史语义缺失不会关闭已验证的身份/日历能力。
 
-已查 `backtest_service`、CurrentStore registry、既有身份/规则/日历/状态/公司行动事实及 D13/D18 文档，未发现原量到份额/raw 基础及研究可靠公开时间/因子锚点的既定权威接入口。日历 capability 的领域契约仅三类交易状态，不能扩作通用准入表。已请求父方提供已有权威入口；个人上下文检索不可用。本 PR 未另造批准记录/来源服务，未把请求、参数或账户 metadata 当成接受事实。
+## 验证及证据边界
 
-默认解析器需接入该既定事实源后，再经默认 `create_app/create_services` 逐类缺事实拒绝、预检/提交/runner/受限 worker/结果及中途事实变化验收。当前草稿 PR **不得因本结果文件而宣称三项全部完成或直接合并**；留父会话核验。
+- 原 SR-01/02 默认缺解析器、空路由，以及 SR-03 B 缺 H1 的问题已独立复现。附件脚本不是生产通过证书，本会话未执行它。
+- 新增默认 SQL 用例 **15 通过**：实际隔离 PG/CurrentStore、默认 create_app 的真实 HTTP、默认工厂、各类缺行、晚知事实、fixture_only、版本/内容变化、最终同事务拒绝、预算、实际 PG statement timeout、Rust 日历投影和公司行动 cash/quantity/phase/currency。没有成功 provider 或 AcceptedRunPlan 注入。SQL 单测的 daemon 只作不启动 worker 的构造端口，不能算 Docker readiness 证明。
+- 受影响 CurrentStore/研究/正式节点/降采样/Rust IPC/SDK/就绪回归 **156 通过**，新增日历版本及 SQL timeout 回归另 **2 通过**；默认 SQL 15 项及相关正式节点 9 项最终再跑全部通过。独立已安装 wheel 的 SDK **90 通过**，Rust core、fmt、clippy 通过。
+- 必需 Docker 套件中的实际默认 create_services 使用真实固定镜像/daemon preflight，再经实际 HTTP 验证同一拒绝且不入队；随后保留原明确隔离 execution oracle，真实 runner/受限 worker/SDK 调用五种研究函数、复权和参考价格，质量变更终止运行。后者仍不是默认成功验收。
+- 本地宿主/卷为 **overlay**，实际 CurrentStore 测试用了既有仅测试 probe。无 probe 本地套件已按门禁拒绝 UNSUPPORTED_FILESYSTEM。受支持文件系统的结论以精确提交 CI 为准，没有移除或放宽门禁。
 
-路径交集：仅 S3 `backtest_service`、SDK 数据路由及其隔离测试/构建/CI；未改 R01 的 `data_store` 实现、身份/日历事实模型、迁移、生产执行脚本和状态。
+## 已完成 CI 与完整规模证据
 
-CI / PR：待精确 head 核验后回报。
+`d765607a9542272363218bd7193274cab308069c` 的 5 workflows / 7 jobs 全成功；这些属于该提交，不能移作后续 head 的 CI。
+
+| workflow | run | job |
+|---|---:|---:|
+| Validate | 38340962687 | 115111599929 |
+| S3 Rust contracts | 38340962690 | 115111600083、115111599817 |
+| S3 worker isolation | 38340962691 | 115111599888 |
+| S3 run UI | 38340962675 | 115111599862 |
+| S3 full integration and release | 38340962781 | 115111674541、115111674766 |
+
+完整 B2/60m：200 标的 × 252 日 × 240 分钟 = **12,096,000** 来源事件，完成 **201,600** 小时事件。4 CPU/8 GiB 整组预算，准入/验收墙钟 **214.468534608s**，采样 cgroup 峰值 **735,621,120 B**；equity/orders/trades/positions/records = 253/90/45/5/256，独立会计 cash_conserved=true。全 B1/B3/B4 未重复。
+
+artifact **11787148539**（run 38340962781），SHA-256 `18a36e84be40a1319dc9af96d87560f148df1f62fb67660b070aae078e720465`。以上测量来自精确 job 的解码日志及 artifact 元数据；本地下载 ZIP 受代理 403，未声称已解析该 ZIP。后续桥接 head 的 CI 状态另在 PR/交接中逐项报告。
+
+## 未通过条件及下一范围
+
+**SR-01 仅完成现有契约桥接；SR-02 默认成功链仍未关闭。** `SqlFormalPlanResolver.__call__` 目前在真实解析后明确拒绝，尚不产生完整 AcceptedRunPlan。终装配和默认 D05 生产 mapping 都以 `adapter_missing` 报出，不能改称纯粹 data_ready=false。完整默认 API→runner→受限 worker→结果正例仍未通过。
+
+已确认确实未定义的事实包括 E50 价格币种/量单位、E70 provider_reported 到 raw/精确份额解释、Product 细分、ListingWindow/上市会话序号、实际上下限/fund_price_band/风险与盘中状态、费用/权限/税务 scope；E69 没可靠 public_ns/锚点，财务/估值/成分缺历史知识/集合语义。保持拒绝，不用 created_at、账户 metadata 标志或合成 MODEL 填这些空缺。
+
+达到默认真实成功所需最小新增生产者、源单位解释、涉及文件及迁移/采集/费用边界见 [FACT_SCOPE.md](FACT_SCOPE.md)，由父交用户选择。已知事实的桥接不再等待这些选择；未请求或执行额外生产操作。
+
+路径交集：变更在 S3 backtest_service、Rust 只读适配、SDK及其测试/构建/CI；仅读 R01 共有身份、日历、状态、公司行动契约，未修改其模型、迁移、CurrentStore 实现或生产状态。
