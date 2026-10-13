@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import event, func, inspect, select, text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.orm import Session
 from sqlalchemy.sql import Select
 
@@ -76,7 +77,15 @@ class FactReadBudget:
         limit = FACT_ROWS - self.rows + 1
         if call.statement._limit_clause is not None:
             limit = min(limit, call.statement._limit_clause.value)
-        result = call.invoke_statement(call.statement.limit(limit)).freeze()
+        try:
+            result = call.invoke_statement(call.statement.limit(limit)).freeze()
+        except DBAPIError as error:
+            if getattr(error.orig, 'sqlstate', None) == '57014':
+                raise RuntimeFault('RESOURCE_LIMIT', '正式小事实SQL读取超过时间预算') from None
+            if getattr(error.orig, 'sqlstate', None) == '42P01':
+                raise FormalResolutionFault([state('formal_sql_schema', 'fact_missing',
+                    missing=('required_existing_fact_tables',))]) from None
+            raise
         if clock.monotonic() >= self.deadline:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过时间预算')
         self.rows += len(result.data)

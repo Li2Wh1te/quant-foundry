@@ -336,7 +336,7 @@ def test_new_calendar_version_is_reselected_and_cannot_mix_with_the_accepted_pro
 def test_fact_budgets_fail_without_truncating_or_advertising_short_coverage(formal_facts):
     seed(formal_facts)
     provider = FormalProvider(SimpleNamespace(), store=formal_facts)
-    for budget, value in [('FACT_ROWS', 1), ('FACT_BYTES', 10), ('FACT_CELLS', 0)]:
+    for budget, value in [('FACT_ROWS', 1), ('FACT_BYTES', 10), ('FACT_CELLS', 0), ('FACT_SECONDS', 0)]:
         with patch('app.backtest_service.formal_resolver.' + budget, value):
             with pytest.raises(RuntimeFault) as failure:
                 provider.plan_resolver.resolve_facts(work())

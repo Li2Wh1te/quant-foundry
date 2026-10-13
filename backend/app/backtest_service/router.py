@@ -82,7 +82,10 @@ def dispatch(payload):
 
 @router.get("/capabilities")
 def capabilities(s: RunService = Depends(service)):
-    return s.capabilities()
+    try:
+        return s.capabilities()
+    except RuntimeFault as error:
+        raise fault(error) from None
 
 
 @router.post("/preflight", openapi_extra=RUN_BODY)
