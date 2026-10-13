@@ -19,6 +19,18 @@
 
 日历补齐已有输入可完成的代码：整周/月显式自然日覆盖产生交易序号、午休区间、下一/随后会话和稳定 reference；Rust 原 SessionCalendar 校验该投影。回调边界是源窗口相邻的逻辑时点，不添加未给出的竞价事实。Rust RuleBook 只读导出复用原官方目录，没有第二份 Python 规则/费用计算。佣金复用现有 Rust 校验；法定费用的具体产品/投资者 scope 仍缺。
 
+## 续修已完成的终装配
+
+`formal_assembly.py::assemble_run_plan` 已接到默认 resolver 的依赖齐备分支，按原 MarketBinding、日历、稳定身份和窄 ExecutionSessionInput 形成 AcceptedRunPlan。原 Rust RuleBook 校验 Product/ListingWindow/状态/实际限价，原 FeeCatalog 与捕获佣金组成两侧 FeeConfig；已知 false 权限保留 false，缺权限明确拒绝。调用方不能注入 fees/origin。会话事实最多 256 项分页，资源预算取捕获的 WorkerLimits，沿原 CurrentStore/context 和最终同一事务复核小事实 token。
+
+修正真实 DTO 边界：原 following_session 错放了第二个会话字符串；现在是与 next_session 同键的完整 CalendarSession，第二个会话仅作为 subsequent_session reference。跨月读取下一会话的整周/月自然日证明，并再次走 Rust 日历校验，不算部分月份或制造假日。
+
+完整零行动投影已直接接原 corporate_action coverage repository。逐开放会话、逐标的必须有全部适用行动类型的完整零证明；cash_dividend 一类的零证明不能推导 split/rights_issue 等也为零。非零事件的 public_ns、phase/sequence、raw mark 与投资者税务仍缺，保持单独拒绝。没有把 after_open_match 改成另一 phase，也没有给缺失税务填零。
+
+缺研究发布时间/锚点/完整集只关闭对应 route；各 source 的缺项分别公开。`execution_plan_assembly=fact_missing` 的 `scope.adapter=implemented` 说明终装配代码存在；missing 列出实际未产出的 market/execution inputs 等依赖，并不代表默认真实成功。默认 `_resolve` 仍不产出源解释和交易执行 inputs。
+
+末次本地验证：受影响 PG/CurrentStore/Arrow/IPC/Rust/研究/降采样/就绪回归 **171 通过**；其中 SQL 与终装配 **28 通过**，含最新同 rank 零行动证明拒绝及 DATA_CHANGED 检查。后者的窄 DTO 是明确隔离 oracle，真实 PG/原节点/IPC/Rust 按页消费，且相同数据下默认 resolver 前后仍拒绝。它不是默认 create_app/create_services 成功证书。独立安装 wheel 的 SDK **93 通过**，Rust workspace/core、fmt、clippy、共享契约/发布版本、根 unittest **29 通过**。
+
 读取使用有界只读 REPEATABLE READ、行/字节/时间/控制预算及事实指纹。`check_facts(..., connection=...)` 在最终事务使用现有事实表 SHARE 锁及同一 connection 重新核验。没有新批准台账、治理层、行情快照或生产写入。
 
 诊断区分 `available`、`fact_missing`、`fact_invalid`、`field_semantics_missing`、`adapter_missing`。无请求 capabilities 的可用项明确标明有界样本及 current-knowledge scope，不宣称全部标的/日期可运行；每次预检/绑定仍按模拟日知识边界重新读取。财务或成分的历史语义缺失不会关闭已验证的身份/日历能力。
@@ -47,12 +59,20 @@
 
 artifact **11787148539**（run 38340962781），SHA-256 `18a36e84be40a1319dc9af96d87560f148df1f62fb67660b070aae078e720465`。以上测量来自精确 job 的解码日志及 artifact 元数据；本地下载 ZIP 受代理 403，未声称已解析该 ZIP。后续桥接 head 的 CI 状态另在 PR/交接中逐项报告。
 
+## 接续 HEAD af47 的已核终态
+
+`af47b038fdfd0ea1952c23334af0279c2e28ddbc` 的 **5 workflows / 7 jobs 全成功**，见 [CI_AF47.json](CI_AF47.json)。Validate 38347275730/115131481521；Rust 38347275835/115131482202、115131482325；worker 38347275775/115131481571；UI 38347275764/115131481542；release 38347275805/115131552935、115131553278。真实 worker suite **26 通过**，保留原受支持文件系统门禁，未启用本地 overlay probe；artifact 11789672742，SHA-256 `c86ee7455a5d804d962767085e770bf5e9ca19bcbf13ded18eb24d4cad6d4b9a`。
+
+该 HEAD 的受影响 B2/60m 再测：12,096,000 来源事件、201,600 小时事件，准入/验收墙钟 **286.7879789409999s**、采样 cgroup 峰值 **682,680,320 B**，4 CPU/8 GiB 整组内独立 cash_conserved=true。artifact 11790755796，SHA-256 `5def3ffa90cb799375660c7f9b029d593d30eda040c0fe1aaacfe70374e02f26`。来自解码日志与 artifact 元数据，未本地解析 ZIP。仍是 full_B1_B4=false，未重复 B1/B3/B4，未将原 d765 的 214.469s 换标签。
+
+以上 CI 属于 af47；续修提交的精确 HEAD CI 另在同一草稿 PR/交接核验，不能用本节替代。
+
 ## 未通过条件及下一范围
 
-**SR-01 仅完成现有契约桥接；SR-02 默认成功链仍未关闭。** `SqlFormalPlanResolver.__call__` 目前在真实解析后明确拒绝，尚不产生完整 AcceptedRunPlan。终装配和默认 D05 生产 mapping 都以 `adapter_missing` 报出，不能改称纯粹 data_ready=false。完整默认 API→runner→受限 worker→结果正例仍未通过。
+**SR-01/SR-02 默认真实成功链仍未关闭。** `SqlFormalPlanResolver.__call__` 已有终装配分支，但当前源/执行事实生产者仍未定义，真实解析后按具体依赖拒绝。终装配代码和完整零行动投影已实现；正式研究 source mapping 的缺语义及非零行动适配仍分别保留。完整默认 API→runner→受限 worker→结果正例仍未通过，不能用隔离 DTO oracle、注入完整计划或成功 provider 代替。
 
 已确认确实未定义的事实包括 E50 价格币种/量单位、E70 provider_reported 到 raw/精确份额解释、Product 细分、ListingWindow/上市会话序号、实际上下限/fund_price_band/风险与盘中状态、费用/权限/税务 scope；E69 没可靠 public_ns/锚点，财务/估值/成分缺历史知识/集合语义。保持拒绝，不用 created_at、账户 metadata 标志或合成 MODEL 填这些空缺。
 
-达到默认真实成功所需最小新增生产者、源单位解释、涉及文件及迁移/采集/费用边界见 [FACT_SCOPE.md](FACT_SCOPE.md)，由父交用户选择。已知事实的桥接不再等待这些选择；未请求或执行额外生产操作。
+达到默认真实成功所需最小新增生产者、源单位解释、涉及字段/文件及迁移/采集/费用边界见 [FACT_SCOPE.md](FACT_SCOPE.md)。已给父两个窄选项：先单 Product/1–3 标的/raw 日线/完整零行动区间，再可选一个研究 kind。未知真实权限、raw/份额解释、ListingWindow/实际限价及非零行动语义不伪造；本次未执行这些新增生产者或生产操作。
 
 路径交集：变更在 S3 backtest_service、Rust 只读适配、SDK及其测试/构建/CI；仅读 R01 共有身份、日历、状态、公司行动契约，未修改其模型、迁移、CurrentStore 实现或生产状态。

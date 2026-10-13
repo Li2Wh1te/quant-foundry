@@ -203,6 +203,10 @@ def test_default_provider_reads_supported_contracts_and_keeps_undefined_semantic
     assert facts.official_rules and all(rule['origin']['kind'] == 'official' for rule in facts.official_rules)
     assert statuses(facts)['E70']['status'] == 'field_semantics_missing'
     assert statuses(facts)['execution_trade_days']['status'] == 'field_semantics_missing'
+    assembly = statuses(facts)['execution_plan_assembly']
+    assert assembly['status'] == 'fact_missing' and assembly['scope']['adapter'] == 'implemented'
+    assert 'resolved_market_projection' in assembly['missing']
+    assert statuses(facts)['research_E69']['scope']['requirement'] == 'optional_per_capability'
     with pytest.raises(RuntimeFault) as failure:
         provider._plan(work())
     assert json.loads(failure.value.diagnostic()['scope']['facts']) == list(facts.checks)
@@ -253,10 +257,15 @@ def test_default_calendar_projects_actual_month_week_lunch_and_following_session
     assert row['week'] == dict(id='2026-07-06', trading_day=1, total_trading_days=5)
     assert row['month'] == dict(id='2026-07', trading_day=4, total_trading_days=23)
     assert projected['next_session'] == 'SSE:2026-07-07'
-    assert projected['following_session'] == 'SSE:2026-07-08'
+    assert projected['following_session']['session']['key'] == projected['next_session']
+    assert projected['following_session']['date'] == '2026-07-07'
+    assert projected['subsequent_session'] == 'SSE:2026-07-08'
     assert len(row['bar_windows']) == 2
     assert int(row['bar_windows'][0]['end_ns']) < int(row['bar_windows'][1]['start_ns'])
     assert not statuses(facts)['E70']['available']
+    assert facts.action_projection is None
+    assert statuses(facts)['execution_corporate_actions']['status'] == 'fact_missing'
+    assert 'split' in statuses(facts)['execution_corporate_actions']['missing']
 
 
 def test_corporate_action_bridge_preserves_quantity_cash_phase_currency_and_rejects_missing_timing(formal_facts):
@@ -289,6 +298,38 @@ def test_corporate_action_bridge_preserves_quantity_cash_phase_currency_and_reje
     with pytest.raises(RuntimeFault) as failure:
         resolver.check_facts(work(), facts)
     assert failure.value.code == 'DATA_CHANGED'
+
+
+def test_next_account_session_requires_whole_following_month_facts_and_correct_dto(formal_facts):
+    seed(formal_facts)
+    calendar_month(formal_facts)
+    run = work()
+    run.config.update(start='2026-07-31', end='2026-07-31')
+    resolver = FormalProvider(SimpleNamespace(), store=formal_facts).plan_resolver
+    # Explicit August fixture coverage. Do not derive holidays from weekdays
+    # in the production adapter; every natural day has a real calendar row.
+    open_days = {date(2026, 8, d) for d in (3, 4, 5, 6, 7, 10, 11, 12, 13, 14,
+        17, 18, 19, 20, 21, 24, 25, 26, 27, 28, 31)}
+    def append_day(session, day):
+        CalendarFactRepository(session).append_session_fact(CalendarSessionFact(
+            calendar_id='SSE', session_date=day, is_open=day in open_days,
+            definition_version='sse-bootstrap-v1', registry_fact_id=UUID(REGISTRY_FACT_IDS['SSE']),
+            registry_version=1, definition_fact_id=UUID(DEFINITION_FACT_IDS['SSE']),
+            **common_provenance(content_hash=None)))
+    with Session(formal_facts.catalog.engine) as session:
+        for d in (1, 2, 3, 4): append_day(session, date(2026, 8, d))
+        session.commit()
+    assert not statuses(resolver.resolve_facts(run))['execution_calendar_assembly']['available']
+    with Session(formal_facts.catalog.engine) as session:
+        for d in range(5, 32): append_day(session, date(2026, 8, d))
+        # The Aug31 session's period is not the admitted following session;
+        # its September week does not have to be manufactured or admitted.
+        session.commit()
+    projection = resolver.resolve_facts(run).execution_calendar
+    assert projection['next_session'] == 'SSE:2026-08-03'
+    assert projection['following_session']['session']['key'] == projection['next_session']
+    assert projection['following_session']['month'] == dict(id='2026-08', trading_day=1, total_trading_days=21)
+    assert projection['subsequent_session'] == 'SSE:2026-08-04'
 
 
 def test_sql_snapshot_rejects_new_fact_or_quality_and_hash_drift(formal_facts):

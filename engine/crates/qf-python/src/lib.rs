@@ -10,6 +10,7 @@ use qf_core::types::{
 };
 use qf_core::{QfError, QfResult};
 
+mod formal_assembly;
 mod result_writer;
 mod runtime;
 
@@ -121,6 +122,10 @@ fn official_market_rules_json(py: Python<'_>) -> PyResult<String> {
             )
         })
     }))
+}
+#[pyfunction]
+fn compose_official_session_fact_json(py: Python<'_>, input: &str) -> PyResult<String> {
+    convert(py.detach(|| formal_assembly::compose(input)))
 }
 #[pyfunction]
 fn validate_formal_calendar_json(py: Python<'_>, input: &str) -> PyResult<String> {
@@ -353,6 +358,7 @@ fn _native(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(validate_commission_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(compose_official_fee_config_json, m)?)?;
     m.add_function(wrap_pyfunction!(official_market_rules_json, m)?)?;
+    m.add_function(wrap_pyfunction!(compose_official_session_fact_json, m)?)?;
     m.add_function(wrap_pyfunction!(validate_formal_calendar_json, m)?)?;
     m.add_function(wrap_pyfunction!(indicator_json, m)?)?;
     m.add("MAX_VIEW_ROWS", qf_core::data::views::MAX_VIEW_ROWS)?;

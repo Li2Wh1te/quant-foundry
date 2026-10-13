@@ -1,7 +1,7 @@
 //! D10 worker binding. Rust owns the clock, matcher, orders and account.
 mod host;
 mod source;
-mod spec;
+pub(super) mod spec;
 mod spool;
 use crate::{convert, python_error};
 use pyo3::prelude::*;

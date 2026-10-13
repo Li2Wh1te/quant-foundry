@@ -1,0 +1,123 @@
+{
+  "commit": "af47b038fdfd0ea1952c23334af0279c2e28ddbc",
+  "verified_utc": "2026-10-13T05:12:29Z",
+  "workflows": [
+    {
+      "id": 38347275764,
+      "name": "S3 run UI",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38347275730,
+      "name": "Validate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38347275775,
+      "name": "S3 worker isolation",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38347275835,
+      "name": "S3 Rust contracts",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 38347275805,
+      "name": "S3 full integration and release",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "jobs": [
+    {
+      "id": 115131481521,
+      "name": "Test and validate release metadata",
+      "run_id": 38347275730,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131482202,
+      "name": "Core without Python or database client",
+      "run_id": 38347275835,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131482325,
+      "name": "Python 3.12 wheel, numerics, contracts and shared tests",
+      "run_id": 38347275835,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131481571,
+      "name": "Real runner to sibling worker and bounded parameter queue",
+      "run_id": 38347275775,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131481542,
+      "name": "Browser run lifecycle and real isolated service",
+      "run_id": 38347275764,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131552935,
+      "name": "Affected full B2 60m in 4 CPU and 8 GiB group",
+      "run_id": 38347275805,
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "id": 115131553278,
+      "name": "Native Linux arm64 wheel install and smoke",
+      "run_id": 38347275805,
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ],
+  "benchmark": {
+    "sha": "af47b038fdfd0ea1952c23334af0279c2e28ddbc",
+    "run": 38347275805,
+    "job": 115131552935,
+    "load": "B2",
+    "frequency": "60m",
+    "passed": true,
+    "full_B1_B4": false,
+    "source_rows": 12096000,
+    "completed_events": 201600,
+    "wall_with_admission_and_acceptance_reads_seconds": 286.7879789409999,
+    "sampled_cgroup_peak_bytes": 682680320,
+    "cash_conserved": true,
+    "counts": {
+      "equity": 253,
+      "orders": 90,
+      "trades": 45,
+      "positions": 5,
+      "records": 256,
+      "logs": 0
+    },
+    "artifact": {
+      "id": 11790755796,
+      "size_in_bytes": 3173370,
+      "digest": "sha256:5def3ffa90cb799375660c7f9b029d593d30eda040c0fe1aaacfe70374e02f26"
+    },
+    "provenance": "Decoded exact job logs and artifact metadata; artifact ZIP not parsed locally.",
+    "proof_scope": "Affected full B2/60m only; preserved B1/B3/B4 were not repeated."
+  },
+  "worker": {
+    "job": 115131481571,
+    "tests": 26,
+    "seconds": 186.229,
+    "artifact": 11789672742,
+    "digest": "sha256:c86ee7455a5d804d962767085e770bf5e9ca19bcbf13ded18eb24d4cad6d4b9a"
+  }
+}

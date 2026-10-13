@@ -7,7 +7,7 @@ ETF Product, raw prices, share conversion, or research publication time.
 """
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time, timedelta
 import json
 import math
@@ -136,6 +136,13 @@ class ResolvedFormalFacts:
     official_rules: tuple
     execution_calendar: object
     token: str
+    # Code-owned projections of the existing S3 contracts. No REST/config or
+    # arbitrary JSON metadata may supply these missing producer outputs.
+    market: object = None
+    execution_inputs: object = None
+    action_projection: object = None
+    research: tuple = ()
+    reference_indices: tuple = ()
 
 
 class SqlFormalPlanResolver:
@@ -171,10 +178,12 @@ class SqlFormalPlanResolver:
 
     def __call__(self, work):
         facts = self.resolve_facts(work)
-        # There is no producer for these explicitly named execution fields in
-        # the current registry. The SQL bridge remains useful independently;
-        # its successes must not be advertised as an executable run plan.
-        raise FormalResolutionFault(list(facts.checks))
+        from .formal_assembly import assemble_run_plan, missing_plan_dependencies
+        if missing_plan_dependencies(facts):
+            raise FormalResolutionFault(list(facts.checks))
+        return assemble_run_plan(work, facts,
+            check_facts=lambda current, *, connection=None: self.check_facts(
+                current, facts, connection=connection))
 
     def check_facts(self, work, accepted, *, connection=None):
         current = self.resolve_facts(work, connection=connection)
@@ -307,10 +316,15 @@ class SqlFormalPlanResolver:
         official = self._attempt('official_market_rules', self._official_rules, checks,
             scope=dict(kind='offline_catalog_only'))
         checks.extend(self._execution_gaps(config['frequency']))
-        token = canonical_hash(dict(config=config, rows=budget.parts, checks=checks, official_rules=official))
-        return ResolvedFormalFacts(tuple(checks), tuple(identities), tuple(calendars),
+        from .formal_assembly import missing_plan_dependencies, zero_action_projection
+        action_projection, action_check = zero_action_projection(actions, execution_calendar, symbols)
+        checks = [action_check if check['binding'] == 'execution_corporate_actions' else check for check in checks]
+        facts = ResolvedFormalFacts(tuple(checks), tuple(identities), tuple(calendars),
             tuple(rules), tuple(trading_status), tuple(actions), tuple(commissions),
-            tuple(official or ()), execution_calendar, token)
+            tuple(official or ()), execution_calendar, '', action_projection=action_projection)
+        checks[-1]['missing'] = list(missing_plan_dependencies(facts))
+        token = canonical_hash(dict(config=config, rows=budget.parts, checks=checks, official_rules=official))
+        return replace(facts, token=token)
 
     @staticmethod
     def _official_rules():
@@ -386,6 +400,19 @@ class SqlFormalPlanResolver:
             day += timedelta(days=1)
         if len(following) < 2:
             raise ValueError('next_open_session_coverage_missing')
+        following.sort()
+        # The worker needs the FIRST session after the run as a CalendarSession,
+        # not the key of the second one. Its week/month ordinals also require
+        # explicit complete natural-day coverage; never count a partial month.
+        next_day = following[0]
+        next_month = (next_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+        next_lower = min(next_day.replace(day=1), next_day - timedelta(days=next_day.weekday()))
+        next_upper = max(next_month - timedelta(days=1), next_day + timedelta(days=6-next_day.weekday()))
+        day = next_lower
+        while day <= next_upper:
+            if day not in selected:
+                selected[day] = cls._calendar(session, calendar_id, day, cutoff)
+            day += timedelta(days=1)
         open_days = sorted(day for day, value in selected.items() if value['fact'].is_open)
         def key(day):
             return calendar_id + ':' + day.isoformat()
@@ -395,7 +422,7 @@ class SqlFormalPlanResolver:
             return delta.days * 86400 * 1000000000 + delta.seconds * 1000000000 + delta.microseconds * 1000
         rows = []
         for day in open_days:
-            if not start <= day <= end:
+            if not start <= day <= end and day != next_day:
                 continue
             value = selected[day]
             intervals = value['intervals']
@@ -418,11 +445,12 @@ class SqlFormalPlanResolver:
                           total_trading_days=len(week_days)),
                 month=dict(id=day.isoformat()[:7], trading_day=month_days.index(day)+1,
                            total_trading_days=len(month_days))))
-        if not rows:
+        if not any(start <= date.fromisoformat(row['date']) <= end for row in rows):
             raise ValueError('open_run_sessions_missing')
         from quantfoundry import _native
         rows = json.loads(_native.validate_formal_calendar_json(encoded(rows).decode()))
-        return dict(calendar=rows, next_session=key(following[0]), following_session=key(following[1]),
+        return dict(calendar=rows[:-1], next_session=key(next_day), following_session=rows[-1],
+            subsequent_session=key(following[1]),
             reference=calendar_id + ':' + canonical_hash([value['fact'].content_hash for _, value in sorted(selected.items())]))
 
     @staticmethod
@@ -461,11 +489,23 @@ class SqlFormalPlanResolver:
     @staticmethod
     def _actions(session, iid, day, cutoff):
         from app.data_ingestion.repositories.corporate_action import CorporateActionRepository
+        from app.data_ingestion.models.corporate_action import CorporateActionCoverageFact
         repository = CorporateActionRepository(session)
         coverage = repository.coverage((iid,), day, day, cutoff=cutoff, knowledge_as_of=cutoff)
         if not coverage:
             return None
+        # The shared repository picks a latest assertion per action family.
+        # A tied latest rank is ambiguous even when one row happens to be zero;
+        # do not let physical SQL order manufacture complete-zero acceptance.
+        candidates = tuple(session.scalars(select(CorporateActionCoverageFact).where(
+            CorporateActionCoverageFact.instrument_id == iid,
+            CorporateActionCoverageFact.start_date <= day, CorporateActionCoverageFact.end_date >= day,
+            CorporateActionCoverageFact.known_at <= cutoff, CorporateActionCoverageFact.observed_at <= cutoff)))
         for row in coverage:
+            tied = [candidate for candidate in candidates if candidate.action_type == row.action_type
+                    and (candidate.known_at, candidate.observed_at) == (row.known_at, row.observed_at)]
+            if len(tied) != 1:
+                raise ValueError('corporate_action_coverage_ambiguous')
             if (row.status != 'complete' or row.event_count is None or not row.source_revision
                     or not row.known_at or not row.observed_at or not row.evidence or not row.validation_rule):
                 raise ValueError('corporate_action_coverage_incomplete')
@@ -500,11 +540,18 @@ class SqlFormalPlanResolver:
         result.append(state('execution_fee_scope', 'field_semantics_missing', missing=(
             'product_and_investor_kind', 'accepted_trading_permissions',
             'sale_cash_and_dividend_tax_timing')))
+        result.append(state('execution_corporate_actions', 'fact_missing', missing=(
+            'all_required_action_family_coverage',)))
         result.append(state('research_publication', 'field_semantics_missing', missing=(
             'historical_publication_time', 'historical_effective_sets', 'adjustment_public_time_and_anchor')))
-        result.append(state('execution_plan_assembly', 'adapter_missing', missing=(
-            'source_and_trade_day_producers_to_AcceptedRunPlan',
-            'formal_research_source_mapping_to_D05_bindings')))
+        from .research_gateway import current_research_bindings
+        for binding in current_research_bindings():
+            result.append(state(binding.name, 'field_semantics_missing', missing=(binding.unavailable_reason,),
+                scope=dict(research_kind=binding.kind, requirement='optional_per_capability')))
+        result.append(state('execution_plan_assembly', 'fact_missing', missing=(
+            'resolved_market_projection', 'resolved_execution_inputs',
+            'resolved_action_projection'), scope=dict(adapter='implemented',
+                acceptance='requires_all_execution_dependencies', research='optional_per_capability')))
         return result
 
     def capabilities(self):

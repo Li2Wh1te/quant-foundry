@@ -62,7 +62,7 @@ pub enum Source {
         request: DataRequest,
     },
 }
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Fact {
     pub instrument: Instrument,
