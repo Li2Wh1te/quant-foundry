@@ -28,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   full:
-    name: Full B1-B4 in 4 CPU and 8 GiB group
+    name: ${{ github.head_ref == 'codex/s3-review-default-runtime' && 'Affected full B2 60m in 4 CPU and 8 GiB group' || 'Full B1-B4 in 4 CPU and 8 GiB group' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
     steps:
@@ -70,6 +70,10 @@ jobs:
           PY
       - uses: actions/cache@v4
         id: completed
+        # This review changes hourly count selection. Keep the existing full
+        # evidence; its affected B2/60m rerun is explicitly partial, never a
+        # complete-source cache entry or a replacement B1-B4 certificate.
+        if: github.head_ref != 'codex/s3-review-default-runtime'
         with:
           # A small result only. No source data, database or fixture is cached.
           path: ${{ runner.temp }}/s3-final-evidence/final-result.json
@@ -84,12 +88,14 @@ jobs:
           QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-final
           QF_S3_RUNTIME_EVIDENCE: ${{ runner.temp }}/s3-final-evidence
           QF_S3_FINAL: '1'
+          QF_S3_FINAL_CASES: ${{ github.head_ref == 'codex/s3-review-default-runtime' && 'B2' || '' }}
+          QF_S3_FINAL_FREQUENCIES: ${{ github.head_ref == 'codex/s3-review-default-runtime' && '60m' || '' }}
           QF_S3_CI_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: bash scripts/test_s3_runtime.sh
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: s3-full-integration-x86_64
+          name: ${{ github.head_ref == 'codex/s3-review-default-runtime' && 's3-review-b2-60m-x86_64' || 's3-full-integration-x86_64' }}
           path: |
             ${{ runner.temp }}/s3-final-evidence/
             ${{ runner.temp }}/s3-final/wheels/

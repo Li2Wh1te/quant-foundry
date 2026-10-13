@@ -697,14 +697,22 @@ def _main():
     selection = os.environ.get("QF_S3_FINAL_CASES")
     selected = set(selection.split(",")) if selection else None
     assert selected is None or selected <= set(x.name for x in FULL)
+    frequency_selection = os.environ.get('QF_S3_FINAL_FREQUENCIES')
+    selected_frequencies = set(frequency_selection.split(',')) if frequency_selection else None
+    assert selected_frequencies is None or selected_frequencies <= {'1d', '1m', '60m', 'tick'}
+    def frequencies(load):
+        declared = ['1m', '60m'] if load.bars == 240 else ['tick'] if load.ticks else ['1d']
+        return [f for f in declared if selected_frequencies is None or f in selected_frequencies]
     loads = [
-        x for x in (SMOKE if smoke else FULL) if selected is None or x.name in selected
+        x for x in (SMOKE if smoke else FULL) if (selected is None or x.name in selected) and frequencies(x)
     ]
+    assert loads, 'the declared workload/frequency selection must not be empty'
     evidence = dict(
         production_executed=False,
         full_B1_B4=False,
         mode="smoke" if smoke else "full",
         selected_cases=[x.name for x in loads],
+        selected_frequencies=None if selected_frequencies is None else sorted(selected_frequencies),
         passed=False,
         architecture=platform.machine(),
         execution=dict(ci_run_url=os.environ.get("QF_S3_CI_RUN_URL")),
@@ -790,12 +798,7 @@ def _main():
             )
             for load in loads:
                 construction = prepare(store, load)
-                frequencies = (
-                    ["1m", "60m"]
-                    if load.bars == 240
-                    else ["tick"] if load.ticks else ["1d"]
-                )
-                for frequency in frequencies:
+                for frequency in frequencies(load):
                     provider = Provider(store, load, frequency, process, telemetry)
                     services = MeasuredServices(provider.binding, results)
                     use_limits = (
@@ -1008,10 +1011,10 @@ def _main():
                         flush=True,
                     )
             passed = len(evidence["cases"]) == sum(
-                2 if x.bars == 240 else 1 for x in loads
+                len(frequencies(x)) for x in loads
             ) and all(c["passed"] for c in evidence["cases"])
             evidence.update(
-                passed=passed, full_B1_B4=passed and not smoke and selected is None
+                passed=passed, full_B1_B4=passed and not smoke and selected is None and selected_frequencies is None
             )
             if not passed:
                 raise AssertionError(
