@@ -323,7 +323,7 @@ def test_stateless_cursors_bind_conditions_owner_dependencies_and_quality_withou
     assert caught.value.code == 'DATA_CHANGED'
 
 
-@pytest.mark.parametrize('change', ['quality', 'overflow', 'mapping', 'maintenance'])
+@pytest.mark.parametrize('change', ['quality', 'overflow', 'mapping', 'maintenance', 'coverage'])
 def test_output_boundary_discards_late_dependency_changes(market, monkeypatch, change):
     client, current, _service = market
     publish(current)
@@ -342,6 +342,9 @@ def test_output_boundary_discards_late_dependency_changes(market, monkeypatch, c
                         {'summary': '{"overflow_restriction":{"blocking_objects":1}}'})
                 elif change == 'mapping':
                     c.execute(text("UPDATE instrument_code_mappings SET evidence='corrected synthetic oracle'"))
+                elif change == 'coverage':
+                    c.execute(text("UPDATE data_store_entry_status SET summary_json=:summary WHERE entry_id='E67'"),
+                        {'summary': '{"full_coverage":{"version":1,"complete":false}}'})
                 else:
                     c.execute(text("UPDATE data_store_legacy_maintenance SET phase='rebuilding'"))
         return result
@@ -360,6 +363,8 @@ def test_read_budget_cancellation_auth_and_no_uninstalled_endpoints(market):
     assert client.post('/api/admin/market/instruments/resolve', headers=HEADERS, json={}).status_code == 405
     assert client.get('/api/admin/market/instruments', headers=HEADERS).status_code == 404
     assert client.get('/api/admin/market/instruments/resolve?symbol=%2Fetc%2Fpasswd', headers=HEADERS).status_code == 422
+    for injected in ('dataset=E51', 'source=tonghuashun', 'allow_partial=true', 'sql=select', 'symbol=OTHER.SH'):
+        assert client.get('/api/admin/market/instruments/resolve?symbol=510300.SH&' + injected, headers=HEADERS).status_code == 422
     with service.read_scope((ETF_CATALOG,), conditions={}) as scope:
         with pytest.raises(DataStoreError):
             scope.read(ETF_CATALOG, replace(query(service), require_qualified=False))

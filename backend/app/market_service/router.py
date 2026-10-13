@@ -17,6 +17,12 @@ from .service import MarketReadService, create_market_service
 router = APIRouter(prefix='/api/admin/market', tags=['admin-market'])
 
 
+def _business_query(request: Request, allowed: set[str]):
+    params = request.query_params.multi_items()
+    if any(name not in allowed for name, _value in params) or len(params) != len({name for name, _value in params}):
+        raise DataStoreError('INVALID_VALUE')
+
+
 def get_market_service(request: Request, session: Session = Depends(get_db_session)) -> MarketReadService:
     # Same cancellation bridge as the existing CurrentStore route, also safe
     # when the kernel invokes it from its DuckDB watchdog thread.
@@ -32,19 +38,21 @@ def get_market_service(request: Request, session: Session = Depends(get_db_sessi
 
 
 @router.get('/capabilities', response_model=CapabilitiesResult)
-def capabilities(response: Response, service: MarketReadService = Depends(get_market_service)):
+def capabilities(request: Request, response: Response, service: MarketReadService = Depends(get_market_service)):
     response.headers['Cache-Control'] = 'no-store'
     try:
+        _business_query(request, set())
         return service.capabilities()
     except (MarketError, DataStoreError, SQLAlchemyError) as error:
         raise http_error(error) from None
 
 
 @router.get('/instruments/resolve', response_model=InstrumentResolution)
-def resolve(response: Response, symbol: Annotated[str, Query(min_length=1, max_length=64)],
+def resolve(request: Request, response: Response, symbol: Annotated[str, Query(min_length=1, max_length=64)],
             asset_type: AssetType = 'etf', service: MarketReadService = Depends(get_market_service)):
     response.headers['Cache-Control'] = 'no-store'
     try:
+        _business_query(request, {'symbol', 'asset_type'})
         return service.resolve(symbol, asset_type)
     except (MarketError, DataStoreError, SQLAlchemyError) as error:
         raise http_error(error) from None

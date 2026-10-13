@@ -33,6 +33,7 @@ from app.data_store.merge import restore_row
 from app.data_store.readers import Page, Query
 from app.data_store.schema import fingerprint
 from app.data_store.storage import CurrentStore
+from app.data_store.values import control_json
 from app.instruments.domain import InstrumentCodeMapping, order_mapping_segments
 
 from .bindings import BINDINGS, ETF_CATALOG, ETF_DAILY, ETF_FACTORS, EXCHANGE_CALENDAR, MarketBinding
@@ -275,13 +276,22 @@ class MarketReadService:
             raise DataStoreError('CONTROL_BUDGET_EXCEEDED')
         return rows
 
-    def _capture(self, store, keys, identity, read_at, *, final=False) -> dict:
+    def _capture(self, store, keys, identity, read_at, *, deadline: float, final=False) -> dict:
         with store.locks.read_many([self.bindings[k].entry.spec.name for k in keys],
                 timeout_ms=store.limits.lock_timeout_ms, cancelled=self.cancelled):
             isolation = 'READ COMMITTED' if final else 'REPEATABLE READ'
             with self.engine.connect().execution_options(isolation_level=isolation) as connection, connection.begin():
                 with Session(bind=connection) as session:
-                    session.execute(text("SET LOCAL statement_timeout='5000ms'"))
+                    def checkpoint():
+                        if self.cancelled():
+                            raise DataStoreError('OPERATION_CANCELLED')
+                        remaining = int((deadline - time.monotonic()) * 1000)
+                        if remaining <= 0:
+                            raise DataStoreError('QUERY_TIMEOUT')
+                        session.execute(text("SELECT set_config('statement_timeout',:limit,true)"),
+                            {'limit': str(min(5000, remaining))})
+
+                    checkpoint()
                     if final:
                         session.execute(text("SET LOCAL lock_timeout='500ms'"))
                         session.execute(text('LOCK TABLE data_store_datasets,data_store_files,data_store_issues,'
@@ -291,8 +301,7 @@ class MarketReadService:
                             session.execute(text('LOCK TABLE instruments,instrument_code_mappings IN SHARE MODE'))
                     states = {}
                     for key in keys:
-                        if self.cancelled():
-                            raise DataStoreError('OPERATION_CANCELLED')
+                        checkpoint()
                         binding = self.bindings[key]
                         admission = require_request_ready(session, binding.entry)
                         state = session.execute(text('SELECT generation,schema_id,rule FROM data_store_datasets '
@@ -303,7 +312,8 @@ class MarketReadService:
                         summary = session.execute(text('SELECT summary_json FROM data_store_entry_status '
                             'WHERE entry_id=:e'), {'e': binding.entry.id}).scalar_one_or_none()
                         try:
-                            overflow = json.loads(summary).get('overflow_restriction', {}) if summary else {}
+                            status = json.loads(summary) if summary else {}
+                            overflow = status.get('overflow_restriction', {})
                         except (ValueError, AttributeError, TypeError):
                             raise DataStoreError('CATALOG_UNAVAILABLE') from None
                         # Existing xmin-based current fingerprint includes every
@@ -311,9 +321,13 @@ class MarketReadService:
                         states[key] = {'generation': str(state['generation']),
                             'schema': state['schema_id'], 'rule': state['rule'],
                             'phase': admission.phase, 'overflow': overflow,
+                            'coverage_proof': status.get('full_coverage'),
+                            'coverage_pending': status.get('coverage_pending'),
                             'quality': inventory_revision(session, 'issues', dataset=binding.entry.spec.name),
                             'binding': binding.contract_token}
+                    checkpoint()
                     mappings = self._identities(session, identity, read_at) if identity else None
+                    checkpoint()
                     return {'datasets': states, 'identity': mappings}
 
     @contextmanager
@@ -330,9 +344,13 @@ class MarketReadService:
             raise MarketError('CAPABILITY_UNAVAILABLE')
         read_at = datetime.now(timezone.utc)
         deadline = time.monotonic() + 30
+        # Freeze the small declared query identity before any I/O or callbacks.
+        conditions = json.loads(control_json(conditions, max_bytes=16 * 1024))
+        if type(conditions) is not dict:
+            raise DataStoreError('INVALID_VALUE')
         with CurrentStore(self.engine, self.settings.data_store_root,
                           cursor_key=self.signing_key, initialize=False) as store:
-            captured = self._capture(store, keys, identity, read_at)
+            captured = self._capture(store, keys, identity, read_at, deadline=deadline)
             scope = MarketReadScope(self, store, keys, conditions, identity, captured, read_at, deadline)
             try:
                 previous = _cursor(self.signing_key, cursor, scope.condition) if cursor else None
@@ -344,7 +362,7 @@ class MarketReadService:
                 yield scope
                 scope.check()
                 try:
-                    latest = self._capture(store, keys, identity, read_at, final=True)
+                    latest = self._capture(store, keys, identity, read_at, deadline=deadline, final=True)
                 except (DataStoreError, MarketError) as error:
                     if error.code in {'DATA_STORE_REBUILDING', 'DATASET_MISSING', 'REBUILD_REQUIRED',
                                       'IDENTITY_MAPPING_UNAVAILABLE'}:
