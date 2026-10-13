@@ -272,7 +272,7 @@ def test_corporate_action_bridge_preserves_quantity_cash_phase_currency_and_reje
             cash_date_rule='tushare_fund_div_cash_date@1', timing_rule='after_open_match@1',
             valid_from=DAY + timedelta(days=1), valid_to=DAY + timedelta(days=2), source='isolated',
             source_revision='synthetic-cash-fact', known_at=KNOWN, observed_at=KNOWN,
-            evidence=dict(reference='isolated-action-evidence'), quality='complete')
+            evidence=dict(reference='isolated-action-evidence', raw=dict(cash_amount=0.123456789012)), quality='complete')
         session.add(event)
         session.commit()
     resolver = FormalProvider(SimpleNamespace(), store=formal_facts).plan_resolver
@@ -281,6 +281,7 @@ def test_corporate_action_bridge_preserves_quantity_cash_phase_currency_and_reje
     assert action['cash_effective_phase'] == 'after_open_match' and action['currency'] == 'CNY'
     assert action['cash_amount_per_unit'] == Decimal('0.123456789012')
     assert action['quantity_ratio'] == Decimal('1.25')
+    assert action['evidence']['raw']['cash_amount'] == 0.123456789012
     with Session(formal_facts.catalog.engine) as session:
         session.scalar(select(CorporateActionFact)).cash_effective_phase = None
         session.commit()

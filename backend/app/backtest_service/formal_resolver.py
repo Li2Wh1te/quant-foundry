@@ -10,6 +10,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 import json
+import math
 import time as clock
 from types import SimpleNamespace
 from zoneinfo import ZoneInfo
@@ -61,6 +62,25 @@ def _row_payload(item):
     return item
 
 
+def _fingerprint_payload(item):
+    """Retain original JSON evidence; do not reinterpret it as money or units.
+
+    SQL Decimal/date/UUID fields use the existing canonical serializer. Raw
+    evidence JSON can legitimately contain finite JSON numbers even though
+    the rule/price domain resolvers reject float-valued computational facts.
+    """
+    from app.instruments.rules.contracts import canonical_payload
+    if isinstance(item, float):
+        if not math.isfinite(item):
+            raise ValueError('non_finite_fact_evidence')
+        return item
+    if isinstance(item, dict):
+        return {key: _fingerprint_payload(value) for key, value in item.items()}
+    if isinstance(item, (tuple, list)):
+        return [_fingerprint_payload(value) for value in item]
+    return canonical_payload(item)
+
+
 class FactReadBudget:
     """Budget every ORM SELECT, including reads performed by shared repositories.
 
@@ -95,8 +115,7 @@ class FactReadBudget:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过行预算')
         # Canonical conversion also covers UUIDs, dates, Decimal and PG ranges.
         payload = [_row_payload(item) for item in result.data]
-        from app.instruments.rules.contracts import canonical_payload
-        payload = canonical_payload(payload)
+        payload = _fingerprint_payload(payload)
         size = len(encoded(payload))
         self.bytes += size
         if self.bytes > FACT_BYTES:
