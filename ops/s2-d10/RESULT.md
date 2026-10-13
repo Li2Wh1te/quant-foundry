@@ -1,6 +1,6 @@
 # S2-D10 RESULT
 
-交付：[草稿 PR183](https://github.com/Li2Wh1te/quant-foundry/pull/183)，接缝收口代码提交 `20c2954ae0d7df8e7326c90a65a7bce641f5e899`。最终 head CI 交父核验；D10 未合并。
+交付：[草稿 PR183](https://github.com/Li2Wh1te/quant-foundry/pull/183)，接缝收口代码提交 `20c2954ae0d7df8e7326c90a65a7bce641f5e899`。最终 head 全部 CI 正在核验，以 PR 的精确 head checks 为准；D10 未合并。
 
 当前状态：D10 自身实现、合成隔离验证及模拟 UI 已完成；父追加授权的入口与全局能力窄修已收口，当前 `code_ready=true`，`live_verified=false`，`deployed=false`。本包交草稿 PR，合并仍交父；没有部署、生产访问、供应商调用或真实用户/行情数据读取复制。
 
@@ -26,6 +26,8 @@ E70 口径依据（显示契约推断，未改 R01 正式模型）：[官方 fun
 | 前端 TypeScript/build | **通过**；现有大 bundle 提示仍在 |
 | 根测试 / release check | **29 passed**；版本一致 |
 | 模拟 Chromium | **14 组交互与限制检查、3 张截图**；[UI_RESULT.json](UI_RESULT.json)。三页、稳定键、回放延迟/取消、资料失败、网络标旧、DATA_CHANGED、401/403 及窄屏均验证，无旧详情价格/因子请求和 page error |
+
+远端 CI：head `4171597` 的 Validate、S3 run UI、S3 Rust contracts 通过，S3 worker isolation 的 OOM/墙钟混合用例失败；[原始失败证据](CI_FAILURE.json) 保留具体 run/job/artifact 与成功基线。与 PR182 已通过 head 比较，runtime、wheel 源码、用例和 CI 脚本均未改动，但不能仅据此宣称偶发。按父追加授权，仅给真实 Docker 用例增加命名 subtest 与有界原始 inspect 状态记录；不替换成功结果、不放宽断言/资源限制、不改 S3 生产判定。新 head 的完整 CI 仍须实际通过。
 
 截图：[1440×900](screenshots/1440x900.png)、[1024×768](screenshots/1024x768.png)、[390px](screenshots/390px.png)。浏览器成功数据全部来自明确标注的人工夹具/模拟接口，不能替代“默认正式服务→浏览器”的真实联调。test-only overlay 探针只验证隔离存储机制，不证明生产挂载。所选环境只沿用原会话，没有新 agent/开发会话或 fast。
 
