@@ -666,6 +666,7 @@ assert not any(n.startswith(('app.backtesting','app.strategy_protocol')) for n i
         services.readiness.refresh()
         supervisor = RunnerSupervisor(repository, process, services, lease_seconds=10)
         source = """import time
+from decimal import Decimal
 from quantfoundry.api import (order, LimitOrder, get_price, get_fundamentals,
                              get_valuation, get_industry, get_instruments, get_index_stocks)
 def before_trading_start(c):
@@ -676,16 +677,16 @@ def handle_data(c, data):
     frame=get_price(['A.SH'],count=2,fields=['close'])
     assert list(frame.columns)==['security','time_ns','close']
     assert all(type(value).__name__=='Decimal' for value in frame['close'])
-    assert str(get_fundamentals(['A.SH'],fields=['net_profit']).iloc[0]['net_profit'])=='120'
-    assert str(get_valuation(['A.SH'],fields=['pe_ratio']).iloc[0]['pe_ratio'])=='12'
+    assert get_fundamentals(['A.SH'],fields=['net_profit']).iloc[0]['net_profit']==Decimal('120')
+    assert get_valuation(['A.SH'],fields=['pe_ratio']).iloc[0]['pe_ratio']==Decimal('12')
     assert get_industry(['A.SH']).iloc[0]['industry_code']=='I1'
     assert get_instruments(['A.SH']).iloc[0]['name']=='Fixture A'
     assert get_index_stocks('REF')==('A.SH',)
     reference=get_price('REF',count=1)
-    assert str(reference.iloc[0]['close'])=='3000.125'
+    assert reference.iloc[0]['close']==Decimal('3000.125')
     assert reference.attrs['qf']['units']['close']=='index_points'
     adjusted=get_price(['A.SH'],count=2,adjustment='post')
-    assert all(str(value)=='20' for value in adjusted['close'])
+    assert all(value==Decimal('20') for value in adjusted['close'])
     time.sleep(c.params.get('callback_pause_seconds',.65))
 """
         self.account, self.revision = catalogue(self.engine, source)
