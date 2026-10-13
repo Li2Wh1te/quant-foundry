@@ -59,7 +59,7 @@ import pathlib,shutil,sys
 repo,build,target=map(pathlib.Path,sys.argv[1:])
 for p in ['VERSION','backend/app','backend/alembic.ini','sdk/python/requirements-build.lock','sdk/python/requirements-runtime.lock',
           'sdk/python/tests/support_sdk.py','ops/s3-d12','ops/s3-d15/isolated_server.py','tests/s3_runtime_suite.py',
-          'ops/s3-d16', 'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','tests/s3_formal_fixtures.py','tests/s3_final_suite.py','ops/s3-d18','examples/strategies','examples/http_workflow.py','docs/backtesting']:
+          'ops/s3-d16', 'tests/s3_runservice_suite.py','tests/s3_cli_suite.py','tests/s3_cli_fixtures.py','tests/s3_formal_fixtures.py','tests/s3_research_fixtures.py','tests/s3_final_suite.py','ops/s3-d18','examples/strategies','examples/http_workflow.py','docs/backtesting']:
     dest=target/p;dest.parent.mkdir(parents=True,exist_ok=True)
     if (repo/p).is_dir():shutil.copytree(repo/p,dest,ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
     else:shutil.copyfile(repo/p,dest)

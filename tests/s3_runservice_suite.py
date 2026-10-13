@@ -687,6 +687,7 @@ def handle_data(c, data):
     assert reference.attrs['qf']['units']['close']=='index_points'
     adjusted=get_price(['A.SH'],count=2,adjustment='post')
     assert all(value==Decimal('20') for value in adjusted['close'])
+    print('isolated-research-query-complete')
     time.sleep(c.params.get('callback_pause_seconds',.65))
 """
         self.account, self.revision = catalogue(self.engine, source)
@@ -799,6 +800,7 @@ def handle_data(c, data):
                 supervisor.step()
                 task = supervisor.tasks.get(changed['run_id'])
                 if (not changed_quality and task is not None and task.binding is not None
+                        and task.output_bytes >= len('isolated-research-query-complete')
                         and research_name in task.binding.context.dependencies):
                     with self.engine.begin() as connection:
                         connection.execute(text('INSERT INTO data_store_issues '
