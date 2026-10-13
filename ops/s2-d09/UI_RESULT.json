@@ -1,0 +1,43 @@
+{
+  "code_ready_browser": true,
+  "live_verified": false,
+  "deployed": false,
+  "fixture": "121 synthetic E67 records and explicit E68 dates via real formal pipeline",
+  "cases": [
+    "default formal directory and independent overview, with old market requests blocked",
+    "server search finds final-page ETF and typed searches cancel old conditions",
+    "three pages, backward paging and browser return preserve position/focus without persistent cursors",
+    "exchange keyboard filter and unsupported listing filter explain limitations",
+    "formal calendar distinguishes records and unknown dates; keyboard/modal focus is contained",
+    "published future facts survive month/year navigation",
+    "legacy symbol link resolves through D08 and formal profile without price/factor prerequisites",
+    "metadata profile without a trusted mapping remains useful and never enables cross-code history",
+    "late older filter response cannot repopulate a changed selection",
+    "network failure retains only explicitly stale same-condition data and disables paging",
+    "changed-data error withdraws rows and continuation rather than keeping stale data",
+    "interactive 1440x900 list/profile/calendar screenshot set",
+    "interactive 1024x768 list/profile/calendar screenshot set",
+    "interactive 390x844 list/profile/calendar screenshot set",
+    "403 from calendar withdraws data from the already mounted catalog panel too",
+    "identity denial withdraws the profile and cannot automatically retry a source-scoped profile",
+    "401 triggers existing login flow and clears market content"
+  ],
+  "screenshots": [
+    "list-1440.png",
+    "profile-1440.png",
+    "calendar-1440.png",
+    "list-1024.png",
+    "profile-1024.png",
+    "profile-capabilities-1024.png",
+    "calendar-1024.png",
+    "list-390.png",
+    "list-table-390.png",
+    "profile-390.png",
+    "profile-capabilities-390.png",
+    "calendar-390.png",
+    "calendar-detail-390.png"
+  ],
+  "market_requests": 133,
+  "legacy_requests": 0,
+  "page_errors": []
+}

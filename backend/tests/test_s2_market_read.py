@@ -361,7 +361,8 @@ def test_read_budget_cancellation_auth_and_no_uninstalled_endpoints(market):
     publish(current)
     assert client.get('/api/admin/market/capabilities').status_code == 401
     assert client.post('/api/admin/market/instruments/resolve', headers=HEADERS, json={}).status_code == 405
-    assert client.get('/api/admin/market/instruments', headers=HEADERS).status_code == 404
+    # D09 now registers the real catalog projection; unknown views stay absent.
+    assert client.get('/api/admin/market/not-a-market-view', headers=HEADERS).status_code == 404
     assert client.get('/api/admin/market/instruments/resolve?symbol=%2Fetc%2Fpasswd', headers=HEADERS).status_code == 422
     for injected in ('dataset=E51', 'source=tonghuashun', 'allow_partial=true', 'sql=select', 'symbol=OTHER.SH'):
         assert client.get('/api/admin/market/instruments/resolve?symbol=510300.SH&' + injected, headers=HEADERS).status_code == 422
