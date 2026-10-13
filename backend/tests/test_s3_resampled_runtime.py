@@ -186,6 +186,21 @@ def test_count_keeps_authorization_cancellation_and_quality_guards(formal):
         gw.close(ctx)
 
 
+def test_count_reaches_an_older_trading_day_without_joining_lunch(formal):
+    provider, work, _, _ = accepted_minutes(formal, absent_buckets={'B.SH': (0, 1, 2)})
+    actual = provider.binding(work, Claim('cross-day-count', 'token', 1), Event())
+    gw, ctx = actual.gateway, actual.context
+    calendar = actual.spec['calendar']
+    query = dict(actual.spec['source']['request'], start_ns=None, count_per_security=2)
+    try:
+        rows = pa.concat_tables([b.table for b in gw.read('accepted-minutes', query, ctx, page_rows=1)]).to_pylist()
+        assert [r['time_ns'] for r in rows if r['security'] == 'B.SH'] == [
+            int(day['bar_windows'][-1]['end_ns']) for day in calendar]
+        assert all(r['interval_end_ns'] - r['interval_start_ns'] == 60 * MINUTE for r in rows)
+    finally:
+        gw.close(ctx)
+
+
 @pytest.mark.parametrize('frequency', ['5m', '15m', '30m', '60m'])
 @pytest.mark.parametrize('page_rows', [1, 19])
 def test_formal_resampling_preserves_calendar_prices_quantities_and_cache(formal, frequency, page_rows):

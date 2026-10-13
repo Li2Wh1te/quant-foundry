@@ -16,7 +16,8 @@ from types import SimpleNamespace
 import pyarrow as pa
 import pytest
 
-from tests.test_s3_formal_runtime import database, limits, store, formal, nodes
+from tests.test_s3_formal_runtime import database, store, formal, nodes
+from tests.test_s3_formal_runtime import limits as formal_limits
 from tests.test_s3_data_gateway import quality
 from app.backtest_service.data_gateway import GatewayError, serve
 from app.backtest_service.formal_runtime import AcceptedRunPlan
@@ -27,6 +28,13 @@ from app.backtest_service.service import FormalProvider
 pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1', reason='isolated PG required')
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'tests'))
 from s3_research_fixtures import research_nodes
+
+
+@pytest.fixture
+def limits(formal_limits):
+    # The minute fixture has 1,920 rows; keep it inside the existing changed-file
+    # cap instead of turning an unrelated ten-row Parquet fixture into 192 files.
+    return replace(formal_limits, file_rows=1000)
 
 
 def composed(formal, *, missing=None):
