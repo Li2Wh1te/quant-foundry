@@ -21,11 +21,12 @@ def execute(dataset: str, context: TaskContext, parameters: CollectionParameters
     monitor = CollectionControl(engine, context.run_id,
         max_requests=parameters.max_requests, max_seconds=parameters.max_seconds)
     token = active_control.set(monitor)
-    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run
+    from app.data_ingestion.tonghuashun.diagnostics import begin_run, check_scope, end_run
     diagnostic_token = None
     try:
         diagnostic_token = begin_run(dataset, context.run_id, getattr(context, 'task_id', None),
                                      parameters.model_dump(mode='json'))
+        check_scope()
         result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),
                          TonghuashunClient.from_settings(get_settings()), engine)
         monitor.emit(stage="本批结束")

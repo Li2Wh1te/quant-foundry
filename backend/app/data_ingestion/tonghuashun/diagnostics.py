@@ -124,6 +124,22 @@ def _claim_scope(run_id, key, now):
             _scope_claims[key] = run_id
 
 
+def _scope_configured(key):
+    raw = os.environ.get('QF_THS_DIAGNOSTIC_SCOPE_KEYS', '')
+    keys = raw.split(',') if raw else []
+    return (key is not None and 1 <= len(keys) <= 2
+            and all(re.fullmatch('[0-9a-f]{64}', x) for x in keys) and key in keys)
+
+
+def check_scope():
+    """A selected diagnostic attempt must not execute after its grant closes."""
+    run = _active.get()
+    if (run is not None and run.scope_key is not None
+            and (not run.capture or not _capture_enabled(run.run_id, datetime.now(UTC), run.scope_key))):
+        from app.data_ingestion.tonghuashun.control import CollectionYield
+        raise CollectionYield('stopped')
+
+
 @dataclass
 class Run:
     run_id: str
@@ -143,8 +159,7 @@ def begin_run(dataset, run_id, task_id=None, parameters=None):
     key = scope_key(dataset, task_id, parameters)
     if identifier and dataset in DATASETS:
         _claim_scope(identifier, key, now)
-    selection = _capture_selection(now)
-    if selection is None or selection[0] == 'run':
+    if not _scope_configured(key):
         key = None
     run = (Run(identifier, dataset, _capture_enabled(identifier, now, key), scope_key=key)
            if dataset in DATASETS and identifier else None)
@@ -322,7 +337,7 @@ def _base(run):
         app_version = 'unknown'
     return dict(run_id=run.run_id, dataset=run.dataset, object_seq=run.object_seq,
                 source_revision=run.source_revision, application_version=app_version,
-                diagnostic_version=2)
+                diagnostic_version=3)
 
 
 def finish_request(attempt, parameters, api_key, status, raw, complete, body, parsed, failure):
