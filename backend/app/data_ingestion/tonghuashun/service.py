@@ -18,6 +18,7 @@ from app.data_ingestion.models.tonghuashun import TonghuashunRequestBudget
 from app.data_ingestion.tonghuashun.acquisition import Acquisition
 from app.data_ingestion.tonghuashun.contracts import CollectionError, CollectionConflict, CollectionParameters, DATASETS, SHANGHAI
 from app.data_ingestion.tonghuashun.repository import CollectionRepository
+from app.data_ingestion.tonghuashun.ticker_diagnostics import TickerAssetTypeConflict
 
 logger = structlog.get_logger(__name__)
 
@@ -95,8 +96,36 @@ def due(spec, previous, parameters, now):
 
 def collect(dataset: str, parameters: CollectionParameters, client, engine,
             *, now: datetime | None = None) -> dict:
-    from app.data_ingestion.tonghuashun.control import control
+    from .directory_proof import DirectoryReplays, release_exception_frames
+    from .control import control
+    import sys
+    replays = DirectoryReplays() if DATASETS[dataset].kind == 'directory' else None
     monitor = control()
+    try:
+        return _collect(dataset, parameters, client, engine, now=now, _replays=replays)
+    except BaseException as error:
+        if replays is not None:
+            release_exception_frames(error)
+        raise
+    finally:
+        if replays is not None:
+            replays.clear()
+            if monitor and monitor.detail.get('directory_buffer_bytes'):
+                primary_error = sys.exc_info()[1]
+                monitor.detail['directory_buffer_bytes'] = 0
+                try:
+                    monitor.emit(directory_buffer_bytes=0)
+                except Exception:
+                    if primary_error is None:
+                        raise
+
+
+def _collect(dataset: str, parameters: CollectionParameters, client, engine,
+             *, now: datetime | None = None, _replays=None) -> dict:
+    from app.data_ingestion.tonghuashun.control import control
+    from .directory_proof import check_publication
+    monitor = control()
+    directory_replays = _replays
     spec = DATASETS[dataset]
     if spec.kind.startswith("m3_"):
         from app.data_ingestion.tonghuashun.research_service import collect_research
@@ -173,19 +202,25 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
         if monitor:
             monitor.begin(dataset, subject, variant, previous.revision, parameters,
                           cache=spec.kind in ("reports", "bars", "financials", "indicators"))
-        acquisition = Acquisition(client)
+        from .directory_proof import DirectoryAcquisition
+        acquisition = DirectoryAcquisition(client) if directory_replays is not None else Acquisition(client)
         try:
             data = acquisition.fetch(spec, subject, parameters, previous.data, now)
             if acquisition.failures:
                 data = {**data, "failed_requests": acquisition.failures}
             published_at = datetime.now(UTC)
+            if directory_replays is not None:
+                check_publication()
             with Session(engine) as session:
                 result = CollectionRepository(session).publish(dataset, subject, variant,
                     expected=previous.revision, data=data, requests=acquisition.requests,
                     now=published_at, ticker_rows=data["item"] if spec.kind == "directory" else None,
-                    reconcile=parameters.mode == "reconcile")
+                    reconcile=parameters.mode == "reconcile",
+                    verify_category_change=directory_replays is not None)
                 if monitor:
                     monitor.published(session)
+                if directory_replays is not None:
+                    check_publication()
                 session.commit()
             summary["failed" if acquisition.failures else "succeeded"] += 1
             result["fetched_count"] = acquisition.fetched_count
@@ -195,6 +230,37 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
                 monitor.completed(summary)
             log_result(spec, subject, parameters, data, result, not acquisition.failures,
                        "partial_reports" if acquisition.failures else None)
+            if directory_replays is not None:
+                for entry in directory_replays.ready(subject, data, acquisition.requests, published_at):
+                    check_publication()
+                    replay_data, replay_requests = entry.payload()
+                    try:
+                        with Session(engine) as session:
+                            replayed = CollectionRepository(session).publish(dataset, entry.subject, variant,
+                                expected=entry.revision, data=replay_data, requests=replay_requests,
+                                now=datetime.now(UTC), observed_at=entry.observed_at,
+                                ticker_rows=replay_data['item'], verify_category_change=True)
+                            check_publication()
+                            session.commit()
+                    except CollectionError:
+                        # A missing old claim or newer scope cannot become a
+                        # success. Replay adds no supplier request or failure.
+                        del replay_data, replay_requests
+                        continue
+                    summary['failed'] -= 1
+                    summary['succeeded'] += 1
+                    summary['directory_reused'] = summary.get('directory_reused', 0) + 1
+                    for field in ('received', 'changed', 'unchanged', 'removed'):
+                        summary[field] += replayed[field]
+                    replayed['fetched_count'] = 0
+                    log_result(spec, entry.subject, parameters, replay_data, replayed, True, None)
+                    directory_replays.remove(entry.subject)
+                    del replay_data, replay_requests
+                    if monitor:
+                        monitor.begin(dataset, entry.subject, variant, entry.revision, parameters, cache=False)
+                        monitor.emit(directory_reused=summary['directory_reused'],
+                                     directory_buffer_bytes=directory_replays.bytes)
+                        monitor.completed(summary)
         except CollectionConflict:
             # Preserve the newer publication and recheck this scope next run.
             summary["skipped"] += 1
@@ -203,18 +269,64 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
             if monitor:
                 monitor.discard()
             kind = exc.kind if isinstance(exc, TonghuashunError) else "invalid_data"
+            failure_recorded = False
             with Session(engine) as session:
                 try:
                     CollectionRepository(session).fail(dataset, subject, variant,
                         expected=previous.revision, kind=kind, now=datetime.now(UTC))
                     session.commit()
+                    failure_recorded = True
                 except CollectionError:
                     session.rollback()  # A newer run owns the visible state.
             summary["failed"] += 1
             if monitor:
                 monitor.completed(summary, advanced=False)
             log_result(spec, subject, parameters, None, {"fetched_count": acquisition.fetched_count}, False, kind,
-                       error_message=str(exc))
+                       error_message=str(exc),
+                       ticker_conflict=exc.diagnostic if isinstance(exc, TickerAssetTypeConflict) else None)
+            if (directory_replays is not None and failure_recorded
+                    and isinstance(exc, TickerAssetTypeConflict)):
+                directory_replays.retain(subject, previous.revision + 1, data, acquisition.requests,
+                                         published_at, acquisition.fetched_count, exc.diagnostic)
+                if monitor:
+                    monitor.emit(directory_buffer_bytes=directory_replays.bytes)
+                pair = directory_replays.pair()
+                if pair:
+                    pair_started = time.monotonic()
+                    try:
+                        check_publication()
+                        with Session(engine) as session:
+                            results = CollectionRepository(session).publish_pair(pair, now=datetime.now(UTC))
+                            check_publication()
+                            session.commit()
+                    except CollectionError as pair_error:
+                        from .ticker_diagnostics import bounded_pair_rejection
+                        from .directory_proof import release_exception_frames
+                        diagnostic = bounded_pair_rejection(pair, pair_error,
+                            elapsed_ms=max(0, int((time.monotonic() - pair_started) * 1000)))
+                        release_exception_frames(pair_error)
+                        logger.warning('tonghuashun_directory_pair_rejected',
+                            title='同花顺基金目录配对发布失败',
+                            message='ETF 与场外基金目录配对发布失败；完成标记未推进，保留已有成功版本。',
+                            source='tonghuashun', data_type='tickers', subjects=['fund-etf', 'fund-otc'],
+                            candidate_count=2, fetched_count=0, published_count=0, failed_count=2,
+                            checkpoint_advanced=False, pair_rejection=diagnostic)
+                    else:
+                        summary['directory_pair_elapsed_ms'] = max(0, int((time.monotonic() - pair_started) * 1000))
+                        for entry in pair:
+                            replayed = results[entry.subject]
+                            summary['failed'] -= 1
+                            summary['succeeded'] += 1
+                            summary['directory_reused'] = summary.get('directory_reused', 0) + 1
+                            for field in ('received', 'changed', 'unchanged', 'removed'):
+                                summary[field] += replayed[field]
+                            replayed['fetched_count'] = 0
+                            log_result(spec, entry.subject, parameters, None, replayed, True, None)
+                            directory_replays.remove(entry.subject)
+                        if monitor:
+                            monitor.emit(directory_reused=summary['directory_reused'],
+                                         directory_buffer_bytes=directory_replays.bytes)
+                            monitor.completed(summary)
             if kind in ("unauthenticated", "forbidden", "rate_limited"):
                 # Account-wide failures must not repeat thousands of times.
                 break
@@ -232,9 +344,16 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
     return summary
 
 
-def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
+def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None,
+               *, ticker_conflict=None):
     from app.data_ingestion.tonghuashun.diagnostics import record_outcome
     record_outcome(spec.key, succeeded, kind, error_message, result.get("version_id"))
+    details = {}
+    if ticker_conflict is not None:
+        from .ticker_diagnostics import bounded_ticker_conflict
+        safe = bounded_ticker_conflict(subject, ticker_conflict)
+        if safe:
+            details['ticker_conflict'] = safe
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"
@@ -253,4 +372,4 @@ def log_result(spec, subject, parameters, data, result, succeeded, kind=None, er
         source="tonghuashun", data_type=spec.key, subject=subject,
         start_date=start, end_date=end, checkpoint_advanced=succeeded,
         version_id=result.get("version_id"), error_type=kind,
-        error_message=error_message, exc_info=error_message is not None, **counts)
+        error_message=error_message, exc_info=error_message is not None, **counts, **details)
