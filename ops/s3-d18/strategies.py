@@ -101,9 +101,10 @@ def handle_tick(c,tick):
     c.state.calls+=1
     if c.state.calls==100:
         print('D18_HOT_PROBE_STARTED',flush=True)
-        deadline=time.monotonic()+15
-        while time.monotonic()<deadline:
+        # The coordinator measures the unchanged 15-second detection window
+        # from the actual CurrentStore commit, not from staging its correction.
+        # Original worker wall/resource limits still bound this test strategy.
+        while True:
             get_price([tick.security],count=1,frequency='tick',fields=['price' if tick.kind=='trade' else 'ask'])
             time.sleep(.01)
-        raise RuntimeError('the controlled correction did not arrive')
 """

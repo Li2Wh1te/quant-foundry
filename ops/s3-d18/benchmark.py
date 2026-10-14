@@ -3,7 +3,7 @@
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
-from threading import Event
+from threading import Event, Thread
 from types import SimpleNamespace
 from uuid import uuid4
 import hashlib, json, os, platform, subprocess, sys, time, traceback
@@ -407,6 +407,60 @@ def prepare(store, load):
     )
 
 
+class _CorrectionProbe:
+    """Keep supervision live while a bounded synthetic write is staged."""
+
+    def __init__(self, correct, *, seconds=15, clock=time.monotonic):
+        self.correct, self.seconds, self.clock = correct, seconds, clock
+        self.stopped, self.done, self.committed = Event(), Event(), Event()
+        self.thread = None
+        self.result = self.error = self.committed_at = self.terminal_at = None
+
+    def _commit(self):
+        self.committed_at = self.clock()
+        self.committed.set()
+
+    def _run(self):
+        try:
+            self.result = self.correct(self._commit, self.stopped)
+        except BaseException as error:
+            self.error = error
+        finally:
+            self.done.set()
+
+    def poll(self, *, ready, terminal):
+        if ready and self.thread is None:
+            self.thread = Thread(target=self._run, daemon=True)
+            self.thread.start()
+        if self.error is not None:
+            raise self.error
+        if terminal and self.terminal_at is None:
+            self.terminal_at = self.clock()
+        observed = self.terminal_at if terminal else self.clock()
+        if (self.committed.is_set() and observed - self.committed_at > self.seconds):
+            raise TimeoutError("worker did not terminate within 15 seconds after correction commit")
+        return self.done.is_set() or (terminal and self.thread is None)
+
+    def measurement(self):
+        return dict(detection_limit_seconds=self.seconds,
+                    commit_observed=self.committed.is_set(),
+                    commit_to_terminal_seconds=(None if self.committed_at is None or self.terminal_at is None
+                                                else max(0.0, self.terminal_at - self.committed_at)))
+
+    def close(self):
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join(5)
+            if self.thread.is_alive():
+                raise TimeoutError("controlled correction did not stop within its cleanup budget")
+
+
+def gateway_measurements(provider, run_ids):
+    return {run_id: dict(provider.gateways[run_id].stats,
+                         **provider.gateways[run_id].elapsed)
+            for run_id in run_ids if run_id in provider.gateways}
+
+
 def run_group(
     repository, process, services, provider, run_ids, *, fault=None, hook=None
 ):
@@ -419,8 +473,7 @@ def run_group(
     try:
         while True:
             supervisor.step()
-            if hook is not None:
-                hook(supervisor)
+            hook_finished = hook is None or hook(supervisor) is not False
             now = time.monotonic()
             if now >= next_sample:
                 value = sample(process.daemon, supervisor)
@@ -436,7 +489,7 @@ def run_group(
                     )
                     injected = True
             states = [repository.status(OWNER, i) for i in run_ids]
-            if all(s["status"] in TERMINAL for s in states):
+            if all(s["status"] in TERMINAL for s in states) and hook_finished:
                 break
             if now - started > 7500:
                 raise TimeoutError("group wall budget reached; not completed")
@@ -454,23 +507,28 @@ def run_group(
         states=states,
         fault_injected=injected,
         writer_seconds=services.writer_seconds,
+        gateway=gateway_measurements(provider, run_ids),
     )
 
 
-def hot_correction(store, provider):
+def hot_correction(store, provider, *, committed=lambda: None, stopped=None, phases=None):
     """Correct only this task's synthetic current input; fence the old reader."""
     started = time.monotonic()
+    stopped = stopped or Event()
+    phases = phases if phases is not None else {}
     work = SimpleNamespace(owner=OWNER, config=provider.spec["config"])
-    gateway, context = provider.gateway(work, "correction-" + uuid4().hex, Event())
+    gateway, context = provider.gateway(work, "correction-" + uuid4().hex, stopped)
     stream = gateway.read("market", provider.request(work), context)
     try:
         head = next(stream).table.slice(0, 2).to_pylist()
+        phases["initial_read_seconds"] = time.monotonic() - started
         assert len(head) == 2 and head[0]["time_ns"] == head[1]["time_ns"]
         before = store.catalog.dataset(provider.dataset.name)["generation"]
         field = "price" if provider.load.kind == "trade_tick" else "ask"
         for row in head:
             row[field] = "10.02"
         current = store.source_state(provider.dataset.name, "d18-fixture")
+        write_started = time.monotonic()
         correction = store.upsert(
             provider.dataset,
             "default",
@@ -484,7 +542,12 @@ def hot_correction(store, provider):
             lower=(head[0]["time_ns"],),
             upper=(head[-1]["time_ns"] + 1,),
             source_check=lambda _: True,
+            cancelled=stopped.is_set,
         )
+        commit_returned = time.monotonic()
+        committed()
+        phases["upsert_seconds"] = commit_returned - write_started
+        phases["start_to_commit_return_seconds"] = commit_returned - started
         for check in (
             lambda: next(stream),
             lambda: gateway.finalize(
@@ -502,15 +565,18 @@ def hot_correction(store, provider):
                 raise AssertionError("changed input must reject old run")
         after = store.catalog.dataset(provider.dataset.name)["generation"]
         assert after > before
+        phases["old_context_checks_seconds"] = time.monotonic() - commit_returned
     finally:
         stream.close()
         gateway.close(context)
-    gateway, context = provider.gateway(work, "corrected-" + uuid4().hex, Event())
+    corrected_read_started = time.monotonic()
+    gateway, context = provider.gateway(work, "corrected-" + uuid4().hex, stopped)
     stream = gateway.read("market", provider.request(work), context)
     try:
         observed = next(stream).table.slice(0, 2).to_pylist()
         assert [row[field] for row in observed] == ["10.02", "10.02"]
         expected = dict(time_ns=str(observed[0]["time_ns"]), field=field, value="10.02")
+        phases["corrected_read_seconds"] = time.monotonic() - corrected_read_started
     finally:
         stream.close()
         gateway.close(context)
@@ -522,6 +588,7 @@ def hot_correction(store, provider):
         old_context_terminal="DATA_CHANGED",
         corrected_read_verified=True,
         expected_first=expected,
+        phases=dict(phases),
     )
 
 
@@ -535,15 +602,24 @@ def worker_hot_correction(
         config, account_id=str(account), strategy_revision_id=str(revision)
     )
     probe = service.submit(OWNER, probe_config, uuid4().hex)["run_id"]
-    corrected = []
+    phases = {}
+    correction = _CorrectionProbe(lambda committed, stopped: hot_correction(
+        store, provider, committed=committed, stopped=stopped, phases=phases))
 
     def change(_supervisor):
-        if services.probe_reached.is_set() and not corrected:
-            corrected.append(hot_correction(store, provider))
+        return correction.poll(ready=services.probe_reached.is_set(),
+                               terminal=repository.status(OWNER, probe)["status"] in TERMINAL)
 
-    measured = run_group(repository, process, services, provider, [probe], hook=change)
+    try:
+        measured = run_group(repository, process, services, provider, [probe], hook=change)
+    finally:
+        correction.close()
+        print(json.dumps(dict(stage="hot_correction_probe", run_id=probe,
+                              phases=phases, gateway=gateway_measurements(provider, [probe]),
+                              **correction.measurement())), flush=True)
     state = repository.status(OWNER, probe)
-    assert services.probe_reached.is_set() and len(corrected) == 1
+    assert services.probe_reached.is_set() and correction.result is not None
+    assert correction.committed.is_set()
     assert (
         state["status"] == "failed" and state["error"]["code"] == "DATA_CHANGED"
     ), state
@@ -560,7 +636,7 @@ def worker_hot_correction(
         ).one()
     assert rows == provider.load.rows
     return dict(
-        corrected[0],
+        correction.result,
         probe_run_id=probe,
         probe_status=state["status"],
         probe_error=state["error"]["code"],
@@ -568,6 +644,7 @@ def worker_hot_correction(
         probe_run=measured,
         source_rows=rows,
         current_source_bytes=size,
+        **correction.measurement(),
     )
 
 
@@ -581,6 +658,7 @@ def validate(repository, provider, run_ids, telemetry, load, frequency):
                     dict(
                         stage="failed_result",
                         run_id=run_id,
+                        gateway=gateway_measurements(provider, [run_id]),
                         logs=read_result(
                             repository, OWNER, run_id, "logs", 10, None, CURSOR
                         ),
