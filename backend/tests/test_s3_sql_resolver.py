@@ -436,6 +436,28 @@ def test_fact_check_uses_bounded_sql_metadata_without_rebuilding_domain_facts(fo
     assert len(selects) == 22 and all('sha256' in query and 'count(' in query for query in selects)
 
 
+def test_default_multisecurity_resolution_reuses_one_calendar_month(formal_facts):
+    seed(formal_facts)
+    seed(formal_facts, symbol='510002.SH', calendar=False)
+    calendar_month(formal_facts)
+    current = work()
+    current.config.update(universe=['510001.SH', '510002.SH'], end='2026-07-20')
+    statements = []
+    def read(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    engine = formal_facts.catalog.engine
+    event.listen(engine, 'before_cursor_execute', read)
+    try:
+        facts = SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current)
+    finally:
+        event.remove(engine, 'before_cursor_execute', read)
+    assert len(facts.identities) == len(facts.calendars) == 30
+    assert facts.execution_calendar['next_session'] == 'SSE:2026-07-21'
+    ordinary = [query for query in statements if 'sha256' not in query]
+    assert sum('FROM calendar_session_facts' in query for query in ordinary) == 1
+    assert sum('FROM calendar_source_priorities' in query for query in ordinary) == 1
+
+
 @pytest.mark.parametrize('kind', ['identity', 'status', 'actions', 'new_mapping'])
 def test_sql_content_guard_detects_related_fields_quality_and_new_candidates(formal_facts, kind):
     iid = seed(formal_facts)

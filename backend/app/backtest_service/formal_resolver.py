@@ -243,8 +243,10 @@ class SqlFormalPlanResolver:
         from app.instruments.rules.etf_china import register_china_listed_etf_rules
         registry = RulePackageRegistry()
         register_china_listed_etf_rules(registry)
-        for symbol in symbols:
-            for offset in range(days):
+        # Walk dates first: all securities reuse the same bounded month
+        # candidates instead of cycling the cache through history per symbol.
+        for offset in range(days):
+            for symbol in symbols:
                 day = start + timedelta(days=offset)
                 at = datetime.combine(day, time(), ZONE)
                 cutoff = inventory_asof or at  # facts known before this simulated day
