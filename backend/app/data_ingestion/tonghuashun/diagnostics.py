@@ -53,7 +53,7 @@ _CREDENTIAL_TEXT = re.compile(
     r'authorization|proxy-authorization|cookie|set-cookie|client[_-]?secret|secret)'
     r'\b[\s"\x27]*[:=][\s"\x27]*)([^"\x27<>&,;}\r\n]+)')
 _BEARER = re.compile(r'(?i)\b(Bearer|Basic)\s+[A-Za-z0-9+/_.=:-]+')
-_AUTH_LINE = re.compile(r'(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*:)[^\r\n]*')
+_AUTH_LINE = re.compile(r'(?i)(\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=])[^\r\n]*')
 _URL_USERINFO = re.compile(r'(?i)([a-z][a-z0-9+.-]*://)[^\s/<>"\x27]+@')
 _PRIVATE_KEY = re.compile(r'-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----', re.S)
 

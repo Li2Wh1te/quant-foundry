@@ -178,8 +178,9 @@ def test_credentials_filtered_while_business_fields_retained(monkeypatch, events
     assert fields['credential_redactions'] > 0 and get.call_count == 1
 
 
-def test_non_json_cookie_and_auth_lines_filtered(monkeypatch, events):
-    raw = b'business=SYNTHETIC.OF\nCookie: first=fixture-one; second=fixture-two\nAuthorization: Bearer fixture-auth\n'
+@pytest.mark.parametrize('separator', [b':', b'='])
+def test_non_json_cookie_and_auth_lines_filtered(monkeypatch, events, separator):
+    raw = b'business=SYNTHETIC.OF\nCookie'+separator+b' first=fixture-one; second=fixture-two\nAuthorization'+separator+b' Bearer fixture-auth\n'
     client, _ = request(monkeypatch, raw)
     with run(monkeypatch), pytest.raises(transport.TonghuashunError):
         client.request('fund.financials.income-statements', {'thscode':BUSINESS})
