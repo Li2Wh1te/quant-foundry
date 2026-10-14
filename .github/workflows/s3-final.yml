@@ -46,7 +46,7 @@ jobs:
           changed = set(subprocess.check_output([
               'git', 'diff', '--name-only', os.environ['QF_BASE_SHA'], 'HEAD'
           ], text=True).splitlines())
-          # These SQL-only paths do not participate in the old direct-Spec
+          # These formal fact paths do not participate in the old direct-Spec
           # B1-B4 workloads. The always-on Rust/wheel and worker workflows
           # still run their affected regressions on a supported filesystem.
           # Default preparation scale is a separate acceptance requirement;
@@ -55,7 +55,12 @@ jobs:
               'backend/app/backtest_service/formal_resolver.py',
               'backend/app/backtest_service/formal_calendar_reader.py',
               'backend/app/backtest_service/formal_fact_guard.py',
+              'backend/app/backtest_service/formal_assembly.py',
+              'backend/app/backtest_service/session_fact_pages.py',
               'backend/tests/test_s3_sql_resolver.py',
+              'backend/tests/test_s3_formal_assembly.py',
+              'backend/tests/test_s3_session_fact_pages.py',
+              '.github/workflows/s3-engine.yml',
               '.github/workflows/s3-final.yml',
           }
           print('sql_facts_only=' + str(bool(changed) and changed <= sql_paths).lower())

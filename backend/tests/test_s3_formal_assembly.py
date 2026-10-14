@@ -20,6 +20,7 @@ from tests.test_s3_sql_resolver import (database, limits, store, formal, formal_
     seed, calendar_month, work, DAY, KNOWN)
 from tests.test_data_store_local_pipeline import Inputs
 from app.backtest_service.formal_assembly import ExecutionSessionInput, assemble_run_plan
+from app.backtest_service.session_fact_pages import PagedSessionInputs, SessionInputPage
 from app.backtest_service.formal_runtime import REQUIRED_EXECUTION_FACTS, daily_node_binding
 from app.backtest_service.formal_resolver import SqlFormalPlanResolver
 from app.backtest_service.service import FormalProvider
@@ -84,6 +85,97 @@ def oracle(formal_facts):
 def assemble(current, resolver, accepted, projected):
     return assemble_run_plan(current, projected, check_facts=lambda run, *, connection=None:
         resolver.check_facts(run, accepted, connection=connection))
+
+
+def page_oracle(projected, transform=None, calls=None):
+    # The same existing narrow DTO oracle, delivered one page at a time.
+    # No fact producer/storage contract or default success resolver is added.
+    def read(session, offset, limit):
+        if calls is not None:
+            calls.append((session, offset, limit))
+        raw = SessionInputPage(projected.execution_inputs, projected.identities,
+            projected.commissions, projected.trading_status, projected.corporate_actions)
+        return transform(raw) if transform is not None else raw
+    return replace(projected, execution_inputs=PagedSessionInputs(read), identities=(),
+        commissions=(), trading_status=(), corporate_actions=(), rule_packages=())
+
+
+def test_paged_assembly_matches_original_rust_dtos_without_full_run_dependency_arrays(formal_facts):
+    current, resolver, accepted, projected = oracle(formal_facts)
+    calls = []
+    paged = assemble(current, resolver, accepted, page_oracle(projected, calls=calls))
+    legacy = assemble(current, resolver, accepted, projected)
+    key = accepted.execution_calendar['calendar'][0]['session']['key']
+    assert calls == [(key, 0, 1)]  # admission checks the complete source first
+    assert paged.session_facts(key, 0, 1) == legacy.session_facts(key, 0, 1)
+    assert calls == [(key, 0, 1), (key, 0, 1)]
+    returned = paged.session_facts(key, 0, 256)
+    returned['facts'][0]['permissions']['buy'] = False
+    assert paged.session_facts(key, 0, 1)['facts'][0]['permissions']['buy']
+    with pytest.raises(RuntimeFault):
+        resolver(current)  # this wiring oracle is still not default success
+
+
+@pytest.mark.parametrize('case', ['missing', 'duplicate', 'identity', 'date', 'status', 'zero_unknown', 'cash_only', 'fees', 'malformed'])
+def test_paged_assembly_rejects_incomplete_or_substituted_source_before_admission(formal_facts, case):
+    current, resolver, accepted, projected = oracle(formal_facts)
+    def transform(raw):
+        if case == 'missing': return replace(raw, execution_inputs=())
+        if case == 'duplicate': return replace(raw, execution_inputs=raw.execution_inputs * 2)
+        if case == 'identity':
+            item = replace(raw.execution_inputs[0], instrument_id=uuid4())
+            return replace(raw, execution_inputs=(item,))
+        if case == 'date':
+            from datetime import timedelta
+            s, d, value = raw.commissions[0]
+            return replace(raw, commissions=((s, d + timedelta(days=1), value),))
+        if case == 'status': return replace(raw, trading_status=())
+        if case in ('zero_unknown', 'cash_only'):
+            s, d, value = raw.corporate_actions[0]
+            value = dict(value, events=None) if case == 'zero_unknown' else dict(value,
+                coverage=tuple(row for row in value['coverage'] if row['action_type'] == 'cash_dividend'))
+            return replace(raw, corporate_actions=((s, d, value),))
+        item = raw.execution_inputs[0]
+        if case == 'malformed':
+            return replace(raw, execution_inputs=(replace(item, payload=dict(item.payload, day=None)),))
+        return replace(raw, execution_inputs=(replace(item, payload=dict(item.payload, buy_fees={})),))
+    with pytest.raises(RuntimeFault):
+        assemble(current, resolver, accepted, page_oracle(projected, transform))
+
+
+def test_paged_assembly_retains_false_permission_and_rejects_change_during_page(formal_facts):
+    current, resolver, accepted, projected = oracle(formal_facts)
+    item = projected.execution_inputs[0]
+    payload = deepcopy(item.payload)
+    payload['permissions']['buy'] = False
+    projected = replace(projected, execution_inputs=(replace(item, payload=payload),))
+    state = dict(changed=False, inject=False)
+    def check(run, *, connection=None):
+        resolver.check_facts(run, accepted, connection=connection)
+        if state['changed']:
+            raise RuntimeFault('DATA_CHANGED', 'isolated page dependency changed')
+    def transform(raw):
+        state['changed'] = state['inject']
+        return raw
+    plan = assemble_run_plan(current, page_oracle(projected, transform), check_facts=check)
+    key = accepted.execution_calendar['calendar'][0]['session']['key']
+    assert plan.session_facts(key, 0, 1)['facts'][0]['permissions']['buy'] is False
+    state['inject'] = True
+    with pytest.raises(RuntimeFault) as changed:
+        plan.session_facts(key, 0, 1)
+    assert changed.value.code == 'DATA_CHANGED'
+
+
+def test_paged_assembly_rejects_invalid_credit_without_reading_source(formal_facts):
+    current, resolver, accepted, projected = oracle(formal_facts)
+    calls = []
+    plan = assemble(current, resolver, accepted, page_oracle(projected, calls=calls))
+    key = accepted.execution_calendar['calendar'][0]['session']['key']
+    for session, offset, limit in [('foreign-session', 0, 1), (key, -1, 1),
+            (key, 1, 1), (key, False, 1), (key, 0, 257), (key, 0, True)]:
+        with pytest.raises(RuntimeFault):
+            plan.session_facts(session, offset, limit)
+    assert len(calls) == 1
 
 
 def test_final_assembly_oracle_streams_original_session_dtos_and_default_still_refuses(formal_facts):
@@ -158,9 +250,10 @@ def test_final_assembly_oracle_rejects_incomplete_scope_and_fact_substitution(fo
         assert all(type(v) is str for v in refused.value.diagnostic()['scope'].values())
 
 
-def test_assembly_oracle_actual_pg_node_ipc_and_rust_session_facts(formal_facts, tmp_path):
+@pytest.mark.parametrize('paged', [False, True])
+def test_assembly_oracle_actual_pg_node_ipc_and_rust_session_facts(formal_facts, tmp_path, paged):
     current, resolver, accepted, projected = oracle(formal_facts)
-    plan = assemble(current, resolver, accepted, projected)
+    plan = assemble(current, resolver, accepted, page_oracle(projected) if paged else projected)
     provider = FormalProvider(SimpleNamespace(environment='test'), store=formal_facts)
     # A direct wiring oracle, never a replacement resolver/default success.
     gateway, context = provider._gateway(current, 'isolated-assembly', Event(), plan)
