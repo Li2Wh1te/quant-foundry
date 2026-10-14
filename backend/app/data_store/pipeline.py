@@ -150,20 +150,24 @@ def _issue_from(record, partition, blocking):
 
 def _partition_issues(store,entry,partition,spool):
     from .issue_sets import members,pack,record
-    logical={};prior={};resolved={};count=0
+    logical={};prior={};resolved={};physical_by_key={};member_keys={};count=0
     # These are exact pending objects, never samples or inferred date ranges.
     for rec,blocking,fixed in spool.problem_records(partition):
         if not fixed:
             issue=_issue_from(rec,partition,blocking);logical[issue.key]=record(issue)
             if len(logical)>MAX_ISSUE_CHANGES:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
+    observed=set(logical)
     after=''
     while True:
         page=store.catalog.issues(entry.spec.name,scope=_scope(partition),limit=500,after=after)
         for physical in page:
             target=json.loads(physical['target_json'])
             if target.get('scope_version') not in ('object-key-v1','object-key-set-v1'):continue
+            physical_by_key[physical['issue_key']]=physical
+            member_keys[physical['issue_key']]=set()
             resolved[physical['issue_key']]=physical['evidence_token']
             for old in members(physical):
+                member_keys[physical['issue_key']].add(old['issue_key'])
                 count+=1
                 if count>MAX_ISSUE_CHANGES:raise DataStoreError('ISSUE_BUDGET_EXCEEDED')
                 prior[old['issue_key']]=old;target=json.loads(old['target_json']);prefix=target.get('prefix',[])
@@ -183,12 +187,27 @@ def _partition_issues(store,entry,partition,spool):
         if len(page)<500:break
         after=page[-1]['issue_key']
     additions=pack(logical.values())
+    retained=[]
+    for issue in additions:
+        old=physical_by_key.get(issue.key)
+        identical=old and (old['scope_key'],old['reason'],old['evidence_token'],
+            json.loads(old['target_json']),json.loads(old['resolution_json'])) == (
+            issue.scope,issue.reason,issue.evidence_token,dict(issue.target),dict(issue.resolution))
+        if identical:
+            # An unchanged sibling is not a new attempt. Leave the physical
+            # row intact; an observed repeated failure still uses the normal
+            # conflict update, preserving first_seen and incrementing attempts.
+            resolved.pop(issue.key)
+            if not observed.intersection(member_keys[issue.key]):continue
+        retained.append(issue)
+    additions=tuple(retained)
     # Physical regrouping is not a resolved business problem. Keep these counts
     # separate from the token-fenced catalog delta used by the atomic commit.
     class Changes(dict):pass
     changes=Changes(resolved)
     changes.resolved_objects=len(set(prior)-set(logical))
     changes.new_objects=len(set(logical)-set(prior))
+    changes.unresolved_objects=len(logical)
     changes.blocking_objects=sum(json.loads(r['target_json']).get('blocking',True) for r in logical.values())
     validate_issue_changes(additions,changes)
     return additions,changes
@@ -222,7 +241,7 @@ def _commit_partition(store,entry,partition,spool,options,cancelled):
                         previous['revision'] if previous else 0,
                         confirmation={'basis':'inline_sparse_object_order','range':partition},
                         checkpoint=checkpoint,
-                        qualified=not issues,expected_generation=generation)
+                        qualified=not resolved.unresolved_objects,expected_generation=generation)
     revision=source.expected_revision
     result=store.replace_partition(entry.spec,partition,
                 spool.batches(partition,rows=store.limits.batch_rows,nbytes=store.limits.batch_bytes),source,
