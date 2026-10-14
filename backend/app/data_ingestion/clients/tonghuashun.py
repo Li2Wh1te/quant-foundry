@@ -12,6 +12,7 @@ from email.utils import parsedate_to_datetime
 import json
 import math
 import re
+import sys
 import threading
 import time
 from typing import Any, Mapping
@@ -20,6 +21,7 @@ from urllib.parse import urlsplit
 import requests
 
 from app.data_sources.errors import SourceError
+from app.data_ingestion.tonghuashun import diagnostics
 from app.data_sources.tonghuashun_catalog import INTERFACES
 
 
@@ -179,6 +181,9 @@ class TonghuashunClient:
         raise TonghuashunError("timeout")  # Defensive; all attempts return or raise.
 
     def _get(self, path: str, params: dict, deadline: float) -> TonghuashunResponse:
+        diagnostic_attempt = diagnostics.begin_request()
+        diagnostic_status, raw, body = None, None, None
+        diagnostic_complete, diagnostic_parsed = False, False
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TonghuashunError("timeout")
@@ -189,11 +194,14 @@ class TonghuashunClient:
                 headers={"X-api-key": self._api_key, "Accept": "application/json"},
                 timeout=(min(3, remaining), min(8, remaining)),
                 allow_redirects=False, stream=True) as response:
+                diagnostic_status = response.status_code
                 retry_after = self._retry_after(response.headers.get("Retry-After"))
                 if response.status_code != 200:
                     kind = {401: "unauthenticated", 403: "forbidden", 429: "rate_limited",
                             408: "timeout", 500: "upstream_error", 502: "upstream_error",
                             503: "upstream_error", 504: "upstream_error"}.get(response.status_code, "rejected")
+                    raw, diagnostic_complete = diagnostics.read_error_body(
+                        diagnostic_attempt, response, deadline, self.max_response_bytes)
                     raise TonghuashunError(kind, retry_after=retry_after)
                 raw = bytearray()
                 # Check elapsed time on every arriving byte to bound slow-drip
@@ -207,7 +215,9 @@ class TonghuashunClient:
                         raise TonghuashunError("response_too_large")
                 if time.monotonic() >= deadline:
                     raise TonghuashunError("timeout")
+                diagnostic_complete = True
                 body = json.loads(raw, parse_float=Decimal, parse_constant=_reject_json_constant)
+                diagnostic_parsed = True
                 if not isinstance(body, dict) or type(body.get("code")) is not int:
                     raise TonghuashunError("invalid_response")
                 if body["code"] != 0:
@@ -232,6 +242,9 @@ class TonghuashunClient:
             raise TonghuashunError("network_error") from None
         except (ValueError, TypeError, RecursionError):
             raise TonghuashunError("invalid_response") from None
+        finally:
+            diagnostics.finish_request(diagnostic_attempt, params, self._api_key,
+                diagnostic_status, raw, diagnostic_complete, body, diagnostic_parsed, sys.exc_info()[1])
 
     @staticmethod
     def _retry_after(value: str | None) -> float:
