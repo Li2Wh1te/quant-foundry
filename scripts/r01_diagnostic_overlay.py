@@ -35,9 +35,11 @@ PATCHES = {
  ],
  'app/data_ingestion/scheduler_tasks/tonghuashun.py': [
   ('    token = active_control.set(monitor)\n',
-   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run\n    diagnostic_token = begin_run(dataset, context.run_id, context.task_id,\n                                 parameters.model_dump(mode="json"))\n'),
+   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run\n    diagnostic_token = None\n'),
+  ('    try:\n        result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),\n',
+   '    try:\n        diagnostic_token = begin_run(dataset, context.run_id, getattr(context, "task_id", None),\n                                     parameters.model_dump(mode="json"))\n        result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),\n'),
   ('        active_control.reset(token)\n',
-   '        end_run(diagnostic_token)\n        active_control.reset(token)\n'),
+   '        if diagnostic_token is not None:\n            end_run(diagnostic_token)\n        active_control.reset(token)\n'),
  ],
  'app/data_ingestion/tonghuashun/service.py': [
   ('    start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)\n',

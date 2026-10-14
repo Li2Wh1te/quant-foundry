@@ -22,9 +22,10 @@ def execute(dataset: str, context: TaskContext, parameters: CollectionParameters
         max_requests=parameters.max_requests, max_seconds=parameters.max_seconds)
     token = active_control.set(monitor)
     from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run
-    diagnostic_token = begin_run(dataset, context.run_id, context.task_id,
-                                 parameters.model_dump(mode='json'))
+    diagnostic_token = None
     try:
+        diagnostic_token = begin_run(dataset, context.run_id, getattr(context, 'task_id', None),
+                                     parameters.model_dump(mode='json'))
         result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),
                          TonghuashunClient.from_settings(get_settings()), engine)
         monitor.emit(stage="本批结束")
@@ -40,7 +41,8 @@ def execute(dataset: str, context: TaskContext, parameters: CollectionParameters
         monitor.emit(stage=stage)
         return {"message": message, "yield_reason": exc.reason, "collection_progress": monitor.detail}
     finally:
-        end_run(diagnostic_token)
+        if diagnostic_token is not None:
+            end_run(diagnostic_token)
         active_control.reset(token)
 
 
