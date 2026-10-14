@@ -233,6 +233,8 @@ def collect(dataset: str, parameters: CollectionParameters, client, engine,
 
 
 def log_result(spec, subject, parameters, data, result, succeeded, kind=None, error_message=None):
+    from app.data_ingestion.tonghuashun.diagnostics import record_outcome
+    record_outcome(spec.key, succeeded, kind, error_message, result.get("version_id"))
     start = (data or {}).get("requested_start") or (data or {}).get("observed_start") or (parameters.start_date.isoformat() if parameters.start_date else None)
     end = (data or {}).get("requested_end") or (data or {}).get("observed_end") or (parameters.end_date.isoformat() if parameters.end_date else None)
     date_label = f"{start or '接口可用起点'} 至 {end or '接口可用终点'}" if start or end else "接口返回范围（快照按采集时间记录）"

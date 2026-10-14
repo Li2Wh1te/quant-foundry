@@ -64,6 +64,8 @@ class CollectionControl:
             raise CollectionYield('budget')
 
     def begin(self, dataset, subject, variant, revision, parameters, *, cache=False):
+        from app.data_ingestion.tonghuashun.diagnostics import begin_object
+        begin_object(dataset, revision)
         # Operational batch settings do not alter the identity of source work.
         scope_params = parameters.model_dump(mode='json')
         for key in ('batch_size', 'max_requests', 'max_seconds'):
