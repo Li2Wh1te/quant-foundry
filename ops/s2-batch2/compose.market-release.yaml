@@ -1,0 +1,10 @@
+# API/frontend pairing only. Preserve the existing project, volumes and every
+# scheduler, S3 admission, worker, runner and queue setting. Run with --no-build.
+services:
+  backend:
+    image: ${QF_S2_BACKEND_IMAGE:?tested immutable paired API image ID required}
+    pull_policy: never
+    user: ${QF_S2_TRUSTED_UID:?verified existing API UID required}:${QF_S2_TRUSTED_GID:?verified existing API GID required}
+  frontend:
+    image: ${QF_S2_FRONTEND_IMAGE:?tested immutable paired frontend image ID required}
+    pull_policy: never
