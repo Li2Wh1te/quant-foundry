@@ -181,6 +181,7 @@ class TonghuashunClient:
         raise TonghuashunError("timeout")  # Defensive; all attempts return or raise.
 
     def _get(self, path: str, params: dict, deadline: float) -> TonghuashunResponse:
+        diagnostics.check_scope()
         diagnostic_attempt = diagnostics.begin_request()
         diagnostic_status, raw, body = None, None, None
         diagnostic_complete, diagnostic_parsed = False, False

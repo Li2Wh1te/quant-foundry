@@ -19,7 +19,7 @@ PATCHES = {
   ('import re\n', 'import re\nimport sys\n'),
   ('from app.data_sources.errors import SourceError\n', 'from app.data_sources.errors import SourceError\nfrom app.data_ingestion.tonghuashun import diagnostics\n'),
   ('    def _get(self, path: str, params: dict, deadline: float) -> TonghuashunResponse:\n',
-   '    def _get(self, path: str, params: dict, deadline: float) -> TonghuashunResponse:\n        diagnostic_attempt = diagnostics.begin_request()\n        diagnostic_status, raw, body = None, None, None\n        diagnostic_complete, diagnostic_parsed = False, False\n'),
+   '    def _get(self, path: str, params: dict, deadline: float) -> TonghuashunResponse:\n        diagnostics.check_scope()\n        diagnostic_attempt = diagnostics.begin_request()\n        diagnostic_status, raw, body = None, None, None\n        diagnostic_complete, diagnostic_parsed = False, False\n'),
   ('                retry_after = self._retry_after(response.headers.get("Retry-After"))\n',
    '                diagnostic_status = response.status_code\n                retry_after = self._retry_after(response.headers.get("Retry-After"))\n'),
   ('                    raise TonghuashunError(kind, retry_after=retry_after)\n',
@@ -35,9 +35,9 @@ PATCHES = {
  ],
  'app/data_ingestion/scheduler_tasks/tonghuashun.py': [
   ('    token = active_control.set(monitor)\n',
-   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run\n    diagnostic_token = None\n'),
+   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, check_scope, end_run\n    diagnostic_token = None\n'),
   ('    try:\n        result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),\n',
-   '    try:\n        diagnostic_token = begin_run(dataset, context.run_id, getattr(context, "task_id", None),\n                                     parameters.model_dump(mode="json"))\n        result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),\n'),
+   '    try:\n        diagnostic_token = begin_run(dataset, context.run_id, getattr(context, "task_id", None),\n                                     parameters.model_dump(mode="json"))\n        check_scope()\n        result = collect(dataset, CollectionParameters.model_validate(parameters.model_dump()),\n'),
   ('        active_control.reset(token)\n',
    '        if diagnostic_token is not None:\n            end_run(diagnostic_token)\n        active_control.reset(token)\n'),
  ],
@@ -65,9 +65,31 @@ def apply_hooks(name, text):
     return text
 
 
-def prepare(source, output, base_image):
+def local_base_tag(base_image):
     if not re.fullmatch(r'sha256:[0-9a-f]{64}', base_image):
         raise ValueError('An exact local base image SHA256 is required')
+    return 'qf-r01-diagnostic-base:' + base_image.removeprefix('sha256:')
+
+
+def ensure_local_base(base_image):
+    tag = local_base_tag(base_image)
+    identity = subprocess.check_output(['docker', 'image', 'inspect', '--format', '{{.Id}}', base_image], text=True).strip()
+    if identity != base_image:
+        raise ValueError('Local base image identity mismatch')
+    existing = subprocess.run(['docker', 'image', 'inspect', '--format', '{{.Id}}', tag],
+                              text=True, capture_output=True)
+    if existing.returncode == 0:
+        if existing.stdout.strip() != base_image:
+            raise ValueError('Refusing to replace an unrelated local base tag')
+    elif existing.returncode == 1 and 'No such image' in existing.stderr:
+        subprocess.run(['docker', 'image', 'tag', base_image, tag], check=True)
+    else:
+        raise ValueError('Cannot verify local base tag')
+    return tag
+
+
+def prepare(source, output, base_image):
+    tag = local_base_tag(base_image)
     if output.exists():
         raise ValueError('Refusing to overwrite an existing build directory')
     # Verify ALL inputs before creating any output.
@@ -86,9 +108,9 @@ def prepare(source, output, base_image):
         file = output / name; file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(text)
         hashes[name] = hashlib.sha256(file.read_bytes()).hexdigest()
-    (output / 'Dockerfile').write_text('FROM ' + base_image + '\n' + ''.join(
+    (output / 'Dockerfile').write_text('FROM ' + tag + '\n' + ''.join(
         'COPY ' + name + ' /app/' + name + '\n' for name in original))
-    receipt = dict(base_image=base_image, expected_base_source_hashes=BASE_HASHES,
+    receipt = dict(base_image=base_image, local_base_tag=tag, expected_base_source_hashes=BASE_HASHES,
                    diagnostic_overlay_hashes=hashes, dependencies_or_migrations_changed=False,
                    whole_main_copied=False, body_capture_default=False)
     (output / 'overlay-manifest.json').write_text(json.dumps(receipt, indent=2)+'\n')
@@ -108,7 +130,7 @@ def main():
         receipt = prepare(args.source_root, args.output, args.base_image)
     else:
         # A never-started container exposes only the five required base files.
-        subprocess.run(['docker', 'image', 'inspect', args.base_image], check=True, stdout=subprocess.DEVNULL)
+        ensure_local_base(args.base_image)
         container = subprocess.check_output(['docker', 'create', '--network', 'none', args.base_image], text=True).strip()
         try:
             with tempfile.TemporaryDirectory(prefix='r01-diagnostic-base-') as temp:
@@ -122,6 +144,7 @@ def main():
     if args.build_tag:
         if not re.fullmatch(r'[a-z0-9][a-z0-9/_.:-]{0,150}', args.build_tag):
             parser.error('invalid build tag')
+        ensure_local_base(args.base_image)
         subprocess.run(['docker', 'build', '--network=none', '--pull=false', '-t', args.build_tag, str(args.output)], check=True)
     print(json.dumps(receipt, indent=2))
 
