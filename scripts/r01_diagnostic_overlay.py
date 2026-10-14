@@ -35,7 +35,7 @@ PATCHES = {
  ],
  'app/data_ingestion/scheduler_tasks/tonghuashun.py': [
   ('    token = active_control.set(monitor)\n',
-   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run\n    diagnostic_token = begin_run(dataset, context.run_id)\n'),
+   '    token = active_control.set(monitor)\n    from app.data_ingestion.tonghuashun.diagnostics import begin_run, end_run\n    diagnostic_token = begin_run(dataset, context.run_id, context.task_id,\n                                 parameters.model_dump(mode="json"))\n'),
   ('        active_control.reset(token)\n',
    '        end_run(diagnostic_token)\n        active_control.reset(token)\n'),
  ],

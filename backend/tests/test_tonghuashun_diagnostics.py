@@ -36,6 +36,7 @@ BUSINESS = 'SYNTHETIC.OF'
 @pytest.fixture(autouse=True)
 def isolated(monkeypatch):
     monkeypatch.delenv('QF_THS_DIAGNOSTIC_RUN_IDS', raising=False)
+    monkeypatch.delenv('QF_THS_DIAGNOSTIC_SCOPE_KEYS', raising=False)
     monkeypatch.delenv('QF_THS_DIAGNOSTIC_UNTIL', raising=False)
     monkeypatch.setattr(transport, '_gate', transport._RequestGate())
 
