@@ -24,7 +24,7 @@ from alembic.migration import MigrationContext
 from alembic.operations import Operations
 import pytest
 import uvicorn
-from sqlalchemy import func, select, text
+from sqlalchemy import event, func, select, text
 from sqlalchemy.orm import Session
 
 if os.getenv('QF_S3_INTEGRATION_REQUIRED') == '1':
@@ -46,7 +46,7 @@ from app.instruments.domain import InstrumentCodeMapping, InstrumentIdentityFact
 from app.instruments.identity_repository import InstrumentIdentityRepository, InstrumentIdentityFactRepository
 from app.instruments.repository import InstrumentCodeMappingRepository
 from app.instruments.rule_facts_repository import RuleFactsRepository
-from app.instruments.models import InstrumentIdentityFactRecord
+from app.instruments.models import InstrumentIdentityFactRecord, InstrumentCodeMappingRecord
 from app.instruments.rule_facts_models import InstrumentRuleFactRecord
 from app.calendars.facts import CalendarSessionFact
 from app.calendars.repository import CalendarFactRepository
@@ -373,6 +373,134 @@ def test_new_calendar_version_is_reselected_and_cannot_mix_with_the_accepted_pro
     with pytest.raises(RuntimeFault) as failure:
         resolver.check_facts(work(), accepted)
     assert failure.value.code == 'DATA_CHANGED'
+
+
+def test_calendar_candidates_are_shared_by_month_but_each_pit_boundary_is_preserved(formal_facts):
+    seed(formal_facts)
+    calendar_month(formal_facts)
+    later = datetime(2026, 7, 7, tzinfo=UTC)
+    with Session(formal_facts.catalog.engine) as session:
+        previous = session.scalar(select(CalendarSessionFactRecord).where(CalendarSessionFactRecord.session_date == DAY))
+        provenance = common_provenance(content_hash=None)
+        provenance.update(known_at=later, observed_at=later, knowledge_from=later, knowledge_as_of=later)
+        CalendarFactRepository(session).append_session_fact(CalendarSessionFact(
+            calendar_id='SSE', session_date=DAY, is_open=False, definition_version='sse-bootstrap-v1',
+            fact_version=2, supersedes_fact_id=previous.fact_id,
+            registry_fact_id=UUID(REGISTRY_FACT_IDS['SSE']), registry_version=1,
+            definition_fact_id=UUID(DEFINITION_FACT_IDS['SSE']), **provenance))
+        session.commit()
+    statements = []
+    def read(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    engine = formal_facts.catalog.engine
+    event.listen(engine, 'before_cursor_execute', read)
+    try:
+        resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=engine)
+        with resolver._session() as (session, _budget):
+            original = resolver._calendar(session, 'SSE', DAY, datetime(2026, 7, 6, tzinfo=UTC))
+            revised = resolver._calendar(session, 'SSE', DAY, later)
+            assert original['fact'].is_open and not revised['fact'].is_open
+            for offset in range(20):
+                resolver._calendar(session, 'SSE', DAY + timedelta(days=offset), later)
+            assert resolver._calendar(session, 'SSE', DAY, datetime(2026, 7, 6, tzinfo=UTC)) == original
+            reader = session.info['s3_calendar_reader']
+            assert len(reader.months) <= 4 and len(reader.selected) <= 128
+    finally:
+        event.remove(engine, 'before_cursor_execute', read)
+    # All securities/knowledge cutoffs reuse the source candidates, not the
+    # selected PIT answer. One SQL month read replaces one read per day.
+    assert sum('FROM calendar_session_facts' in query for query in statements) == 1
+    assert sum('FROM calendar_source_priorities' in query for query in statements) == 1
+
+
+def test_fact_check_uses_bounded_sql_metadata_without_rebuilding_domain_facts(formal_facts, monkeypatch):
+    seed(formal_facts)
+    calendar_month(formal_facts)
+    resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=formal_facts.catalog.engine)
+    current = work()
+    accepted = resolver.resolve_facts(current)
+    monkeypatch.setattr(resolver, 'resolve_facts', lambda *a, **kw: pytest.fail('fact check must not resolve the full run'))
+    monkeypatch.setattr(resolver, '_resolve', lambda *a, **kw: pytest.fail('fact check must not decode domain history'))
+    statements = []
+    def read(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    engine = formal_facts.catalog.engine
+    event.listen(engine, 'before_cursor_execute', read)
+    try:
+        resolver.check_facts(current, accepted)
+        with engine.begin() as connection:
+            resolver.check_facts(current, accepted, connection=connection)
+    finally:
+        event.remove(engine, 'before_cursor_execute', read)
+    selects = [query for query in statements if query.lstrip().startswith('SELECT')]
+    assert len(selects) == 22 and all('sha256' in query and 'count(' in query for query in selects)
+
+
+def test_default_multisecurity_resolution_reuses_one_calendar_month(formal_facts):
+    seed(formal_facts)
+    seed(formal_facts, symbol='510002.SH', calendar=False)
+    calendar_month(formal_facts)
+    current = work()
+    current.config.update(universe=['510001.SH', '510002.SH'], end='2026-07-20')
+    statements = []
+    def read(connection, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+    engine = formal_facts.catalog.engine
+    event.listen(engine, 'before_cursor_execute', read)
+    try:
+        facts = SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current)
+    finally:
+        event.remove(engine, 'before_cursor_execute', read)
+    assert len(facts.identities) == len(facts.calendars) == 30
+    assert facts.execution_calendar['next_session'] == 'SSE:2026-07-21'
+    ordinary = [query for query in statements if 'sha256' not in query]
+    assert sum('FROM calendar_session_facts' in query for query in ordinary) == 1
+    assert sum('FROM calendar_source_priorities' in query for query in ordinary) == 1
+
+
+@pytest.mark.parametrize('kind', ['identity', 'status', 'actions', 'new_mapping'])
+def test_sql_content_guard_detects_related_fields_quality_and_new_candidates(formal_facts, kind):
+    iid = seed(formal_facts)
+    resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=formal_facts.catalog.engine)
+    current = work()
+    accepted = resolver.resolve_facts(current)
+    with Session(formal_facts.catalog.engine) as session:
+        if kind == 'identity':
+            session.scalar(select(InstrumentIdentityFactRecord)).currency = 'USD'
+        elif kind == 'status':
+            session.scalar(select(TradingStatusCoverageFact)).status = 'incomplete'
+        elif kind == 'actions':
+            session.scalar(select(CorporateActionCoverageFact)).evidence = dict(reference='changed')
+        else:
+            previous = session.scalar(select(InstrumentCodeMappingRecord))
+            later = KNOWN + timedelta(days=1)
+            InstrumentCodeMappingRepository(session).add_mapping(InstrumentCodeMapping(
+                instrument_id=iid, source='etf_ingestion', source_code='510003.SH',
+                trading_code='510003.SH', mapping_source='isolated-sql-fixture',
+                valid_from=date(2030, 1, 1), known_at=later, observed_at=later,
+                evidence='isolated-new-revision', logical_fact_key=previous.logical_fact_key,
+                fact_version=2, supersedes_fact_id=previous.id))
+        session.commit()
+    with pytest.raises(RuntimeFault) as changed:
+        resolver.check_facts(current, accepted)
+    assert changed.value.code == 'DATA_CHANGED'
+
+
+def test_unrelated_identity_and_cold_calendar_rows_do_not_invalidate_run(formal_facts):
+    seed(formal_facts)
+    calendar_month(formal_facts)
+    resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=formal_facts.catalog.engine)
+    current = work()
+    accepted = resolver.resolve_facts(current)
+    seed(formal_facts, symbol='510002.SH', calendar=False)
+    with Session(formal_facts.catalog.engine) as session:
+        CalendarFactRepository(session).append_session_fact(CalendarSessionFact(
+            calendar_id='SSE', session_date=DAY - timedelta(days=400), is_open=False,
+            definition_version='sse-bootstrap-v1', registry_fact_id=UUID(REGISTRY_FACT_IDS['SSE']),
+            registry_version=1, definition_fact_id=UUID(DEFINITION_FACT_IDS['SSE']),
+            **common_provenance(content_hash=None)))
+        session.commit()
+    resolver.check_facts(current, accepted)
 
 
 def test_fact_budgets_fail_without_truncating_or_advertising_short_coverage(formal_facts):
