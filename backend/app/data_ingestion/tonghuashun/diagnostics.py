@@ -1,7 +1,8 @@
 """Correlated diagnostics; business originals are opt-in and file-local only.
 
 This module never issues a request or changes a collection checkpoint. The
-operator can enable originals for at most two exact run UUIDs for 30 minutes.
+operator can enable originals for two run UUIDs or two frozen task scopes
+for 30 minutes. Each frozen scope admits only one run in this process.
 Credentials are excluded; business symbols, values and response text are kept.
 """
 from contextvars import ContextVar
@@ -16,6 +17,7 @@ import json
 import logging
 import os
 import re
+from threading import Lock
 import time
 from urllib.parse import quote, quote_plus
 from uuid import UUID
@@ -43,6 +45,8 @@ MAX_BODY_BYTES = 8 * 1024 * 1024
 MAX_RUN_BYTES = 16 * 1024 * 1024
 MAX_CAPTURE_REQUESTS = 120
 _active = ContextVar('tonghuashun_diagnostic_run', default=None)
+_scope_claims = {}
+_scope_claim_lock = Lock()
 _SECRET_KEYS = frozenset({'password', 'passwd', 'pwd', 'token', 'accesstoken',
     'refreshtoken', 'apikey', 'authorization', 'proxyauthorization', 'cookie',
     'setcookie', 'secret', 'clientsecret', 'sessiontoken', 'sessionid', 'xapikey',
@@ -65,17 +69,59 @@ def _uuid(value):
         return None
 
 
-def _capture_enabled(run_id, now):
+def scope_key(dataset, task_id, parameters):
+    """Hash the complete validated parameter snapshot, without logging it."""
+    task = _uuid(task_id)
+    if dataset not in DATASETS or task is None or not isinstance(parameters, dict):
+        return None
+    try:
+        raw = json.dumps([dataset, task, parameters], sort_keys=True,
+                         separators=(',', ':'), ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(raw.encode()).hexdigest()
+    except (ValueError, TypeError, OverflowError, UnicodeError, RecursionError):
+        return None
+
+
+def _capture_selection(now):
     try:
         raw = os.environ.get('QF_THS_DIAGNOSTIC_RUN_IDS', '')
+        scoped = os.environ.get('QF_THS_DIAGNOSTIC_SCOPE_KEYS', '')
+        if bool(raw) == bool(scoped):
+            return None
+        until = datetime.fromisoformat(os.environ.get('QF_THS_DIAGNOSTIC_UNTIL', '').replace('Z', '+00:00'))
+        if until.tzinfo is None or not 0 < (until - now).total_seconds() <= 1800:
+            return None
+        if scoped:
+            keys = scoped.split(',')
+            if not 1 <= len(keys) <= 2 or any(re.fullmatch('[0-9a-f]{64}', x) is None for x in keys):
+                return None
+            return 'scope', set(keys)
         ids = raw.split(',') if raw else []
         if not 1 <= len(ids) <= 2 or any(_uuid(x.strip()) is None for x in ids):
-            return False
-        until = datetime.fromisoformat(os.environ.get('QF_THS_DIAGNOSTIC_UNTIL', '').replace('Z', '+00:00'))
-        return (until.tzinfo is not None and 0 < (until - now).total_seconds() <= 1800
-                and run_id in {_uuid(x.strip()) for x in ids})
+            return None
+        return 'run', {_uuid(x.strip()) for x in ids}
     except (ValueError, TypeError, OverflowError):
+        return None
+
+
+def _capture_enabled(run_id, now, key=None):
+    selection = _capture_selection(now)
+    if selection is None:
         return False
+    mode, values = selection
+    if mode == 'run':
+        return key is None and run_id in values
+    with _scope_claim_lock:
+        return key in values and _scope_claims.get(key) == run_id
+
+
+def _claim_scope(run_id, key, now):
+    selection = _capture_selection(now)
+    if selection is None or selection[0] != 'scope' or key not in selection[1]:
+        return
+    with _scope_claim_lock:
+        if key not in _scope_claims and len(_scope_claims) < 2:
+            _scope_claims[key] = run_id
 
 
 @dataclass
@@ -83,6 +129,7 @@ class Run:
     run_id: str
     dataset: str
     capture: bool
+    scope_key: str | None = None
     object_seq: int = 0
     request_seq: int = 0
     source_revision: int | None = None
@@ -90,9 +137,16 @@ class Run:
     last: dict = field(default_factory=dict)
 
 
-def begin_run(dataset, run_id):
+def begin_run(dataset, run_id, task_id=None, parameters=None):
     identifier = _uuid(run_id)
-    run = (Run(identifier, dataset, _capture_enabled(identifier, datetime.now(UTC)))
+    now = datetime.now(UTC)
+    key = scope_key(dataset, task_id, parameters)
+    if identifier and dataset in DATASETS:
+        _claim_scope(identifier, key, now)
+    selection = _capture_selection(now)
+    if selection is None or selection[0] == 'run':
+        key = None
+    run = (Run(identifier, dataset, _capture_enabled(identifier, now, key), scope_key=key)
            if dataset in DATASETS and identifier else None)
     return _active.set(run)
 
@@ -120,7 +174,7 @@ def begin_request():
 def wants_body(attempt):
     return bool(attempt and attempt[0].capture and attempt[1] <= MAX_CAPTURE_REQUESTS
                 and attempt[0].used_bytes < MAX_RUN_BYTES
-                and _capture_enabled(attempt[0].run_id, datetime.now(UTC)))
+                and _capture_enabled(attempt[0].run_id, datetime.now(UTC), attempt[0].scope_key))
 
 
 def read_error_body(attempt, response, deadline, limit):
@@ -268,7 +322,7 @@ def _base(run):
         app_version = 'unknown'
     return dict(run_id=run.run_id, dataset=run.dataset, object_seq=run.object_seq,
                 source_revision=run.source_revision, application_version=app_version,
-                diagnostic_version=1)
+                diagnostic_version=2)
 
 
 def finish_request(attempt, parameters, api_key, status, raw, complete, body, parsed, failure):
