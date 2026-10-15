@@ -20,6 +20,9 @@ from app.data_store.locking import _filesystem_name
 from app.data_store.pipeline import PipelineOptions, run_entry
 from app.data_store.storage import CurrentStore
 from app.instruments.models import Instrument, InstrumentCodeMappingRecord
+from app.data_ingestion.models.etf import EtfCode, EtfEntity
+from app.data_ingestion.models.etf_daily import EtfDailyBar
+from app.data_ingestion.models.etf_watchlist import EtfWatchlistEntry
 from app.market_service.bindings import TEST_VARIANT
 
 START, END = date(2024, 1, 1), date(2026, 10, 9)
@@ -110,6 +113,14 @@ def main():
                 known_at=datetime(2024, 1, 1, tzinfo=timezone.utc), observed_at=NOW))
             directory.append(source('E67', 'directory', dict(source='tushare', ts_code=code,
                 csname='人工 ETF ' + str(index), exchange='SSE', list_date=first.strftime('%Y%m%d'))))
+        if closure:
+            iid = uuid5(NAMESPACE_URL, 'qf-s2-artificial:510300.SH')
+            session.add(EtfEntity(id=iid)); session.flush()
+            session.add(EtfCode(source='tushare', ts_code='510300.SH', etf_id=iid,
+                list_status='L', exchange='SSE', csname='人工原生自选', first_seen_at=NOW, last_seen_at=NOW))
+            session.add(EtfDailyBar(source='tushare', ts_code='510300.SH', trade_date=END, close=Decimal('99')))
+            session.add(EtfWatchlistEntry(owner_scope='token:' + hashlib.sha256(settings.api_token.get_secret_value().encode()).hexdigest(),
+                source='tushare', ts_code='510300.SH'))
     day, count = START, 0
     while day <= date(2026, 10, 31):
         opened = day.weekday() < 5  # A synthetic oracle, not an exchange rule.

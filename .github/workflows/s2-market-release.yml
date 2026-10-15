@@ -77,7 +77,16 @@ jobs:
         run: |
           # Reports, screenshots and runtime diagnostics stay in runner-local
           # temporary storage; publish only the job's pass/fail status.
-          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --closure-only --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1
+          if ! python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --closure-only --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1; then
+            python - "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" <<'PY'
+          import json,sys
+          from pathlib import Path
+          path=Path(sys.argv[1])
+          stage=json.loads(path.read_text()).get('stage','setup') if path.exists() else 'setup'
+          print('::error::D13 isolated check failed at '+stage+'; detailed output remains private')
+          PY
+            exit 1
+          fi
       - uses: actions/cache/save@v4
         if: always() && steps.native-build.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:

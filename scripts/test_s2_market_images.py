@@ -141,6 +141,8 @@ def main():
             read('/api/auth/verify', expected=204)
             read('/api/system/version')
             assert all(not item['enabled'] for item in read('/api/data-sources')['items'])
+            selections = read('/api/admin/etf-watchlist')['items']
+            assert len(selections) == 1 and selections[0]['ts_code'] == '510300.SH' and Decimal(selections[0]['close']) == 99
             read('/api/admin/backtests/capabilities')
             issues = read('/api/admin/data-store/issues')
             result['checks'].append('UID 999 image start; no worker; read routes preserve explicit S3 admission and disabled source settings')
@@ -238,6 +240,8 @@ def main():
                     'QF_S2_TEST_TOKEN':env['QF_API_TOKEN'], 'QF_S2_BROWSER_OUTPUT':str(browser_result),
                     'QF_S2_TEST_DATASET':issues['items'][0]['dataset'], 'QF_S2_FIXTURE':json.dumps(result['fixture'])},
                 capture_output=True, text=True, timeout=420 if args.closure_only else 180)
+            if completed.returncode and browser_result.exists():
+                result['stage'] = 'browser-' + json.loads(browser_result.read_text()).get('stage','unknown')
             assert completed.returncode == 0, completed.stderr[-4000:] + completed.stdout[-2000:]
             result['browser'] = json.loads(browser_result.read_text())
         if args.closure_only:
