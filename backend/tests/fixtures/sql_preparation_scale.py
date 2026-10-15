@@ -71,9 +71,9 @@ checking = [False]
 config = payload['config']
 targets = {(config['universe'][0], config['start']), (config['universe'][-1], config['end'])}
 def statement(connection, cursor, sql, parameters, context, executemany):
-    if checking[0] and sql.lstrip().startswith('SELECT'):
+    if checking[0] and sql.lstrip().startswith(('SELECT', 'WITH')):
         assert 'sha256' in sql or 'current_setting' in sql, 'consistency checks must not fetch domain history'
-    if tracking[0] and sql.lstrip().startswith('SELECT'):
+    if tracking[0] and sql.lstrip().startswith(('SELECT', 'WITH')):
         metrics['select_count'] += 1
 event.listen(engine, 'before_cursor_execute', statement)
 original_read, original_check, original_reset = FactReadBudget.read, FactReadBudget.check, FactReadBudget.reset

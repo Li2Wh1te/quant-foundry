@@ -19,6 +19,7 @@ def fact_statements(work, *, zone, inventory_asof=None):
     from app.instruments.models import InstrumentCodeMappingRecord, InstrumentIdentityFactRecord
     from app.instruments.rule_facts_models import InstrumentRuleFactRecord
     from app.instruments.spec_provider import DEFAULT_MAPPING_SOURCE, DEFAULT_RULE_PACKAGE_REFERENCE
+    from .formal_execution_producer import PACKAGE
     from app.calendars.models import (CalendarRegistryRecord, CalendarDefinitionRecord,
         CalendarSessionFactRecord, CalendarSourcePriorityRecord)
     from app.data_ingestion.models.trading_calendar import TradingStatusFact, TradingStatusCoverageFact
@@ -43,6 +44,18 @@ def fact_statements(work, *, zone, inventory_asof=None):
         rule.rule_package_key == DEFAULT_RULE_PACKAGE_REFERENCE.key,
         rule.rule_package_version == DEFAULT_RULE_PACKAGE_REFERENCE.version,
         rule.valid_from <= end, or_(rule.valid_to.is_(None), rule.valid_to > start), rule.known_at <= cutoff))
+    # Keep this scoped package's revision fold separate. Combining it with the
+    # legacy query revisited every legacy fact by key even when this package
+    # was absent. Its temporary key set contains only related instruments.
+    execution_keys = select(rule.fact_key, rule.instrument_id).where(
+        rule.instrument_id.in_(ids),
+        rule.rule_package_key == PACKAGE.key, rule.rule_package_version == PACKAGE.version,
+        rule.valid_from <= end, or_(rule.valid_to.is_(None), rule.valid_to > start),
+        rule.known_at <= cutoff).cte('execution_fact_keys').prefix_with('MATERIALIZED')
+    related_keys = select(execution_keys.c.fact_key)
+    # A correction can move its effective window or package out of this run.
+    # Include its visible revision before the producer folds versions.
+    statements.append(select(rule.__table__).where(rule.fact_key.in_(related_keys), rule.known_at <= cutoff))
     for model in (CalendarRegistryRecord, CalendarDefinitionRecord):
         statements.append(select(model.__table__).where(model.calendar_id.in_(calendars)))
     # Calendar assembly verifies full weeks/months and the following session's
