@@ -11,7 +11,7 @@ assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/);
 assert.equal(process.env.QF_ENVIRONMENT, 'test');
 const fixture = JSON.parse(process.env.QF_S2_FIXTURE);
 let browser;
-const findings=[], errors=[], requests=[], metrics=[], pending=[], faults=[], verification=[];
+const findings=[], errors=[], requests=[], metrics=[], faults=[], verification=[];
 const started=Date.now();
 let stage;
 function setStage(value) {
@@ -40,39 +40,26 @@ try {
     if(url.searchParams.has('cursor')) url.searchParams.set('cursor','omitted');
     requests.push(url.pathname+url.search);
   });
-  const finished=new WeakSet(), failed=new WeakSet(), completions=new Map();
-  function finish(request, successful) {
-    (successful?finished:failed).add(request);
-    for(const resolve of completions.get(request)||[]) resolve(successful);
-    completions.delete(request);
-  }
-  page.on('requestfinished',request=>finish(request,true));
-  page.on('requestfailed',request=>finish(request,false));
-  page.on('close',()=>{ for(const waiting of completions.values()) for(const resolve of waiting) resolve(false); completions.clear(); });
-  function completed(response) {
-    const request=response.request();
-    if(failed.has(request)||request.failure()) return Promise.resolve(false);
-    if(finished.has(request)) return Promise.resolve(true);
-    return new Promise(resolve=>{ const waiting=completions.get(request)||[];waiting.push(resolve);completions.set(request,waiting); });
-  }
-  page.on('response', response=>{
-    if(!new URL(response.url()).pathname.startsWith('/api/admin/market/')) return;
-    const capture=(async()=>{
-      if(!await completed(response)) return; // Superseded reads are cancelled by the real client.
-      // Network transfer accounting does not depend on Chromium retaining a
-      // second inspector copy of a body already consumed by the application.
-      const sizes=await response.request().sizes();
-      assert.ok(sizes.responseBodySize>=0&&sizes.responseBodySize<=4*1024*1024);
-      assert.ok([undefined,'identity'].includes(response.headers()['content-encoding']));
-      if(response.status()>=400) {
-        const path=new URL(response.url()).pathname;
-        faults.push({route:path.endsWith('/bars')?'bars':path.endsWith('/series')?'series':'metadata',code:'HTTP_'+response.status()});
-      }
-      metrics.push({bytes:sizes.responseBodySize,status:response.status(),milliseconds:response.request().timing().responseEnd});
-    })();
-    capture.catch(()=>{}); // Observed again by Promise.all inside the guarded result path.
-    pending.push(capture);
+  page.on('response',response=>{
+    const path=new URL(response.url()).pathname;
+    if(path.startsWith('/api/admin/market/')&&response.status()>=400)
+      faults.push({route:path.endsWith('/bars')?'bars':path.endsWith('/series')?'series':'metadata',code:'HTTP_'+response.status()});
   });
+  async function collectMetrics() {
+    // Quiesce the current document before navigation/read-only snapshots.
+    // Resource Timing reports decoded bytes without retaining response bodies.
+    await page.waitForLoadState('networkidle',{timeout:35000});
+    const observed=await page.evaluate(()=>performance.getEntriesByType('resource')
+      .filter(entry=>new URL(entry.name).pathname.startsWith('/api/admin/market/'))
+      .map(entry=>{
+        const url=new URL(entry.name);if(url.searchParams.has('cursor'))url.searchParams.set('cursor','omitted');
+        return {url:url.pathname+url.search,bytes:entry.decodedBodySize,encoded_bytes:entry.encodedBodySize,
+          milliseconds:entry.duration,status:entry.responseStatus??null};
+      }));
+    for(const item of observed) assert.ok(Number.isSafeInteger(item.bytes)&&item.bytes>=0&&item.bytes<=4*1024*1024);
+    assert.ok(observed.some(item=>item.url.includes('/bars?')&&item.bytes>0));
+    metrics.push(...observed);
+  }
   async function readActual(response) {
     assert.equal(response.status(),200);
     // An independent real GET of exactly the observed URL verifies the shown
@@ -95,18 +82,20 @@ try {
   async function bars(action, expected, continuation=false) {
     const phase=stage;
     const instrument=decodeURIComponent(new URL(page.url()).pathname.split('/').at(-1));
-    const response=page.waitForResponse(async response=>{
+    const response=page.waitForResponse(response=>{
       const url=new URL(response.url());
       return decodeURIComponent(url.pathname)===`/api/admin/market/instruments/${instrument}/bars` &&
-        (!continuation || url.searchParams.has('cursor')) && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value) && await completed(response);
+        (!continuation || url.searchParams.has('cursor')) && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value);
     });
     response.catch(()=>{}); // Keep an action failure in the guarded report path.
     setStage(phase+'-request');
     await action(); const actual=await response;
-    setStage(phase+'-decode');
-    const data=await readActual(actual);
+    assert.equal(actual.status(),200);
     setStage(phase+'-render');
-    await settled(); setStage(phase); return data;
+    await settled();
+    setStage(phase+'-verify');
+    const data=await readActual(actual);
+    setStage(phase); return data;
   }
   await page.goto(base+'/admin/data/etf-basics/'+encodeURIComponent(fixture.instrument_key)+'?tab=overview');
   await settled();
@@ -136,12 +125,13 @@ try {
   setStage('selected-factor-table');
   const side=button('切换资料侧栏');
   if(await side.getAttribute('aria-expanded')!=='true') await side.click();
-  const factorResponse=page.waitForResponse(async response=>{
-    const url=new URL(response.url()); return url.pathname.endsWith('/factors')&&url.searchParams.get('series_key')==='isolated-etf-daily'&&await completed(response);
+  const factorResponse=page.waitForResponse(response=>{
+    const url=new URL(response.url()); return url.pathname.endsWith('/factors')&&url.searchParams.get('series_key')==='isolated-etf-daily';
   });
   factorResponse.catch(()=>{});
   await page.getByRole('tab',{name:'复权因子',exact:true}).click();
   const factorResult=await factorResponse; assert.equal(factorResult.status(),200);
+  await page.locator('.qfb-factors tbody tr').first().waitFor();
   const factors=await readActual(factorResult);
   assert.deepEqual(factors.items.map(row=>row.trade_date),raw.items.map(row=>row.last_trade_date));
   assert.deepEqual(factors.items.map(row=>canonical(row.factor)),['1','1','1','2','2','2']);
@@ -161,6 +151,7 @@ try {
   assert.equal(await page.locator('#qfb-price-basis').inputValue(),'none');
   assert.equal(await page.locator('#qfb-price-basis option[value="pre"]').isDisabled(),true);
   findings.push('explicit series change resets basis/window; production E69 remains restricted, without implicit source/basis fallback');
+  await collectMetrics();
   setStage('history-navigation');
   await page.goto(base+'/admin/data/etf-basics/'+encodeURIComponent(fixture.history_key)+'?tab=overview');
   setStage('history-initial-window');
@@ -196,7 +187,7 @@ try {
   assert.deepEqual(await page.evaluate(()=>Object.keys(localStorage)),[]);
   assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage)),['quant-foundry.api-token']);
   findings.push('real multi-decade formal history reaches the fixed-page resident boundary at 9,728/10,000 with continuation still present; next page disabled, release returns to 512; repeated refresh/zoom does not persist bars or cursors');
-  await Promise.all(pending);
+  await collectMetrics();
   assert.deepEqual(errors,[]);
   await writeFile(output,JSON.stringify({passed:true,synthetic:true,live_verified:false,deployed:false,findings,
     requests,metrics,verification,resident_bars:9728,loaded_pages:pages,browser_metrics:peak.metrics,
