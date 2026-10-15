@@ -1,0 +1,81 @@
+name: S2 market paired image acceptance
+on:
+  pull_request:
+    paths:
+      - backend/app/market_service/**
+      - frontend/src/features/market-data/**
+      - frontend/src/pages/EtfDetailPage.tsx
+      - frontend/src/pages/MarketPage.tsx
+      - frontend/Dockerfile
+      - scripts/build_s2_market_images.sh
+      - scripts/test_s2_market_images.py
+      - ops/s2-batch2/**
+      - .github/workflows/s2-market-release.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  paired-images:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      RUSTUP_TOOLCHAIN: '1.90.0'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.2'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: astral-sh/setup-uv@v5
+      - name: Locked native build toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal
+      - uses: actions/cache@v4
+        id: native-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: s2-native-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock', 'engine/**/src/**', 'sdk/python/pyproject.toml') }}
+      - name: Build and seal the existing SDK wheel
+        id: native-build
+        run: |
+          export QF_S2_BUILD_ROOT="$RUNNER_TEMP/s2-build"
+          mkdir -p "$QF_S2_BUILD_ROOT/wheels"
+          python -m venv "$QF_S2_BUILD_ROOT/build"
+          "$QF_S2_BUILD_ROOT/build/bin/python" -m pip install --require-hashes -r sdk/python/requirements-build.lock
+          python scripts/s3_release.py snapshot --out "$QF_S2_BUILD_ROOT/native-before.json"
+          (cd sdk/python && "$QF_S2_BUILD_ROOT/build/bin/maturin" build --release --locked --interpreter "$QF_S2_BUILD_ROOT/build/bin/python" --out "$QF_S2_BUILD_ROOT/wheels")
+          python scripts/s3_release.py seal --manifest "$QF_S2_BUILD_ROOT/native-before.json" --wheel "$QF_S2_BUILD_ROOT"/wheels/quantfoundry_sdk-*.whl --out "$QF_S2_BUILD_ROOT/release.json"
+      - name: Frozen frontend dependencies and Chromium
+        run: |
+          corepack enable
+          corepack prepare pnpm@11.19.0 --activate
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend exec playwright install --with-deps chromium
+          echo "QF_BROWSER_PATH=$(pnpm --dir frontend exec node -e 'console.log(require("playwright").chromium.executablePath())')" >> "$GITHUB_ENV"
+      - name: Build immutable API and frontend pair
+        env:
+          QF_S2_BUILD_ROOT: ${{ runner.temp }}/s2-build
+          QF_S2_BUILD_PYTHON: ${{ runner.temp }}/s2-build/build/bin/python
+          QF_S2_RELEASE_ROOT: ${{ runner.temp }}/s2-release
+          QF_S2_PNPM_OFFLINE: '1'
+        run: bash scripts/build_s2_market_images.sh
+      - name: Default app, supported storage, actual image browser chain
+        run: |
+          # Reports, screenshots and runtime diagnostics stay in runner-local
+          # temporary storage; publish only the job's pass/fail status.
+          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1
+      - uses: actions/cache/save@v4
+        if: always() && steps.native-build.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            engine/target
+          key: s2-native-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock', 'engine/**/src/**', 'sdk/python/pyproject.toml') }}
