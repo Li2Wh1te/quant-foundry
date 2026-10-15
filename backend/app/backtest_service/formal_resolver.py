@@ -7,7 +7,7 @@ ETF Product, raw prices, share conversion, or research publication time.
 """
 from contextlib import contextmanager
 from copy import deepcopy
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 import json
 import math
@@ -27,6 +27,8 @@ ZONE = ZoneInfo('Asia/Shanghai')
 FACT_ROWS = 10000
 FACT_BYTES = 4 * 1024 * 1024
 FACT_DAYS = 3660
+# Whole-run work bound, independent of the 256-security page credit. Paging
+# must not turn this existing admission guard into a per-segment allowance.
 FACT_CELLS = 20000
 FACT_SECONDS = 5
 
@@ -99,7 +101,7 @@ class FactReadBudget:
     detects exhaustion; it is never returned as a silently truncated fact set.
     """
     def __init__(self):
-        self.rows, self.bytes, self.parts = 0, 0, []
+        self.rows, self.bytes = 0, 0
         self.deadline = clock.monotonic() + FACT_SECONDS
 
     def read(self, call):
@@ -131,7 +133,6 @@ class FactReadBudget:
         self.bytes += size
         if self.bytes > FACT_BYTES:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过字节预算')
-        self.parts.append(canonical_hash(sorted(payload, key=lambda item: encoded(item))))
         return result()
 
 
@@ -189,7 +190,7 @@ class SqlFormalPlanResolver:
                     yield session, budget
 
     def __call__(self, work):
-        facts = self.resolve_facts(work)
+        facts = self.resolve_facts(work, paged=True)
         from .formal_assembly import assemble_run_plan, missing_plan_dependencies
         if missing_plan_dependencies(facts):
             raise FormalResolutionFault(list(facts.checks))
@@ -205,13 +206,18 @@ class SqlFormalPlanResolver:
         if token != accepted.token:
             raise RuntimeFault('DATA_CHANGED', '已解析的正式小事实、版本或质量发生变化')
 
-    def resolve_facts(self, work, *, connection=None):
+    def resolve_facts(self, work, *, connection=None, paged=True):
+        """Default to bounded SQL pages; retain small tuple inspection explicitly.
+
+        This in-process representation choice cannot select source semantics
+        or change admission limits and is absent from every RunConfig/REST DTO.
+        """
         # This guard applies to the SQL reader, not the downstream DTO page
         # composer. Refuse oversized scopes before opening a DB transaction;
         # a bounded composer alone does not make this reader page bounded.
         self._check_range(work.config)
         with self._session(connection) as (session, budget):
-            return self._resolve(session, budget, work)
+            return self._resolve(session, budget, work, paged=paged)
 
     @staticmethod
     def _check_range(config):
@@ -245,15 +251,13 @@ class SqlFormalPlanResolver:
             checks.append(state(name, 'available', scope=scope))
         return value
 
-    def _resolve(self, session, budget, work, *, inventory_asof=None):
-        config = work.config
-        start, end = date.fromisoformat(config['start']), date.fromisoformat(config['end'])
-        days = (end - start).days + 1
-        symbols = tuple(config['universe'])
-        self._check_range(config)
-        from .formal_fact_guard import fact_fingerprint
-        fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
-        checks, identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], [], []
+    def _read_dependency_page(self, session, work, symbols, day, *, inventory_asof=None, summarized=False):
+        from .formal_sql_pages import ScopedChecks, SqlDependencyPage
+        from .session_fact_pages import PAGE_ROWS
+        if not 1 <= len(symbols) <= PAGE_ROWS:
+            raise RuntimeFault('RESOURCE_LIMIT', 'SQL依赖读取超过单页标的信用')
+        checks = ScopedChecks() if summarized else []
+        identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
         from app.instruments.spec_provider import DEFAULT_MAPPING_SOURCE, DEFAULT_RULE_PACKAGE_REFERENCE
         from app.instruments.models import InstrumentCodeMappingRecord
         from app.instruments.repository import InstrumentCodeMappingRepository
@@ -262,98 +266,183 @@ class SqlFormalPlanResolver:
         from app.instruments.rules.registry import RulePackageRegistry
         from app.instruments.rules.resolver import RulePackageResolver
         from app.instruments.rules.etf_china import register_china_listed_etf_rules
-        registry = RulePackageRegistry()
-        register_china_listed_etf_rules(registry)
-        # Walk dates first: all securities reuse the same bounded month
-        # candidates instead of cycling the cache through history per symbol.
+        registry = session.info.get('s3_rule_registry')
+        if registry is None:
+            registry = RulePackageRegistry()
+            register_china_listed_etf_rules(registry)
+            session.info['s3_rule_registry'] = registry
+        for symbol in symbols:
+            at = datetime.combine(day, time(), ZONE)
+            cutoff = inventory_asof or at  # facts known before this simulated day
+            scope = dict(security=symbol, date=day.isoformat())
+            def identity():
+                ids = set(session.scalars(select(InstrumentCodeMappingRecord.instrument_id).where(
+                    func.lower(func.trim(InstrumentCodeMappingRecord.source)) == DEFAULT_MAPPING_SOURCE,
+                    InstrumentCodeMappingRecord.source_code == symbol,
+                    InstrumentCodeMappingRecord.known_at <= cutoff)))
+                found = []
+                for iid in sorted(ids, key=str):
+                    mappings = InstrumentCodeMappingRepository(session).resolve_code_mappings(iid,
+                        source=DEFAULT_MAPPING_SOURCE, start_date=day, end_date=day, data_cutoff=cutoff)
+                    if not any(mapping.source_code == symbol for mapping in mappings):
+                        continue
+                    fact = InstrumentIdentityFactRepository(session).resolve_identity_at(iid,
+                        effective_at=at, data_cutoff=cutoff)
+                    if fact is not None:
+                        found.append((fact, mappings))
+                if len(found) > 1:
+                    raise ValueError('identity_mapping_ambiguous')
+                return found[0] if found else None
+            pair = self._attempt('identity', identity, checks, scope=scope)
+            if pair is None:
+                checks.extend(state(name, 'fact_missing', missing=('resolved_identity_dependency',),
+                    scope=scope) for name in ('calendar_sessions', 'instrument_rule_package',
+                                             'suspension_facts', 'corporate_actions',
+                                             *(('account_commission',) if summarized else ())))
+                continue
+            fact, mappings = pair
+            identities.append((symbol, day, fact, mappings))
+            calendar = self._attempt('calendar_sessions',
+                lambda: self._calendar(session, fact.calendar_id, day, cutoff), checks, scope=scope)
+            if calendar is not None:
+                calendars.append((symbol, day, calendar))
+            def rule():
+                candidates = RuleFactsRepository(session).list_facts(fact.instrument_id,
+                    DEFAULT_RULE_PACKAGE_REFERENCE, start_date=day, end_date=day, data_cutoff=cutoff)
+                if not candidates:
+                    return None
+                resolved = RulePackageResolver(registry).resolve(DEFAULT_RULE_PACKAGE_REFERENCE,
+                    instrument_id=fact.instrument_id, asset_class=fact.asset_class,
+                    effective_date=day, data_cutoff=cutoff, facts=candidates)
+                from app.instruments.rules.contracts import ResolutionStatus
+                if resolved.status != ResolutionStatus.READY:
+                    raise ValueError(','.join(issue.code.value for issue in resolved.issues))
+                return resolved
+            resolved = self._attempt('instrument_rule_package', rule, checks, scope=scope)
+            if resolved is not None:
+                rules.append((symbol, day, resolved))
+            status = self._attempt('suspension_facts', lambda: self._status(session,
+                fact.instrument_id, symbol, day, cutoff), checks, scope=scope)
+            if status is not None:
+                trading_status.append((symbol, day, status))
+            action = self._attempt('corporate_actions', lambda: self._actions(session,
+                fact.instrument_id, day, cutoff), checks, scope=scope)
+            if action is not None:
+                actions.append((symbol, day, action))
+            if getattr(work, 'specification', None):
+                def commission():
+                    from .account_config import commission_from_account_fee_schedule
+                    schedule = work.specification['account_snapshot']['fee_schedule']
+                    return tuple(commission_from_account_fee_schedule(schedule, side=side,
+                        currency=fact.currency, applicability_context=dict(asset_class=fact.asset_class,
+                            exchange=fact.exchange)) for side in ('buy', 'sell'))
+                value = self._attempt('account_commission', commission, checks, scope=scope)
+                if value is not None:
+                    commissions.append((symbol, day, value))
+            elif summarized:
+                checks.append(state('account_commission', 'fact_missing',
+                    missing=('captured_account_snapshot',), scope=scope))
+            if len(encoded(checks)) > 256 * 1024:
+                raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
+        return SqlDependencyPage(tuple(identities), tuple(calendars), tuple(rules),
+            tuple(trading_status), tuple(actions), tuple(commissions), tuple(checks))
+
+    def _resolve(self, session, budget, work, *, inventory_asof=None, paged=False):
+        from .formal_fact_guard import fact_fingerprint
+        from .formal_sql_pages import ScopedChecks
+        from .session_fact_pages import PAGE_ROWS
+        from .formal_assembly import missing_plan_dependencies, zero_action_projection
+        config = work.config
+        start, end = date.fromisoformat(config['start']), date.fromisoformat(config['end'])
+        days, symbols = (end - start).days + 1, tuple(config['universe'])
+        self._check_range(config)
+        fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
+        checks = ScopedChecks() if paged else []
+        identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
+        calendar_seeds, action_failures = {}, {}
+        # One session and one FactReadBudget cover ALL admission pages. Neither
+        # the 20,000-cell range guard nor SQL row/byte/time budgets reset here.
         for offset in range(days):
-            for symbol in symbols:
-                day = start + timedelta(days=offset)
-                at = datetime.combine(day, time(), ZONE)
-                cutoff = inventory_asof or at  # facts known before this simulated day
-                scope = dict(security=symbol, date=day.isoformat())
-                def identity():
-                    ids = set(session.scalars(select(InstrumentCodeMappingRecord.instrument_id).where(
-                        func.lower(func.trim(InstrumentCodeMappingRecord.source)) == DEFAULT_MAPPING_SOURCE,
-                        InstrumentCodeMappingRecord.source_code == symbol,
-                        InstrumentCodeMappingRecord.known_at <= cutoff)))
-                    found = []
-                    for iid in sorted(ids, key=str):
-                        mappings = InstrumentCodeMappingRepository(session).resolve_code_mappings(iid,
-                            source=DEFAULT_MAPPING_SOURCE, start_date=day, end_date=day, data_cutoff=cutoff)
-                        if not any(mapping.source_code == symbol for mapping in mappings):
-                            continue
-                        fact = InstrumentIdentityFactRepository(session).resolve_identity_at(iid,
-                            effective_at=at, data_cutoff=cutoff)
-                        if fact is not None:
-                            found.append((fact, mappings))
-                    if len(found) > 1:
-                        raise ValueError('identity_mapping_ambiguous')
-                    return found[0] if found else None
-                pair = self._attempt('identity', identity, checks, scope=scope)
-                if pair is None:
-                    checks.extend(state(name, 'fact_missing', missing=('resolved_identity_dependency',),
-                        scope=scope) for name in ('calendar_sessions', 'instrument_rule_package',
-                                                 'suspension_facts', 'corporate_actions'))
-                    continue
-                fact, mappings = pair
-                identities.append((symbol, day, fact, mappings))
-                calendar = self._attempt('calendar_sessions',
-                    lambda: self._calendar(session, fact.calendar_id, day, cutoff), checks, scope=scope)
-                if calendar is not None:
-                    calendars.append((symbol, day, calendar))
-                def rule():
-                    candidates = RuleFactsRepository(session).list_facts(fact.instrument_id,
-                        DEFAULT_RULE_PACKAGE_REFERENCE, start_date=day, end_date=day, data_cutoff=cutoff)
-                    if not candidates:
-                        return None
-                    resolved = RulePackageResolver(registry).resolve(DEFAULT_RULE_PACKAGE_REFERENCE,
-                        instrument_id=fact.instrument_id, asset_class=fact.asset_class,
-                        effective_date=day, data_cutoff=cutoff, facts=candidates)
-                    from app.instruments.rules.contracts import ResolutionStatus
-                    if resolved.status != ResolutionStatus.READY:
-                        raise ValueError(','.join(issue.code.value for issue in resolved.issues))
-                    return resolved
-                resolved = self._attempt('instrument_rule_package', rule, checks, scope=scope)
-                if resolved is not None:
-                    rules.append((symbol, day, resolved))
-                status = self._attempt('suspension_facts', lambda: self._status(session,
-                    fact.instrument_id, symbol, day, cutoff), checks, scope=scope)
-                if status is not None:
-                    trading_status.append((symbol, day, status))
-                action = self._attempt('corporate_actions', lambda: self._actions(session,
-                    fact.instrument_id, day, cutoff), checks, scope=scope)
-                if action is not None:
-                    actions.append((symbol, day, action))
-                if getattr(work, 'specification', None):
-                    def commission():
-                        from .account_config import commission_from_account_fee_schedule
-                        schedule = work.specification['account_snapshot']['fee_schedule']
-                        return tuple(commission_from_account_fee_schedule(schedule, side=side,
-                            currency=fact.currency, applicability_context=dict(asset_class=fact.asset_class,
-                                exchange=fact.exchange)) for side in ('buy', 'sell'))
-                    value = self._attempt('account_commission', commission, checks, scope=scope)
-                    if value is not None:
-                        commissions.append((symbol, day, value))
-                if len(encoded(checks)) > 256 * 1024:
-                    raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
-        # No mapping/row quantity, UUID date, current report or metadata flag
-        # supplies these semantics. Failures distinguish code from producers.
+            day = start + timedelta(days=offset)
+            for first in range(0, len(symbols), PAGE_ROWS):
+                selected = symbols[first:first + PAGE_ROWS]
+                page = self._read_dependency_page(session, work, selected, day,
+                    inventory_asof=inventory_asof, summarized=paged)
+                if paged:
+                    checks.merge(page.checks)
+                    for row in page.calendars:
+                        calendar_seeds.setdefault(row[2]['fact'].calendar_id, row)
+                    # Keep only a first failure per natural day until the
+                    # original start-cutoff calendar selects actual open days.
+                    # Later PIT calendar revisions must not erase zero proofs
+                    # required by that originally assembled reference calendar.
+                    _, failure = zero_action_projection(page.corporate_actions,
+                        dict(calendar=[dict(date=day.isoformat())]), selected)
+                    if not failure['available']:
+                        action_failures.setdefault(day.isoformat(), failure)
+                    if len(encoded(checks)) + len(encoded(list(action_failures.values()))) > 256 * 1024:
+                        raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
+                else:
+                    checks.extend(page.checks)
+                    for target, rows in ((identities, page.identities), (calendars, page.calendars),
+                            (rules, page.rule_packages), (trading_status, page.trading_status),
+                            (actions, page.corporate_actions), (commissions, page.commissions)):
+                        target.extend(rows)
+                    if len(encoded(checks)) > 256 * 1024:
+                        raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
+                del page
+        checks = list(checks)
         execution_calendar = self._attempt('execution_calendar_assembly', lambda:
-            self._assemble_calendar(session, calendars, start, end, inventory_asof), checks,
-            scope=dict(start=start.isoformat(), end=end.isoformat()))
+            self._assemble_calendar(session, tuple(calendar_seeds.values()) if paged else calendars,
+                start, end, inventory_asof), checks, scope=dict(start=start.isoformat(), end=end.isoformat()))
         official = self._attempt('official_market_rules', self._official_rules, checks,
             scope=dict(kind='offline_catalog_only'))
         checks.extend(self._execution_gaps(config['frequency']))
-        from .formal_assembly import missing_plan_dependencies, zero_action_projection
-        action_projection, action_check = zero_action_projection(actions, execution_calendar, symbols)
+        if paged and execution_calendar is not None:
+            action_check = next((action_failures[row['date']] for row in execution_calendar['calendar']
+                if row['date'] in action_failures), state('execution_corporate_actions', 'available',
+                    scope=dict(kind='complete_zero_action_projection')))
+            action_projection = () if action_check['available'] else None
+        else:
+            action_projection, action_check = zero_action_projection(actions, execution_calendar, symbols)
         checks = [action_check if check['binding'] == 'execution_corporate_actions' else check for check in checks]
+        token = canonical_hash(dict(config=config, facts=fingerprint, official_rules=official))
+        inputs = self._sql_session_inputs(work, execution_calendar, token) if paged else None
         facts = ResolvedFormalFacts(tuple(checks), tuple(identities), tuple(calendars),
             tuple(rules), tuple(trading_status), tuple(actions), tuple(commissions),
-            tuple(official or ()), execution_calendar, '', action_projection=action_projection)
+            tuple(official or ()), execution_calendar, token, execution_inputs=inputs,
+            action_projection=action_projection, fact_fingerprint=fingerprint)
         checks[-1]['missing'] = list(missing_plan_dependencies(facts))
-        token = canonical_hash(dict(config=config, facts=fingerprint, official_rules=official))
-        return replace(facts, token=token, fact_fingerprint=fingerprint)
+        return facts
+
+    def _sql_session_inputs(self, work, calendar, token):
+        from .formal_sql_pages import SqlSessionInputs
+        from .formal_fact_guard import fact_fingerprint
+        from .session_fact_pages import PAGE_ROWS
+        captured = deepcopy(work)
+        symbols = tuple(captured.config['universe'])
+        sessions = {row['session']['key']: date.fromisoformat(row['date'])
+            for row in calendar['calendar']} if calendar is not None else {}
+        accepted = SimpleNamespace(token=token)
+        def read(session_key, offset, limit):
+            if type(session_key) is not str or session_key not in sessions:
+                raise RuntimeFault('DATA_RESTRICTED', 'SQL依赖页超出已核开放会话')
+            if (type(offset) is not int or not 0 <= offset < len(symbols)
+                    or type(limit) is not int or not 1 <= limit <= PAGE_ROWS):
+                raise RuntimeFault('INVALID_CONTRACT', 'SQL依赖页偏移或信用无效')
+            with self._session() as (session, _budget):
+                current = fact_fingerprint(session, captured, zone=ZONE)
+                actual = canonical_hash(dict(config=captured.config, facts=current, official_rules=self._official_rules()))
+                if actual != token:
+                    raise RuntimeFault('DATA_CHANGED', '已解析的正式小事实、版本或质量发生变化')
+                page = self._read_dependency_page(session, captured, symbols[offset:offset + limit],
+                    sessions[session_key], summarized=True).session_inputs()
+            # A new transaction catches a correction committed while the page
+            # was read under its repeatable-read snapshot. Final publication
+            # still calls the original same-result-transaction check/locks.
+            self.check_facts(captured, accepted)
+            return page
+        return SqlSessionInputs(read)
 
     @staticmethod
     def _official_rules():

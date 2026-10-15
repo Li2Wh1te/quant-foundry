@@ -80,6 +80,16 @@ def reject_checks(checks, securities, day):
             raise RuntimeFault('RULE_UNAVAILABLE', '会话事实的既有正式依赖未就绪')
 
 
+def check_input_bytes(page):
+    evidence = dict(inputs=[item.payload for item in page.execution_inputs],
+        identities=[dict(instrument_id=value.instrument_id, currency=value.currency,
+            exchange=value.exchange, asset_class=value.asset_class) for _, _, value, _ in page.identities],
+        commissions=[row[2] for row in page.commissions], status=[row[2] for row in page.trading_status],
+        actions=[row[2] for row in page.corporate_actions], checks=page.checks)
+    if len(encoded(evidence)) > PAGE_INPUT_BYTES:
+        raise RuntimeFault('RESOURCE_LIMIT', '会话事实输入页超过字节预算')
+
+
 class LegacySessionInputs:
     """Bounded compatibility for old small tuple callers, never large runs.
 
@@ -185,13 +195,7 @@ def compose_page(raw, securities, day, session, work, compose):
                 or not isinstance(payloads[security].instrument_id, UUID)
                 or any(not hasattr(identity, name) for name in ('currency', 'exchange', 'asset_class'))):
             raise RuntimeFault('RULE_UNAVAILABLE', '会话输入缺少原稳定身份依赖')
-    evidence = dict(inputs=[item.payload for item in raw.execution_inputs],
-        identities=[dict(instrument_id=value.instrument_id, currency=value.currency,
-            exchange=value.exchange, asset_class=value.asset_class) for value in identities.values()],
-        commissions=list(commissions.values()), status=list(status.values()),
-        actions=list(actions.values()), checks=raw.checks)
-    if len(encoded(evidence)) > PAGE_INPUT_BYTES:
-        raise RuntimeFault('RESOURCE_LIMIT', '会话事实输入页超过字节预算')
+    check_input_bytes(raw)
     output = []
     for security in securities:
         item, identity = payloads[security], identities[security]

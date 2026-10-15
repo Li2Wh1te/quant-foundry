@@ -62,7 +62,8 @@ def missing_plan_dependencies(facts):
     return tuple(name for name, value in (
         ('resolved_market_projection', facts.market),
         ('resolved_execution_calendar', facts.execution_calendar),
-        ('resolved_execution_inputs', facts.execution_inputs),
+        ('resolved_execution_inputs', None if getattr(facts.execution_inputs, 'unavailable_reason', None)
+            else facts.execution_inputs),
         ('resolved_action_projection', facts.action_projection),
         ('resolved_official_rules', facts.official_rules),
         # A paged reader supplies the original captured commissions in every
