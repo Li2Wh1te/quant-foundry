@@ -1,8 +1,8 @@
 """Read narrowly typed daily execution facts from the existing versioned store.
 
 The producer does not collect, infer or write facts. Its package is separate
-from the old ETF rule package: old rule fields, source observations, account
-metadata and caller acceptance flags cannot supply these inputs. The original
+from the old ETF rule package: old rule fields, source observations, arbitrary
+metadata and caller acceptance flags cannot supply missing source facts. The original
 Rust composer remains responsible for execution/rate validation.
 """
 from dataclasses import dataclass
@@ -75,9 +75,9 @@ class Permissions(FactBody):
     risk_bought_or_open: DecimalText | None
 
 
-class Account(FactBody):
-    account_id: UUID
-    account_version: Annotated[int, Field(gt=0)]
+class BacktestTerms(FactBody):
+    """Explicit simulation configuration, never a broker account or its funds."""
+    scope: Literal['backtest_configuration']
     permissions: Permissions
     investor: Literal['resident_individual', 'resident_enterprise']
     sale_proceeds: Literal['immediate', 'next_session']
@@ -104,26 +104,31 @@ class DailyExecutionFact(FactBody):
     product: Literal['equity_etf', 'bond_etf', 'money_etf', 'gold_etf',
                      'commodity_etf', 'cross_border_etf']
     day: TradingDay
-    account: Account
     market: Market
 
 
 class InputFactFault(ValueError):
-    def __init__(self, code, *, fields=()):
+    def __init__(self, code, *, fields=(), contract=None):
         super().__init__(code)
         self.code = code
-        self.details = dict(package=f'{PACKAGE.key}@{PACKAGE.version}', fields=list(fields))
+        self.details = dict(package=contract or f'{PACKAGE.key}@{PACKAGE.version}', fields=list(fields))
 
 
 REQUIRED_FIELDS = ('date', 'product', 'day.listing', 'day.status', 'day.risk',
     'day.price_limit', 'day.fund_price_band', 'day.underlying_same_session',
     'day.delisting_session_ordinal', 'day.submission_reference', 'day.evidence',
-    'account.account_id', 'account.account_version', 'account.permissions',
-    'account.investor', 'account.sale_proceeds', 'account.sale_proceeds_basis',
-    'account.disposal_settlement_date', 'account.holding_bands', 'account.evidence',
     'market.entry_id', 'market.representation', 'market.source_subject',
     'market.price_currency', 'market.price_basis', 'market.quantity_unit',
     'market.shares_per_lot', 'market.completed_bar_visibility', 'market.evidence')
+
+
+def unique_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError('duplicate_saved_agreement_field')
+        result[key] = value
+    return result
 
 
 def captured_commission_schedule(schedule):
@@ -143,13 +148,6 @@ def captured_commission_schedule(schedule):
         return schedule
     if len(agreement.encode()) > 4096:
         raise ValueError('saved_commission_agreement_too_large')
-    def unique_pairs(pairs):
-        result = {}
-        for key, value in pairs:
-            if key in result:
-                raise ValueError('saved_commission_agreement_duplicate_field')
-            result[key] = value
-        return result
     try:
         decoded = json.loads(agreement, object_pairs_hook=unique_pairs)
     except ValueError:
@@ -159,15 +157,39 @@ def captured_commission_schedule(schedule):
     return dict(schedule, metadata=dict(metadata, s3_commission=decoded))
 
 
+def captured_backtest_terms(work):
+    """Bind explicit saved simulation terms to the captured profile version.
+
+    A profile created today may configure a historical backtest. Its ID and
+    terms are not backdated source knowledge, and no actual brokerage right or
+    money is asserted. The immutable run snapshot retains the original terms.
+    """
+    snapshot = work.specification.get('account_snapshot', {})
+    try:
+        if str(UUID(snapshot['id'])) != work.config.get('account_id'):
+            raise ValueError()
+        if type(snapshot['version']) is not int or snapshot['version'] <= 0:
+            raise ValueError()
+        raw = snapshot.get('metadata', {}).get('s3_execution')
+        if type(raw) is not str or len(raw.encode()) > 16384:
+            raise ValueError()
+        json.loads(raw, object_pairs_hook=unique_pairs)
+        return BacktestTerms.model_validate_json(raw)
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise InputFactFault('saved_backtest_execution_terms_missing_or_invalid',
+            fields=('account_snapshot.id', 'account_snapshot.version', 'account_snapshot.metadata.s3_execution'),
+            contract='saved_backtest_execution_terms@1') from None
+
+
 def daily_rows(session, instrument_ids, day, cutoff):
     """Fold visible versions before applying validity, including removals."""
     from app.instruments.rule_facts_models import InstrumentRuleFactRecord as Row
     newer = aliased(Row)
     latest = ~exists(select(newer.id).where(newer.fact_key == Row.fact_key,
-        newer.fact_version > Row.fact_version, newer.known_at <= cutoff, newer.observed_at <= cutoff))
+        newer.fact_version > Row.fact_version, newer.known_at <= cutoff))
     return tuple(session.scalars(select(Row).where(Row.instrument_id.in_(instrument_ids),
         Row.rule_package_key == PACKAGE.key, Row.rule_package_version == PACKAGE.version,
-        Row.known_at <= cutoff, Row.observed_at <= cutoff, latest,
+        Row.known_at <= cutoff, latest,
         Row.valid_from <= day, or_(Row.valid_to.is_(None), Row.valid_to > day))))
 
 
@@ -179,18 +201,16 @@ class MarketInput:
 
 
 def produce(rows, *, work, symbol, day, identity, calendar, cutoff):
-    """Return original DTO fields only from one verified, account-bound fact."""
+    """Join original DTO fields from source facts and captured simulation terms."""
     from app.instruments.rule_facts_repository import _to_domain
     from app.instruments.rules.contracts import FactQualityStatus
     if not rows:
         raise InputFactFault('daily_execution_fact_missing', fields=REQUIRED_FIELDS)
-    snapshot = work.specification.get('account_snapshot', {})
     selected = []
     for row in rows:
         candidate = _to_domain(row)  # includes content-hash and immutable-version validation
         if (candidate.quality_status != FactQualityStatus.COMPLETE or candidate.fixture_only
-                or not candidate.source_revision or candidate.known_at > cutoff
-                or candidate.observed_at > cutoff):
+                or not candidate.source_revision or candidate.known_at > cutoff):
             raise InputFactFault('daily_execution_provenance_invalid')
         try:
             value = DailyExecutionFact.model_validate_json(encoded(canonical_payload(candidate.fields)))
@@ -200,10 +220,9 @@ def produce(rows, *, work, symbol, day, identity, calendar, cutoff):
         if (value.date != day or candidate.valid_from != day
                 or candidate.valid_to != day + timedelta(days=1)):
             raise InputFactFault('daily_execution_date_or_validity_invalid', fields=('date', 'valid_from', 'valid_to'))
-        if str(value.account.account_id) == snapshot.get('id') and value.account.account_version == snapshot.get('version'):
-            selected.append(value)
+        selected.append(value)
     if len(selected) != 1:
-        raise InputFactFault('daily_execution_account_missing_or_ambiguous', fields=('account.account_id', 'account.account_version'))
+        raise InputFactFault('daily_execution_fact_ambiguous')
     value = selected[0]
     if (identity.asset_class != 'etf' or identity.currency != 'CNY'
             or identity.exchange not in ('SSE', 'SZSE') or value.market.source_subject != symbol):
@@ -220,7 +239,7 @@ def produce(rows, *, work, symbol, day, identity, calendar, cutoff):
     trade_day = value.day.model_dump(mode='json', exclude={'evidence', 'submission_reference'})
     trade_day.update(security=symbol, date=day.isoformat(),
         session=calendar['fact'].calendar_id + ':' + day.isoformat())
-    account = value.account.model_dump(mode='json', exclude={'account_id', 'account_version', 'evidence'})
+    account = captured_backtest_terms(work).model_dump(mode='json', exclude={'scope', 'evidence'})
     payload = dict(instrument=dict(security=symbol,
         exchange={'SSE': 'shanghai', 'SZSE': 'shenzhen'}[identity.exchange], product=value.product),
         day=trade_day, submission_reference=value.day.submission_reference, **account)

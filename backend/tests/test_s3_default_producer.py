@@ -7,6 +7,7 @@ Execution-machine verification remains a separate operational step.
 from copy import deepcopy
 from datetime import timedelta
 from decimal import Decimal
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 from uuid import uuid4
@@ -95,6 +96,15 @@ def producer_setup(formal_facts, tmp_path):
             price_currency='CNY', price_basis='raw', quantity_unit='lots', shares_per_lot='100',
             completed_bar_visibility='at_verified_session_close',
             evidence='development-explicit-source-semantics'))
+    terms = fields.pop('account')
+    terms.pop('account_id')
+    terms.pop('account_version')
+    terms['scope'] = 'backtest_configuration'
+    with Session(formal_facts.catalog.engine) as session:
+        AccountProfileService(session).update(account.id, expected_version=1,
+            metadata=dict(s3_execution=json.dumps(terms)))
+        session.commit()
+    current = service._capture('development-producer', config)
     return SimpleNamespace(store=formal_facts, iid=iid, fields=fields, work=current,
         provider=provider, service=service, settings=settings, key='producer-' + uuid4().hex)
 
@@ -142,17 +152,24 @@ def test_default_provider_uses_real_sql_producer_and_original_native_composer(pr
 
 
 @pytest.mark.parametrize('case', ['absent', 'raw', 'conversion', 'account', 'permissions', 'fixture',
-    'future', 'future_observation', 'incomplete', 'date', 'plan', 'visibility'])
+    'future', 'incomplete', 'date', 'plan', 'visibility', 'missing_terms', 'duplicate_terms'])
 def test_default_producer_refuses_missing_or_substituted_source_facts(producer_setup, case):
     setup = producer_setup
     fields, options = deepcopy(setup.fields), {}
     if case == 'raw': fields['market']['price_basis'] = 'provider_reported'
     elif case == 'conversion': fields['market']['shares_per_lot'] = '0'
-    elif case == 'account': fields['account']['account_id'] = str(uuid4())
-    elif case == 'permissions': fields['account']['permissions']['buy'] = None
+    elif case == 'account': setup.work.specification['account_snapshot']['id'] = str(uuid4())
+    elif case == 'permissions':
+        terms = json.loads(setup.work.specification['account_snapshot']['metadata']['s3_execution'])
+        terms['permissions']['buy'] = None
+        setup.work.specification['account_snapshot']['metadata']['s3_execution'] = json.dumps(terms)
+    elif case == 'missing_terms':
+        setup.work.specification['account_snapshot']['metadata'] = dict(buy=True, raw=True)
+    elif case == 'duplicate_terms':
+        metadata = setup.work.specification['account_snapshot']['metadata']
+        metadata['s3_execution'] = '{"scope":"backtest_configuration",' + metadata['s3_execution'][1:]
     elif case == 'fixture': options['fixture_only'] = True
     elif case == 'future': options['known_at'] = KNOWN.replace(year=2027)
-    elif case == 'future_observation': options['observed_at'] = KNOWN.replace(year=2027)
     elif case == 'incomplete':
         from app.instruments.rules.contracts import FactQualityStatus
         options['quality_status'] = FactQualityStatus.INCOMPLETE
@@ -174,7 +191,7 @@ def test_new_visible_fact_revision_invalidates_ordinary_and_final_checks(produce
     append_fact(setup)
     accepted = setup.provider.plan_resolver.resolve_facts(setup.work)
     changed = deepcopy(setup.fields)
-    changed['account']['permissions']['buy'] = False  # false stays false, never inferred true
+    changed['market']['evidence'] = 'development-corrected-source-evidence'
     append_fact(setup, changed, fact_reference=VersionedReference(key=setup.key, version=2))
     with pytest.raises(RuntimeFault) as error:
         setup.provider.plan_resolver.check_facts(setup.work, accepted)
@@ -184,7 +201,26 @@ def test_new_visible_fact_revision_invalidates_ordinary_and_final_checks(produce
     assert error.value.code == 'DATA_CHANGED'
     plan = setup.provider._plan(setup.work)
     key = plan.spec['calendar'][0]['session']['key']
-    assert plan.session_facts(key, 0, 1)['facts'][0]['permissions']['buy'] is False
+    terms = json.loads(setup.work.specification['account_snapshot']['metadata']['s3_execution'])
+    terms['permissions']['buy'] = False
+    from uuid import UUID
+    with Session(setup.store.catalog.engine) as session:
+        AccountProfileService(session).update(UUID(setup.work.config['account_id']),
+            expected_version=setup.work.specification['account_snapshot']['version'],
+            metadata=dict(s3_execution=json.dumps(terms)))
+        session.commit()
+    current = setup.service._capture('development-producer', setup.work.config)
+    fresh = setup.provider._plan(current)
+    assert fresh.session_facts(key, 0, 1)['facts'][0]['permissions']['buy'] is False
+    assert plan.session_facts(key, 0, 1)['facts'][0]['permissions']['buy'] is True
+
+
+def test_source_observation_audit_does_not_backdate_saved_configuration(producer_setup):
+    setup = producer_setup
+    # Same existing RuleFactCandidate contract: known_at is visibility;
+    # observed_at is audit/display and may follow the simulated date.
+    append_fact(setup, observed_at=KNOWN.replace(month=8))
+    assert setup.provider._plan(setup.work)
 
 
 def test_revision_removing_effective_window_cannot_resurrect_old_fact(producer_setup):
