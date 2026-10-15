@@ -100,6 +100,7 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
         ? "overview"
         : "basic";
   const [refresh, setRefresh] = useState(0);
+  const [seriesKey, setSeriesKey] = useState("etf-daily-local");
   const [fixedEnd, setFixedEnd] = useState(shanghaiBusinessDate);
   const [replaySteps, setReplaySteps] = useState<{ code: string; dates: string[] }>({ code: "", dates: [] });
   const [period, setPeriod] = useState<Period>("day"),
@@ -139,6 +140,8 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
     [logout, navigate],
   );
   useEffect(() => {
+    setSeriesKey("etf-daily-local");
+    setAdjustment("raw");
     setReplay(null);
     setPlaying(false);
     setInspected(null);
@@ -176,17 +179,18 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
   const marketAdjustment: MarketAdjustment = adjustment === "raw" ? "none" : adjustment === "forward" ? "pre" : "post";
   const requestedEnd = cutoff ?? (range.end || fixedEnd);
   const selectedIdentity = entry?.instrumentKey ?? tsCode;
-  const formal = useFormalDetail(selectedIdentity, { period, adjustment: marketAdjustment, start: range.start || undefined,
+  const formal = useFormalDetail(selectedIdentity, { seriesKey, period, adjustment: marketAdjustment, start: range.start || undefined,
     end: requestedEnd, asOf: requestedEnd, refresh }, authError);
   const identity = formal.identity.data;
   const currentIdentity = identity?.requestedSymbol === selectedIdentity;
   const candidate = formal.prices.data;
-  const data = candidate && currentIdentity && matchesBarWindow(candidate, { instrument_key: identity!.instrument_key,
+  const data = candidate && currentIdentity && matchesBarWindow(candidate, { instrument_key: identity!.instrument_key, series_key: seriesKey,
     period, adjustment: marketAdjustment, start: range.start || undefined, end: requestedEnd, as_of: requestedEnd }) ? candidate : null;
   const etf = currentIdentity ? formal.metadata.data?.instrument : undefined;
   const entrySymbol = entry?.symbol?.startsWith("instrument:") ? null : entry?.symbol;
   const displayCode = etf?.symbol ?? entrySymbol ?? (tsCode.startsWith("instrument:") ? "ETF" : tsCode);
   const loading = formal.prices.pending || formal.identity.pending;
+  const selectedSeries = currentIdentity ? formal.options.data?.find(option => option.series_key === seriesKey) ?? null : null;
   const error = formal.prices.error?.message ?? formal.identity.error?.message ?? "";
   const series = useMemo(() => data ? plotBars(data) : { bars: [], error: "", volumeMissing: false, gaps: false }, [data]);
   const daily = (replaySteps.code === tsCode ? replaySteps.dates : []).map(trade_date => ({ trade_date }));
@@ -430,8 +434,16 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
           >
             <Expand />
           </button>
+          {currentIdentity && formal.options.data && (formal.options.data.length > 1 || !selectedSeries) && <label className="qfe-series">价格序列
+            <select value={seriesKey} onChange={event => {
+              setSeriesKey(event.target.value); setAdjustment("raw"); setPlaying(false); setInspected(null); setExactTable(false);
+            }}>
+              {!selectedSeries && <option value={seriesKey} disabled>所选序列当前不可用</option>}
+              {formal.options.data.map(option => <option key={option.series_key} value={option.series_key}>{option.label}</option>)}
+            </select>
+          </label>}
           {BasisControls && formal.identity.data ? <BasisControls instrumentKey={formal.identity.data.instrument_key}
-            series={formal.options.data?.[0] ?? null} adjustment={marketAdjustment} asOf={cutoff ?? (range.end || fixedEnd)}
+            series={selectedSeries} adjustment={marketAdjustment} asOf={cutoff ?? (range.end || fixedEnd)}
             disabled={loading} onChange={value => { setAdjustment(value === "none" ? "raw" : value === "pre" ? "forward" : "backward"); setPlaying(false); setInspected(null); }} /> :
             <button onClick={(e) => open("adjust", e.currentTarget)}>{ADJUSTMENTS[adjustment]}<ChevronDown /></button>}
         </div>
@@ -722,7 +734,7 @@ export function EtfDetailPage({ BasisControls = DefaultBasisControls, FactorTabl
                       <Kv label="日期覆盖">{data?.meta.coverage.note ?? "未知"}</Kv></dl>
                   </>}
                   {tab === "factors" && (FactorTable && formal.identity.data ? <FactorTable
-                    instrumentKey={formal.identity.data.instrument_key} seriesKey="etf-daily-local" start={range.start || null}
+                    instrumentKey={formal.identity.data.instrument_key} seriesKey={seriesKey} start={range.start || null}
                     end={cutoff ?? (range.end || fixedEnd)} asOf={cutoff ?? (range.end || fixedEnd)} adjustment={marketAdjustment}
                     page={data} onError={formal.factorError} /> : <p className="qfe-note">因子表由独立口径模块接入。不复权价格无需因子；前/后复权暂不可选择。</p>)}
                 </div>

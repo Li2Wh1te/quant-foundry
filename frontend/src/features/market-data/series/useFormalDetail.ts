@@ -6,7 +6,7 @@ import { createSeriesWindow } from "./window";
 type DetailIdentity = Pick<InstrumentResolution, "instrument_key" | "symbol"> & { requestedSymbol: string };
 
 const empty = <T,>(): MarketReadState<T> => ({ data: null, error: null, pending: false, stale: false, canContinue: false });
-export function useFormalDetail(symbol: string, request: { period: Period; adjustment: Adjustment; start?: string;
+export function useFormalDetail(symbol: string, request: { seriesKey: string; period: Period; adjustment: Adjustment; start?: string;
   end: string; asOf: string; refresh: number }, onError: (error: unknown) => void) {
   const [identity, setIdentity] = useState(empty<DetailIdentity>), [metadata, setMetadata] = useState(empty<InstrumentDetail>);
   const [options, setOptions] = useState(empty<SeriesOption[]>), [prices, setPrices] = useState(empty<BarPage>);
@@ -52,10 +52,10 @@ export function useFormalDetail(symbol: string, request: { period: Period; adjus
   }, [key, request.asOf, request.refresh]);
   useEffect(() => {
     if (!key) { active.current?.clear(); return; }
-    void active.current?.load({ instrument_key: key, series_key: "etf-daily-local", period: request.period,
+    void active.current?.load({ instrument_key: key, series_key: request.seriesKey, period: request.period,
       adjustment: request.adjustment, start: request.start, end: request.end, as_of: request.asOf, limit: 512 })
       .catch(error => { if (!isCancellation(error)) onError(error); });
-  }, [key, request.period, request.adjustment, request.start, request.end, request.asOf, request.refresh, onError]);
+  }, [key, request.seriesKey, request.period, request.adjustment, request.start, request.end, request.asOf, request.refresh, onError]);
   return { identity, metadata, options, prices, factorError,
     earlier: () => { void active.current?.earlier().catch(error => { if (!isCancellation(error)) onError(error); }); },
     release: () => { active.current?.clear(); } };

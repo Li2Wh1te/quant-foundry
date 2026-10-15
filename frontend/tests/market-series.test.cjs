@@ -87,8 +87,8 @@ test('condition changes withdraw prior history while pending and late replies ca
 test('render cutoff gate rejects old future data before the next effect/request starts', () => {
   const { matchesBarWindow } = require('../src/features/market-data/series/window.ts');
   const page = makePage([makeBar('2026-02-06')]);
-  const request = { instrument_key: page.instrument_key, period: 'day', adjustment: 'none', end: '2026-02-08', as_of: '2026-02-08' };
+  const request = { instrument_key: page.instrument_key, series_key: page.series_key, period: 'day', adjustment: 'none', end: '2026-02-08', as_of: '2026-02-08' };
   assert.equal(matchesBarWindow(page, request), true);
-  for (const change of [{ end: '2026-02-05', as_of: '2026-02-05' }, { adjustment: 'pre' }, { period: 'week' }, { instrument_key: 'instrument:other' }, { start: '2026-02-01' }])
+  for (const change of [{ end: '2026-02-05', as_of: '2026-02-05' }, { series_key: 'other-series' }, { adjustment: 'pre' }, { period: 'week' }, { instrument_key: 'instrument:other' }, { start: '2026-02-01' }])
     assert.equal(matchesBarWindow(page, { ...request, ...change }), false);
 });
