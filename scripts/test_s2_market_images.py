@@ -35,6 +35,8 @@ def main():
     project = 'qf-s2-d13-' + uuid4().hex[:12]
     containers, volumes = [], []
     network_created = False
+    edge_created = False
+    edge = project + '-edge'
     result = dict(task='S2-D13', synthetic=True, live_verified=False, deployed=False,
         images=receipt['images'], architecture=receipt['architecture'], checks=[], requests=[])
     env = dict(QF_ENVIRONMENT='test', QF_API_TOKEN='a' * 64, QF_CURSOR_SIGNING_KEY='b' * 64,
@@ -84,6 +86,9 @@ def main():
     try:
         result['stage'] = 'isolated-setup'
         command(['docker', 'network', 'create', '--internal', '--label', 'qf-s2-d13-isolated=true', project]); network_created = True
+        # Only Nginx joins this separate bridge for the host loopback port.
+        # API/PostgreSQL stay exclusively on the internal network.
+        command(['docker', 'network', 'create', '--label', 'qf-s2-d13-isolated=true', edge]); edge_created = True
         for suffix in (('pg', 'current', 'logs') if args.closure_only else ('pg', 'current')):
             name = project + '-' + suffix
             command(['docker', 'volume', 'create', '--label', 'qf-s2-d13-isolated=true', name]); volumes.append(name)
@@ -119,7 +124,7 @@ def main():
             *environment, '--user', uid, *owned_mount(volumes[1], '/app/data/current-store'),
             *(owned_mount(volumes[2], '/app/data/logs') if args.closure_only else []), api])
         containers.append(project + '-web')
-        command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--publish', '127.0.0.1::80',
+        command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--network', edge, '--publish', '127.0.0.1::80',
             '--env', 'QF_BACKEND_PORT=8000', web])
         address = command(['docker', 'port', containers[-1], '80/tcp'])
         assert address.startswith('127.0.0.1:')
@@ -258,10 +263,12 @@ def main():
             assert before['database'] == after['database'], 'Market reads modified application/source/governance facts'
             assert before['files'] == after['files'], 'Market reads created or changed persistent formal/scratch files'
             assert before['settings'] == after['settings'], 'Market reads changed service configuration'
+            assert before['pending_owners'] == after['pending_owners'], 'Market reads changed source continuation ownership'
             # Record actual log growth separately from formal data; the test
             # performs a fixed finite number of reads and creates no poller.
             result['preservation'] = dict(database_tables=len(after['database']), formal_files=len(after['files']),
-                unchanged=True, logs_before=before['logs'], logs_after=after['logs'], settings=after['settings'])
+                unchanged=True, quota_slots_before=before['quota_slots'], quota_slots_after=after['quota_slots'],
+                logs_before=before['logs'], logs_after=after['logs'], settings=after['settings'])
         process = command(['docker','exec',containers[1],'python','-c',
             "from pathlib import Path; print(Path('/proc/1/status').read_text())"])
         result['api_memory_kib'] = {line.split(':')[0]:int(line.split()[1]) for line in process.splitlines()
@@ -269,7 +276,7 @@ def main():
         assert result['api_memory_kib']['VmHWM'] * 1024 < 2 * 1024**3, 'Default CurrentStore process memory budget exceeded'
         result['passed'] = True
         if args.keep_preview:
-            result['preview'] = dict(url=base, containers=containers, volumes=volumes, network=project,
+            result['preview'] = dict(url=base, containers=containers, volumes=volumes, network=project, networks=[project,edge],
                 synthetic_only=True)
     except BaseException as error:
         marker = re.search(r'__D13_FIXTURE_FAILURE__=([A-Za-z0-9_-]{1,160})', str(error))
@@ -287,6 +294,8 @@ def main():
                 subprocess.run(['docker','rm','--force',name],capture_output=True)
             for name in volumes:
                 subprocess.run(['docker','volume','rm',name],capture_output=True)
+            if edge_created:
+                subprocess.run(['docker','network','rm',edge],capture_output=True)
             if network_created:
                 subprocess.run(['docker','network','rm',project],capture_output=True)
         args.output.parent.mkdir(parents=True,exist_ok=True)

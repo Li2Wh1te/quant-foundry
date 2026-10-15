@@ -67,10 +67,26 @@ def main():
                 quoted = connection.dialect.identifier_preparer.quote(name)
                 database[name] = connection.execute(text(f"SELECT md5(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'[]')) FROM {quoted} t")).scalar_one()
         root = Path(settings.data_store_root)
-        files = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
-            for name in ('objects', '.scratch') for path in (root / name).rglob('*') if path.is_file()}
+        files = {}
+        quotas = []
+        for name in ('objects', '.scratch'):
+            for path in (root / name).rglob('*'):
+                if not path.is_file():
+                    continue
+                relative = path.relative_to(root)
+                if name == '.scratch' and len(relative.parts) == 3 and relative.name == 'quota':
+                    # The existing kernel updates bounded slot coordination
+                    # even for reads. It is not retained market content.
+                    data = path.read_bytes(); assert len(data) <= 256
+                    quota = json.loads(data)
+                    assert quota['kind'] in ('read','write') and 0 < quota['bytes'] <= 4 * 1024**3
+                    quotas.append(quota)
+                else:
+                    files[str(relative)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        assert len(quotas) <= 16  # Existing default StoreLimits.operation_slots.
         logs = [path for path in Path(settings.log_dir).rglob('*') if path.is_file()]
-        print(json.dumps(dict(database=database, files=files,
+        print(json.dumps(dict(database=database, files=files, quota_slots=len(quotas),
+            pending_owners=sorted(q['pending'] for q in quotas if q.get('pending')),
             logs=dict(files=len(logs), bytes=sum(path.stat().st_size for path in logs)),
             settings=dict(s3_accept_new_runs=settings.s3_accept_new_runs,
                 scheduler_enabled=settings.scheduler_enabled, worker_image=settings.s3_worker_image,
