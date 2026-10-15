@@ -2,6 +2,7 @@
 import ast
 import hashlib
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -76,5 +77,27 @@ def test_recipe_pins_only_five_files_and_writes_no_runtime_configuration():
     assert all(name.endswith('.py') for name in overlay.BASE_HASHES)
     assert not any('/models/' in name or '/migrations/' in name for name in overlay.BASE_HASHES)
     assert overlay.SOURCE_REVISION == '4454337feaf3ce4e0f1b62c211bf0035f1e7a1fc'
-    for name, expected in overlay.MERGED_HASHES.items():
-        assert hashlib.sha256((ROOT / 'backend' / name).read_bytes()).hexdigest() == expected
+    # This historical recipe stays pinned when current application code moves.
+    # Freeze its complete identity, rather than requiring HEAD to remain old.
+    pinned = {'base_image': overlay.BASE_IMAGE, 'source_revision': overlay.SOURCE_REVISION,
+              'base_hashes': overlay.BASE_HASHES, 'merged_hashes': overlay.MERGED_HASHES}
+    assert hashlib.sha256(json.dumps(pinned, sort_keys=True, separators=(',', ':')).encode()).hexdigest() == (
+        '8fa259796febf286bfbaf1cb8ad9ce666c3b9b9e29a2beb1ed7e2d98ec62dd8e')
+
+
+def test_newer_merged_source_is_rejected_before_any_output(tmp_path, monkeypatch):
+    name = 'app/data_store/pipeline.py'
+    base, approved = b'synthetic base source', b'synthetic approved merged source'
+    monkeypatch.setattr(overlay, 'BASE_HASHES', {name: hashlib.sha256(base).hexdigest()})
+    monkeypatch.setattr(overlay, 'MERGED_HASHES', {name: hashlib.sha256(approved).hexdigest()})
+    source, repository = tmp_path / 'source', tmp_path / 'repository'
+    for path, data in ((source / name, base),
+                       (repository / 'backend' / name, b'newer unapproved source')):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(data)
+    output = tmp_path / 'output'
+
+    with pytest.raises(ValueError, match='merged source hash mismatch'):
+        overlay.prepare(source, output, repository=repository)
+
+    assert not output.exists()
