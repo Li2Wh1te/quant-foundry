@@ -118,17 +118,21 @@ def main():
             'type=bind,src=' + str(repo / 'ops/s2-batch2/isolated-fixture.py') + ',dst=/tmp/fixture.py,readonly'],
             ['python', '-c', "import runpy,sys; sys.argv=['fixture']+" + ("['closure']" if args.closure_only else "[]") + "; runpy.run_path('/tmp/fixture.py',run_name='__main__')"], timeout=600 if args.closure_only else 180)
         result['fixture'] = json.loads(fixture.splitlines()[-1])
-        result['stage'] = 'default-image-start'
+        result['stage'] = 'start-api-image'
         containers.append(project + '-api')
         command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--network-alias', 'backend',
             *environment, '--user', uid, *owned_mount(volumes[1], '/app/data/current-store'),
             *(owned_mount(volumes[2], '/app/data/logs') if args.closure_only else []), api])
+        result['stage'] = 'start-nginx-image'
         containers.append(project + '-web')
         command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--network', edge, '--publish', '127.0.0.1::80',
             '--env', 'QF_BACKEND_PORT=8000', web])
+        result['stage'] = 'resolve-loopback-port'
         address = command(['docker', 'port', containers[-1], '80/tcp'])
         assert address.startswith('127.0.0.1:')
         base = 'http://' + address
+        result['stage'] = 'nginx-loopback-readiness'
+        ready = False
         for _ in range(100):
             try:
                 with urlopen(base + '/readyz', timeout=1) as response:
@@ -289,6 +293,18 @@ def main():
         marker = re.search(r'__D13_FIXTURE_FAILURE__=([A-Za-z0-9_-]{1,160})', str(error))
         if marker:
             result['stage'] += '-' + marker.group(1)
+        result['stage'] += '-' + type(error).__name__
+        if result['stage'].startswith('nginx-loopback-readiness'):
+            # A read-only diagnostic against the owned API loopback separates
+            # default lifespan failure from the disposable reverse proxy path.
+            try:
+                direct = subprocess.run(['docker','exec',containers[1],'python','-c',
+                    "from urllib.request import urlopen; assert urlopen('http://127.0.0.1:8000/readyz',timeout=3).status==200"],
+                    capture_output=True,text=True,timeout=10)
+                result['stage'] += '-direct-api-ready' if direct.returncode == 0 else '-direct-api-unready'
+                result['direct_api_diagnostic'] = (direct.stdout + direct.stderr)[-2500:]
+            except subprocess.TimeoutExpired:
+                result['stage'] += '-direct-api-diagnostic-timeout'
         result['passed'] = False
         result['error'] = str(error)[-5000:]
         for name in containers[1:]:
