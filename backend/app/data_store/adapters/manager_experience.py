@@ -8,6 +8,16 @@ from app.data_store.adapters.canonical import NativeInputError
 
 
 def experience_body(source, raw):
+    container = source.content
+    if not isinstance(container, dict):
+        raise NativeInputError('SOURCE_SCHEMA_INVALID', '经理经历缺少完整来源容器。')
+    failures = container.get('failed_requests', [])
+    if (not isinstance(failures, list) or type(container.get('complete', True)) is not bool
+            or type(container.get('has_more', False)) is not bool):
+        raise NativeInputError('SOURCE_SCHEMA_INVALID', '经理经历完整性标记无效，未取得整集合证明。')
+    if (failures or not container.get('complete', True) or container.get('has_more', False)
+            or container.get('next_cursor') not in (None, '')):
+        raise NativeInputError('REPORT_INCOMPLETE', '经理经历响应未完整，保留整个来源主体限制。')
     manager = source.subject
     history = raw.get('investment_history')
     if not isinstance(manager, str) or not manager.strip():
