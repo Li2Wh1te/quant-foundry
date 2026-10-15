@@ -27,9 +27,9 @@ ZONE = ZoneInfo('Asia/Shanghai')
 FACT_ROWS = 10000
 FACT_BYTES = 4 * 1024 * 1024
 FACT_DAYS = 3660
-# Whole-run work bound, independent of the 256-security page credit. Paging
-# must not turn this existing admission guard into a per-segment allowance.
-FACT_CELLS = 20000
+# Only the explicit small, tuple-inspection compatibility path retains a
+# Cartesian limit. Default preparation budgets each SQL batch and cache.
+LEGACY_FACT_CELLS = 20000
 FACT_SECONDS = 5
 
 
@@ -51,11 +51,13 @@ class FormalResolutionFault(RuntimeFault):
 
 
 class FormalRangeFault(RuntimeFault):
-    def __init__(self, symbols, days):
+    def __init__(self, symbols, days, *, legacy=False):
         super().__init__('RESOURCE_LIMIT', '正式小事实日期或标的组合超过预算')
         self.scope = dict(resource='formal_sql_fact_range', requested_symbols=str(symbols),
             requested_natural_days=str(days), requested_cells=str(symbols * days),
-            max_natural_days=str(FACT_DAYS), max_cells=str(FACT_CELLS))
+            max_natural_days=str(FACT_DAYS))
+        if legacy:
+            self.scope['max_cells'] = str(LEGACY_FACT_CELLS)
 
     def diagnostic(self):
         return dict(super().diagnostic(), scope=self.scope.copy())
@@ -100,19 +102,60 @@ class FactReadBudget:
     FrozenResult preserves the normal ORM scalar/row interface. The extra row
     detects exhaustion; it is never returned as a silently truncated fact set.
     """
-    def __init__(self):
+    def __init__(self, connection=None):
+        self.connection = connection
+        self.ceiling_ms = FACT_SECONDS * 1000
+        if connection is not None and connection.dialect.name == 'postgresql':
+            configured = self._setting_ms()
+            if configured:
+                self.ceiling_ms = min(self.ceiling_ms, configured)
+        self.written_ms = None
+        self.reset()
+
+    def reset(self):
+        """Start one bounded SQL batch, never widen a caller's final timeout."""
+        if hasattr(self, 'deadline'):
+            self.check()
         self.rows, self.bytes = 0, 0
-        self.deadline = clock.monotonic() + FACT_SECONDS
+        self.deadline = clock.monotonic() + min(FACT_SECONDS, self.ceiling_ms / 1000)
+        self.starting = True
+
+    def _setting_ms(self):
+        value = self.connection.scalar(text("SELECT current_setting('statement_timeout')"))
+        for unit, factor in (('ms', 1), ('min', 60000), ('s', 1000), ('h', 3600000), ('d', 86400000)):
+            if value.endswith(unit):
+                return int(value[:-len(unit)]) * factor
+        return int(value)
+
+    def check(self):
+        remaining = int((self.deadline - clock.monotonic()) * 1000)
+        if remaining <= 0:
+            raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过时间预算')
+        return remaining
+
+    def timeout(self):
+        remaining = self.check()
+        if self.connection is not None and self.connection.dialect.name == 'postgresql':
+            configured = self._setting_ms()
+            # Only restore a timeout written by this budget at a new batch.
+            # External callers may lower the setting even after session entry.
+            if not (self.starting and self.written_ms is not None and configured == self.written_ms):
+                remaining = min(remaining, configured or remaining)
+            bounded = max(1, remaining // 10 * 10)
+            if configured != bounded:
+                self.connection.execute(text('SET LOCAL statement_timeout = ' + str(bounded)))
+                self.written_ms = bounded
+            self.starting = False
 
     def read(self, call):
-        if clock.monotonic() >= self.deadline:
-            raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过时间预算')
+        self.check()
         if not isinstance(call.statement, Select):
             raise RuntimeFault('INVALID_CONTRACT', '正式事实适配器只允许SQL读取')
         limit = FACT_ROWS - self.rows + 1
         if call.statement._limit_clause is not None:
             limit = min(limit, call.statement._limit_clause.value)
         try:
+            self.timeout()
             result = call.invoke_statement(call.statement.limit(limit)).freeze()
         except DBAPIError as error:
             if getattr(error.orig, 'sqlstate', None) == '57014':
@@ -121,8 +164,7 @@ class FactReadBudget:
                 raise FormalResolutionFault([state('formal_sql_schema', 'fact_missing',
                     missing=('required_existing_fact_tables',))]) from None
             raise
-        if clock.monotonic() >= self.deadline:
-            raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过时间预算')
+        self.check()
         self.rows += len(result.data)
         if self.rows > FACT_ROWS:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过行预算')
@@ -133,6 +175,7 @@ class FactReadBudget:
         self.bytes += size
         if self.bytes > FACT_BYTES:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实读取超过字节预算')
+        self.check()
         return result()
 
 
@@ -166,6 +209,8 @@ class SqlFormalPlanResolver:
     def _session(self, connection=None):
         from app.db.session import get_engine
         if connection is not None:
+            budget = FactReadBudget(connection)
+            budget.timeout()
             # A final result transaction holds these existing small-fact
             # tables stable until it commits. No new snapshot/table is made.
             if connection.dialect.name == 'postgresql':
@@ -174,9 +219,9 @@ class SqlFormalPlanResolver:
                     'calendar_source_priorities, trading_status_facts, trading_status_coverage_facts, '
                     'corporate_action_facts, corporate_action_coverage_facts IN SHARE MODE'))
             with Session(bind=connection) as session:
-                budget = FactReadBudget()
                 event.listen(session, 'do_orm_execute', budget.read, retval=True)
                 yield session, budget
+                budget.check()
             return
         engine = self.engine or get_engine()
         with engine.connect().execution_options(isolation_level='REPEATABLE READ') as connection:
@@ -185,9 +230,10 @@ class SqlFormalPlanResolver:
                     connection.execute(text('SET TRANSACTION READ ONLY'))
                     connection.execute(text("SET LOCAL statement_timeout = '5s'"))
                 with Session(bind=connection) as session:
-                    budget = FactReadBudget()
+                    budget = FactReadBudget(connection)
                     event.listen(session, 'do_orm_execute', budget.read, retval=True)
                     yield session, budget
+                    budget.check()
 
     def __call__(self, work):
         facts = self.resolve_facts(work, paged=True)
@@ -209,22 +255,24 @@ class SqlFormalPlanResolver:
     def resolve_facts(self, work, *, connection=None, paged=True):
         """Default to bounded SQL pages; retain small tuple inspection explicitly.
 
-        This in-process representation choice cannot select source semantics
-        or change admission limits and is absent from every RunConfig/REST DTO.
+        Tuple inspection keeps its old small-scope bound. This compatibility
+        choice is absent from RunConfig/REST and supplies no source semantics.
         """
-        # This guard applies to the SQL reader, not the downstream DTO page
-        # composer. Refuse oversized scopes before opening a DB transaction;
-        # a bounded composer alone does not make this reader page bounded.
-        self._check_range(work.config)
+        self._check_range(work.config, paged=paged)
         with self._session(connection) as (session, budget):
-            return self._resolve(session, budget, work, paged=paged)
+            facts = self._resolve(session, budget, work, paged=paged)
+        if connection is None:
+            # A correction during the coherent admission snapshot must not
+            # escape as an accepted dependency set, even before execution.
+            self.check_facts(work, facts)
+        return facts
 
     @staticmethod
-    def _check_range(config):
+    def _check_range(config, *, paged=True):
         start, end = (date.fromisoformat(config[name]) for name in ('start', 'end'))
         days, symbols = (end - start).days + 1, len(config['universe'])
-        if not 1 <= days <= FACT_DAYS or symbols * days > FACT_CELLS:
-            raise FormalRangeFault(symbols, days)
+        if not 1 <= days <= FACT_DAYS or not paged and symbols * days > LEGACY_FACT_CELLS:
+            raise FormalRangeFault(symbols, days, legacy=not paged)
 
     @staticmethod
     def _attempt(name, read, checks, *, scope):
@@ -258,6 +306,9 @@ class SqlFormalPlanResolver:
             raise RuntimeFault('RESOURCE_LIMIT', 'SQL依赖读取超过单页标的信用')
         checks = ScopedChecks() if summarized else []
         identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
+        candidates = session.info.get('s3_candidate_page')
+        if candidates is not None:
+            candidates.load_day(day, inventory_asof or datetime.combine(day, time(), ZONE))
         from app.instruments.spec_provider import DEFAULT_MAPPING_SOURCE, DEFAULT_RULE_PACKAGE_REFERENCE
         from app.instruments.models import InstrumentCodeMappingRecord
         from app.instruments.repository import InstrumentCodeMappingRepository
@@ -276,6 +327,8 @@ class SqlFormalPlanResolver:
             cutoff = inventory_asof or at  # facts known before this simulated day
             scope = dict(security=symbol, date=day.isoformat())
             def identity():
+                if candidates is not None:
+                    return candidates.identity(symbol, day, cutoff, ZONE)
                 ids = set(session.scalars(select(InstrumentCodeMappingRecord.instrument_id).where(
                     func.lower(func.trim(InstrumentCodeMappingRecord.source)) == DEFAULT_MAPPING_SOURCE,
                     InstrumentCodeMappingRecord.source_code == symbol,
@@ -307,13 +360,15 @@ class SqlFormalPlanResolver:
             if calendar is not None:
                 calendars.append((symbol, day, calendar))
             def rule():
-                candidates = RuleFactsRepository(session).list_facts(fact.instrument_id,
+                if candidates is not None:
+                    return candidates.rule(fact, day, cutoff, registry)
+                rule_facts = RuleFactsRepository(session).list_facts(fact.instrument_id,
                     DEFAULT_RULE_PACKAGE_REFERENCE, start_date=day, end_date=day, data_cutoff=cutoff)
-                if not candidates:
+                if not rule_facts:
                     return None
                 resolved = RulePackageResolver(registry).resolve(DEFAULT_RULE_PACKAGE_REFERENCE,
                     instrument_id=fact.instrument_id, asset_class=fact.asset_class,
-                    effective_date=day, data_cutoff=cutoff, facts=candidates)
+                    effective_date=day, data_cutoff=cutoff, facts=rule_facts)
                 from app.instruments.rules.contracts import ResolutionStatus
                 if resolved.status != ResolutionStatus.READY:
                     raise ValueError(','.join(issue.code.value for issue in resolved.issues))
@@ -322,20 +377,27 @@ class SqlFormalPlanResolver:
             if resolved is not None:
                 rules.append((symbol, day, resolved))
             status = self._attempt('suspension_facts', lambda: self._status(session,
-                fact.instrument_id, symbol, day, cutoff), checks, scope=scope)
+                fact.instrument_id, symbol, day, cutoff, candidates=candidates), checks, scope=scope)
             if status is not None:
                 trading_status.append((symbol, day, status))
             action = self._attempt('corporate_actions', lambda: self._actions(session,
-                fact.instrument_id, day, cutoff), checks, scope=scope)
+                fact.instrument_id, day, cutoff, candidates=candidates), checks, scope=scope)
             if action is not None:
                 actions.append((symbol, day, action))
             if getattr(work, 'specification', None):
                 def commission():
                     from .account_config import commission_from_account_fee_schedule
+                    key = (fact.currency, fact.asset_class, fact.exchange)
+                    if candidates is not None and key in candidates.commissions:
+                        candidates.commissions.move_to_end(key)
+                        return candidates.commissions[key]
                     schedule = work.specification['account_snapshot']['fee_schedule']
-                    return tuple(commission_from_account_fee_schedule(schedule, side=side,
+                    value = tuple(commission_from_account_fee_schedule(schedule, side=side,
                         currency=fact.currency, applicability_context=dict(asset_class=fact.asset_class,
                             exchange=fact.exchange)) for side in ('buy', 'sell'))
+                    if candidates is not None:
+                        candidates._remember(candidates.commissions, key, value)
+                    return value
                 value = self._attempt('account_commission', commission, checks, scope=scope)
                 if value is not None:
                     commissions.append((symbol, day, value))
@@ -350,28 +412,56 @@ class SqlFormalPlanResolver:
     def _resolve(self, session, budget, work, *, inventory_asof=None, paged=False):
         from .formal_fact_guard import fact_fingerprint
         from .formal_sql_pages import ScopedChecks
-        from .session_fact_pages import PAGE_ROWS
+        from .session_fact_pages import PAGE_ROWS, BRIDGES
         from .formal_assembly import missing_plan_dependencies, zero_action_projection
+        from .research_gateway import current_research_bindings
         config = work.config
         start, end = date.fromisoformat(config['start']), date.fromisoformat(config['end'])
         days, symbols = (end - start).days + 1, tuple(config['universe'])
-        self._check_range(config)
+        self._check_range(config, paged=paged)
         fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
-        checks = ScopedChecks() if paged else []
+        checks = ScopedChecks(symbols) if paged else []
         identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
-        calendar_seeds, action_failures = {}, {}
-        # One session and one FactReadBudget cover ALL admission pages. Neither
-        # the 20,000-cell range guard nor SQL row/byte/time budgets reset here.
-        for offset in range(days):
-            day = start + timedelta(days=offset)
-            for first in range(0, len(symbols), PAGE_ROWS):
-                selected = symbols[first:first + PAGE_ROWS]
+        calendar_seeds, action_failures, dependency_failures = {}, {}, {}
+        def batches():
+            if not paged:
+                for offset in range(days):
+                    for first in range(0, len(symbols), PAGE_ROWS):
+                        yield symbols[first:first + PAGE_ROWS], start + timedelta(days=offset)
+                return
+            from .formal_sql_candidates import SqlCandidatePage
+            cutoff = inventory_asof or datetime.combine(end, time(), ZONE)
+            try:
+                for first in range(0, len(symbols), PAGE_ROWS):
+                    selected = symbols[first:first + PAGE_ROWS]
+                    # One bounded candidate cache, then one bounded daily
+                    # batch. No cache or output grows with symbols * days.
+                    session.info.pop('s3_candidate_page', None)
+                    budget.reset()
+                    session.info['s3_candidate_page'] = SqlCandidatePage(session, selected, start, end, cutoff)
+                    budget.check()
+                    for offset in range(days):
+                        budget.reset()
+                        yield selected, start + timedelta(days=offset)
+                        budget.check()
+            finally:
+                session.info.pop('s3_candidate_page', None)
+        iterator = batches()
+        try:
+            for selected, day in iterator:
                 page = self._read_dependency_page(session, work, selected, day,
                     inventory_asof=inventory_asof, summarized=paged)
                 if paged:
                     checks.merge(page.checks)
+                    for check in page.checks:
+                        if not check['available']:
+                            dependency_failures.setdefault((check['binding'], day.isoformat()), check)
                     for row in page.calendars:
-                        calendar_seeds.setdefault(row[2]['fact'].calendar_id, row)
+                        calendar_id = row[2]['fact'].calendar_id
+                        # Existing assembly rejects multiple references; two
+                        # seeds suffice to diagnose it without a growing map.
+                        if calendar_id in calendar_seeds or len(calendar_seeds) < 2:
+                            calendar_seeds.setdefault(calendar_id, row)
                     # Keep only a first failure per natural day until the
                     # original start-cutoff calendar selects actual open days.
                     # Later PIT calendar revisions must not erase zero proofs
@@ -380,7 +470,8 @@ class SqlFormalPlanResolver:
                         dict(calendar=[dict(date=day.isoformat())]), selected)
                     if not failure['available']:
                         action_failures.setdefault(day.isoformat(), failure)
-                    if len(encoded(checks)) + len(encoded(list(action_failures.values()))) > 256 * 1024:
+                    if (len(encoded(checks)) + len(encoded(list(action_failures.values())))
+                            + len(encoded(list(dependency_failures.values()))) > 256 * 1024):
                         raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
                 else:
                     checks.extend(page.checks)
@@ -391,13 +482,35 @@ class SqlFormalPlanResolver:
                     if len(encoded(checks)) > 256 * 1024:
                         raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
                 del page
+        finally:
+            iterator.close()
+        if paged:
+            budget.reset()
         checks = list(checks)
         execution_calendar = self._attempt('execution_calendar_assembly', lambda:
             self._assemble_calendar(session, tuple(calendar_seeds.values()) if paged else calendars,
                 start, end, inventory_asof), checks, scope=dict(start=start.isoformat(), end=end.isoformat()))
+        if paged and execution_calendar is not None and execution_calendar['calendar']:
+            # The legacy assembler requires bridge facts on open sessions.
+            # Retaining only the first natural-day failure can otherwise hide
+            # a later open-session failure behind an irrelevant weekend gap.
+            open_days = [row['date'] for row in execution_calendar['calendar']]
+            for index, check in enumerate(checks):
+                if check['binding'] not in BRIDGES:
+                    continue
+                failure = next((dependency_failures[check['binding'], day] for day in open_days
+                    if (check['binding'], day) in dependency_failures), None)
+                if failure is not None:
+                    selected_check = deepcopy(failure)
+                    selected_check['scope']['checked_cells'] = check['scope']['checked_cells']
+                    checks[index] = selected_check
+                elif not check['available']:
+                    checks[index] = state(check['binding'], 'available', scope=dict(
+                        kind='checked_open_session_dependencies', checked_cells=check['scope']['checked_cells']))
         official = self._attempt('official_market_rules', self._official_rules, checks,
             scope=dict(kind='offline_catalog_only'))
-        checks.extend(self._execution_gaps(config['frequency']))
+        research = current_research_bindings()
+        checks.extend(self._execution_gaps(config['frequency'], research=research))
         if paged and execution_calendar is not None:
             action_check = next((action_failures[row['date']] for row in execution_calendar['calendar']
                 if row['date'] in action_failures), state('execution_corporate_actions', 'available',
@@ -411,7 +524,7 @@ class SqlFormalPlanResolver:
         facts = ResolvedFormalFacts(tuple(checks), tuple(identities), tuple(calendars),
             tuple(rules), tuple(trading_status), tuple(actions), tuple(commissions),
             tuple(official or ()), execution_calendar, token, execution_inputs=inputs,
-            action_projection=action_projection, fact_fingerprint=fingerprint)
+            action_projection=action_projection, fact_fingerprint=fingerprint, research=research)
         checks[-1]['missing'] = list(missing_plan_dependencies(facts))
         return facts
 
@@ -435,8 +548,19 @@ class SqlFormalPlanResolver:
                 actual = canonical_hash(dict(config=captured.config, facts=current, official_rules=self._official_rules()))
                 if actual != token:
                     raise RuntimeFault('DATA_CHANGED', '已解析的正式小事实、版本或质量发生变化')
-                page = self._read_dependency_page(session, captured, symbols[offset:offset + limit],
-                    sessions[session_key], summarized=True).session_inputs()
+                from .formal_sql_candidates import SqlCandidatePage
+                day = sessions[session_key]
+                selected = symbols[offset:offset + limit]
+                _budget.reset()
+                session.info['s3_candidate_page'] = SqlCandidatePage(session, selected, day, day,
+                    datetime.combine(day, time(), ZONE))
+                _budget.check()
+                _budget.reset()
+                try:
+                    page = self._read_dependency_page(session, captured, selected,
+                        day, summarized=True).session_inputs()
+                finally:
+                    session.info.pop('s3_candidate_page', None)
             # A new transaction catches a correction committed while the page
             # was read under its repeatable-read snapshot. Final publication
             # still calls the original same-result-transaction check/locks.
@@ -550,17 +674,20 @@ class SqlFormalPlanResolver:
             reference=calendar_id + ':' + canonical_hash([value['fact'].content_hash for _, value in sorted(selected.items())]))
 
     @staticmethod
-    def _status(session, iid, symbol, day, cutoff):
+    def _status(session, iid, symbol, day, cutoff, *, candidates=None):
         from app.data_ingestion.models.trading_calendar import TradingStatusFact, TradingStatusCoverageFact
-        facts = tuple(session.scalars(select(TradingStatusFact).where(
-            TradingStatusFact.instrument_id == iid, TradingStatusFact.ts_code == symbol,
-            TradingStatusFact.trade_date == day, TradingStatusFact.dimension == 'suspension',
-            TradingStatusFact.known_at <= cutoff, TradingStatusFact.observed_at <= cutoff)))
-        coverage = tuple(session.scalars(select(TradingStatusCoverageFact).where(
-            TradingStatusCoverageFact.instrument_id == iid, TradingStatusCoverageFact.dimension == 'suspension',
-            TradingStatusCoverageFact.start_date <= day, TradingStatusCoverageFact.end_date >= day,
-            TradingStatusCoverageFact.known_at <= cutoff, TradingStatusCoverageFact.observed_at <= cutoff).order_by(
-                TradingStatusCoverageFact.known_at.desc(), TradingStatusCoverageFact.observed_at.desc())))
+        if candidates is not None:
+            facts, coverage = candidates.status_inputs(iid, symbol)
+        else:
+            facts = tuple(session.scalars(select(TradingStatusFact).where(
+                TradingStatusFact.instrument_id == iid, TradingStatusFact.ts_code == symbol,
+                TradingStatusFact.trade_date == day, TradingStatusFact.dimension == 'suspension',
+                TradingStatusFact.known_at <= cutoff, TradingStatusFact.observed_at <= cutoff)))
+            coverage = tuple(session.scalars(select(TradingStatusCoverageFact).where(
+                TradingStatusCoverageFact.instrument_id == iid, TradingStatusCoverageFact.dimension == 'suspension',
+                TradingStatusCoverageFact.start_date <= day, TradingStatusCoverageFact.end_date >= day,
+                TradingStatusCoverageFact.known_at <= cutoff, TradingStatusCoverageFact.observed_at <= cutoff).order_by(
+                    TradingStatusCoverageFact.known_at.desc(), TradingStatusCoverageFact.observed_at.desc())))
         if not facts and not coverage:
             return None
         if coverage:
@@ -583,20 +710,28 @@ class SqlFormalPlanResolver:
                     coverage=tuple(_row_payload(row) for row in coverage))
 
     @staticmethod
-    def _actions(session, iid, day, cutoff):
+    def _actions(session, iid, day, cutoff, *, candidates=None):
         from app.data_ingestion.repositories.corporate_action import CorporateActionRepository
         from app.data_ingestion.models.corporate_action import CorporateActionCoverageFact
         repository = CorporateActionRepository(session)
-        coverage = repository.coverage((iid,), day, day, cutoff=cutoff, knowledge_as_of=cutoff)
+        if candidates is None:
+            coverage = repository.coverage((iid,), day, day, cutoff=cutoff, knowledge_as_of=cutoff)
+            if not coverage:
+                return None
+            candidates = tuple(session.scalars(select(CorporateActionCoverageFact).where(
+                CorporateActionCoverageFact.instrument_id == iid,
+                CorporateActionCoverageFact.start_date <= day, CorporateActionCoverageFact.end_date >= day,
+                CorporateActionCoverageFact.known_at <= cutoff, CorporateActionCoverageFact.observed_at <= cutoff)))
+            get_events = lambda: repository.list_facts((iid,), day, day, cutoff=cutoff, knowledge_as_of=cutoff)
+        else:
+            candidate_page = candidates
+            get_events = lambda: candidate_page.action_events(iid)
+            coverage, candidates = candidate_page.action_coverage_inputs(iid)
         if not coverage:
             return None
         # The shared repository picks a latest assertion per action family.
         # A tied latest rank is ambiguous even when one row happens to be zero;
         # do not let physical SQL order manufacture complete-zero acceptance.
-        candidates = tuple(session.scalars(select(CorporateActionCoverageFact).where(
-            CorporateActionCoverageFact.instrument_id == iid,
-            CorporateActionCoverageFact.start_date <= day, CorporateActionCoverageFact.end_date >= day,
-            CorporateActionCoverageFact.known_at <= cutoff, CorporateActionCoverageFact.observed_at <= cutoff)))
         for row in coverage:
             tied = [candidate for candidate in candidates if candidate.action_type == row.action_type
                     and (candidate.known_at, candidate.observed_at) == (row.known_at, row.observed_at)]
@@ -605,7 +740,7 @@ class SqlFormalPlanResolver:
             if (row.status != 'complete' or row.event_count is None or not row.source_revision
                     or not row.known_at or not row.observed_at or not row.evidence or not row.validation_rule):
                 raise ValueError('corporate_action_coverage_incomplete')
-        events = repository.list_facts((iid,), day, day, cutoff=cutoff, knowledge_as_of=cutoff)
+        events = get_events()
         for row in events:
             if (row.quality != 'complete' or not row.source_revision or not row.known_at or not row.observed_at
                     or not row.evidence or row.valid_from is None or row.record_date is None or row.ex_date is None
@@ -620,7 +755,7 @@ class SqlFormalPlanResolver:
                     events=tuple(_row_payload(row) for row in events))
 
     @staticmethod
-    def _execution_gaps(frequency):
+    def _execution_gaps(frequency, *, research=None):
         from .market_projection import current_market_bindings
         result = []
         for binding in current_market_bindings():
@@ -641,7 +776,7 @@ class SqlFormalPlanResolver:
         result.append(state('research_publication', 'field_semantics_missing', missing=(
             'historical_publication_time', 'historical_effective_sets', 'adjustment_public_time_and_anchor')))
         from .research_gateway import current_research_bindings
-        for binding in current_research_bindings():
+        for binding in current_research_bindings() if research is None else research:
             result.append(state(binding.name, 'field_semantics_missing', missing=(binding.unavailable_reason,),
                 scope=dict(research_kind=binding.kind, requirement='optional_per_capability')))
         result.append(state('execution_plan_assembly', 'fact_missing', missing=(

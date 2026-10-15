@@ -19,9 +19,14 @@ class ScopedChecks(list):
     cell diagnostics do not need a whole-run per-cell history to prove that
     every page was visited. A failure is never replaced by a later success.
     """
-    def __init__(self):
+    def __init__(self, symbols=()):
         super().__init__()
         self.positions = {}
+        self.symbol_order = {symbol: i for i, symbol in enumerate(symbols)}
+
+    def _order(self, check):
+        scope = check['scope']
+        return scope.get('date', ''), self.symbol_order.get(scope.get('security'), -1)
 
     def _record(self, check, count):
         name = check['binding']
@@ -34,7 +39,8 @@ class ScopedChecks(list):
         else:
             value = self[position]
             total = int(value['scope']['checked_cells']) + count
-            if value['available'] and not check['available']:
+            if (value['available'] and not check['available'] or self.symbol_order
+                    and not value['available'] and not check['available'] and self._order(check) < self._order(value)):
                 value = deepcopy(check)
                 self[position] = value
         value['scope']['checked_cells'] = str(total)
