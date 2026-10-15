@@ -719,8 +719,9 @@ impl ReadView {
         if identities.values().any(|ids| ids.len() > 1) {
             return Err(unavailable("显示代码在此时点不能唯一解析为稳定身份"));
         }
-        let mut selected: BTreeMap<String, (Option<String>, Nanoseconds, Value)> = BTreeMap::new();
-        let mut members = Vec::new();
+        let mut selected: BTreeMap<String, (Option<String>, Nanoseconds, Value, bool)> =
+            BTreeMap::new();
+        let mut members: BTreeMap<String, Vec<(Nanoseconds, Nanoseconds, Value)>> = BTreeMap::new();
         for ((security, instrument_id, _), rows) in groups {
             let public = rows
                 .iter()
@@ -754,7 +755,11 @@ impl ReadView {
             }
             let value = Value::Object(object);
             if request.kind == "index_stocks" {
-                members.push((rows[0].effective_from_ns, public, value));
+                members.entry(security).or_default().push((
+                    rows[0].effective_from_ns,
+                    public,
+                    value,
+                ));
                 continue;
             }
             let order_period = if request.kind == "fundamentals" {
@@ -764,32 +769,41 @@ impl ReadView {
             };
             let replace = selected
                 .get(&security)
-                .is_none_or(|(p, t, _)| (&order_period, public) > (p, *t));
-            if selected
-                .get(&security)
-                .is_some_and(|(p, t, _)| (&order_period, public) == (p, *t))
+                .is_none_or(|(p, t, _, _)| (&order_period, public) > (p, *t));
+            if let Some((p, t, _, ambiguous)) = selected.get_mut(&security)
+                && (&order_period, public) == (p, *t)
             {
-                return Err(unavailable("同一公开/报告边界存在无法唯一确定的修订记录"));
+                // An obsolete tie must not reject a later unique revision
+                // merely because record identifiers sort before that revision.
+                *ambiguous = true;
             }
             if replace {
-                selected.insert(security, (order_period, public, value));
+                selected.insert(security, (order_period, public, value, false));
             }
         }
         let output: Vec<_> = if request.kind == "index_stocks" {
-            if members.is_empty() {
-                return Err(unavailable("此时点没有可验证的历史完整成员集合"));
+            let mut output = Vec::new();
+            for security in &request.securities {
+                let records = members
+                    .remove(security)
+                    .ok_or_else(|| unavailable("此时点没有可验证的历史完整成员集合"))?;
+                let latest = records.iter().map(|(e, p, _)| (*e, *p)).max();
+                let current: Vec<_> = records
+                    .into_iter()
+                    .filter(|(e, p, _)| Some((*e, *p)) == latest)
+                    .map(|(_, _, v)| v)
+                    .collect();
+                if current.len() > 1 && current.iter().any(|v| v["member"]["value"].is_null()) {
+                    return Err(unavailable("历史成员空集证明与同边界记录冲突"));
+                }
+                output.extend(current);
             }
-            let latest = members
-                .iter()
-                .map(|(effective, public, _)| (*effective, *public))
-                .max();
-            members
-                .into_iter()
-                .filter(|(effective, public, _)| Some((*effective, *public)) == latest)
-                .map(|(_, _, v)| v)
-                .collect()
+            output
         } else {
-            selected.into_values().map(|(_, _, v)| v).collect()
+            if selected.values().any(|(_, _, _, ambiguous)| *ambiguous) {
+                return Err(unavailable("同一公开/报告边界存在无法唯一确定的修订记录"));
+            }
+            selected.into_values().map(|(_, _, v, _)| v).collect()
         };
         let mut filtered = Vec::new();
         for row in output {
