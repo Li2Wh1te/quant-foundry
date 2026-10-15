@@ -31,7 +31,7 @@ jobs:
     name: Select affected S3 verification
     runs-on: ubuntu-latest
     outputs:
-      sql_facts_only: ${{ steps.scope.outputs.sql_facts_only }}
+      direct_spec_unchanged: ${{ steps.scope.outputs.direct_spec_unchanged }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -46,34 +46,53 @@ jobs:
           changed = set(subprocess.check_output([
               'git', 'diff', '--name-only', os.environ['QF_BASE_SHA'], 'HEAD'
           ], text=True).splitlines())
-          # These formal fact paths do not participate in the old direct-Spec
+          # These dependency paths do not participate in the old direct-Spec
           # B1-B4 workloads. The always-on Rust/wheel and worker workflows
           # still run their affected regressions on a supported filesystem.
           # Default preparation scale is a separate acceptance requirement;
           # skipping this unchanged workload is not its success evidence.
           # Runtime/UI CI still execute independently; their diagnostic-file
           # retention policy does not change the direct-Spec B1-B4 workloads.
-          sql_paths = {
+          dependency_paths = {
               'backend/app/backtest_service/formal_resolver.py',
               'backend/app/backtest_service/formal_calendar_reader.py',
               'backend/app/backtest_service/formal_fact_guard.py',
               'backend/app/backtest_service/formal_sql_pages.py',
               'backend/app/backtest_service/formal_assembly.py',
               'backend/app/backtest_service/session_fact_pages.py',
+              'backend/app/backtest_service/research_gateway.py',
               'backend/tests/test_s3_sql_resolver.py',
               'backend/tests/test_s3_sql_pages.py',
               'backend/tests/test_s3_formal_assembly.py',
               'backend/tests/test_s3_session_fact_pages.py',
+              'backend/tests/test_s3_research_api.py',
               '.github/workflows/s3-engine.yml',
               '.github/workflows/s3-runtime.yml',
               '.github/workflows/s3-run-ui.yml',
               '.github/workflows/s3-final.yml',
           }
-          print('sql_facts_only=' + str(bool(changed) and changed <= sql_paths).lower())
+          view_path = 'engine/crates/qf-core/src/data/views.rs'
+          if view_path in changed:
+              # B1-B4 do not call research(). Compare all other native code,
+              # including price, adjustment, visibility and input validation.
+              # A change outside this one method retains full verification.
+              def without_research(revision):
+                  source = subprocess.check_output(['git', 'show', revision + ':' + view_path], text=True)
+                  before, start, rest = source.partition('    pub fn research(')
+                  method, end, after = rest.partition('    pub fn adjust(')
+                  if not start or not end or any(
+                      line.startswith(('    pub fn ', '    fn ')) for line in method.splitlines()[1:]
+                  ):
+                      return None
+                  return before + end + after
+              previous, current = map(without_research, (os.environ['QF_BASE_SHA'], 'HEAD'))
+              if previous is not None and previous == current:
+                  dependency_paths.add(view_path)
+          print('direct_spec_unchanged=' + str(bool(changed) and changed <= dependency_paths).lower())
           PY
   full:
     needs: impact
-    if: needs.impact.outputs.sql_facts_only != 'true'
+    if: needs.impact.outputs.direct_spec_unchanged != 'true'
     name: ${{ github.head_ref == 'codex/s3-review-default-runtime' && 'Affected full B2 60m in 4 CPU and 8 GiB group' || 'Full B1-B4 in 4 CPU and 8 GiB group' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -150,7 +169,7 @@ jobs:
           if-no-files-found: error
   arm:
     needs: impact
-    if: needs.impact.outputs.sql_facts_only != 'true'
+    if: needs.impact.outputs.direct_spec_unchanged != 'true'
     name: Native Linux arm64 wheel install and smoke
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
