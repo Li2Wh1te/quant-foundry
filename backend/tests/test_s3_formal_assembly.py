@@ -1,7 +1,7 @@
 """Isolated final-assembly DTO oracles and real PG/node/IPC/Rust consumption.
 
-These narrow DTOs are test inputs, not new production producers. The default
-SQL resolver remains unchanged and refuses the same rows before/after assembly;
+These narrow DTOs are test inputs, not new production producers. Default SQL
+dependency pages read existing facts and keep the missing-producer refusal;
 no AcceptedRunPlan or success provider is installed into either default factory.
 """
 from copy import deepcopy
@@ -55,7 +55,7 @@ def oracle(formal_facts):
         fee_rules=[dict(key='commission', category='commission', side='both', rate='0.0003',
             minimum='5', rounding_mode='half_up', rounding_precision='0.01')])))
     resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=formal_facts.catalog.engine)
-    facts = resolver.resolve_facts(current)
+    facts = resolver.resolve_facts(current, paged=False)
     assert facts.action_projection == ()
     assert next(check for check in facts.checks if check['binding'] == 'execution_corporate_actions')['available']
     entry = BY_ID['E70']
@@ -250,10 +250,24 @@ def test_final_assembly_oracle_rejects_incomplete_scope_and_fact_substitution(fo
         assert all(type(v) is str for v in refused.value.diagnostic()['scope'].values())
 
 
-@pytest.mark.parametrize('paged', [False, True])
+@pytest.mark.parametrize('paged', [False, True, 'sql'])
 def test_assembly_oracle_actual_pg_node_ipc_and_rust_session_facts(formal_facts, tmp_path, paged):
     current, resolver, accepted, projected = oracle(formal_facts)
-    plan = assemble(current, resolver, accepted, page_oracle(projected) if paged else projected)
+    if paged == 'sql':
+        actual = resolver.resolve_facts(current)
+        # Only the original missing execution DTO remains an explicit oracle.
+        # All dependency pages now come from the real default SQL reader.
+        # This wrapper is never installed into the app/provider factories.
+        source = actual.execution_inputs
+        execution_dtos = projected.execution_inputs
+        def read(session, offset, limit):
+            return replace(source.read(session, offset, limit), execution_inputs=execution_dtos)
+        projected = replace(actual, market=projected.market, execution_inputs=PagedSessionInputs(read))
+        with pytest.raises(RuntimeFault) as refused:
+            resolver(current)
+        assert refused.value.code == 'CAPABILITY_UNAVAILABLE'
+    plan = assemble(current, resolver, accepted,
+        page_oracle(projected) if paged is True else projected)
     provider = FormalProvider(SimpleNamespace(environment='test'), store=formal_facts)
     # A direct wiring oracle, never a replacement resolver/default success.
     gateway, context = provider._gateway(current, 'isolated-assembly', Event(), plan)

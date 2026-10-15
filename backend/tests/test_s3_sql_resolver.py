@@ -191,7 +191,7 @@ def test_default_provider_reads_supported_contracts_and_keeps_undefined_semantic
     iid = seed(formal_facts)
     provider = FormalProvider(SimpleNamespace(environment='test'), store=formal_facts)
     assert isinstance(provider.plan_resolver, SqlFormalPlanResolver)
-    facts = provider.plan_resolver.resolve_facts(work())
+    facts = provider.plan_resolver.resolve_facts(work(), paged=False)
     for name in ('identity', 'calendar_sessions', 'instrument_rule_package', 'suspension_facts',
                  'corporate_actions', 'official_market_rules'):
         assert statuses(facts)[name]['available'], statuses(facts)
@@ -209,7 +209,8 @@ def test_default_provider_reads_supported_contracts_and_keeps_undefined_semantic
     assert statuses(facts)['research_E69']['scope']['requirement'] == 'optional_per_capability'
     with pytest.raises(RuntimeFault) as failure:
         provider._plan(work())
-    assert json.loads(failure.value.diagnostic()['scope']['facts']) == list(facts.checks)
+    assert json.loads(failure.value.diagnostic()['scope']['facts']) == list(
+        provider.plan_resolver.resolve_facts(work()).checks)
 
 
 @pytest.mark.parametrize('missing', ['identity', 'calendar', 'rules', 'coverage', 'suspension'])
@@ -285,7 +286,7 @@ def test_corporate_action_bridge_preserves_quantity_cash_phase_currency_and_reje
         session.add(event)
         session.commit()
     resolver = FormalProvider(SimpleNamespace(), store=formal_facts).plan_resolver
-    facts = resolver.resolve_facts(work())
+    facts = resolver.resolve_facts(work(), paged=False)
     action = facts.corporate_actions[0][2]['events'][0]
     assert action['cash_effective_phase'] == 'after_open_match' and action['currency'] == 'CNY'
     assert action['cash_amount_per_unit'] == Decimal('0.123456789012')
@@ -367,7 +368,7 @@ def test_new_calendar_version_is_reselected_and_cannot_mix_with_the_accepted_pro
             registry_fact_id=UUID(REGISTRY_FACT_IDS['SSE']), registry_version=1,
             definition_fact_id=UUID(DEFINITION_FACT_IDS['SSE']), **provenance))
         session.commit()
-    current = resolver.resolve_facts(work())
+    current = resolver.resolve_facts(work(), paged=False)
     assert current.calendars[0][2]['fact'].fact_version == 2
     assert not statuses(current)['execution_calendar_assembly']['available']
     with pytest.raises(RuntimeFault) as failure:
@@ -451,7 +452,8 @@ def test_default_multisecurity_resolution_reuses_one_calendar_month(formal_facts
         facts = SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current)
     finally:
         event.remove(engine, 'before_cursor_execute', read)
-    assert len(facts.identities) == len(facts.calendars) == 30
+    assert not facts.identities and not facts.calendars
+    assert statuses(facts)['identity']['scope']['checked_cells'] == '30'
     assert facts.execution_calendar['next_session'] == 'SSE:2026-07-21'
     ordinary = [query for query in statements if 'sha256' not in query]
     assert sum('FROM calendar_session_facts' in query for query in ordinary) == 1
@@ -630,6 +632,7 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
             checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
             assert checks['account_commission']['available']
             assert checks['identity']['available'] and checks['calendar_sessions']['available']
+            assert checks['identity']['scope']['checked_cells'] == '1'
             assert checks['E70']['status'] == 'field_semantics_missing'
             if scope == 'all_existing_facts':
                 for binding in ('instrument_rule_package', 'suspension_facts', 'corporate_actions',
