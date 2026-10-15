@@ -353,7 +353,11 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                             if unit.failure and getattr(sources,'snapshot_scope',None):
                                 invalid_snapshot_scopes.add((raw.subject,str(raw.content.get('trade_date',''))[:7]))
                             spool.offer(unit)
-                        if count and not failed and entry.projection[0] in ('snapshot','reference'):
+                        # E54 validates its whole atomic collection before
+                        # splitting assignments into intervals. Ordinary report
+                        # and dividend windows do not prove a whole subject.
+                        if count and not failed and (
+                                entry.projection[0] in ('snapshot','reference') or entry.id=='E54'):
                             spool.validate_scope(raw)
                         spool.check()
                     if not sources.summary.get('complete',False):
