@@ -92,6 +92,7 @@ class Market(FactBody):
     representation: Annotated[str, Field(pattern=r'^tushare:[0-9a-f]{24}$')]
     source_subject: Label
     price_currency: Literal['CNY']
+    price_unit: Literal['per_share']
     price_basis: Literal['raw']
     quantity_unit: Literal['lots']
     shares_per_lot: DecimalText
@@ -118,7 +119,7 @@ REQUIRED_FIELDS = ('date', 'product', 'day.listing', 'day.status', 'day.risk',
     'day.price_limit', 'day.fund_price_band', 'day.underlying_same_session',
     'day.delisting_session_ordinal', 'day.submission_reference', 'day.evidence',
     'market.entry_id', 'market.representation', 'market.source_subject',
-    'market.price_currency', 'market.price_basis', 'market.quantity_unit',
+    'market.price_currency', 'market.price_unit', 'market.price_basis', 'market.quantity_unit',
     'market.shares_per_lot', 'market.completed_bar_visibility', 'market.evidence')
 
 

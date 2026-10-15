@@ -93,7 +93,7 @@ def producer_setup(formal_facts, tmp_path):
             sale_proceeds='next_session', sale_proceeds_basis='development-cash-timing',
             disposal_settlement_date=None, holding_bands={}, evidence='development-backtest-configuration'),
         market=dict(entry_id='E70', representation=representation, source_subject=symbol,
-            price_currency='CNY', price_basis='raw', quantity_unit='lots', shares_per_lot='100',
+            price_currency='CNY', price_unit='per_share', price_basis='raw', quantity_unit='lots', shares_per_lot='100',
             completed_bar_visibility='at_verified_session_close',
             evidence='development-explicit-source-semantics'))
     terms = fields.pop('account')
@@ -154,7 +154,7 @@ def test_default_provider_uses_real_sql_producer_and_original_native_composer(pr
 
 
 @pytest.mark.parametrize('case', ['absent', 'raw', 'conversion', 'account', 'permissions', 'fixture',
-    'future', 'incomplete', 'date', 'plan', 'visibility', 'missing_terms', 'duplicate_terms'])
+    'future', 'incomplete', 'date', 'plan', 'visibility', 'price_unit', 'missing_terms', 'duplicate_terms'])
 def test_default_producer_refuses_missing_or_substituted_source_facts(producer_setup, case):
     setup = producer_setup
     fields, options = deepcopy(setup.fields), {}
@@ -178,6 +178,7 @@ def test_default_producer_refuses_missing_or_substituted_source_facts(producer_s
     elif case == 'date': fields['date'] = (DAY + timedelta(days=1)).isoformat()
     elif case == 'plan': fields['buy_fees'] = {}
     elif case == 'visibility': fields['market'].pop('completed_bar_visibility')
+    elif case == 'price_unit': fields['market']['price_unit'] = 'per_100_shares'
     if case != 'absent': append_fact(setup, fields, **options)
     with pytest.raises(FormalResolutionFault) as refused:
         setup.provider._plan(setup.work)
