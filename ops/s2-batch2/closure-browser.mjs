@@ -67,6 +67,7 @@ try {
       const url=new URL(response.url());
       return url.pathname.endsWith('/bars') && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value);
     });
+    response.catch(()=>{}); // Keep an action failure in the guarded report path.
     await action(); const actual=await response;
     assert.equal(actual.status(),200); const data=await actual.json();
     await settled(); return data;
@@ -102,6 +103,7 @@ try {
   const factorResponse=page.waitForResponse(response=>{
     const url=new URL(response.url()); return url.pathname.endsWith('/factors')&&url.searchParams.get('series_key')==='isolated-etf-daily';
   });
+  factorResponse.catch(()=>{});
   await page.getByRole('tab',{name:'复权因子',exact:true}).click();
   const factorResult=await factorResponse; assert.equal(factorResult.status(),200);
   const factors=await factorResult.json();
@@ -142,8 +144,14 @@ try {
   await button('释放窗口并重读').click();
   await page.waitForFunction(()=>document.querySelector('.qfe-history-actions')?.textContent.includes('512 /'));
   for(let i=0;i<3;i++) await bars(()=>button('刷新数据').click(),{series_key:'etf-daily-local',adjustment:'none'});
-  const canvas=page.locator('.qfe-chart canvas').first();
-  await canvas.hover(); for(let i=0;i<3;i++) { await page.mouse.wheel(0,-100); await page.mouse.wheel(0,100); }
+  await button('缩放').click();
+  for(let i=0;i<3;i++) {
+    for(const name of ['放大图表','缩小图表']) {
+      const prior=await page.locator('.qfe-timeline > span').first().textContent();
+      await button(name).click();
+      await page.waitForFunction(value=>document.querySelector('.qfe-timeline > span')?.textContent!==value,prior);
+    }
+  }
   assert.ok(!new URL(page.url()).searchParams.has('cursor'));
   assert.deepEqual(await page.evaluate(()=>Object.keys(localStorage)),[]);
   assert.deepEqual(await page.evaluate(()=>Object.keys(sessionStorage)),['quant-foundry.api-token']);
