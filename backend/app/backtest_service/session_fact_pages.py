@@ -41,7 +41,7 @@ class SessionInputPage:
             value = getattr(self, name)
             if type(value) is not tuple or len(value) > PAGE_ROWS:
                 raise RuntimeFault('RESOURCE_LIMIT', '会话事实输入页超过行信用或不是有限元组')
-        if type(self.checks) is not tuple or len(self.checks) > PAGE_ROWS * len(BRIDGES):
+        if type(self.checks) is not tuple or len(self.checks) > PAGE_ROWS * (len(BRIDGES) + 2):
             raise RuntimeFault('RESOURCE_LIMIT', '会话事实诊断页超过行信用')
 
 

@@ -56,7 +56,7 @@ class SqlCandidatePage:
             RuleRow.known_at <= cutoff).order_by(RuleRow.valid_from, RuleRow.fact_version)))
         self.ids = ids
         self.converted, self.identity_cache, self.rule_cache, self.commissions = {}, OrderedDict(), OrderedDict(), OrderedDict()
-        self.status_rows, self.status_coverage, self.action_coverage, self.events = {}, {}, {}, {}
+        self.status_rows, self.status_coverage, self.action_coverage, self.events, self.execution_rows = {}, {}, {}, {}, {}
 
     @staticmethod
     def _remember(cache, key, value):
@@ -130,9 +130,11 @@ class SqlCandidatePage:
 
     def load_day(self, day, cutoff):
         # Drop the prior daily buffers BEFORE querying the next batch.
-        self.status_rows, self.status_coverage, self.action_coverage, self.events = {}, {}, {}, {}
+        self.status_rows, self.status_coverage, self.action_coverage, self.events, self.execution_rows = {}, {}, {}, {}, {}
         if not self.ids:
             return
+        from .formal_execution_producer import daily_rows
+        self.execution_rows = grouped(daily_rows(self.session, self.ids, day, cutoff))
         self.status_rows = grouped(self.session.scalars(select(TradingStatusFact).where(
             TradingStatusFact.instrument_id.in_(self.ids), TradingStatusFact.ts_code.in_(self.symbols),
             TradingStatusFact.trade_date == day, TradingStatusFact.dimension == 'suspension',

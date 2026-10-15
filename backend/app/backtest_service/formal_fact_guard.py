@@ -19,6 +19,7 @@ def fact_statements(work, *, zone, inventory_asof=None):
     from app.instruments.models import InstrumentCodeMappingRecord, InstrumentIdentityFactRecord
     from app.instruments.rule_facts_models import InstrumentRuleFactRecord
     from app.instruments.spec_provider import DEFAULT_MAPPING_SOURCE, DEFAULT_RULE_PACKAGE_REFERENCE
+    from .formal_execution_producer import PACKAGE
     from app.calendars.models import (CalendarRegistryRecord, CalendarDefinitionRecord,
         CalendarSessionFactRecord, CalendarSourcePriorityRecord)
     from app.data_ingestion.models.trading_calendar import TradingStatusFact, TradingStatusCoverageFact
@@ -39,10 +40,14 @@ def fact_statements(work, *, zone, inventory_asof=None):
         or_(requested, mapping.instrument_id.in_(ids))),
         select(identity.__table__).where(identity.instrument_id.in_(ids), identity.known_at <= cutoff)]
     rule = InstrumentRuleFactRecord
-    statements.append(select(rule.__table__).where(rule.instrument_id.in_(ids),
-        rule.rule_package_key == DEFAULT_RULE_PACKAGE_REFERENCE.key,
-        rule.rule_package_version == DEFAULT_RULE_PACKAGE_REFERENCE.version,
-        rule.valid_from <= end, or_(rule.valid_to.is_(None), rule.valid_to > start), rule.known_at <= cutoff))
+    packages = or_((rule.rule_package_key == DEFAULT_RULE_PACKAGE_REFERENCE.key)
+        & (rule.rule_package_version == DEFAULT_RULE_PACKAGE_REFERENCE.version),
+        (rule.rule_package_key == PACKAGE.key) & (rule.rule_package_version == PACKAGE.version))
+    related_keys = select(rule.fact_key).where(rule.instrument_id.in_(ids), packages,
+        rule.valid_from <= end, or_(rule.valid_to.is_(None), rule.valid_to > start), rule.known_at <= cutoff)
+    # A correction can move its effective window or package out of this run.
+    # Include its visible revision before the producer folds versions.
+    statements.append(select(rule.__table__).where(rule.fact_key.in_(related_keys), rule.known_at <= cutoff))
     for model in (CalendarRegistryRecord, CalendarDefinitionRecord):
         statements.append(select(model.__table__).where(model.calendar_id.in_(calendars)))
     # Calendar assembly verifies full weeks/months and the following session's
