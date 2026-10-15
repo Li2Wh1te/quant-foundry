@@ -9,6 +9,7 @@ on:
       - frontend/Dockerfile
       - scripts/build_s2_market_images.sh
       - scripts/test_s2_market_images.py
+      - scripts/package_s2_market_images.py
       - ops/s2-batch2/**
       - .github/workflows/s2-market-release.yml
   workflow_dispatch:
@@ -87,6 +88,17 @@ jobs:
           PY
             exit 1
           fi
+      - name: Export the tested immutable image pair
+        run: python scripts/package_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-package"
+      - name: Retain only deployable images and minimal build metadata
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-market-image-pair
+          path: |
+            ${{ runner.temp }}/s2-package/images.tar
+            ${{ runner.temp }}/s2-package/pair.json
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/cache/save@v4
         if: always() && steps.native-build.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:

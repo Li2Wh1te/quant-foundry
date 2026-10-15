@@ -10,7 +10,7 @@ assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/);
 assert.equal(process.env.QF_ENVIRONMENT, 'test');
 const fixture = JSON.parse(process.env.QF_S2_FIXTURE);
 const browser = await chromium.launch({executablePath:process.env.QF_BROWSER_PATH || '/usr/bin/chromium', headless:true, args:['--no-sandbox']});
-const findings=[], errors=[], requests=[], metrics=[], pending=[];
+const findings=[], errors=[], requests=[], metrics=[], pending=[], faults=[];
 const started=Date.now();
 let stage='open-default-detail';
 function canonical(value) { return value.includes('.') ? value.replace(/0+$/, '').replace(/\.$/, '') : value; }
@@ -38,6 +38,12 @@ try {
       if(!body) return;
       const bytes=body.length;
       assert.ok(bytes<=4*1024*1024);
+      if(response.status()>=400) {
+        let code='UNKNOWN';
+        try { const value=JSON.parse(body.toString()).detail?.code; if(/^[A-Z_]{1,64}$/.test(value)) code=value; } catch {}
+        const path=new URL(response.url()).pathname;
+        faults.push({route:path.endsWith('/bars')?'bars':path.endsWith('/series')?'series':'metadata',code});
+      }
       metrics.push({bytes,status:response.status(),milliseconds:response.request().timing().responseEnd});
     })());
   });
@@ -56,10 +62,13 @@ try {
   }
   await page.goto(base+'/admin/data/etf-basics/'+encodeURIComponent(fixture.instrument_key)+'?tab=overview');
   await settled();
+  stage='production-basis-restriction';
   assert.equal(await page.locator('#qfb-price-basis option[value="pre"]').isDisabled(),true);
+  stage='fixed-window-controls';
   await button('范围').click();
   await page.getByLabel('开始日期',{exact:true}).fill('2025-12-29');
   await page.getByLabel('结束日期',{exact:true}).fill('2026-01-05');
+  stage='fixed-window-read';
   await bars(()=>button('应用').click(),{series_key:'etf-daily-local',adjustment:'none',end:'2026-01-05'});
   stage='select-declared-series';
   const raw=await bars(()=>page.getByLabel('价格序列',{exact:true}).selectOption('isolated-etf-daily'),{series_key:'isolated-etf-daily',adjustment:'none'});
@@ -130,6 +139,9 @@ try {
     requests,metrics,resident_bars:9728,loaded_pages:pages,browser_metrics:peak.metrics,
     milliseconds:Date.now()-started,errors},null,2)+'\n');
 } catch(error) {
-  await writeFile(output,JSON.stringify({passed:false,stage,error:String(error)},null,2)+'\n');
+  const fault=faults.at(-1);
+  const code=error.name==='TimeoutError'?'timeout':error.name==='AssertionError'?'assertion':'runtime';
+  await writeFile(output,JSON.stringify({passed:false,stage:stage+'-'+code+(fault?'-'+fault.route+'-'+fault.code:''),
+    error:String(error),faults,errors,requests},null,2)+'\n');
   throw error;
 } finally { await browser.close(); }
