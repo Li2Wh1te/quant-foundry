@@ -10,6 +10,7 @@ import os
 from pathlib import Path
 import socket
 import sys
+import time
 from threading import Event, Thread
 from types import SimpleNamespace
 
@@ -37,6 +38,124 @@ from quantfoundry._worker import _run_module
 from quantfoundry.data import _MarketRoute
 
 pytestmark = pytest.mark.skipif(os.getenv('POSTGRES_TEST_ENABLED') != '1', reason='isolated PG required')
+
+
+def test_hot_probe_budget_starts_at_commit_and_still_rejects_late_terminal():
+    from benchmark import _CorrectionProbe
+    clock = [0.0]
+    release, entered = Event(), Event()
+    def correct(committed, stopped):
+        entered.set()
+        assert release.wait(2)
+        committed()
+        return {'real_commit_observed': True}
+    probe = _CorrectionProbe(correct, clock=lambda: clock[0])
+    try:
+        assert probe.poll(ready=True, terminal=False) is False
+        assert entered.wait(2)
+        clock[0] = 20.0
+        assert probe.poll(ready=True, terminal=False) is False
+        assert not probe.committed.is_set()
+        release.set()
+        assert probe.done.wait(2)
+        clock[0] = 35.0
+        assert probe.poll(ready=True, terminal=False) is True
+        clock[0] = 35.001
+        with pytest.raises(TimeoutError, match='after correction commit'):
+            probe.poll(ready=True, terminal=True)
+    finally:
+        release.set()
+        probe.close()
+
+
+@pytest.mark.parametrize('kind', ['trade_tick', 'quote_tick'])
+def test_hot_probe_real_late_commit_keeps_data_changed_and_partial(formal, tmp_path, kind):
+    """Delay only synthetic batch arrival; all checks/write/Rust calls are real."""
+    from benchmark import Provider, _CorrectionProbe, hot_correction, prepare
+    from strategies import HOT_PROBE
+    from quantfoundry import _native
+    load = Load('late-commit-' + kind, 1, 1, ticks=1000, kind=kind)
+    formal.limits = replace(formal.limits, file_rows=1000)
+    prepare(formal, load)
+    provider = Provider(formal, load, 'tick', None, {})
+    work = AcceptedWork('isolated-owner', deepcopy(provider.spec['config']), HOT_PROBE,
+        WorkerLimits(cpu_millis=2000, memory_bytes=5*1024**3, wall_seconds=3600),
+        dict(account_snapshot=dict(fee_schedule=account_payload())))
+    bound = provider.binding(work, Claim('late-commit-probe', 'token', 1), Event())
+    endpoint = tmp_path/'late.sock'
+    listener = socket.socket(socket.AF_UNIX);listener.bind(str(endpoint));listener.listen(1)
+    bound.spec['source']['socket_path'] = str(endpoint)
+    marker, staged, arrived, finished = Event(), Event(), Event(), Event()
+    peer_errors, worker_errors, output, phases = [], [], {}, {}
+    cancellation = _native.CancellationToken()
+    def peer():
+        try:
+            connection, _ = listener.accept()
+            serve(Channel(connection, timeout=45), bound.gateway, bound.context,
+                  close_context=False, session_facts=bound.session_facts)
+        except BaseException as error:
+            peer_errors.append(error)
+    module = SimpleNamespace()
+    exec(compile(HOT_PROBE, 'strategy.py', 'exec'), module.__dict__)
+    module.print = lambda *args, **kwargs: marker.set()
+    def worker():
+        result = None
+        try:
+            result = _run_module(module, bound.spec,
+                market_routes={'tick': _MarketRoute('market', tuple(provider.request(work)['fields']))},
+                cancellation=cancellation)
+            output['summary'] = json.loads(result.summary_json())
+            output['callbacks'] = result._callback_metrics
+        except BaseException as error:
+            worker_errors.append(error)
+        finally:
+            if result is not None: result.close()
+            finished.set()
+    class DelayedBatchStore:
+        def __getattr__(self, name):return getattr(formal, name)
+        def upsert(self, spec, partition, batches, source, **kwargs):
+            def late_batch():
+                staged.set()
+                # Exceeds the former 15-second callback-relative deadline.
+                # It is input staging, before the actual CurrentStore commit.
+                if probe.stopped.wait(16):raise RuntimeError('test correction cancelled')
+                arrived.set()
+                yield from batches
+            return formal.upsert(spec, partition, late_batch(), source, **kwargs)
+    probe = _CorrectionProbe(lambda committed, stopped: hot_correction(
+        DelayedBatchStore(), provider, committed=committed, stopped=stopped, phases=phases))
+    peer_thread, worker_thread = Thread(target=peer, daemon=True), Thread(target=worker, daemon=True)
+    peer_thread.start();worker_thread.start()
+    started = time.monotonic()
+    staging_still_running = False
+    try:
+        while True:
+            complete = probe.poll(ready=marker.is_set(), terminal=finished.is_set())
+            if staged.is_set() and not arrived.is_set() and time.monotonic()-started > 15.5:
+                assert not finished.is_set(), 'probe exhausted its deadline before commit'
+                staging_still_running = True
+            if finished.is_set() and complete:break
+            assert time.monotonic()-started < 45, 'isolated regression exceeded its test budget'
+            finished.wait(.01)
+        summary = output['summary']
+        assert staging_still_running
+        assert summary['outcome']['status'] == 'failed', summary
+        assert summary['outcome']['error']['code'] == 'DATA_CHANGED', summary
+        assert summary['outcome']['partial'] is True, summary
+        assert summary['progress']['completed_events'] == 100
+        assert output['callbacks']['by_kind']['handle_tick']['count'] == 100
+        assert probe.result['generation_after'] > probe.result['generation_before']
+        assert probe.result['old_context_terminal'] == 'DATA_CHANGED'
+        assert probe.result['corrected_read_verified'] is True
+        assert phases['upsert_seconds'] >= 16
+        assert 0 <= probe.measurement()['commit_to_terminal_seconds'] <= 15
+        assert not worker_errors and not peer_errors, (worker_errors, peer_errors)
+    finally:
+        cancellation.cancel()
+        probe.close()
+        listener.close();worker_thread.join(5);peer_thread.join(5)
+        bound.gateway.close(bound.context)
+    assert not worker_thread.is_alive() and not peer_thread.is_alive()
 
 
 def test_fact_page_keeps_every_wire_value_and_distinct_side_commissions():

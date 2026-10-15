@@ -156,6 +156,8 @@ def series(acq, spec, unit, params, previous, now):
     earliest = years_before(now.date(), spec.years)
     start = params.start_date or (max(earliest, end - timedelta(days=30))
         if previous and params.mode == 'incremental' else earliest)
+    if start > end:
+        raise CollectionError('查询开始日期晚于有效结束日期，本次未发起请求。')
     if spec.key == 'rank_trend' and start < earliest:
         raise CollectionError('个股排名走势仅支持近一年范围。')
     old = {r['date_ms']: r for r in (previous or {}).get('item', [])}

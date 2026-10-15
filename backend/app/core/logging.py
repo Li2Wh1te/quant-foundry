@@ -19,6 +19,7 @@ import structlog
 from concurrent_log_handler import ConcurrentTimedRotatingFileHandler
 
 from app.core.config import Settings
+from app.data_ingestion.tonghuashun.diagnostics import LocalOnlyDiagnostics, render_json
 
 
 LOG_FILE_NAME = "app.jsonl"
@@ -139,7 +140,7 @@ def configure_logging(settings: Settings) -> LoggingRuntime:
         ]
 
         formatter = structlog.stdlib.ProcessorFormatter(
-            processor=structlog.processors.JSONRenderer(),
+            processor=render_json,
             foreign_pre_chain=shared_processors,
         )
         file_handler = ConcurrentTimedRotatingFileHandler(
@@ -156,6 +157,7 @@ def configure_logging(settings: Settings) -> LoggingRuntime:
         console_handler = logging.StreamHandler(sys.stderr)
         console_handler.setLevel(level)
         console_handler.setFormatter(formatter)
+        console_handler.addFilter(LocalOnlyDiagnostics())
 
         log_queue: queue.Queue[logging.LogRecord] = queue.Queue(
             maxsize=settings.log_queue_size

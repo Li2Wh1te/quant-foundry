@@ -143,6 +143,7 @@ class ResolvedFormalFacts:
     action_projection: object = None
     research: tuple = ()
     reference_indices: tuple = ()
+    fact_fingerprint: str | None = None
 
 
 class SqlFormalPlanResolver:
@@ -186,8 +187,11 @@ class SqlFormalPlanResolver:
                 current, facts, connection=connection))
 
     def check_facts(self, work, accepted, *, connection=None):
-        current = self.resolve_facts(work, connection=connection)
-        if current.token != accepted.token:
+        from .formal_fact_guard import fact_fingerprint
+        with self._session(connection) as (session, _budget):
+            current = fact_fingerprint(session, work, zone=ZONE)
+        token = canonical_hash(dict(config=work.config, facts=current, official_rules=self._official_rules()))
+        if token != accepted.token:
             raise RuntimeFault('DATA_CHANGED', '已解析的正式小事实、版本或质量发生变化')
 
     def resolve_facts(self, work, *, connection=None):
@@ -226,6 +230,8 @@ class SqlFormalPlanResolver:
         symbols = tuple(config['universe'])
         if not 1 <= days <= FACT_DAYS or len(symbols) * days > FACT_CELLS:
             raise RuntimeFault('RESOURCE_LIMIT', '正式小事实日期或标的组合超过预算')
+        from .formal_fact_guard import fact_fingerprint
+        fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
         checks, identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], [], []
         from app.instruments.spec_provider import DEFAULT_MAPPING_SOURCE, DEFAULT_RULE_PACKAGE_REFERENCE
         from app.instruments.models import InstrumentCodeMappingRecord
@@ -237,8 +243,10 @@ class SqlFormalPlanResolver:
         from app.instruments.rules.etf_china import register_china_listed_etf_rules
         registry = RulePackageRegistry()
         register_china_listed_etf_rules(registry)
-        for symbol in symbols:
-            for offset in range(days):
+        # Walk dates first: all securities reuse the same bounded month
+        # candidates instead of cycling the cache through history per symbol.
+        for offset in range(days):
+            for symbol in symbols:
                 day = start + timedelta(days=offset)
                 at = datetime.combine(day, time(), ZONE)
                 cutoff = inventory_asof or at  # facts known before this simulated day
@@ -323,8 +331,8 @@ class SqlFormalPlanResolver:
             tuple(rules), tuple(trading_status), tuple(actions), tuple(commissions),
             tuple(official or ()), execution_calendar, '', action_projection=action_projection)
         checks[-1]['missing'] = list(missing_plan_dependencies(facts))
-        token = canonical_hash(dict(config=config, rows=budget.parts, checks=checks, official_rules=official))
-        return replace(facts, token=token)
+        token = canonical_hash(dict(config=config, facts=fingerprint, official_rules=official))
+        return replace(facts, token=token, fact_fingerprint=fingerprint)
 
     @staticmethod
     def _official_rules():
@@ -344,34 +352,12 @@ class SqlFormalPlanResolver:
 
     @staticmethod
     def _calendar(session, calendar_id, day, cutoff):
-        from app.calendars.repository import CalendarFactRepository
-        from app.calendars.facts import CalendarPITContext, select_pit_candidate
-        from app.calendars.contracts import QueryBoundary
-        repository = CalendarFactRepository(session)
-        context = CalendarPITContext.from_query_boundary(QueryBoundary(
-            # Calendar planning may read a pre-announced future session. Its
-            # knowledge time remains the simulated instant, not that future day.
-            data_cutoff=max(cutoff, datetime.combine(day, time(), ZONE)),
-            knowledge_as_of=cutoff, include_cutoff_day=True))
-        priorities = repository.list_source_priorities()
-        def choose(rows):
-            selected = select_pit_candidate(rows, effective_day=day, pit_context=context,
-                source_priorities=priorities)
-            selected.strict_validate()
-            return selected
-        registry = choose(repository.list_registries((calendar_id,)))
-        definition = choose(repository.list_definitions((calendar_id,)))
-        fact = choose(repository.list_session_facts((calendar_id,), day, day + timedelta(days=1)))
-        if (definition.registry_fact_id != registry.fact_id or definition.registry_version != registry.registry_version
-                or fact.registry_fact_id != registry.fact_id or fact.registry_version != registry.registry_version
-                or fact.definition_fact_id != definition.fact_id or fact.definition_version != definition.definition_version):
-            raise ValueError('calendar_reference_mismatch')
-        timezone, windows = fact.effective_timezone_and_sessions(definition)
-        # A narrow exact local-window projection, with no invented auction or
-        # before/after callback phase. The D03 execution phase producer is separate.
-        intervals = tuple((datetime.combine(day, window.start, ZoneInfo(timezone)),
-                           datetime.combine(day, window.end, ZoneInfo(timezone))) for window in windows)
-        return dict(registry=registry, definition=definition, fact=fact, timezone=timezone, intervals=intervals)
+        from .formal_calendar_reader import CalendarReader
+        reader = session.info.get('s3_calendar_reader')
+        if reader is None:
+            reader = CalendarReader(session)
+            session.info['s3_calendar_reader'] = reader
+        return reader.resolve(calendar_id, day, cutoff)
 
     @classmethod
     def _assemble_calendar(cls, session, resolved, start, end, inventory_asof):
