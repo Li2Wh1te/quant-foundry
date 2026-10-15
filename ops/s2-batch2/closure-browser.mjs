@@ -11,7 +11,7 @@ assert.match(base, /^http:\/\/127\.0\.0\.1:\d+$/);
 assert.equal(process.env.QF_ENVIRONMENT, 'test');
 const fixture = JSON.parse(process.env.QF_S2_FIXTURE);
 let browser;
-const findings=[], errors=[], requests=[], metrics=[], pending=[], faults=[];
+const findings=[], errors=[], requests=[], metrics=[], pending=[], faults=[], verification=[];
 const started=Date.now();
 let stage;
 function setStage(value) {
@@ -40,24 +40,54 @@ try {
     if(url.searchParams.has('cursor')) url.searchParams.set('cursor','omitted');
     requests.push(url.pathname+url.search);
   });
+  const finished=new WeakSet(), failed=new WeakSet(), completions=new Map();
+  function finish(request, successful) {
+    (successful?finished:failed).add(request);
+    for(const resolve of completions.get(request)||[]) resolve(successful);
+    completions.delete(request);
+  }
+  page.on('requestfinished',request=>finish(request,true));
+  page.on('requestfailed',request=>finish(request,false));
+  page.on('close',()=>{ for(const waiting of completions.values()) for(const resolve of waiting) resolve(false); completions.clear(); });
+  function completed(response) {
+    const request=response.request();
+    if(failed.has(request)||request.failure()) return Promise.resolve(false);
+    if(finished.has(request)) return Promise.resolve(true);
+    return new Promise(resolve=>{ const waiting=completions.get(request)||[];waiting.push(resolve);completions.set(request,waiting); });
+  }
   page.on('response', response=>{
     if(!new URL(response.url()).pathname.startsWith('/api/admin/market/')) return;
     const capture=(async()=>{
-      const body=await response.body().catch(()=>null); // Cancelled superseded reads have no body.
-      if(!body) return;
-      const bytes=body.length;
-      assert.ok(bytes<=4*1024*1024);
+      if(!await completed(response)) return; // Superseded reads are cancelled by the real client.
+      // Network transfer accounting does not depend on Chromium retaining a
+      // second inspector copy of a body already consumed by the application.
+      const sizes=await response.request().sizes();
+      assert.ok(sizes.responseBodySize>=0&&sizes.responseBodySize<=4*1024*1024);
+      assert.ok([undefined,'identity'].includes(response.headers()['content-encoding']));
       if(response.status()>=400) {
-        let code='UNKNOWN';
-        try { const value=JSON.parse(body.toString()).detail?.code; if(/^[A-Z_]{1,64}$/.test(value)) code=value; } catch {}
         const path=new URL(response.url()).pathname;
-        faults.push({route:path.endsWith('/bars')?'bars':path.endsWith('/series')?'series':'metadata',code});
+        faults.push({route:path.endsWith('/bars')?'bars':path.endsWith('/series')?'series':'metadata',code:'HTTP_'+response.status()});
       }
-      metrics.push({bytes,status:response.status(),milliseconds:response.request().timing().responseEnd});
+      metrics.push({bytes:sizes.responseBodySize,status:response.status(),milliseconds:response.request().timing().responseEnd});
     })();
     capture.catch(()=>{}); // Observed again by Promise.all inside the guarded result path.
     pending.push(capture);
   });
+  async function readActual(response) {
+    assert.equal(response.status(),200);
+    // An independent real GET of exactly the observed URL verifies the shown
+    // values and repeatable signed cursor. No route/provider/body is replaced.
+    // Chromium's best-effort inspector body cache is not a market contract.
+    const start=Date.now();
+    const actual=await page.request.get(response.url(),{headers:{Authorization:'Bearer '+process.env.QF_S2_TEST_TOKEN},timeout:35000});
+    try {
+      assert.equal(actual.status(),200);
+      const bytes=await actual.body(); assert.ok(bytes.length<=4*1024*1024);
+      const url=new URL(response.url());if(url.searchParams.has('cursor')) url.searchParams.set('cursor','omitted');
+      verification.push({url:url.pathname+url.search,status:actual.status(),bytes:bytes.length,milliseconds:Date.now()-start});
+      return JSON.parse(bytes.toString());
+    } finally { await actual.dispose(); }
+  }
   await page.addInitScript(token=>sessionStorage.setItem('quant-foundry.api-token',token),process.env.QF_S2_TEST_TOKEN);
   const button=name=>page.getByRole('button',{name,exact:true});
   const settled=()=>page.waitForFunction(()=>!document.querySelector('[aria-label="刷新数据"]')?.disabled &&
@@ -65,16 +95,16 @@ try {
   async function bars(action, expected, continuation=false) {
     const phase=stage;
     const instrument=decodeURIComponent(new URL(page.url()).pathname.split('/').at(-1));
-    const response=page.waitForResponse(response=>{
+    const response=page.waitForResponse(async response=>{
       const url=new URL(response.url());
       return decodeURIComponent(url.pathname)===`/api/admin/market/instruments/${instrument}/bars` &&
-        (!continuation || url.searchParams.has('cursor')) && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value);
+        (!continuation || url.searchParams.has('cursor')) && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value) && await completed(response);
     });
     response.catch(()=>{}); // Keep an action failure in the guarded report path.
     setStage(phase+'-request');
     await action(); const actual=await response;
     setStage(phase+'-decode');
-    assert.equal(actual.status(),200); const data=await actual.json();
+    const data=await readActual(actual);
     setStage(phase+'-render');
     await settled(); setStage(phase); return data;
   }
@@ -106,13 +136,13 @@ try {
   setStage('selected-factor-table');
   const side=button('切换资料侧栏');
   if(await side.getAttribute('aria-expanded')!=='true') await side.click();
-  const factorResponse=page.waitForResponse(response=>{
-    const url=new URL(response.url()); return url.pathname.endsWith('/factors')&&url.searchParams.get('series_key')==='isolated-etf-daily';
+  const factorResponse=page.waitForResponse(async response=>{
+    const url=new URL(response.url()); return url.pathname.endsWith('/factors')&&url.searchParams.get('series_key')==='isolated-etf-daily'&&await completed(response);
   });
   factorResponse.catch(()=>{});
   await page.getByRole('tab',{name:'复权因子',exact:true}).click();
   const factorResult=await factorResponse; assert.equal(factorResult.status(),200);
-  const factors=await factorResult.json();
+  const factors=await readActual(factorResult);
   assert.deepEqual(factors.items.map(row=>row.trade_date),raw.items.map(row=>row.last_trade_date));
   assert.deepEqual(factors.items.map(row=>canonical(row.factor)),['1','1','1','2','2','2']);
   await page.locator('.qfb-factors tbody tr').first().waitFor();
@@ -169,7 +199,7 @@ try {
   await Promise.all(pending);
   assert.deepEqual(errors,[]);
   await writeFile(output,JSON.stringify({passed:true,synthetic:true,live_verified:false,deployed:false,findings,
-    requests,metrics,resident_bars:9728,loaded_pages:pages,browser_metrics:peak.metrics,
+    requests,metrics,verification,resident_bars:9728,loaded_pages:pages,browser_metrics:peak.metrics,
     milliseconds:Date.now()-started,errors},null,2)+'\n');
 } catch(error) {
   const fault=faults.at(-1);
@@ -181,6 +211,6 @@ try {
     message.includes('net::ERR_')?'browser-network':'guarded-failure';
   const code=['TimeoutError','AssertionError','TypeError','SyntaxError','ReferenceError','Error'].includes(error.name)?error.name:'runtime';
   await writeFile(output,JSON.stringify({passed:false,stage:stage+'-'+code+'-'+diagnostic+(fault?'-'+fault.route+'-'+fault.code:''),
-    error:String(error),faults,errors,requests},null,2)+'\n');
+    error:String(error),faults,errors,requests,metrics,verification},null,2)+'\n');
   throw error;
 } finally { await browser?.close(); }
