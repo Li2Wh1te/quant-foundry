@@ -5,6 +5,7 @@ Current formal observations lack required PIT facts and remain explicit denials.
 """
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
+import re
 from types import MappingProxyType
 from typing import Callable, Mapping
 
@@ -72,9 +73,12 @@ class ResearchBinding:
             try:
                 if anchor is None or set(anchor) != {'factor', 'effective_ns', 'public_ns'}:
                     raise ValueError()
-                value = Decimal(anchor['factor'])
-                if (type(anchor['factor']) is not str or len(anchor['factor']) > 128
-                        or not value.is_finite() or value <= 0):
+                factor = anchor['factor']
+                # Match the native exact-decimal wire contract before parsing,
+                # including for empty reads which never push a native row.
+                if (type(factor) is not str or len(factor) > 128
+                        or re.fullmatch(r'(?:0|[1-9][0-9]*)(?:\.[0-9]+)?', factor) is None
+                        or Decimal(factor) <= 0):
                     raise ValueError()
                 _ns(anchor['effective_ns']); _ns(anchor['public_ns'])
             except (ValueError, TypeError, InvalidOperation):

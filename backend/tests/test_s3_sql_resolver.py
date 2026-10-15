@@ -552,8 +552,9 @@ def test_sql_range_guard_retains_exact_existing_boundaries():
         SqlFormalPlanResolver._check_range(config)
 
 
-@pytest.mark.parametrize('scope', ['sparse', 'all_existing_facts', '100x365', '5000x5'])
-def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_semantics(formal_facts, tmp_path, scope):
+@pytest.mark.parametrize('scope', ['sparse', 'all_existing_facts', '100x365', '5000x5',
+    'sql_rows', 'sql_bytes', 'sql_time'])
+def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_invalid_inputs(formal_facts, tmp_path, monkeypatch, scope):
     iid = seed(formal_facts)
     if scope == 'all_existing_facts':
         # Fill every supported existing dependency and the actual E70 node.
@@ -618,6 +619,10 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
         caps = request('GET', '/api/admin/backtests/capabilities')
         assert caps.status_code == 200, caps.text
         assert any(item['binding'] == 'identity' and item['available'] for item in caps.json()['actual_data'])
+        if scope.startswith('sql_'):
+            budget, value = {'sql_rows': ('FACT_ROWS', 1), 'sql_bytes': ('FACT_BYTES', 10),
+                             'sql_time': ('FACT_SECONDS', 0)}[scope]
+            monkeypatch.setattr('app.backtest_service.formal_resolver.' + budget, value)
         preflight = request('POST', '/api/admin/backtests/preflight', config)
         assert preflight.status_code == 200, preflight.text
         diagnostic = preflight.json()['errors'][0]
@@ -627,6 +632,9 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
             assert diagnostic['scope'] == dict(resource='formal_sql_fact_range',
                 requested_symbols=str(symbols), requested_natural_days=str(days),
                 requested_cells=str(symbols * days), max_natural_days='3660', max_cells='20000')
+        elif scope.startswith('sql_'):
+            assert diagnostic['code'] == 'RESOURCE_LIMIT'
+            assert diagnostic['scope'] == {}
         else:
             assert diagnostic['code'] == 'CAPABILITY_UNAVAILABLE'
             checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
@@ -649,7 +657,7 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
         def preflight(self, image):
             assert image == settings.s3_worker_image
         def start(self, *args, **kwargs):
-            pytest.fail('unknown source semantics must never launch a worker')
+            pytest.fail('refused default inputs must never launch a worker')
     repository, process, services = create_services(settings=settings, engine=formal_facts.catalog.engine,
         daemon=NoWorkerDaemon())
     assert isinstance(services.builder.__self__.plan_resolver, SqlFormalPlanResolver)
