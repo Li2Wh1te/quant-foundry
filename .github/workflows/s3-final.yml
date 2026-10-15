@@ -81,12 +81,12 @@ jobs:
               def without_research(revision):
                   source = subprocess.check_output(['git', 'show', revision + ':' + view_path], text=True)
                   before, start, rest = source.partition('    pub fn research(')
-                  method, end, after = rest.partition('    pub fn adjust(')
-                  if not start or not end or any(
-                      line.startswith(('    pub fn ', '    fn ')) for line in method.splitlines()[1:]
-                  ):
+                  # rustfmt places the method's closing brace at this indent.
+                  # Keep any new associated item after it in the comparison.
+                  method, end, after = rest.partition('\n    }\n')
+                  if not start or not end:
                       return None
-                  return before + end + after
+                  return before + after
               previous, current = map(without_research, (os.environ['QF_BASE_SHA'], 'HEAD'))
               if previous is not None and previous == current:
                   dependency_paths.add(view_path)
