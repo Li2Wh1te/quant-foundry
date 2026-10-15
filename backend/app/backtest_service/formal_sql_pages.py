@@ -1,8 +1,11 @@
 """In-process pages of the existing SQL dependencies, without new fact fields."""
 from copy import deepcopy
 from dataclasses import dataclass
+from array import array
+from datetime import date
 
 from .session_fact_pages import PagedSessionInputs, SessionInputPage, check_input_bytes
+from .serialization import encoded
 
 
 class SqlSessionInputs(PagedSessionInputs):
@@ -55,6 +58,55 @@ class ScopedChecks(list):
     def merge(self, checks):
         for check in checks:
             self._record(check, int(check['scope']['checked_cells']))
+
+
+class SessionFailurePositions:
+    """Compact day positions; never retain per-day error payloads or facts.
+
+    Seven uint32 arrays at the existing 3,660-day bound use at most 102,480
+    bytes. Keep one detailed error per binding; reread a selected open-session
+    error in the same SQL snapshot only when the first error was irrelevant.
+    """
+    EMPTY = 2**32-1
+
+    def __init__(self, symbols, start, end, bindings):
+        self.symbols, self.start = symbols, start
+        self.ranks = {symbol: i for i, symbol in enumerate(symbols)}
+        days = (end-start).days+1
+        self.positions = {name: array('I', [self.EMPTY])*days for name in bindings}
+        self.first = {}
+
+    def record(self, check):
+        if check['available']:
+            return
+        name, scope = check['binding'], check['scope']
+        offset = (date.fromisoformat(scope['date'])-self.start).days
+        rank = self.ranks[scope['security']]
+        self.positions[name][offset] = min(self.positions[name][offset], rank)
+        previous = self.first.get(name)
+        if previous is None or (scope['date'], rank) < (
+                previous['scope']['date'], self.ranks[previous['scope']['security']]):
+            self.first[name] = deepcopy(check)
+
+    def control_bytes(self, checks):
+        return (sum(len(values)*values.itemsize for values in self.positions.values())
+                + len(encoded(self.first)) + len(encoded(checks)))
+
+    def select(self, name, days, reread):
+        for day in days:
+            offset = (date.fromisoformat(day)-self.start).days
+            rank = self.positions[name][offset]
+            if rank == self.EMPTY:
+                continue
+            symbol = self.symbols[rank]
+            check = self.first[name]
+            if check['scope']['date'] != day or check['scope']['security'] != symbol:
+                check = reread(symbol, day)[name]
+            if check['available']:
+                from .runtime_contracts import RuntimeFault
+                raise RuntimeFault('INVALID_CONTRACT', '会话缺项复核与同一SQL快照不一致')
+            return deepcopy(check)
+        return None
 
 
 @dataclass(frozen=True)

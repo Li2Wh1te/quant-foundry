@@ -411,7 +411,7 @@ class SqlFormalPlanResolver:
 
     def _resolve(self, session, budget, work, *, inventory_asof=None, paged=False):
         from .formal_fact_guard import fact_fingerprint
-        from .formal_sql_pages import ScopedChecks
+        from .formal_sql_pages import ScopedChecks, SessionFailurePositions
         from .session_fact_pages import PAGE_ROWS, BRIDGES
         from .formal_assembly import missing_plan_dependencies, zero_action_projection
         from .research_gateway import current_research_bindings
@@ -422,7 +422,9 @@ class SqlFormalPlanResolver:
         fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
         checks = ScopedChecks(symbols) if paged else []
         identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
-        calendar_seeds, action_failures, dependency_failures = {}, {}, {}
+        calendar_seeds = {}
+        failures = SessionFailurePositions(symbols, start, end,
+            (*BRIDGES, 'execution_corporate_actions')) if paged else None
         def batches():
             if not paged:
                 for offset in range(days):
@@ -454,24 +456,17 @@ class SqlFormalPlanResolver:
                 if paged:
                     checks.merge(page.checks)
                     for check in page.checks:
-                        if not check['available']:
-                            dependency_failures.setdefault((check['binding'], day.isoformat()), check)
+                        failures.record(check)
                     for row in page.calendars:
                         calendar_id = row[2]['fact'].calendar_id
                         # Existing assembly rejects multiple references; two
                         # seeds suffice to diagnose it without a growing map.
                         if calendar_id in calendar_seeds or len(calendar_seeds) < 2:
                             calendar_seeds.setdefault(calendar_id, row)
-                    # Keep only a first failure per natural day until the
-                    # original start-cutoff calendar selects actual open days.
-                    # Later PIT calendar revisions must not erase zero proofs
-                    # required by that originally assembled reference calendar.
                     _, failure = zero_action_projection(page.corporate_actions,
                         dict(calendar=[dict(date=day.isoformat())]), selected)
-                    if not failure['available']:
-                        action_failures.setdefault(day.isoformat(), failure)
-                    if (len(encoded(checks)) + len(encoded(list(action_failures.values())))
-                            + len(encoded(list(dependency_failures.values()))) > 256 * 1024):
+                    failures.record(failure)
+                    if failures.control_bytes(checks) > 256 * 1024:
                         raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
                 else:
                     checks.extend(page.checks)
@@ -490,6 +485,21 @@ class SqlFormalPlanResolver:
         execution_calendar = self._attempt('execution_calendar_assembly', lambda:
             self._assemble_calendar(session, tuple(calendar_seeds.values()) if paged else calendars,
                 start, end, inventory_asof), checks, scope=dict(start=start.isoformat(), end=end.isoformat()))
+        diagnostic_key, diagnostic_values = None, None
+        def reread_failure(symbol, day):
+            nonlocal diagnostic_key, diagnostic_values
+            if diagnostic_key != (symbol, day):
+                budget.reset()
+                page = self._read_dependency_page(session, work, (symbol,), date.fromisoformat(day),
+                    inventory_asof=inventory_asof, summarized=True)
+                _, action = zero_action_projection(page.corporate_actions,
+                    dict(calendar=[dict(date=day)]), (symbol,))
+                diagnostic_values = {row['binding']: row for row in (*page.checks, action)}
+                diagnostic_key = symbol, day
+                del page
+                if failures.control_bytes(checks) + len(encoded(diagnostic_values)) > 256 * 1024:
+                    raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
+            return diagnostic_values
         if paged and execution_calendar is not None and execution_calendar['calendar']:
             # The legacy assembler requires bridge facts on open sessions.
             # Retaining only the first natural-day failure can otherwise hide
@@ -498,12 +508,10 @@ class SqlFormalPlanResolver:
             for index, check in enumerate(checks):
                 if check['binding'] not in BRIDGES:
                     continue
-                failure = next((dependency_failures[check['binding'], day] for day in open_days
-                    if (check['binding'], day) in dependency_failures), None)
+                failure = failures.select(check['binding'], open_days, reread_failure)
                 if failure is not None:
-                    selected_check = deepcopy(failure)
-                    selected_check['scope']['checked_cells'] = check['scope']['checked_cells']
-                    checks[index] = selected_check
+                    failure['scope']['checked_cells'] = check['scope']['checked_cells']
+                    checks[index] = failure
                 elif not check['available']:
                     checks[index] = state(check['binding'], 'available', scope=dict(
                         kind='checked_open_session_dependencies', checked_cells=check['scope']['checked_cells']))
@@ -512,9 +520,10 @@ class SqlFormalPlanResolver:
         research = current_research_bindings()
         checks.extend(self._execution_gaps(config['frequency'], research=research))
         if paged and execution_calendar is not None:
-            action_check = next((action_failures[row['date']] for row in execution_calendar['calendar']
-                if row['date'] in action_failures), state('execution_corporate_actions', 'available',
-                    scope=dict(kind='complete_zero_action_projection')))
+            action_check = failures.select('execution_corporate_actions',
+                [row['date'] for row in execution_calendar['calendar']], reread_failure)
+            action_check = action_check or state('execution_corporate_actions', 'available',
+                scope=dict(kind='complete_zero_action_projection'))
             action_projection = () if action_check['available'] else None
         else:
             action_projection, action_check = zero_action_projection(actions, execution_calendar, symbols)
