@@ -53,8 +53,14 @@ def main():
             raise RuntimeError('Isolated command failed: ' + completed.stderr[-3000:] + completed.stdout[-3000:])
         return completed.stdout.strip()
 
+    def owned_mount(volume, target):
+        # An empty named volume can be populated from the image again on a
+        # later mount, including its image UID. Preserve the owner prepared
+        # for this fresh, uniquely owned test volume instead.
+        return ['--mount', 'type=volume,source=' + volume + ',target=' + target + ',volume-nocopy']
+
     def ephemeral(extra, command_args, *, timeout=120):
-        compatibility = ['--user', uid, '--volume', volumes[2] + ':/app/data/logs'] if args.closure_only else []
+        compatibility = ['--user', uid, *owned_mount(volumes[2], '/app/data/logs')] if args.closure_only else []
         return command(['docker', 'run', '--rm', '--network', project, *environment, *compatibility, *extra,
             api, *command_args], timeout=timeout)
 
@@ -91,8 +97,8 @@ def main():
             time.sleep(.2)
         assert ready
         for volume, target in [(volumes[1], '/app/data/current-store')] + ([(volumes[2], '/app/data/logs')] if args.closure_only else []):
-            command(['docker', 'run', '--rm', '--network', 'none', '--user', '0:0', '--volume',
-                volume + ':' + target, api, 'chown', uid, target])
+            command(['docker', 'run', '--rm', '--network', 'none', '--user', '0:0',
+                *owned_mount(volume, target), api, 'chown', uid, target])
         native = ephemeral(['--read-only'], ['python', '-c',
             "import hashlib,json; from pathlib import Path; from quantfoundry import _native; "
             "print(json.dumps(dict(sha256=hashlib.sha256(Path(_native.__file__).read_bytes()).hexdigest(),"
@@ -103,15 +109,15 @@ def main():
         ephemeral([], ['alembic', 'upgrade', 'head'], timeout=180)
         result['migration'] = ephemeral([], ['alembic', 'current'])
         result['stage'] = 'formal-fixture'
-        fixture = ephemeral(['--volume', volumes[1] + ':/app/data/current-store', '--mount',
+        fixture = ephemeral([*owned_mount(volumes[1], '/app/data/current-store'), '--mount',
             'type=bind,src=' + str(repo / 'ops/s2-batch2/isolated-fixture.py') + ',dst=/tmp/fixture.py,readonly'],
             ['python', '-c', "import runpy,sys; sys.argv=['fixture']+" + ("['closure']" if args.closure_only else "[]") + "; runpy.run_path('/tmp/fixture.py',run_name='__main__')"], timeout=600 if args.closure_only else 180)
         result['fixture'] = json.loads(fixture.splitlines()[-1])
         result['stage'] = 'default-image-start'
         containers.append(project + '-api')
         command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--network-alias', 'backend',
-            *environment, '--user', uid, '--volume', volumes[1] + ':/app/data/current-store',
-            *(['--volume', volumes[2] + ':/app/data/logs'] if args.closure_only else []), api])
+            *environment, '--user', uid, *owned_mount(volumes[1], '/app/data/current-store'),
+            *(owned_mount(volumes[2], '/app/data/logs') if args.closure_only else []), api])
         containers.append(project + '-web')
         command(['docker', 'run', '-d', '--name', containers[-1], '--network', project, '--publish', '127.0.0.1::80',
             '--env', 'QF_BACKEND_PORT=8000', web])
@@ -133,7 +139,7 @@ def main():
             checks = runpy.run_path(str(repo / 'ops/s2-batch2/closure_checks.py'))
             result['compose_preservation'] = checks['check_compose'](repo, receipt['images'], args.output.with_name('COMPOSE_RESULT.json'))
             def snapshot():
-                return json.loads(ephemeral(['--volume', volumes[1] + ':/app/data/current-store', '--mount',
+                return json.loads(ephemeral([*owned_mount(volumes[1], '/app/data/current-store'), '--mount',
                     'type=bind,src=' + str(repo / 'ops/s2-batch2/isolated-fixture.py') + ',dst=/tmp/fixture.py,readonly'],
                     ['python', '-c', "import runpy,sys; sys.argv=['fixture','snapshot']; runpy.run_path('/tmp/fixture.py',run_name='__main__')"]))
             before = snapshot()

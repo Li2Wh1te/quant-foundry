@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
 from pathlib import Path
 import hashlib
 import sys
@@ -93,6 +94,9 @@ def main():
     assert closure or not sys.argv[1:]
     with engine.connect() as connection:
         assert connection.execute(text('SELECT count(*) FROM instruments')).scalar_one() == 0
+    STAGE = 'verify-current-root-owner'
+    owner = Path(settings.data_store_root).stat()
+    assert owner.st_uid == os.geteuid() and owner.st_gid == os.getegid()
     STAGE = 'open-current-store'
     with CurrentStore(engine, settings.data_store_root,
             cursor_key=settings.cursor_signing_key.get_secret_value().encode(), initialize=True) as current:
@@ -192,5 +196,7 @@ if __name__ == '__main__':
     except BaseException as error:
         # A source-defined phase and exception class are sufficient for CI;
         # fact values, paths and the full exception stay in the private log.
-        print('__D13_FIXTURE_FAILURE__=' + STAGE + '-' + type(error).__name__ + '-' + getattr(error,'code',''), flush=True)
+        cause = error.__context__
+        errno = '-errno-' + str(cause.errno) if isinstance(cause,OSError) else ''
+        print('__D13_FIXTURE_FAILURE__=' + STAGE + '-' + type(error).__name__ + '-' + getattr(error,'code','') + errno, flush=True)
         raise
