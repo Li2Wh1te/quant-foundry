@@ -252,8 +252,15 @@ def main():
                     'QF_S2_TEST_TOKEN':env['QF_API_TOKEN'], 'QF_S2_BROWSER_OUTPUT':str(browser_result),
                     'QF_S2_TEST_DATASET':issues['items'][0]['dataset'], 'QF_S2_FIXTURE':json.dumps(result['fixture'])},
                 capture_output=True, text=True, timeout=420 if args.closure_only else 180)
+            browser_result.with_name('BROWSER_PROCESS.log').write_text(completed.stdout + completed.stderr)
             if completed.returncode and browser_result.exists():
                 result['stage'] = 'browser-' + json.loads(browser_result.read_text()).get('stage','unknown')
+                if completed.returncode < 0:
+                    result['stage'] += '-process-killed'
+                elif not json.loads(browser_result.read_text()).get('error'):
+                    # Only a safe exception kind leaves the private process log.
+                    failure = re.search(r'\b(AssertionError|TimeoutError|TypeError|ReferenceError|SyntaxError|Error)\b', completed.stderr)
+                    result['stage'] += '-process-' + (failure.group(1) if failure else 'exit')
             assert completed.returncode == 0, completed.stderr[-4000:] + completed.stdout[-2000:]
             result['browser'] = json.loads(browser_result.read_text())
         if args.closure_only:
