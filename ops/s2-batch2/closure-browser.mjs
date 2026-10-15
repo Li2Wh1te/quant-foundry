@@ -62,15 +62,21 @@ try {
   const button=name=>page.getByRole('button',{name,exact:true});
   const settled=()=>page.waitForFunction(()=>!document.querySelector('[aria-label="刷新数据"]')?.disabled &&
     /[1-9]\d* \/ 10,000 根/.test(document.querySelector('.qfe-history-actions')?.textContent||''));
-  async function bars(action, expected) {
+  async function bars(action, expected, continuation=false) {
+    const phase=stage;
+    const instrument=decodeURIComponent(new URL(page.url()).pathname.split('/').at(-1));
     const response=page.waitForResponse(response=>{
       const url=new URL(response.url());
-      return url.pathname.endsWith('/bars') && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value);
+      return decodeURIComponent(url.pathname)===`/api/admin/market/instruments/${instrument}/bars` &&
+        (!continuation || url.searchParams.has('cursor')) && Object.entries(expected).every(([key,value])=>url.searchParams.get(key)===value);
     });
     response.catch(()=>{}); // Keep an action failure in the guarded report path.
+    setStage(phase+'-request');
     await action(); const actual=await response;
+    setStage(phase+'-decode');
     assert.equal(actual.status(),200); const data=await actual.json();
-    await settled(); return data;
+    setStage(phase+'-render');
+    await settled(); setStage(phase); return data;
   }
   await page.goto(base+'/admin/data/etf-basics/'+encodeURIComponent(fixture.instrument_key)+'?tab=overview');
   await settled();
@@ -125,19 +131,23 @@ try {
   assert.equal(await page.locator('#qfb-price-basis').inputValue(),'none');
   assert.equal(await page.locator('#qfb-price-basis option[value="pre"]').isDisabled(),true);
   findings.push('explicit series change resets basis/window; production E69 remains restricted, without implicit source/basis fallback');
-  setStage('resident-boundary');
+  setStage('history-navigation');
   await page.goto(base+'/admin/data/etf-basics/'+encodeURIComponent(fixture.history_key)+'?tab=overview');
+  setStage('history-initial-window');
   await settled();
   await page.waitForFunction(()=>document.querySelector('.qfe-history-actions')?.textContent.includes('512 /'));
   let pages=1;
   while(pages<19) {
-    const earlier=await bars(()=>button('加载更早历史').click(),{series_key:'etf-daily-local',adjustment:'none'});
+    setStage('resident-page-load');
+    const earlier=await bars(()=>button('加载更早历史').click(),{series_key:'etf-daily-local',adjustment:'none'},true);
     assert.ok(earlier.next_cursor); pages++;
     await page.waitForFunction(count=>document.querySelector('.qfe-history-actions')?.textContent.includes(`${count} /`),512*pages);
   }
+  setStage('resident-limit-controls');
   assert.equal(await button('加载更早历史').isDisabled(),true);
   await button('释放窗口并重读').waitFor();
   assert.equal(pages*512,9728); // One more fixed 512-item cursor page would exceed 10,000.
+  setStage('resident-metrics');
   const cdp=await page.context().newCDPSession(page);
   await cdp.send('Performance.enable'); const peak=await cdp.send('Performance.getMetrics');
   setStage('release-refresh-zoom');
@@ -163,8 +173,14 @@ try {
     milliseconds:Date.now()-started,errors},null,2)+'\n');
 } catch(error) {
   const fault=faults.at(-1);
-  const code=error.name==='TimeoutError'?'timeout':error.name==='AssertionError'?'assertion':'runtime';
-  await writeFile(output,JSON.stringify({passed:false,stage:stage+'-'+code+(fault?'-'+fault.route+'-'+fault.code:''),
+  const message=String(error);
+  const diagnostic=message.includes('getResponseBody')||message.includes('No resource with given identifier')||message.includes('No data found for resource')?'response-body-unavailable':
+    message.includes('Execution context was destroyed')||message.includes('Cannot find context with specified id')?'navigation-context-replaced':
+    message.includes('Target page, context or browser has been closed')?'browser-target-closed':
+    message.includes('strict mode violation')?'locator-ambiguous':
+    message.includes('net::ERR_')?'browser-network':'guarded-failure';
+  const code=['TimeoutError','AssertionError','TypeError','SyntaxError','ReferenceError','Error'].includes(error.name)?error.name:'runtime';
+  await writeFile(output,JSON.stringify({passed:false,stage:stage+'-'+code+'-'+diagnostic+(fault?'-'+fault.route+'-'+fault.code:''),
     error:String(error),faults,errors,requests},null,2)+'\n');
   throw error;
 } finally { await browser?.close(); }
