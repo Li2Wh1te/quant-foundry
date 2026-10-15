@@ -10,6 +10,7 @@ RUN pnpm install --frozen-lockfile
 WORKDIR /app
 COPY VERSION ./VERSION
 COPY frontend ./frontend
+COPY examples/strategies/etf_rotation.py ./examples/strategies/etf_rotation.py
 
 WORKDIR /app/frontend
 RUN pnpm build
