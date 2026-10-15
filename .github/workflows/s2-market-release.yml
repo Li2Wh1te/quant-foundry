@@ -68,7 +68,9 @@ jobs:
         run: bash scripts/build_s2_market_images.sh
       - name: Default app, supported storage, actual image browser chain
         run: |
-          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --browser
+          # Reports, screenshots and runtime diagnostics stay in runner-local
+          # temporary storage; publish only the job's pass/fail status.
+          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1
       - uses: actions/cache/save@v4
         if: always() && steps.native-build.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:
@@ -77,10 +79,3 @@ jobs:
             ~/.cargo/git
             engine/target
           key: s2-native-${{ runner.os }}-${{ hashFiles('engine/Cargo.lock', 'engine/**/src/**', 'sdk/python/pyproject.toml') }}
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: s2-market-paired-images
-          path: ${{ runner.temp }}/s2-release
-          if-no-files-found: error
-          retention-days: 7
