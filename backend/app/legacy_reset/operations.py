@@ -515,6 +515,10 @@ def finish_rebuild(engine, *, expect_database: str) -> dict:
     from app.data_store.adapters.registry import ENTRIES
     from app.data_store.coverage import check_coverage
     with transaction(engine, isolation_level='READ COMMITTED') as c:
+        # Local refreshes retain a SHARE maintenance lock through their writes.
+        # Take this fence before catalogue locks, so finish cannot hold files
+        # while waiting for a refresh that still needs those same files.
+        c.execute(text('LOCK TABLE data_store_legacy_maintenance IN SHARE ROW EXCLUSIVE MODE'))
         # Fence both pipeline status writes and direct kernel commits before
         # taking any evidence snapshot. The locks remain held through ready's
         # commit, so a concurrent reset/contract change cannot win the gap.

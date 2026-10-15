@@ -11,7 +11,7 @@ from app.scheduling.registry import TaskContext, TaskDefinition, TaskRegistry
 
 from .adapters.registry import ENTRIES
 from .adapters.canonical import NativeInputError
-from .availability import require_ready
+from .availability import require_local_update_ready
 from .errors import DataStoreError
 from .local_sources import NativeSources, SourceLimits
 from .pipeline import PipelineOptions, run_local
@@ -49,44 +49,56 @@ class LocalUpdateParameters(BaseModel):
 
 def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dict:
     engine = get_engine()
-    with Session(engine) as session:
-        availability = require_ready(session)
     settings = get_settings()
     entries = ([BUSINESS[dataset] for dataset in parameters.datasets]
                if parameters.datasets else list(BUSINESS.values()))
-    with CurrentStore(
-        engine, settings.data_store_root,
-        cursor_key=settings.cursor_signing_key.get_secret_value().encode(),
-        initialize=availability.fresh_install,
-    ) as store:
-        sources = NativeSources(
-            engine, limits=SourceLimits(pass_seconds=parameters.pass_seconds)
-        )
-        try:
-            results = run_local(
-                store, sources, entries=entries,
-                options=PipelineOptions(
-                    mode="update", maximum_passes=parameters.maximum_passes,
-                    pass_seconds=parameters.pass_seconds,
-                    pipeline_spill_bytes=parameters.pipeline_spill_bytes,
-                ),
+    with Session(engine) as session:
+        availability = require_local_update_ready(session)
+        # Old plans can retain large pass counts. During unfinished rebuilds,
+        # advance one bounded pass per entry without editing their parameters
+        # or silently resuming thousands of claims after this admission fix.
+        maximum_passes = parameters.maximum_passes if availability.ready else 1
+        pass_seconds = parameters.pass_seconds if availability.ready else min(parameters.pass_seconds, 180)
+        with CurrentStore(
+            engine, settings.data_store_root,
+            cursor_key=settings.cursor_signing_key.get_secret_value().encode(),
+            initialize=availability.fresh_install,
+        ) as store:
+            sources = NativeSources(
+                engine, limits=SourceLimits(pass_seconds=pass_seconds)
             )
-        except Exception as error:
-            partial=getattr(error,'results',[])
-            code=getattr(error,'code',type(error).__name__)
-            logger.error(
-                "data_store_local_update_failed",
-                message=(
-                    f"本地数据更新：数据类型为所选 {len(entries)} 类，适用起始日期和结束日期均未限定，"
-                    f"已处理 {len(partial)} 项、读取 {sum(r.get('source_rows',0) for r in partial)} 条，"
-                    f"全局停止原因 {code}，已提交分区仍按当前断点保存，任务未完成。"
-                ),
+            logger.info(
+                'data_store_local_update_admitted',
                 task_id=str(context.task_id), run_id=str(context.run_id),
-                task_type=TASK_KEY, selected_entries=[entry.id for entry in entries],
-                error_type=code, failed=1, entries=partial,
+                maintenance_phase=availability.phase,
+                configured_maximum_passes=parameters.maximum_passes,
+                effective_maximum_passes=maximum_passes, effective_pass_seconds=pass_seconds,
             )
-            if isinstance(error,(DataStoreError,NativeInputError)):raise
-            raise RuntimeError('DATA_STORE_UPDATE_ABORTED:'+type(error).__name__) from None
+            try:
+                results = run_local(
+                    store, sources, entries=entries,
+                    options=PipelineOptions(
+                        mode="update", maximum_passes=maximum_passes,
+                        pass_seconds=pass_seconds,
+                        pipeline_spill_bytes=parameters.pipeline_spill_bytes,
+                    ),
+                )
+            except Exception as error:
+                partial=getattr(error,'results',[])
+                code=getattr(error,'code',type(error).__name__)
+                logger.error(
+                    "data_store_local_update_failed",
+                    message=(
+                        f"本地数据更新：数据类型为所选 {len(entries)} 类，适用起始日期和结束日期均未限定，"
+                        f"已处理 {len(partial)} 项、读取 {sum(r.get('source_rows',0) for r in partial)} 条，"
+                        f"全局停止原因 {code}，已提交分区仍按当前断点保存，任务未完成。"
+                    ),
+                    task_id=str(context.task_id), run_id=str(context.run_id),
+                    task_type=TASK_KEY, selected_entries=[entry.id for entry in entries],
+                    error_type=code, failed=1, entries=partial,
+                )
+                if isinstance(error,(DataStoreError,NativeInputError)):raise
+                raise RuntimeError('DATA_STORE_UPDATE_ABORTED:'+type(error).__name__) from None
     for result in results:
         logger.info(
             "data_store_local_update",
