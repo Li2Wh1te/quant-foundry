@@ -52,6 +52,13 @@ jobs:
           python scripts/s3_release.py snapshot --out "$QF_S2_BUILD_ROOT/native-before.json"
           (cd sdk/python && "$QF_S2_BUILD_ROOT/build/bin/maturin" build --release --locked --interpreter "$QF_S2_BUILD_ROOT/build/bin/python" --out "$QF_S2_BUILD_ROOT/wheels")
           python scripts/s3_release.py seal --manifest "$QF_S2_BUILD_ROOT/native-before.json" --wheel "$QF_S2_BUILD_ROOT"/wheels/quantfoundry_sdk-*.whl --out "$QF_S2_BUILD_ROOT/release.json"
+      - name: Retain only the installable native build for isolated consumers
+        uses: actions/upload-artifact@v4
+        with:
+          name: s2-market-native-wheel
+          path: ${{ runner.temp }}/s2-build/wheels/quantfoundry_sdk-*.whl
+          if-no-files-found: error
+          retention-days: 7
       - name: Frozen frontend dependencies and Chromium
         run: |
           corepack enable
@@ -70,7 +77,7 @@ jobs:
         run: |
           # Reports, screenshots and runtime diagnostics stay in runner-local
           # temporary storage; publish only the job's pass/fail status.
-          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1
+          python scripts/test_s2_market_images.py "$RUNNER_TEMP/s2-release/images.json" --output "$RUNNER_TEMP/s2-release/IMAGE_RESULT.json" --closure-only --browser > "$RUNNER_TEMP/s2-release/image-check.log" 2>&1
       - uses: actions/cache/save@v4
         if: always() && steps.native-build.outcome == 'success' && steps.native-cache.outputs.cache-hit != 'true'
         with:

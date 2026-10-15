@@ -3,6 +3,8 @@ from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 import json
+from pathlib import Path
+import hashlib
 import sys
 from uuid import NAMESPACE_URL, uuid5, uuid4
 
@@ -15,7 +17,7 @@ from app.db.session import get_engine
 from app.data_store.adapters.contracts import LocalInput, digest
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.locking import _filesystem_name
-from app.data_store.pipeline import run_entry
+from app.data_store.pipeline import PipelineOptions, run_entry
 from app.data_store.storage import CurrentStore
 from app.instruments.models import Instrument, InstrumentCodeMappingRecord
 from app.market_service.bindings import TEST_VARIANT
@@ -49,6 +51,25 @@ def main():
     assert settings.database_name == 'qf_s2_market_test'
     assert str(settings.data_store_root) == '/app/data/current-store'
     engine = get_engine()
+    if sys.argv[1:] == ['snapshot']:
+        # Only the fresh isolated database/root guarded above. Read no values
+        # from a deployment and retain only digests in the private result.
+        with engine.connect() as connection:
+            tables = connection.execute(text("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename")).scalars()
+            database = {}
+            for name in tables:
+                quoted = connection.dialect.identifier_preparer.quote(name)
+                database[name] = connection.execute(text(f"SELECT md5(COALESCE(jsonb_agg(to_jsonb(t) ORDER BY to_jsonb(t)::text)::text,'[]')) FROM {quoted} t")).scalar_one()
+        root = Path(settings.data_store_root)
+        files = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for name in ('objects', '.scratch') for path in (root / name).rglob('*') if path.is_file()}
+        logs = [path for path in Path(settings.log_dir).rglob('*') if path.is_file()]
+        print(json.dumps(dict(database=database, files=files,
+            logs=dict(files=len(logs), bytes=sum(path.stat().st_size for path in logs)),
+            settings=dict(s3_accept_new_runs=settings.s3_accept_new_runs,
+                scheduler_enabled=settings.scheduler_enabled, worker_image=settings.s3_worker_image,
+                worker_limits=settings.s3_worker_limits, group_budget=settings.s3_group_budget))))
+        return
     if sys.argv[1:] == ['append-identity']:
         with Session(engine) as session, session.begin():
             previous = session.scalar(select(InstrumentCodeMappingRecord)
@@ -63,11 +84,14 @@ def main():
                 evidence='changed artificial D13 fact',known_at=known,observed_at=known))
         print(json.dumps(dict(artificial_identity_revision_appended=True)))
         return
-    assert not sys.argv[1:]
+    closure = sys.argv[1:] == ['closure']
+    assert closure or not sys.argv[1:]
     with engine.begin() as connection:
         assert connection.execute(text('SELECT count(*) FROM instruments')).scalar_one() == 0
         # Explicit artificial control fact on this empty test database only.
         connection.execute(text("INSERT INTO data_store_legacy_maintenance(singleton,phase) VALUES(1,'ready')"))
+        if closure:
+            connection.execute(text("UPDATE data_source_configs SET initialized=true,enabled=false,version=7"))
     directory, prices, factors, calendars = [], [], [], []
     with Session(engine) as session, session.begin():
         for index in range(125):
@@ -75,16 +99,17 @@ def main():
             iid = uuid5(NAMESPACE_URL, 'qf-s2-artificial:' + code)
             session.add(Instrument(id=iid, asset_class='etf', status='active'))
             session.flush()
+            first = date(1980, 1, 1) if closure and index == 2 else START
             session.add(InstrumentCodeMappingRecord(id=uuid4(), instrument_id=iid,
                 source='tushare', source_code=code, trading_code=code.split('.')[0],
-                valid_from=START, valid_to=None, fact_version=1,
+                valid_from=first, valid_to=None, fact_version=1,
                 logical_fact_key='isolated-d13:' + code,
-                effective_range=Range(START, None, bounds='[)'),
+                effective_range=Range(first, None, bounds='[)'),
                 knowledge_range=Range(datetime(2024, 1, 1, tzinfo=timezone.utc), None, bounds='[)'),
                 mapping_source='isolated-reviewed-identity', evidence='artificial D13 identity oracle',
                 known_at=datetime(2024, 1, 1, tzinfo=timezone.utc), observed_at=NOW))
             directory.append(source('E67', 'directory', dict(source='tushare', ts_code=code,
-                csname='人工 ETF ' + str(index), exchange='SSE', list_date='20240101')))
+                csname='人工 ETF ' + str(index), exchange='SSE', list_date=first.strftime('%Y%m%d'))))
     day, count = START, 0
     while day <= date(2026, 10, 31):
         opened = day.weekday() < 5  # A synthetic oracle, not an exchange rule.
@@ -103,6 +128,17 @@ def main():
     prices.append(no_factor)
     factors.append(source('E69', 'factor', dict(source='tushare', ts_code='510300.SH',
         trade_date='2026-10-12', adj_factor=Decimal('100'))))  # Must not enter END/as_of.
+    history_count = 0
+    if closure:
+        day = date(1980, 1, 1)
+        while day <= END:
+            if day.weekday() < 5:  # Explicit artificial sessions, never production calendar inference.
+                prices.append(source('E70', 'daily', dict(source='tushare', ts_code='600002.SH', trade_date=day.isoformat(),
+                    open=Decimal('3.123456'), high=Decimal('4.123456'), low=Decimal('2.123456'), close=Decimal('3.223456'),
+                    vol=Decimal('100'), amount=Decimal('200'))))
+                history_count += 1
+            day += timedelta(days=1)
+        assert history_count > 10_000
     with CurrentStore(engine, settings.data_store_root,
             cursor_key=settings.cursor_signing_key.get_secret_value().encode(), initialize=True) as current:
         actual_fs = _filesystem_name(current.files.fd)
@@ -110,7 +146,8 @@ def main():
         for entry_id, rows in [('E67', directory), ('E68', calendars), ('E70', prices), ('E69', factors),
                 ('E70', [replace(row, variant=TEST_VARIANT) for row in prices]),
                 ('E69', [replace(row, variant=TEST_VARIANT) for row in factors])]:
-            result = run_entry(current, BY_ID[entry_id], Inputs(*rows))
+            result = run_entry(current, BY_ID[entry_id], Inputs(*rows),
+                options=PipelineOptions(partitions_per_pass=8) if closure else PipelineOptions())
             assert result['qualified'], result
         # A genuine isolated invalid input creates an issue in an unrelated
         # source-scoped object, without editing quality flags or issue tables.
@@ -120,7 +157,8 @@ def main():
     print(json.dumps(dict(synthetic=True, filesystem=actual_fs, instruments=125,
         price_sessions=count, calendar_days=len(calendars), start=START.isoformat(), end=END.isoformat(),
         instrument_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:510300.SH')),
-        no_factor_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600001.SH')))))
+        no_factor_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600001.SH')),
+        history_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600002.SH')), history_sessions=history_count)))
 
 
 if __name__ == '__main__':

@@ -2,8 +2,8 @@ import { createMarketReadSession, isCancellation, marketClient, marketError, ret
 
 export const MAX_RESIDENT_BARS = 10_000;
 /** Render gate closes the pre-effect frame when a cutoff/basis/period changes. */
-export function matchesBarWindow(page: BarPage, request: Pick<BarRequest, "instrument_key" | "period" | "adjustment" | "start" | "end" | "as_of">): boolean {
-  return page.instrument_key === request.instrument_key && page.period === request.period && page.basis.adjustment === request.adjustment
+export function matchesBarWindow(page: BarPage, request: Pick<BarRequest, "instrument_key" | "series_key" | "period" | "adjustment" | "start" | "end" | "as_of">): boolean {
+  return page.instrument_key === request.instrument_key && page.series_key === request.series_key && page.period === request.period && page.basis.adjustment === request.adjustment
     && page.window.start === (request.start ?? null) && page.window.end === request.end && page.window.as_of === request.as_of;
 }
 /** Pure join: never splice different reads, buckets, windows or bases. */
