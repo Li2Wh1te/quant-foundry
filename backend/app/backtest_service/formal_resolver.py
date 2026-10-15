@@ -301,11 +301,13 @@ class SqlFormalPlanResolver:
 
     def _read_dependency_page(self, session, work, symbols, day, *, inventory_asof=None, summarized=False):
         from .formal_sql_pages import ScopedChecks, SqlDependencyPage
+        from .formal_execution_producer import PRODUCER_BRIDGES, daily_rows, produce, InputFactFault
         from .session_fact_pages import PAGE_ROWS
         if not 1 <= len(symbols) <= PAGE_ROWS:
             raise RuntimeFault('RESOURCE_LIMIT', 'SQL依赖读取超过单页标的信用')
         checks = ScopedChecks() if summarized else []
         identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
+        execution_inputs, market_inputs = [], []
         candidates = session.info.get('s3_candidate_page')
         if candidates is not None:
             candidates.load_day(day, inventory_asof or datetime.combine(day, time(), ZONE))
@@ -351,7 +353,8 @@ class SqlFormalPlanResolver:
                 checks.extend(state(name, 'fact_missing', missing=('resolved_identity_dependency',),
                     scope=scope) for name in ('calendar_sessions', 'instrument_rule_package',
                                              'suspension_facts', 'corporate_actions',
-                                             *(('account_commission',) if summarized else ())))
+                                             *(('account_commission',) if summarized else ()),
+                                             *sorted(PRODUCER_BRIDGES)))
                 continue
             fact, mappings = pair
             identities.append((symbol, day, fact, mappings))
@@ -387,11 +390,12 @@ class SqlFormalPlanResolver:
             if getattr(work, 'specification', None):
                 def commission():
                     from .account_config import commission_from_account_fee_schedule
+                    from .formal_execution_producer import captured_commission_schedule
                     key = (fact.currency, fact.asset_class, fact.exchange)
                     if candidates is not None and key in candidates.commissions:
                         candidates.commissions.move_to_end(key)
                         return candidates.commissions[key]
-                    schedule = work.specification['account_snapshot']['fee_schedule']
+                    schedule = captured_commission_schedule(work.specification['account_snapshot']['fee_schedule'])
                     value = tuple(commission_from_account_fee_schedule(schedule, side=side,
                         currency=fact.currency, applicability_context=dict(asset_class=fact.asset_class,
                             exchange=fact.exchange)) for side in ('buy', 'sell'))
@@ -404,10 +408,28 @@ class SqlFormalPlanResolver:
             elif summarized:
                 checks.append(state('account_commission', 'fact_missing',
                     missing=('captured_account_snapshot',), scope=scope))
+            producer_checks = []
+            def execution():
+                if calendar is None:
+                    raise InputFactFault('daily_execution_calendar_missing', fields=('resolved_calendar_session',))
+                if not calendar['fact'].is_open:
+                    return ()  # No execution input is needed for a proven closed day.
+                rows = (candidates.execution_rows.get(fact.instrument_id, ()) if candidates is not None
+                    else daily_rows(session, (fact.instrument_id,), day, cutoff))
+                return produce(rows, work=work, symbol=symbol, day=day,
+                    identity=fact, calendar=calendar, cutoff=cutoff)
+            produced = self._attempt('daily_execution_inputs', execution, producer_checks, scope=scope)
+            checks.extend(producer_checks)
+            checks.append(dict(producer_checks[0], binding='daily_market_inputs'))
+            if produced:
+                execution_input, market_input = produced
+                execution_inputs.append(execution_input)
+                market_inputs.append(market_input)
             if len(encoded(checks)) > 256 * 1024:
                 raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
         return SqlDependencyPage(tuple(identities), tuple(calendars), tuple(rules),
-            tuple(trading_status), tuple(actions), tuple(commissions), tuple(checks))
+            tuple(trading_status), tuple(actions), tuple(commissions), tuple(checks),
+            tuple(execution_inputs), tuple(market_inputs))
 
     def _resolve(self, session, budget, work, *, inventory_asof=None, paged=False):
         from .formal_fact_guard import fact_fingerprint
@@ -415,6 +437,7 @@ class SqlFormalPlanResolver:
         from .session_fact_pages import PAGE_ROWS, BRIDGES
         from .formal_assembly import missing_plan_dependencies, zero_action_projection
         from .research_gateway import current_research_bindings
+        from .formal_execution_producer import PRODUCER_BRIDGES, MarketAdmission
         config = work.config
         start, end = date.fromisoformat(config['start']), date.fromisoformat(config['end'])
         days, symbols = (end - start).days + 1, tuple(config['universe'])
@@ -422,9 +445,10 @@ class SqlFormalPlanResolver:
         fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
         checks = ScopedChecks(symbols) if paged else []
         identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], []
+        execution_inputs, market_admission = [], MarketAdmission(symbols)
         calendar_seeds = {}
         failures = SessionFailurePositions(symbols, start, end,
-            (*BRIDGES, 'execution_corporate_actions')) if paged else None
+            (*BRIDGES, *sorted(PRODUCER_BRIDGES), 'execution_corporate_actions')) if paged else None
         def batches():
             if not paged:
                 for offset in range(days):
@@ -453,6 +477,7 @@ class SqlFormalPlanResolver:
             for selected, day in iterator:
                 page = self._read_dependency_page(session, work, selected, day,
                     inventory_asof=inventory_asof, summarized=paged)
+                market_admission.add(page.market_inputs)
                 if paged:
                     checks.merge(page.checks)
                     for check in page.checks:
@@ -472,7 +497,8 @@ class SqlFormalPlanResolver:
                     checks.extend(page.checks)
                     for target, rows in ((identities, page.identities), (calendars, page.calendars),
                             (rules, page.rule_packages), (trading_status, page.trading_status),
-                            (actions, page.corporate_actions), (commissions, page.commissions)):
+                            (actions, page.corporate_actions), (commissions, page.commissions),
+                            (execution_inputs, page.execution_inputs)):
                         target.extend(rows)
                     if len(encoded(checks)) > 256 * 1024:
                         raise RuntimeFault('RESOURCE_LIMIT', '正式事实诊断超过控制消息预算')
@@ -506,7 +532,7 @@ class SqlFormalPlanResolver:
             # a later open-session failure behind an irrelevant weekend gap.
             open_days = [row['date'] for row in execution_calendar['calendar']]
             for index, check in enumerate(checks):
-                if check['binding'] not in BRIDGES:
+                if check['binding'] not in BRIDGES | PRODUCER_BRIDGES:
                     continue
                 failure = failures.select(check['binding'], open_days, reread_failure)
                 if failure is not None:
@@ -517,8 +543,19 @@ class SqlFormalPlanResolver:
                         kind='checked_open_session_dependencies', checked_cells=check['scope']['checked_cells']))
         official = self._attempt('official_market_rules', self._official_rules, checks,
             scope=dict(kind='offline_catalog_only'))
+        readiness = {name: all(check['available'] for check in checks if check['binding'] == name)
+            and any(check['binding'] == name for check in checks) for name in PRODUCER_BRIDGES}
+        market = None
+        if execution_calendar is not None and readiness['daily_market_inputs'] and config['frequency'] == '1d':
+            market = self._attempt('daily_market_assembly', lambda: market_admission.binding(execution_calendar),
+                checks, scope=dict(start=start.isoformat(), end=end.isoformat()))
         research = current_research_bindings()
         checks.extend(self._execution_gaps(config['frequency'], research=research))
+        for index, check in enumerate(checks):
+            if market is not None and check['binding'] == 'E70':
+                checks[index] = state('E70', 'available', scope=dict(kind='validated_daily_execution_facts'))
+            elif readiness['daily_execution_inputs'] and check['binding'] in ('execution_trade_days', 'execution_fee_scope'):
+                checks[index] = state(check['binding'], 'available', scope=dict(kind='validated_daily_execution_facts'))
         if paged and execution_calendar is not None:
             action_check = failures.select('execution_corporate_actions',
                 [row['date'] for row in execution_calendar['calendar']], reread_failure)
@@ -529,15 +566,16 @@ class SqlFormalPlanResolver:
             action_projection, action_check = zero_action_projection(actions, execution_calendar, symbols)
         checks = [action_check if check['binding'] == 'execution_corporate_actions' else check for check in checks]
         token = canonical_hash(dict(config=config, facts=fingerprint, official_rules=official))
-        inputs = self._sql_session_inputs(work, execution_calendar, token) if paged else None
+        inputs = (self._sql_session_inputs(work, execution_calendar, token,
+            ready=readiness['daily_execution_inputs']) if paged else tuple(execution_inputs) or None)
         facts = ResolvedFormalFacts(tuple(checks), tuple(identities), tuple(calendars),
             tuple(rules), tuple(trading_status), tuple(actions), tuple(commissions),
             tuple(official or ()), execution_calendar, token, execution_inputs=inputs,
-            action_projection=action_projection, fact_fingerprint=fingerprint, research=research)
+            action_projection=action_projection, fact_fingerprint=fingerprint, research=research, market=market)
         checks[-1]['missing'] = list(missing_plan_dependencies(facts))
         return facts
 
-    def _sql_session_inputs(self, work, calendar, token):
+    def _sql_session_inputs(self, work, calendar, token, *, ready=False):
         from .formal_sql_pages import SqlSessionInputs
         from .formal_fact_guard import fact_fingerprint
         from .session_fact_pages import PAGE_ROWS
@@ -575,7 +613,7 @@ class SqlFormalPlanResolver:
             # still calls the original same-result-transaction check/locks.
             self.check_facts(captured, accepted)
             return page
-        return SqlSessionInputs(read)
+        return SqlSessionInputs(read, unavailable_reason=None if ready else 'daily_execution_fact_missing')
 
     @staticmethod
     def _official_rules():

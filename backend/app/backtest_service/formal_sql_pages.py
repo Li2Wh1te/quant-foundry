@@ -8,11 +8,11 @@ from .session_fact_pages import PagedSessionInputs, SessionInputPage, check_inpu
 from .serialization import encoded
 
 
+@dataclass(frozen=True)
 class SqlSessionInputs(PagedSessionInputs):
-    # The SQL dependency reader is live, but the existing stored facts cannot
-    # produce an ExecutionSessionInput. This code-owned denial is not a caller
-    # flag, and a reader's presence must not advertise executable source facts.
-    unavailable_reason = 'execution_session_input_producer_missing'
+    # Only a complete admission traversal of the typed producer may remove
+    # this denial. A reader's presence or caller flags never establish it.
+    unavailable_reason: str | None = 'daily_execution_fact_missing'
 
 
 class ScopedChecks(list):
@@ -63,8 +63,8 @@ class ScopedChecks(list):
 class SessionFailurePositions:
     """Compact day positions; never retain per-day error payloads or facts.
 
-    Seven uint32 arrays at the existing 3,660-day bound use at most 102,480
-    bytes. Keep one detailed error per binding; reread a selected open-session
+    Bounded uint32 arrays at the existing 3,660-day bound retain positions
+    only. Keep one detailed error per binding; reread a selected open-session
     error in the same SQL snapshot only when the first error was irrelevant.
     """
     EMPTY = 2**32-1
@@ -118,12 +118,14 @@ class SqlDependencyPage:
     corporate_actions: tuple
     commissions: tuple
     checks: tuple
+    execution_inputs: tuple = ()
+    market_inputs: tuple = ()
 
     def session_inputs(self):
         # Identity/mapping and rule validation already ran through the original
         # repositories. The composer only needs the original identity fields,
         # captured commissions, status, action coverage and rejection checks.
-        page = SessionInputPage((),
+        page = SessionInputPage(self.execution_inputs,
             tuple((s, d, identity, ()) for s, d, identity, _ in self.identities),
             self.commissions, self.trading_status, self.corporate_actions, self.checks)
         check_input_bytes(page)
