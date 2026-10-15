@@ -30,7 +30,7 @@ from quantfoundry._transport import Client, Channel, TransportError
 from quantfoundry.api import (get_price, get_current_data, get_fundamentals, get_valuation,
                              get_industry, get_instruments, get_index_stocks, Filter)
 from app.core.auth import AuthenticatedPrincipal
-from app.backtest_service.data_gateway import AuthorizedRun, MARKET_SCHEMA, DataBatch, serve
+from app.backtest_service.data_gateway import AuthorizedRun, GatewayError, MARKET_SCHEMA, DataBatch, serve
 from app.backtest_service.research_gateway import (ResearchDataGateway, ResearchBinding, SCHEMA,
                                                   current_research_bindings, FIELDS)
 from app.data_store.schema import DatasetSpec, fingerprint
@@ -746,3 +746,81 @@ def test_ambiguous_same_public_time_financial_revision_is_not_arbitrarily_select
             with pytest.raises(ContractError) as error:
                 get_fundamentals(['A.SH'], fields=['revenue'])
             assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+@pytest.mark.parametrize('new_first', [False, True])
+def test_obsolete_revision_ties_do_not_change_latest_public_financial_value(formal, new_first):
+    spec = research_spec('fundamentals'); formal.register(spec)
+    latest, old = ('a-new', ('y-old', 'z-old')) if new_first else ('z-new', ('a-old', 'b-old'))
+    put(formal, spec, [fact(record=old[0], published=BASE-20, value='1'),
+        fact(record=old[1], published=BASE-20, value='2'),
+        fact(record=latest, published=BASE-10, value='3')])
+    g = gateway(formal, [research_binding(spec, 'fundamentals')])
+    with session(g, research_routes={'fundamentals': 'fundamentals'}) as (data, _):
+        with _callback(data, boundary()):
+            assert get_fundamentals(['A.SH'], fields=['revenue'])['revenue'].tolist() == [Decimal('3')]
+            with pytest.raises(ContractError) as error:
+                get_fundamentals(['A.SH'], fields=['revenue'], as_of=BASE-15)
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+@pytest.mark.parametrize('second_set', ['members', 'empty', 'unknown'])
+def test_native_multiple_indices_each_require_their_own_latest_complete_set(second_set):
+    view = _native.ReadView(json.dumps(boundary()), 100, 8*1024*1024)
+    payload = [fact(security='I1.SH', field='member', value='A.SH', kind='text', unit='synthetic_text',
+        effective=BASE-100, published=BASE-20),
+        fact(security='I1.SH', field='member', value=None, kind='text', unit='synthetic_text',
+             effective=BASE-200, published=BASE-30, record='old-empty')]
+    if second_set != 'unknown':
+        payload.extend([
+            fact(security='I2.SH', field='member', value='OLD.SH', kind='text', unit='synthetic_text',
+                effective=BASE-100, published=BASE-20, record='old-set'),
+            fact(security='I2.SH', field='member', value=None if second_set == 'empty' else 'B.SH', kind='text', unit='synthetic_text',
+                effective=BASE-50, published=BASE-10)])
+    batch = DataBatch(pa.Table.from_pylist(payload, schema=SCHEMA),
+                      dict(schema_id='qf.research.v1', rows=len(payload)))
+    view.push_research(json.dumps(batch.metadata), batch.ipc(8*1024*1024))
+    request = dict(kind='index_stocks', securities=['I1.SH', 'I2.SH'], fields=['member'],
+                   as_of_ns=str(BASE), limit=100)
+    try:
+        if second_set == 'unknown':
+            with pytest.raises(ContractError) as error:
+                view.research_json(json.dumps(request))
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+        else:
+            result = json.loads(view.research_json(json.dumps(request)))
+            assert {(row['security'], row['member']['value']) for row in result} == {
+                ('I1.SH', 'A.SH'), ('I2.SH', None if second_set == 'empty' else 'B.SH')}
+    finally:
+        view.expire()
+
+
+@pytest.mark.parametrize('other_member', ['A.SH', None])
+def test_conflicting_complete_empty_membership_proofs_are_refused(formal, other_member):
+    spec = research_spec('index_stocks'); formal.register(spec)
+    put(formal, spec, [fact(security='I.SH', field='member', value=None, kind='text', unit='synthetic_text',
+        record='empty'), fact(security='I.SH', field='member', value=other_member, kind='text',
+        unit='synthetic_text', record='other')])
+    g = gateway(formal, [research_binding(spec, 'index_stocks')], reference_indices=('I.SH',))
+    with session(g, research_routes={'index_stocks': 'index_stocks'}) as (data, _):
+        with _callback(data, boundary()):
+            with pytest.raises(ContractError) as error:
+                get_index_stocks('I.SH')
+            assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+
+
+@pytest.mark.parametrize('factor', ['1e0', '+1', '01', ' 1', '１', '1.', 1, '1'*129])
+def test_factor_anchor_uses_native_exact_decimal_contract_even_with_empty_inputs(formal, factor):
+    spec = research_spec('adjustment'); formal.register(spec)
+    base = research_binding(spec, 'adjustment')
+    candidate = replace(base, factor_anchor=dict(base.factor_anchor, factor=factor))
+    g = gateway(formal, [candidate])
+    context = g.open(dict(run_id=g.grant.run_id, universe=list(g.grant.universe)))
+    try:
+        with pytest.raises(GatewayError) as error:
+            list(g.read('adjustment', dict(kind='adjustment', securities=[], fields=['factor'],
+                                          as_of_ns=str(BASE)), context))
+        assert error.value.code == 'CAPABILITY_UNAVAILABLE'
+        assert g.stats['storage_reads'] == 0
+    finally:
+        g.close(context)
