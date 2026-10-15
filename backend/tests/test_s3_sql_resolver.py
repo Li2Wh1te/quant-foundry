@@ -153,7 +153,7 @@ def statuses(facts):
 
 
 @contextmanager
-def http_api(app):
+def http_api(app, *, timeout=10):
     sock = socket.socket()
     sock.bind(('127.0.0.1', 0))
     url = 'http://127.0.0.1:' + str(sock.getsockname()[1])
@@ -172,7 +172,7 @@ def http_api(app):
                     'Idempotency-Key': 'isolated-default-' + uuid4().hex}),
                 data=json.dumps(payload).encode() if payload is not None else None)
             try:
-                response = urlopen(req, timeout=10)
+                response = urlopen(req, timeout=timeout)
             except HTTPError as response:
                 body = response.read().decode()
                 return SimpleNamespace(status_code=response.code, text=body, json=lambda: json.loads(body))
@@ -433,7 +433,8 @@ def test_fact_check_uses_bounded_sql_metadata_without_rebuilding_domain_facts(fo
             resolver.check_facts(current, accepted, connection=connection)
     finally:
         event.remove(engine, 'before_cursor_execute', read)
-    selects = [query for query in statements if query.lstrip().startswith('SELECT')]
+    selects = [query for query in statements if query.lstrip().startswith('SELECT')
+               and 'current_setting' not in query]
     assert len(selects) == 22 and all('sha256' in query and 'count(' in query for query in selects)
 
 
@@ -508,7 +509,7 @@ def test_unrelated_identity_and_cold_calendar_rows_do_not_invalidate_run(formal_
 def test_fact_budgets_fail_without_truncating_or_advertising_short_coverage(formal_facts):
     seed(formal_facts)
     provider = FormalProvider(SimpleNamespace(), store=formal_facts)
-    for budget, value in [('FACT_ROWS', 1), ('FACT_BYTES', 10), ('FACT_CELLS', 0), ('FACT_SECONDS', 0)]:
+    for budget, value in [('FACT_ROWS', 1), ('FACT_BYTES', 10), ('FACT_SECONDS', 0)]:
         with patch('app.backtest_service.formal_resolver.' + budget, value):
             with pytest.raises(RuntimeFault) as failure:
                 provider.plan_resolver.resolve_facts(work())
@@ -524,8 +525,20 @@ def test_real_pg_statement_timeout_is_reported_as_resource_limit(formal_facts):
         assert failure.value.code == 'RESOURCE_LIMIT'
 
 
-@pytest.mark.parametrize('symbols,days', [(100, 365), (5000, 5), (1, 3661)])
-def test_sql_range_refusal_precedes_database_connection(formal_facts, symbols, days):
+def test_batch_resets_preserve_a_callers_lower_statement_timeout(formal_facts):
+    resolver = SqlFormalPlanResolver(SimpleNamespace(), engine=formal_facts.catalog.engine)
+    with formal_facts.catalog.engine.begin() as connection:
+        connection.execute(text("SET LOCAL statement_timeout = '1s'"))
+        with resolver._session(connection) as (session, budget):
+            for _ in range(2):
+                budget.reset()
+                assert session.scalar(select(1)) == 1
+                actual = connection.scalar(text("SELECT extract(epoch FROM current_setting('statement_timeout')::interval)*1000"))
+                assert 0 < actual <= 1000
+
+
+@pytest.mark.parametrize('symbols,days,paged', [(100, 365, False), (5000, 5, False), (1, 3661, True)])
+def test_legacy_cartesian_and_date_refusal_precede_database_connection(formal_facts, symbols, days, paged):
     current = work()
     current.config.update(universe=[f'S{i:04}.SZ' for i in range(symbols)],
         end=(DAY + timedelta(days=days - 1)).isoformat())
@@ -535,18 +548,21 @@ def test_sql_range_refusal_precedes_database_connection(formal_facts, symbols, d
     event.listen(engine, 'engine_connect', connected)
     try:
         with pytest.raises(RuntimeFault) as failure:
-            SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current)
+            SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current, paged=paged)
     finally:
         event.remove(engine, 'engine_connect', connected)
     diagnostic = failure.value.diagnostic()
     assert diagnostic['code'] == 'RESOURCE_LIMIT'
-    assert diagnostic['scope'] == dict(resource='formal_sql_fact_range',
+    expected = dict(resource='formal_sql_fact_range',
         requested_symbols=str(symbols), requested_natural_days=str(days),
-        requested_cells=str(symbols * days), max_natural_days='3660', max_cells='20000')
+        requested_cells=str(symbols * days), max_natural_days='3660')
+    if not paged:
+        expected['max_cells'] = '20000'
+    assert diagnostic['scope'] == expected
 
 
-def test_sql_range_guard_retains_exact_existing_boundaries():
-    for symbols, days in [(100, 200), (4000, 5), (1, 3660)]:
+def test_default_sql_range_accepts_large_scopes_within_the_date_bound():
+    for symbols, days in [(100, 365), (5000, 5), (1, 3660)]:
         config = dict(universe=['S'] * symbols, start=DAY.isoformat(),
             end=(DAY + timedelta(days=days - 1)).isoformat())
         SqlFormalPlanResolver._check_range(config)
@@ -628,10 +644,10 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_invalid_
         diagnostic = preflight.json()['errors'][0]
         assert all(type(value) is str for value in diagnostic['scope'].values())
         if scope in ('100x365', '5000x5'):
-            assert diagnostic['code'] == 'RESOURCE_LIMIT'
-            assert diagnostic['scope'] == dict(resource='formal_sql_fact_range',
-                requested_symbols=str(symbols), requested_natural_days=str(days),
-                requested_cells=str(symbols * days), max_natural_days='3660', max_cells='20000')
+            assert diagnostic['code'] == 'CAPABILITY_UNAVAILABLE'
+            checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
+            assert checks['identity']['scope']['checked_cells'] == str(symbols * days)
+            assert not checks['identity']['available']
         elif scope.startswith('sql_'):
             assert diagnostic['code'] == 'RESOURCE_LIMIT'
             assert diagnostic['scope'] == {}

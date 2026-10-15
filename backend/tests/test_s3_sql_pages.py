@@ -134,7 +134,7 @@ def test_sql_reader_returns_only_the_requested_slice_and_captured_dependencies(s
     current.specification['account_snapshot']['fee_schedule']['fee_rules'][0]['minimum'] = '999'
     statements = []
     def observed(connection, cursor, statement, parameters, context, executemany):
-        if 'sha256' not in statement and 'instrument_code_mappings.source_code =' in statement:
+        if 'sha256' not in statement and 'instrument_code_mappings.source_code IN' in statement:
             statements.append(parameters)
     engine = resolver.engine
     event.listen(engine, 'before_cursor_execute', observed)
@@ -225,13 +225,17 @@ def test_sql_page_rechecks_the_entire_run_token(sql_pages, monkeypatch, phase):
 
 
 @pytest.mark.parametrize('budget', ['FACT_ROWS', 'FACT_BYTES', 'FACT_SECONDS'])
-def test_admission_sql_budget_is_shared_across_pages(sql_pages, monkeypatch, budget):
+def test_admission_budget_is_bounded_per_batch_and_cannot_hide_exhaustion(sql_pages, monkeypatch, budget):
     current, resolver, _ = sql_pages
-    active, completed = [], []
+    active, completed, static = [], [], []
     original_budget, original_page = FactReadBudget.read, resolver._read_dependency_page
     def budgeted(self, call):
+        before = (self.rows, self.bytes)
         result = original_budget(self, call)
         active.append(self)
+        sql = str(call.statement)
+        if 'FROM instrument_rule_facts' in sql and 'sha256' not in sql:
+            static.append((before, (self.rows, self.bytes)))
         return result
     def read(*args, **kwargs):
         page = original_page(*args, **kwargs)
@@ -243,15 +247,136 @@ def test_admission_sql_budget_is_shared_across_pages(sql_pages, monkeypatch, bud
     monkeypatch.setattr(FactReadBudget, 'read', budgeted)
     monkeypatch.setattr(resolver, '_read_dependency_page', read)
     resolver.resolve_facts(current)
-    assert len(completed) == 2 and completed[1][0] > completed[0][0] and completed[1][1] > completed[0][1]
-    first = completed[0]
+    assert len(completed) == 2 and completed[1][0] < completed[0][0] and completed[1][1] < completed[0][1]
+    before, full = static[0]
     active.clear()
     completed.clear()
     if budget == 'FACT_SECONDS':
         exhaust[0] = True
     else:
-        monkeypatch.setattr('app.backtest_service.formal_resolver.' + budget, first[0 if budget == 'FACT_ROWS' else 1])
+        index = 0 if budget == 'FACT_ROWS' else 1
+        limit = full[index]-1
+        assert before[index] <= limit and full[index]-before[index] <= limit
+        monkeypatch.setattr('app.backtest_service.formal_resolver.' + budget, limit)
     with pytest.raises(RuntimeFault) as limited:
         resolver.resolve_facts(current)
     assert limited.value.code == 'RESOURCE_LIMIT'
-    assert len(completed) == 1
+    assert len(completed) == (1 if budget == 'FACT_SECONDS' else 0)
+
+
+@pytest.mark.parametrize('kind', ['identity', 'mapping', 'rule', 'status', 'actions'])
+def test_batched_candidates_match_original_pit_repositories_across_visibility_changes(sql_pages, monkeypatch, kind):
+    from app.instruments.domain import InstrumentIdentityFact, InstrumentCodeMapping, VersionedReference
+    from app.instruments.identity_repository import InstrumentIdentityFactRepository
+    from app.instruments.repository import InstrumentCodeMappingRepository
+    from app.instruments.models import InstrumentCodeMappingRecord
+    from app.instruments.rule_facts_repository import RuleFactsRepository
+    from tests.test_instrument_rule_facts import make_candidate
+    current, resolver, ids = sql_pages
+    iid = ids[0]
+    later = datetime(2026, 7, 6, 12, tzinfo=UTC)
+    with Session(resolver.engine) as session:
+        if kind == 'identity':
+            previous = session.scalar(select(InstrumentIdentityFactRecord).where(InstrumentIdentityFactRecord.instrument_id == iid))
+            InstrumentIdentityFactRepository(session).append_fact(InstrumentIdentityFact(
+                instrument_id=iid, fact_version=2, logical_fact_key=previous.logical_fact_key,
+                supersedes_fact_id=previous.id, asset_class='etf', exchange='SSE', currency='USD',
+                calendar_id='SSE', valid_from=previous.valid_from, known_at=later,
+                observed_at=later, evidence='isolated-later-identity'))
+        elif kind == 'mapping':
+            previous = session.scalar(select(InstrumentCodeMappingRecord).where(InstrumentCodeMappingRecord.instrument_id == iid))
+            InstrumentCodeMappingRepository(session).add_mapping(InstrumentCodeMapping(instrument_id=iid,
+                source=previous.source, source_code=previous.source_code, trading_code=previous.trading_code,
+                mapping_source='isolated-correction', valid_from=DAY+timedelta(days=2),
+                known_at=later, observed_at=later, evidence='isolated-removed-window',
+                logical_fact_key=previous.logical_fact_key, fact_version=2, supersedes_fact_id=previous.id))
+        elif kind == 'rule':
+            RuleFactsRepository(session).append_fact(make_candidate(instrument_id=iid,
+                fact_reference=VersionedReference(key='isolated-conflict-'+uuid4().hex, version=1),
+                content_hash=None, known_at=later, observed_at=later))
+        else:
+            model = TradingStatusCoverageFact if kind == 'status' else CorporateActionCoverageFact
+            fields = dict(dimension='suspension') if kind == 'status' else dict(action_type='cash_dividend')
+            session.add(model(id=uuid4(), instrument_id=iid, start_date=DAY, end_date=DAY+timedelta(days=1),
+                status='incomplete', event_count=0, source='isolated', source_revision='synthetic-later-coverage',
+                known_at=later, observed_at=later, evidence=dict(reference='isolated-later'),
+                validation_rule='isolated@1', **fields))
+        session.commit()
+    pages, recording = [], [True]
+    original = resolver._read_dependency_page
+    def read(*args, **kwargs):
+        page = original(*args, **kwargs)
+        if recording[0]: pages.append((args[3], page))
+        return page
+    monkeypatch.setattr(resolver, '_read_dependency_page', read)
+    actual = resolver.resolve_facts(current)
+    recording[0] = False
+    legacy = resolver.resolve_facts(current, paged=False)
+    assert actual.token == legacy.token and actual.execution_calendar == legacy.execution_calendar
+    assert actual.action_projection == legacy.action_projection
+    for day, page in pages:
+        for name in ('identities', 'calendars', 'rule_packages', 'trading_status', 'corporate_actions', 'commissions'):
+            assert getattr(page, name) == tuple(row for row in getattr(legacy, name) if row[1] == day), (kind, name, day)
+    for name in BRIDGES:
+        expected = [check for check in legacy.checks if check['binding'] == name]
+        if expected:
+            assert statuses(actual)[name]['available'] == (len(expected) == 8 and all(row['available'] for row in expected)), name
+
+
+def test_security_page_order_preserves_the_first_calendar_failure():
+    from app.backtest_service.formal_sql_pages import ScopedChecks
+    from app.backtest_service.formal_resolver import state
+    checks = ScopedChecks(('Z.SH', 'A.SH'))
+    for symbol, day in [('Z.SH', '2026-07-07'), ('A.SH', '2026-07-06')]:
+        checks.append(state('identity', 'fact_missing', missing=('identity',), scope=dict(security=symbol, date=day)))
+    assert checks[0]['scope'] == dict(security='A.SH', date='2026-07-06', checked_cells='2')
+
+
+def test_default_resolver_carries_research_descriptors_without_acceptance_flags(sql_pages):
+    from app.backtest_service.research_gateway import current_research_bindings
+    current, resolver, _ = sql_pages
+    facts = resolver.resolve_facts(current)
+    describe = lambda bindings: [(item.name, item.kind, item.unavailable_reason) for item in bindings]
+    assert describe(facts.research) == describe(current_research_bindings())
+    assert facts.research and all(item.unavailable_reason and not item.accepted_facts for item in facts.research)
+    for binding in facts.research:
+        assert statuses(facts)[binding.name]['scope']['requirement'] == 'optional_per_capability'
+
+
+@pytest.mark.parametrize('sql_pages', [(1, 10)], indirect=True)
+@pytest.mark.parametrize('missing_monday', [False, True])
+def test_calendar_closed_failures_cannot_hide_required_open_session_failures(sql_pages, missing_monday):
+    from app.instruments.domain import InstrumentIdentityFact
+    from app.instruments.identity_repository import InstrumentIdentityFactRepository
+    current, resolver, ids = sql_pages
+    with Session(resolver.engine) as session:
+        previous = session.scalar(select(InstrumentIdentityFactRecord).where(
+            InstrumentIdentityFactRecord.instrument_id == ids[0]))
+        # Build the two initial non-overlapping facts in this private fixture;
+        # an old unbounded logical chain cannot coexist with a second chain.
+        valid_from, logical_key = previous.valid_from, previous.logical_fact_key
+        session.delete(previous)
+        session.flush()
+        repository = InstrumentIdentityFactRepository(session)
+        repository.append_fact(InstrumentIdentityFact(instrument_id=ids[0], fact_version=1,
+            logical_fact_key=logical_key,
+            asset_class='etf', exchange='SSE', currency='CNY', calendar_id='SSE',
+            valid_from=valid_from, valid_to=DAY+timedelta(days=5), known_at=KNOWN,
+            observed_at=KNOWN, evidence='isolated-friday-window'))
+        repository.append_fact(InstrumentIdentityFact(instrument_id=ids[0], fact_version=1,
+            logical_fact_key='isolated-returning-identity', asset_class='etf', exchange='SSE', currency='CNY',
+            calendar_id='SSE', valid_from=DAY+timedelta(days=8 if missing_monday else 7),
+            known_at=KNOWN, observed_at=KNOWN, evidence='isolated-returning-window'))
+        session.commit()
+    facts = resolver.resolve_facts(current)
+    legacy = resolver.resolve_facts(current, paged=False)
+    assert facts.token == legacy.token and facts.action_projection == legacy.action_projection
+    required = {row['date'] for row in facts.execution_calendar['calendar']}
+    for name in BRIDGES:
+        legacy_required = [check for check in legacy.checks if check['binding'] == name
+            and check['scope']['date'] in required]
+        expected = len(legacy_required) == len(required) and all(check['available'] for check in legacy_required)
+        assert statuses(facts)[name]['available'] == expected, name
+        if not expected:
+            assert statuses(facts)[name]['scope']['date'] == (DAY+timedelta(days=7)).isoformat()
+    assert facts.action_projection == (None if missing_monday else ())
