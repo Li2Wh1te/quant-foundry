@@ -9,6 +9,7 @@ from decimal import Decimal
 import json
 import os
 import runpy
+import re
 from pathlib import Path
 import subprocess
 import time
@@ -265,6 +266,9 @@ def main():
             result['preview'] = dict(url=base, containers=containers, volumes=volumes, network=project,
                 synthetic_only=True)
     except BaseException as error:
+        marker = re.search(r'__D13_FIXTURE_FAILURE__=([A-Za-z0-9_-]{1,160})', str(error))
+        if marker:
+            result['stage'] += '-' + marker.group(1)
         result['passed'] = False
         result['error'] = str(error)[-5000:]
         for name in containers[1:]:

@@ -27,6 +27,7 @@ from app.market_service.bindings import TEST_VARIANT
 
 START, END = date(2024, 1, 1), date(2026, 10, 9)
 NOW = datetime(2026, 10, 10, tzinfo=timezone.utc)
+STAGE = 'configuration'
 
 
 class Inputs:
@@ -47,6 +48,7 @@ def source(entry_id, subject, row, *, variant='default', observed=NOW):
 
 
 def main():
+    global STAGE
     settings = get_settings()
     # This utility is only mounted into the disposable test containers.
     assert settings.environment == 'test'
@@ -89,6 +91,21 @@ def main():
         return
     closure = sys.argv[1:] == ['closure']
     assert closure or not sys.argv[1:]
+    with engine.connect() as connection:
+        assert connection.execute(text('SELECT count(*) FROM instruments')).scalar_one() == 0
+    STAGE = 'open-current-store'
+    with CurrentStore(engine, settings.data_store_root,
+            cursor_key=settings.cursor_signing_key.get_secret_value().encode(), initialize=True) as current:
+        actual_fs = _filesystem_name(current.files.fd)
+        assert actual_fs in ('ext4', 'xfs', 'btrfs'), actual_fs
+        print(json.dumps(seed(current, settings, closure)))
+
+
+def seed(current, settings, closure=False):
+    """Synthetic source facts; callers provide their owned isolated store."""
+    global STAGE
+    STAGE = 'seed-control-and-identity'
+    engine = current.catalog.engine
     with engine.begin() as connection:
         assert connection.execute(text('SELECT count(*) FROM instruments')).scalar_one() == 0
         # Explicit artificial control fact on this empty test database only.
@@ -150,27 +167,30 @@ def main():
                 history_count += 1
             day += timedelta(days=1)
         assert history_count > 10_000
-    with CurrentStore(engine, settings.data_store_root,
-            cursor_key=settings.cursor_signing_key.get_secret_value().encode(), initialize=True) as current:
-        actual_fs = _filesystem_name(current.files.fd)
-        assert actual_fs in ('ext4', 'xfs', 'btrfs'), actual_fs
-        for entry_id, rows in [('E67', directory), ('E68', calendars), ('E70', prices), ('E69', factors),
-                ('E70', [replace(row, variant=TEST_VARIANT) for row in prices]),
-                ('E69', [replace(row, variant=TEST_VARIANT) for row in factors])]:
-            result = run_entry(current, BY_ID[entry_id], Inputs(*rows),
-                options=PipelineOptions(partitions_per_pass=8) if closure else PipelineOptions())
-            assert result['qualified'], result
-        # A genuine isolated invalid input creates an issue in an unrelated
-        # source-scoped object, without editing quality flags or issue tables.
-        bad = source('E70', 'daily', dict(source='tushare', ts_code='699999.SH', trade_date='2026-10-09',
-            open=Decimal('-1'), high=Decimal('4'), low=Decimal('3'), close=Decimal('3.5')))
-        assert not run_entry(current, BY_ID['E70'], Inputs(bad))['qualified']
-    print(json.dumps(dict(synthetic=True, filesystem=actual_fs, instruments=125,
+    for entry_id, rows in [('E67', directory), ('E68', calendars), ('E70', prices), ('E69', factors),
+            ('E70', [replace(row, variant=TEST_VARIANT) for row in prices]),
+            ('E69', [replace(row, variant=TEST_VARIANT) for row in factors])]:
+        STAGE = 'pipeline-' + entry_id
+        result = run_entry(current, BY_ID[entry_id], Inputs(*rows),
+            options=PipelineOptions(partitions_per_pass=8) if closure else PipelineOptions())
+        assert result['qualified'], result
+    # A genuine isolated invalid input creates an issue in an unrelated
+    # source-scoped object, without editing quality flags or issue tables.
+    bad = source('E70', 'daily', dict(source='tushare', ts_code='699999.SH', trade_date='2026-10-09',
+        open=Decimal('-1'), high=Decimal('4'), low=Decimal('3'), close=Decimal('3.5')))
+    assert not run_entry(current, BY_ID['E70'], Inputs(bad))['qualified']
+    return dict(synthetic=True, filesystem=_filesystem_name(current.files.fd), instruments=125,
         price_sessions=count, calendar_days=len(calendars), start=START.isoformat(), end=END.isoformat(),
         instrument_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:510300.SH')),
         no_factor_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600001.SH')),
-        history_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600002.SH')), history_sessions=history_count)))
+        history_key='instrument:' + str(uuid5(NAMESPACE_URL, 'qf-s2-artificial:600002.SH')), history_sessions=history_count)
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except BaseException as error:
+        # A source-defined phase and exception class are sufficient for CI;
+        # fact values, paths and the full exception stay in the private log.
+        print('__D13_FIXTURE_FAILURE__=' + STAGE + '-' + type(error).__name__ + '-' + getattr(error,'code',''), flush=True)
+        raise
