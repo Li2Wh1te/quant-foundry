@@ -48,6 +48,17 @@ class FormalResolutionFault(RuntimeFault):
         return dict(super().diagnostic(), scope=dict(facts=encoded(self.checks).decode()))
 
 
+class FormalRangeFault(RuntimeFault):
+    def __init__(self, symbols, days):
+        super().__init__('RESOURCE_LIMIT', '正式小事实日期或标的组合超过预算')
+        self.scope = dict(resource='formal_sql_fact_range', requested_symbols=str(symbols),
+            requested_natural_days=str(days), requested_cells=str(symbols * days),
+            max_natural_days=str(FACT_DAYS), max_cells=str(FACT_CELLS))
+
+    def diagnostic(self):
+        return dict(super().diagnostic(), scope=self.scope.copy())
+
+
 def _row_payload(item):
     from sqlalchemy.dialects.postgresql import Range
     if isinstance(item, Range):
@@ -195,8 +206,19 @@ class SqlFormalPlanResolver:
             raise RuntimeFault('DATA_CHANGED', '已解析的正式小事实、版本或质量发生变化')
 
     def resolve_facts(self, work, *, connection=None):
+        # This guard applies to the SQL reader, not the downstream DTO page
+        # composer. Refuse oversized scopes before opening a DB transaction;
+        # a bounded composer alone does not make this reader page bounded.
+        self._check_range(work.config)
         with self._session(connection) as (session, budget):
             return self._resolve(session, budget, work)
+
+    @staticmethod
+    def _check_range(config):
+        start, end = (date.fromisoformat(config[name]) for name in ('start', 'end'))
+        days, symbols = (end - start).days + 1, len(config['universe'])
+        if not 1 <= days <= FACT_DAYS or symbols * days > FACT_CELLS:
+            raise FormalRangeFault(symbols, days)
 
     @staticmethod
     def _attempt(name, read, checks, *, scope):
@@ -228,8 +250,7 @@ class SqlFormalPlanResolver:
         start, end = date.fromisoformat(config['start']), date.fromisoformat(config['end'])
         days = (end - start).days + 1
         symbols = tuple(config['universe'])
-        if not 1 <= days <= FACT_DAYS or len(symbols) * days > FACT_CELLS:
-            raise RuntimeFault('RESOURCE_LIMIT', '正式小事实日期或标的组合超过预算')
+        self._check_range(config)
         from .formal_fact_guard import fact_fingerprint
         fingerprint = fact_fingerprint(session, work, zone=ZONE, inventory_asof=inventory_asof)
         checks, identities, calendars, rules, trading_status, actions, commissions = [], [], [], [], [], [], []

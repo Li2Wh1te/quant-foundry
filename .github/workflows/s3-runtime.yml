@@ -32,10 +32,4 @@ jobs:
           QF_S3_BUILD_ROOT: ${{ runner.temp }}/s3-build
           QF_S3_RUNTIME_EVIDENCE: ${{ runner.temp }}/s3-isolation-evidence
         run: bash scripts/test_s3_runtime.sh
-      - name: Retain actual isolation and group-resource evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: s3-worker-isolation
-          path: ${{ runner.temp }}/s3-isolation-evidence/
-          if-no-files-found: error
+      # Keep generated isolation/resource files only in this disposable runner.
