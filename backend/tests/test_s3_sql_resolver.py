@@ -433,9 +433,9 @@ def test_fact_check_uses_bounded_sql_metadata_without_rebuilding_domain_facts(fo
             resolver.check_facts(current, accepted, connection=connection)
     finally:
         event.remove(engine, 'before_cursor_execute', read)
-    selects = [query for query in statements if query.lstrip().startswith('SELECT')
+    selects = [query for query in statements if query.lstrip().startswith(('SELECT', 'WITH'))
                and 'current_setting' not in query]
-    assert len(selects) == 22 and all('sha256' in query and 'count(' in query for query in selects)
+    assert len(selects) == 24 and all('sha256' in query and 'count(' in query for query in selects)
 
 
 def test_default_multisecurity_resolution_reuses_one_calendar_month(formal_facts):
