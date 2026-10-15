@@ -43,9 +43,4 @@ jobs:
           QF_D15_EVIDENCE: ${{ runner.temp }}/s3-ui-evidence
           QF_D16_UI: "1"
         run: bash scripts/test_s3_run_ui.sh
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: s3-run-ui-browser-evidence
-          path: ${{ runner.temp }}/s3-ui-evidence/
-          if-no-files-found: error
+      # Browser diagnostics remain in this disposable runner, without upload.

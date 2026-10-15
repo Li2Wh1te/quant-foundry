@@ -51,6 +51,8 @@ jobs:
           # still run their affected regressions on a supported filesystem.
           # Default preparation scale is a separate acceptance requirement;
           # skipping this unchanged workload is not its success evidence.
+          # Runtime/UI CI still execute independently; their diagnostic-file
+          # retention policy does not change the direct-Spec B1-B4 workloads.
           sql_paths = {
               'backend/app/backtest_service/formal_resolver.py',
               'backend/app/backtest_service/formal_calendar_reader.py',
@@ -61,6 +63,8 @@ jobs:
               'backend/tests/test_s3_formal_assembly.py',
               'backend/tests/test_s3_session_fact_pages.py',
               '.github/workflows/s3-engine.yml',
+              '.github/workflows/s3-runtime.yml',
+              '.github/workflows/s3-run-ui.yml',
               '.github/workflows/s3-final.yml',
           }
           print('sql_facts_only=' + str(bool(changed) and changed <= sql_paths).lower())

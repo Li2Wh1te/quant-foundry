@@ -37,7 +37,7 @@ from app.backtest_service.runtime_contracts import AcceptedWork, Claim, RuntimeF
 from app.backtest_service.runtime_services import create_services
 from app.backtest_service.service import FormalProvider, RunService
 from app.backtest_service.repository import DatabaseRunRepository
-from app.backtest_service.models import Run
+from app.backtest_service.models import Run, RunResult
 from app.core.config import Settings
 from app.main import create_app
 from app.db.base import Base
@@ -522,8 +522,58 @@ def test_real_pg_statement_timeout_is_reported_as_resource_limit(formal_facts):
         assert failure.value.code == 'RESOURCE_LIMIT'
 
 
-def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_semantics(formal_facts, tmp_path):
-    seed(formal_facts)
+@pytest.mark.parametrize('symbols,days', [(100, 365), (5000, 5), (1, 3661)])
+def test_sql_range_refusal_precedes_database_connection(formal_facts, symbols, days):
+    current = work()
+    current.config.update(universe=[f'S{i:04}.SZ' for i in range(symbols)],
+        end=(DAY + timedelta(days=days - 1)).isoformat())
+    engine = formal_facts.catalog.engine
+    def connected(connection):
+        pytest.fail('an oversized formal range must not open a SQL connection')
+    event.listen(engine, 'engine_connect', connected)
+    try:
+        with pytest.raises(RuntimeFault) as failure:
+            SqlFormalPlanResolver(SimpleNamespace(), engine=engine).resolve_facts(current)
+    finally:
+        event.remove(engine, 'engine_connect', connected)
+    diagnostic = failure.value.diagnostic()
+    assert diagnostic['code'] == 'RESOURCE_LIMIT'
+    assert diagnostic['scope'] == dict(resource='formal_sql_fact_range',
+        requested_symbols=str(symbols), requested_natural_days=str(days),
+        requested_cells=str(symbols * days), max_natural_days='3660', max_cells='20000')
+
+
+def test_sql_range_guard_retains_exact_existing_boundaries():
+    for symbols, days in [(100, 200), (4000, 5), (1, 3660)]:
+        config = dict(universe=['S'] * symbols, start=DAY.isoformat(),
+            end=(DAY + timedelta(days=days - 1)).isoformat())
+        SqlFormalPlanResolver._check_range(config)
+
+
+@pytest.mark.parametrize('scope', ['sparse', 'all_existing_facts', '100x365', '5000x5'])
+def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_semantics(formal_facts, tmp_path, scope):
+    iid = seed(formal_facts)
+    if scope == 'all_existing_facts':
+        # Fill every supported existing dependency and the actual E70 node.
+        # This deliberately supplies no missing execution DTO, accepted-facts
+        # flag, custom resolver or plan to the default application.
+        calendar_month(formal_facts)
+        with Session(formal_facts.catalog.engine) as session:
+            for family in ('share_distribution', 'split', 'rights_issue'):
+                session.add(CorporateActionCoverageFact(id=uuid4(), instrument_id=iid,
+                    start_date=DAY, end_date=DAY, status='complete', event_count=0, action_type=family,
+                    source='isolated', source_revision='synthetic-default-full-zero', known_at=KNOWN,
+                    observed_at=KNOWN, evidence=dict(reference='isolated-zero'), validation_rule='isolated@1'))
+            session.commit()
+        from app.data_store.adapters.contracts import LocalInput, digest
+        from app.data_store.adapters.registry import BY_ID
+        from app.data_store.pipeline import run_entry
+        from tests.test_data_store_local_pipeline import Inputs
+        entry = BY_ID['E70']
+        body = dict(source='tushare', ts_code='510001.SH', trade_date=DAY.isoformat(),
+            open=Decimal('10'), high=Decimal('11'), low=Decimal('9'), close=Decimal('10'), vol=Decimal('500'))
+        source = LocalInput(entry.source, entry.native, '510001.SH', 'isolated-default-sql', KNOWN, body, digest(body))
+        assert run_entry(formal_facts, entry, Inputs(source))['qualified']
     settings = Settings(api_token=TOKEN, cursor_signing_key=CURSOR, database_password='isolated-test',
         s3_result_root=tmp_path/'results', data_store_root=formal_facts.files.root, environment='test',
         scheduler_enabled=False, s3_work_root=tmp_path/'work', s3_daemon_work_root=tmp_path/'work',
@@ -551,6 +601,10 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
             strategy_revision_id=str(revision.id), initial_cash='10000', universe=['510001.SH'],
             frequency='1d', start=DAY.isoformat(), end=DAY.isoformat(), parameters={},
             execution_model='bar_next_interval_v1', participation_rate='1', slippage_bps='0', seed=23))
+    if scope in ('100x365', '5000x5'):
+        symbols, days = map(int, scope.split('x'))
+        config = normalize(dict(config, universe=[f'S{i:04}.SZ' for i in range(symbols)],
+            end=(DAY + timedelta(days=days - 1)).isoformat()))
     # The app uses its normal factory. Only the DB connection points at this
     # random private schema; s3_provider and repository are never installed.
     app = create_app(settings)
@@ -565,14 +619,26 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
         preflight = request('POST', '/api/admin/backtests/preflight', config)
         assert preflight.status_code == 200, preflight.text
         diagnostic = preflight.json()['errors'][0]
-        assert diagnostic['code'] == 'CAPABILITY_UNAVAILABLE'
         assert all(type(value) is str for value in diagnostic['scope'].values())
-        checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
-        assert checks['account_commission']['available']
-        assert checks['identity']['available'] and checks['calendar_sessions']['available']
-        assert checks['E70']['status'] == 'field_semantics_missing'
+        if scope in ('100x365', '5000x5'):
+            assert diagnostic['code'] == 'RESOURCE_LIMIT'
+            assert diagnostic['scope'] == dict(resource='formal_sql_fact_range',
+                requested_symbols=str(symbols), requested_natural_days=str(days),
+                requested_cells=str(symbols * days), max_natural_days='3660', max_cells='20000')
+        else:
+            assert diagnostic['code'] == 'CAPABILITY_UNAVAILABLE'
+            checks = {item['binding']: item for item in json.loads(diagnostic['scope']['facts'])}
+            assert checks['account_commission']['available']
+            assert checks['identity']['available'] and checks['calendar_sessions']['available']
+            assert checks['E70']['status'] == 'field_semantics_missing'
+            if scope == 'all_existing_facts':
+                for binding in ('instrument_rule_package', 'suspension_facts', 'corporate_actions',
+                        'execution_calendar_assembly', 'execution_corporate_actions', 'official_market_rules'):
+                    assert checks[binding]['available'], checks[binding]
+                assert checks['execution_plan_assembly']['missing'] == [
+                    'resolved_market_projection', 'resolved_execution_inputs']
         submission = request('POST', '/api/admin/backtests', config)
-        assert submission.status_code == 503, submission.text
+        assert submission.status_code == (429 if diagnostic['code'] == 'RESOURCE_LIMIT' else 503), submission.text
         assert submission.json()['detail'] == diagnostic
     class NoWorkerDaemon:
         # This test proves default SQL factory composition. Docker image
@@ -591,3 +657,4 @@ def test_default_app_and_runner_share_sql_diagnostics_and_never_enqueue_unknown_
     assert failure.value.diagnostic() == diagnostic
     with Session(formal_facts.catalog.engine) as session:
         assert session.scalar(select(Run.id)) is None
+        assert session.scalar(select(RunResult.run_id)) is None
