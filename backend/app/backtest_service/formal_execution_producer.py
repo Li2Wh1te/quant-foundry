@@ -166,7 +166,7 @@ def captured_backtest_terms(work):
     """
     snapshot = work.specification.get('account_snapshot', {})
     try:
-        if str(UUID(snapshot['id'])) != work.config.get('account_id'):
+        if UUID(snapshot['id']) != UUID(work.config.get('account_id', '')):
             raise ValueError()
         if type(snapshot['version']) is not int or snapshot['version'] <= 0:
             raise ValueError()

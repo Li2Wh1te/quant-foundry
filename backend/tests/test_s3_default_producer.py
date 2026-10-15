@@ -123,6 +123,8 @@ def append_fact(setup, fields=None, **overrides):
 def test_default_provider_uses_real_sql_producer_and_original_native_composer(producer_setup):
     setup = producer_setup
     append_fact(setup)
+    # The existing account identity port also accepts the same UUID in hex.
+    setup.work.config['account_id'] = setup.work.config['account_id'].replace('-', '')
     assert type(setup.provider.plan_resolver) is SqlFormalPlanResolver
     plan = setup.provider._plan(setup.work)
     key = plan.spec['calendar'][0]['session']['key']
