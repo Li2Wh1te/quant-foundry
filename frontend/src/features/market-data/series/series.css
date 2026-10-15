@@ -5,3 +5,5 @@
 .qfe-exact-values table { border-collapse:collapse; white-space:nowrap; width:100%; }
 .qfe-exact-values td,.qfe-exact-values th { padding:4px 8px; text-align:right; border-bottom:1px solid #2a313c; }
 .qfe-ohlc { overflow-x:auto; white-space:nowrap; scrollbar-width:thin; }
+.qfe-series { display:flex; align-items:center; gap:6px; font-size:13px; }
+.qfe-series select { max-width:220px; min-width:0; background:#202734; color:#dce3ec; border:1px solid #354050; border-radius:4px; padding:5px; }
