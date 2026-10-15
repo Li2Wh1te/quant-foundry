@@ -277,7 +277,7 @@ class SchedulerServiceTestCase(unittest.TestCase):
         task = make_task(task_type="data_store.update_local")
         service.repository.get_task.return_value = task
 
-        with patch("app.scheduling.service.require_ready",
+        with patch("app.scheduling.service.require_local_update_ready",
                    side_effect=DataStoreError("DATA_STORE_REBUILDING")):
             with self.assertRaisesRegex(TaskConflictError, "维护"):
                 service.enqueue_run(task.id, trigger_type=TriggerType.MANUAL,
