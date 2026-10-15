@@ -32,6 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       direct_spec_unchanged: ${{ steps.scope.outputs.direct_spec_unchanged }}
+      backend_dependencies_only: ${{ steps.scope.outputs.backend_dependencies_only }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -71,6 +72,7 @@ jobs:
               '.github/workflows/s3-run-ui.yml',
               '.github/workflows/s3-final.yml',
           }
+          print('backend_dependencies_only=' + str(bool(changed) and changed <= dependency_paths).lower())
           view_path = 'engine/crates/qf-core/src/data/views.rs'
           if view_path in changed:
               # B1-B4 do not call research(). Compare all other native code,
@@ -169,7 +171,7 @@ jobs:
           if-no-files-found: error
   arm:
     needs: impact
-    if: needs.impact.outputs.direct_spec_unchanged != 'true'
+    if: needs.impact.outputs.backend_dependencies_only != 'true'
     name: Native Linux arm64 wheel install and smoke
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 30
@@ -196,12 +198,3 @@ jobs:
           bash scripts/build_s3_images.sh
           python scripts/test_s3_images.py "$QF_S3_RELEASE_ROOT/images.json"
           python scripts/test_s3_startup.py "$QF_S3_RELEASE_ROOT/images.json"
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: s3-release-arm64
-          path: |
-            ${{ runner.temp }}/s3-arm/wheels/
-            ${{ runner.temp }}/s3-arm/release.json
-            ${{ runner.temp }}/s3-arm-release/
-          if-no-files-found: error
