@@ -69,10 +69,11 @@ def _operation_scope(options):
     return 'partitions:'+','.join(sorted(options.partitions)) if options.partitions else 'entry'
 
 
-def _source_rows(sources, entry):
+def _source_rows(sources, entry, *, partitions=()):
     """Classify source-file IO at its boundary, separately from store IO."""
     try:
-        yield from sources.iter_entry(entry)
+        selected=getattr(sources,'iter_partitions',None) if partitions else None
+        yield from selected(entry,partitions) if selected else sources.iter_entry(entry)
     except OSError as error:
         if error.errno in (errno.ENOSPC,errno.EDQUOT):
             raise DataStoreError('DISK_PRESSURE') from None
@@ -343,7 +344,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                         spool.db.execute('DELETE FROM '+table)
                     input_hash=hashlib.sha256()
                     invalid_snapshot_scopes=set()
-                    for raw in _source_rows(sources,entry):
+                    for raw in _source_rows(sources,entry,partitions=options.partitions):
                         input_hash.update(digest([raw.source,raw.dataset,raw.subject,
                                                   raw.variant,raw.token,raw.order_ns]).encode())
                         summary['source_rows']+=1

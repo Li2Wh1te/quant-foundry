@@ -13,6 +13,7 @@ import gzip
 from datetime import datetime, timezone
 import os
 from pathlib import Path
+import re
 import stat
 import time
 from uuid import UUID
@@ -346,6 +347,22 @@ class NativeSources:
             result.close()
 
     def iter_entry(self, entry: Entry):
+        yield from self._iter_entry(entry)
+
+    def iter_partitions(self, entry: Entry, partitions):
+        # Only E22 currently promises the source subject unchanged in the
+        # representation/subject bucket. Other adapters keep their full scan.
+        if type(self) is not NativeSources or entry.id!='E22' or not partitions:
+            yield from self.iter_entry(entry)
+            return
+        matches=[re.fullmatch(r'(?:\d{4}-(?:0[1-9]|1[0-2])|undated)\.(b(?:0\d|1[0-5]))',p)
+                 for p in partitions]
+        if not all(matches):
+            yield from self.iter_entry(entry)
+            return
+        yield from self._iter_entry(entry,buckets={m.group(1) for m in matches})
+
+    def _iter_entry(self, entry: Entry, *, buckets=None):
         self.summary = {'entry_id':entry.id, 'source_rows':0, 'state':'reading',
                         'complete':False, 'scan_policy':'fresh_repeatable_read_rescan'}
         try:
@@ -391,7 +408,8 @@ class NativeSources:
                         self.summary['import_status'] = _.get('status')
                     self.summary['state'] = 'ingestion_channel'
                 else:
-                    yield from self._ths(c, entry, when)
+                    if buckets is None:yield from self._ths(c,entry,when)
+                    else:yield from self._ths(c,entry,when,buckets=buckets)
             self.summary['complete'] = True
             if entry.complete_table_snapshot:
                 # This declaration is published only after the read transaction
@@ -404,7 +422,32 @@ class NativeSources:
             self.summary['state'] = 'unavailable'
             raise NativeInputError('LOCAL_SOURCE_UNAVAILABLE', '原生本地表不可读取；没有调用供应商。') from None
 
-    def _ths(self, c, entry, when):
+    def _ths_rows(self, c, entry, table, order='', *, suffix='', buckets=None):
+        where='WHERE t.dataset=:d'
+        if buckets is None:
+            yield from self._rows(c,table,where+suffix,{'d':entry.native},order)
+            return
+        # Enumerate identities only, before row_to_json or payload decoding.
+        # Keep every observation of each candidate scope: observed_at is not
+        # the business event date, and its old history supplies ordering proof.
+        scopes=c.execution_options(stream_results=True,yield_per=self.limits.page_rows).execute(
+            text(f'SELECT DISTINCT t.subject,t.variant FROM {table} t '+where+suffix+
+                 ' ORDER BY t.subject,t.variant'),{'d':entry.native})
+        try:
+            for subject,variant in scopes:
+                self._check()
+                if not (isinstance(subject,str) and subject and len(subject.encode())<=256
+                        and isinstance(variant,str) and variant and len(variant.encode())<=128):
+                    raise NativeInputError('SOURCE_SCHEMA_INVALID','原生本地范围身份无法确认。')
+                representation=entry.source+':'+digest([entry.native,variant])[:24]
+                bucket=entry.spec.partitioner((representation,subject,'undated')).rsplit('.',1)[1]
+                if bucket not in buckets:continue
+                yield from self._rows(c,table,where+' AND t.subject=:s AND t.variant=:v'+suffix,
+                                      {'d':entry.native,'s':subject,'v':variant},order)
+        finally:
+            scopes.close()
+
+    def _ths(self, c, entry, when, *, buckets=None):
         def lookup(identity):
             value = c.execute(text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:n '
                                    'THEN row_to_json(t)::text ELSE NULL END '
@@ -415,7 +458,7 @@ class NativeSources:
         order = 'ORDER BY t.subject, t.variant, t.observed_at, t.id'
         # Equal timestamp conflicts are retained for the merger. The UUID is only
         # a deterministic iteration tie-break, never authority over another value.
-        for row in self._rows(c, 'tonghuashun_observations', 'WHERE t.dataset=:d', {'d':entry.native}, order):
+        for row in self._ths_rows(c,entry,'tonghuashun_observations',order,buckets=buckets):
             self.summary['source_rows'] += 1
             try:
                 content, basis, field = materialize_observation(row, lookup, self.limits)
@@ -434,8 +477,8 @@ class NativeSources:
             yield value
         # Last failed refresh is separate from last-good native observation. Never
         # transform a failed attempted refresh into successful empty data.
-        for row in self._rows(c,'tonghuashun_collection_states',
-                              "WHERE t.dataset=:d AND t.status IN ('failed','partial')", {'d':entry.native}):
+        for row in self._ths_rows(c,entry,'tonghuashun_collection_states',
+                                 suffix=" AND t.status IN ('failed','partial')",buckets=buckets):
             self.summary['source_failures'] = self.summary.get('source_failures',0)+1
             if row['status']=='partial':
                 continue  # per-report failures live in the observation; don't block unrelated reports twice
