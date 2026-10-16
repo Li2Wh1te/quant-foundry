@@ -62,6 +62,93 @@ def test_current_audit_is_read_only_and_asserts_real_api(api, tmp_path):
     assert "postgresql://" not in (tmp_path / "audit" / "runtime.json").read_text()
 
 
+@pytest.mark.parametrize('phase', ['reset_done', 'rebuilding'])
+def test_audit_reports_real_maintenance_gate_without_descriptor_mismatch(api, tmp_path, phase):
+    client, current = api
+    entry = BY_ID['E41']
+    run_entry(current, entry, NativeSources(current.catalog.engine))
+    before = current.catalog.dataset(entry.spec.name)
+    with current.catalog.engine.begin() as connection:
+        connection.execute(text('INSERT INTO data_store_legacy_maintenance VALUES (1,:phase)'),
+                           {'phase': phase})
+
+    output = tmp_path / 'maintenance-audit'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=(entry,), api_request=_request(client))
+
+    assert not result['complete']
+    checks = _checks(output)
+    assert any(check['check'] == 'api_sample' and check['status'] == 'incomplete'
+               and check.get('code') == 'DATA_STORE_REBUILDING' for check in checks)
+    assert not any(check.get('code') == 'API_DESCRIPTOR_MISMATCH' for check in checks)
+    assert current.catalog.dataset(entry.spec.name) == before
+    status, page = _request(client)('POST', '/query', {
+        'dataset': entry.spec.name, 'frequency': 'object',
+        'representation': 'r', 'subject': 's', 'from_key': 'k', 'to_key': 'k',
+        'columns': ['representation', 'subject', 'object_key', 'member_key'],
+        'page_size': 1,
+    })
+    assert status == 503 and page['detail']['code'] == 'DATA_STORE_REBUILDING'
+    with current.catalog.engine.connect() as connection:
+        assert connection.execute(text(
+            'SELECT phase FROM data_store_legacy_maintenance WHERE singleton=1')).scalar_one() == phase
+
+
+def test_audit_reports_maintenance_entered_between_descriptor_and_query(api, tmp_path):
+    client, current = api
+    entry = BY_ID['E41']
+    run_entry(current, entry, NativeSources(current.catalog.engine))
+    request = _request(client)
+
+    def enter_before_query(method, path, payload=None):
+        if method == 'POST' and path == '/query':
+            with current.catalog.engine.begin() as connection:
+                connection.execute(text("INSERT INTO data_store_legacy_maintenance VALUES (1,'reset_done')"))
+        return request(method, path, payload)
+
+    output = tmp_path / 'late-maintenance-audit'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=(entry,), api_request=enter_before_query)
+
+    assert not result['complete']
+    assert any(check['check'] == 'api_sample' and check['status'] == 'incomplete'
+               and check.get('code') == 'DATA_STORE_REBUILDING' for check in _checks(output))
+
+
+@pytest.mark.parametrize('field', ['generation', 'row_count'])
+def test_audit_still_rejects_ready_descriptor_disagreement(api, tmp_path, field):
+    client, current = api
+    entry = BY_ID['E41']
+    run_entry(current, entry, NativeSources(current.catalog.engine))
+    request = _request(client)
+
+    def disagree(method, path, payload=None):
+        status, response = request(method, path, payload)
+        if method == 'GET' and status == 200:
+            response[field] += 1
+        return status, response
+
+    output = tmp_path / 'descriptor-mismatch-audit'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=(entry,), api_request=disagree)
+
+    assert not result['complete']
+    assert any(check.get('code') == 'API_DESCRIPTOR_MISMATCH' for check in _checks(output))
+
+
+def test_nonmaintenance_api_error_is_incomplete_without_forging_readiness(api, tmp_path):
+    _, current = api
+    entry = BY_ID['E41']
+    run_entry(current, entry, NativeSources(current.catalog.engine))
+    output = tmp_path / 'unavailable-api-audit'
+    result = export_audit(current.catalog.engine, current.files.root, output,
+                          entries=(entry,), api_request=lambda *_: (503, {'detail': 'Unavailable'}))
+
+    assert not result['complete']
+    assert any(check.get('code') == 'API_DESCRIPTOR_MISMATCH' for check in _checks(output))
+    assert not any(check.get('code') == 'DATA_STORE_REBUILDING' for check in _checks(output))
+
+
 def test_audit_marks_budget_truncation_and_missing_api_incomplete(api, tmp_path):
     _, current = api
     entry = BY_ID["E41"]

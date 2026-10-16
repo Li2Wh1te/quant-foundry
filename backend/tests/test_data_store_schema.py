@@ -9,7 +9,7 @@ from sqlalchemy import inspect
 
 from app.data_store.catalog import DDL
 from app.data_store.errors import DataStoreError
-from app.data_store.schema import DatasetSpec, prefix_end
+from app.data_store.schema import DatasetSpec, prefix_end, _ordered
 
 
 @pytest.mark.parametrize('dtype,values',[
@@ -34,6 +34,46 @@ def test_prefix_is_an_exact_report_interval():
     for member in [-2**63,0,2**63-1]:
         assert prefix <= s.key_bytes(('a',member)) < end
     assert s.key_bytes(('aa',0))>=end
+
+
+@pytest.mark.parametrize('member_type,member',[
+    (pa.string(), 'm\x00中'), (pa.int64(), -1), (pa.uint64(), 2**64-1),
+    (pa.date32(), date(1960,1,1)), (pa.bool_(), True),
+    (pa.timestamp('us','UTC'), datetime(1960,1,1,tzinfo=timezone.utc)),
+    (pa.decimal128(38,8), Decimal('-0.00000001')),
+])
+def test_validated_full_key_retains_exact_object_prefix_and_contract(member_type,member):
+    spec=DatasetSpec('objects',pa.schema([pa.field('source',pa.string(),False),
+        pa.field('subject',pa.string(),False),pa.field('object',pa.string(),False),
+        pa.field('member',member_type,False)]),('source','subject','object','member'),'r1')
+    descriptor=spec.descriptor()
+    prefix=('s\x00', '中', 'o\x00tail')
+    # Retain the pre-cache expression as a byte oracle. Both a full key and
+    # its partial prefix must keep the persisted order-preserving encoding.
+    old=b''.join(_ordered(value,spec.schema.field(name).type)
+                 for name,value in zip(spec.key,(*prefix,member)))
+    encoded=spec.key_bytes((*prefix,member))
+    assert encoded==old
+    assert encoded[:-len(_ordered(member,member_type))]==spec.key_bytes(prefix)
+    assert spec.descriptor()==descriptor
+    restored=DatasetSpec.from_descriptor(descriptor)
+    assert restored.key_bytes((*prefix,member))==encoded
+    with pytest.raises(DataStoreError):
+        restored.key_bytes((*prefix,None))
+
+
+def test_validated_string_member_prefix_handles_empty_nul_and_unicode_components():
+    from itertools import product
+    from app.data_store.verify_coverage import _string_member_prefix
+
+    fields=('source','subject','object','member')
+    spec=DatasetSpec('strings',pa.schema([pa.field(k,pa.string(),False) for k in fields]),fields,'r1')
+    # Exercise terminator adjacency, escaped NUL pairs and multibyte UTF-8;
+    # find the three-field prefix only from the validated four-field bytes.
+    values=('', '\x00', '\x00\x00', '中', 'a\x00中')
+    for components in product(values,repeat=4):
+        encoded=spec.key_bytes(components)
+        assert _string_member_prefix(encoded)==spec.key_bytes(components[:3])
 
 
 def test_migration_is_self_contained_and_matches_current_ddl():

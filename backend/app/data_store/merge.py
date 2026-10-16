@@ -41,10 +41,14 @@ def restore_row(schema, row):
 def value_hash(rows):
     # Canonical model fields, excluding provenance/confirmation and null columns
     # from unrelated node types in the declared scalar union schema.
-    from .adapters.canonical import encode
-    clean=[{k:v for k,v in row.items() if (k in ('member_key','row_kind','quality_json') or k.startswith('f')) and v is not None}
+    from .adapters.canonical import normalized, _CANONICAL_ENCODER
+    # Projection and exact-value normalization can share one pass. The selected
+    # names are declared scalar-union field strings; nested values still use the
+    # same recursive validator, including float/nonfinite rejection. Reuse the
+    # canonical-v1 encoder so persisted fingerprints keep identical bytes.
+    clean=[{k:normalized(v,_sort=False) for k,v in row.items() if (k in ('member_key','row_kind','quality_json') or k.startswith('f')) and v is not None}
            for row in rows]
-    return hashlib.sha256(encode(clean).encode()).hexdigest()
+    return hashlib.sha256(_CANONICAL_ENCODER.encode(clean).encode()).hexdigest()
 
 
 class MergeSpool:
