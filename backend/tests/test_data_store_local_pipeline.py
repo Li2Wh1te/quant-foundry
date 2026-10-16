@@ -419,7 +419,7 @@ def test_idle_continuations_remain_charged_and_are_reclaimed_only_when_done(read
     with pytest.raises(DataStoreError) as error:
         with budget.reserve('read',pending='pipeline.E69'):
             pass
-    assert error.value.code == 'SCRATCH_BUDGET_EXCEEDED'
+    assert error.value.code == 'SCRATCH_ADMISSION_DEFERRED'
     # At capacity a writer still fits, so the retained continuations can drain.
     with budget.reserve('write'):
         pass

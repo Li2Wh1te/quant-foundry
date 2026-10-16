@@ -235,7 +235,12 @@ class Budget:
                     writer_quota=min(self.limits.scratch_bytes,
                                      self.limits.commit_bytes*3+self.limits.duckdb_memory_bytes)
                     needed_slots=2 if slot is None else 1
-                    if len(available_slots)<needed_slots or used+quota+writer_quota>self.limits.scratch_bytes:
+                    if len(available_slots)<needed_slots:
+                        # No source or commit has been admitted. Keep every
+                        # sealed owner and distinguish capacity waiting from
+                        # an admitted operation exceeding its byte quota.
+                        raise DataStoreError('SCRATCH_ADMISSION_DEFERRED')
+                    if used+quota+writer_quota>self.limits.scratch_bytes:
                         raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
                 if slot is None and available_slots:
                     slot = available_slots[0]

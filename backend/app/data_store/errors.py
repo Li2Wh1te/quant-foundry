@@ -30,6 +30,7 @@ MESSAGES = {
     'INVALID_CONFIGURATION': '数据存储的资源上限配置无效。',
     'CONTROL_BUDGET_EXCEEDED': '当前状态信息超过大小或复杂度上限。',
     'SCRATCH_BUDGET_EXCEEDED': '暂存与查询临时空间已达到共同上限。',
+    'SCRATCH_ADMISSION_DEFERRED': '现有暂存工作仍在续作，本项等待处理槽位后继续。',
     'DISK_PRESSURE': '磁盘剩余空间不足，已停止新增写入。',
     'GARBAGE_BUDGET_EXCEEDED': '待清理文件已达到上限，请先完成清理。',
     'LOCK_TIMEOUT': '数据正在提交或处理，请稍后重试。',
