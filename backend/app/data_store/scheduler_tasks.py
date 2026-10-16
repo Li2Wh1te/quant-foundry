@@ -16,6 +16,7 @@ from .errors import DataStoreError
 from .local_sources import NativeSources, SourceLimits
 from .pipeline import PipelineOptions, run_local
 from .storage import CurrentStore
+from .updates import FATAL
 
 
 logger = structlog.get_logger(__name__)
@@ -123,7 +124,19 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
             source_metrics=result.get('source_metrics'),incremental=result.get('incremental'),
         )
     complete = all(row.get("complete") and row.get("qualified") for row in results)
-    if not complete:
+    pending = [row for row in results if not (row.get('complete') and row.get('qualified'))]
+    ordinary_pending = all(
+        row.get('outcome') in {'continued', 'deferred', 'backoff'}
+        and row.get('reason') in {
+            'PASS_BUDGET_EXCEEDED', 'NATIVE_RANGES_PENDING', 'LOCAL_UPDATE_BUDGET_EXCEEDED',
+            'SCRATCH_ADMISSION_DEFERRED', 'RETRY_BACKOFF',
+        }
+        and not any(row.get(key, 0) for key in ('new_issues', 'input_failures', 'unresolved_issues'))
+        and not (row.get('overflow_restriction') or {}).get('blocking_objects')
+        and not (row.get('outcome') == 'backoff' and row.get('refresh', {}).get('reason') in FATAL)
+        for row in pending
+    )
+    if not complete and not ordinary_pending:
         logger.error(
             "data_store_local_update_incomplete",
             message=(
@@ -138,17 +151,26 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
             failed=sum(not (row.get("complete") and row.get("qualified")) for row in results),
         )
         raise RuntimeError("DATA_STORE_UPDATE_INCOMPLETE")
+    if pending:
+        logger.info(
+            'data_store_local_update_pending',
+            message=(f"本次本地更新已保存处理进度，涉及 {len(results)} 类数据，"
+                     f"其中 {len(pending)} 类待续作或等待预算；完整覆盖仍未完成。"),
+            task_id=str(context.task_id), run_id=str(context.run_id), task_type=TASK_KEY,
+            entries=len(results), pending=len(pending), complete=False,
+        )
     return {
         "message": (
-            f"本地数据更新完成：涉及 {len(results)} 类数据，适用起始日期和结束日期均未限定，读取 "
+            f"本地数据更新{'进度已保存' if pending else '完成'}：涉及 {len(results)} 类数据，适用起始日期和结束日期均未限定，读取 "
             f"{sum(row.get('source_rows', 0) for row in results)} 条，提交 "
             f"{sum(row.get('committed_partitions', 0) for row in results)} 个分区，"
-            "所有处理断点已保存。"
+            + (f"{len(pending)} 类待续作或等待预算，完整覆盖仍未完成。" if pending else "所有处理断点已保存。")
         ),
         "entries": len(results),
         "source_rows": sum(row.get("source_rows", 0) for row in results),
         "committed_partitions": sum(row.get("committed_partitions", 0) for row in results),
-        "complete": True,
+        "complete": complete,
+        "pending": len(pending),
     }
 
 

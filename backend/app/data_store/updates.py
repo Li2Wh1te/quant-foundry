@@ -44,14 +44,15 @@ def _read(store, entry):
     return json.loads(raw) if raw else {'entry_id':entry.id}
 
 
-def _refresh(store, entry, patch, *, operation=None):
+def _refresh(store, entry, patch, *, operation=None, previous=None):
     """Only update our namespace from a freshly locked row, never coverage."""
     with store.catalog.transaction() as c:
         raw=c.execute(text('SELECT summary_json FROM data_store_entry_status WHERE entry_id=:i FOR UPDATE'),
                       {'i':entry.id}).scalar_one_or_none()
         status=json.loads(raw) if raw else {'entry_id':entry.id}
         if operation:status.update(operation)
-        state=dict(status.get('refresh',{}));state.update(patch);status['refresh']=state
+        state=dict(status.get('refresh',{}) if previous is None else previous)
+        state.update(patch);status['refresh']=state
         c.execute(text('INSERT INTO data_store_entry_status(entry_id,summary_json) VALUES (:i,:j) '
                        'ON CONFLICT(entry_id) DO UPDATE SET summary_json=EXCLUDED.summary_json, '
                        'updated_at=clock_timestamp()'), {'i':entry.id,'j':control_json(status)})
@@ -102,6 +103,19 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 # Database failure must not replace a process exit/cancel signal.
                 status=_skipped(old,'failed',_code(caught))
             result=dict(status,state='incomplete',complete=False,qualified=False,reason=_code(caught))
+        if (isinstance(error,DataStoreError) and error.code=='SCRATCH_ADMISSION_DEFERRED'
+                and not result.get('work_admitted')):
+            # The entry lock was checked, but no input/commit was admitted.
+            # Restore its prior attempt/backoff clocks; only this invocation's
+            # waiting state changes. Coverage remains pending, never promoted.
+            state=_refresh(store,entry,{'outcome':'deferred','attempted':False,
+                'deferred_since':previous.get('deferred_since') or now,
+                'reason':error.code,'error_type':None},previous=previous)
+            return dict(_skipped(result,'deferred',error.code),refresh=state)
+        if isinstance(error,DataStoreError) and error.code=='SCRATCH_ADMISSION_DEFERRED':
+            # Earlier ranges in this invocation may already have committed.
+            # Their counters/checkpoints survive ordinary capacity waiting.
+            error=None
         success=bool(result.get('complete') and result.get('qualified',not entry.business))
         continued=(error is None and not result.get('complete') or
                    result.get('reason')=='LOCAL_UPDATE_BUDGET_EXCEEDED')
