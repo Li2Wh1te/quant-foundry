@@ -98,7 +98,8 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         except BaseException as caught:
             error=caught
             try:
-                status=_read(store,entry)
+                status=getattr(caught,'entry_result',None)
+                if status is None:status=_read(store,entry)
             except Exception:
                 # Database failure must not replace a process exit/cancel signal.
                 status=_skipped(old,'failed',_code(caught))
@@ -107,7 +108,8 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 and not result.get('work_admitted')):
             # The entry lock was checked, but no input/commit was admitted.
             # Restore its prior attempt/backoff clocks; only this invocation's
-            # waiting state changes. Coverage remains pending, never promoted.
+            # waiting state changes. No new coverage is claimed; the existing
+            # current-data proof and any pending/quality restrictions survive.
             state=_refresh(store,entry,{'outcome':'deferred','attempted':False,
                 'deferred_since':previous.get('deferred_since') or now,
                 'reason':error.code,'error_type':None},previous=previous)

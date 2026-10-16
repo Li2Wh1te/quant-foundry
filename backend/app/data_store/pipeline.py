@@ -282,7 +282,6 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
             judgment=check_coverage(c,entry,candidate)
             maintain_coverage=judgment['satisfied'] or judgment['reason']=='CURRENT_QUALITY_UNRESOLVED'
     if old_status.get('overflow_restriction'):summary['overflow_restriction']=old_status['overflow_restriction']
-    _status(store,entry,summary)
     try:
         source_selection=sources.selection_key() if hasattr(sources,'selection_key') else None
         source_kind=digest([type(sources).__module__,type(sources).__qualname__])
@@ -296,6 +295,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                            summary['full_coverage'].get('source_kind')==source_kind)
         if not entry.business:
             summary['work_admitted']=True
+            _status(store,entry,summary)
             for _ in _source_rows(sources,entry): pass
             summary.update(sources.summary)
             summary['source_scanned']=bool(sources.summary.get('complete'))
@@ -311,6 +311,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                                   pending='pipeline.'+entry.id+('.selected' if options.partitions else ''),
                                   quota_bytes=options.pipeline_spill_bytes) as space:
             summary['work_admitted']=True
+            _status(store,entry,summary)
             space.deadline=time.monotonic()+options.pass_seconds
             spool=MergeSpool(space,entry.spec,partitions=options.partitions or None,
                              partition_count=None)
@@ -539,12 +540,14 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                        reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else ('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL or 'database or disk is full' in str(error) else 'FILE_INVALID'))
         # Previously committed independent partitions remain authoritative.
         # Never mark a truncated pass as an empty or completed source range.
-        _status(store,entry,summary)
+        if summary['reason']!='SCRATCH_ADMISSION_DEFERRED' or summary.get('work_admitted'):
+            _status(store,entry,summary)
         if isinstance(error, sqlite3.Error):
             # SQLite's bounded working file reports SQLITE_FULL as a native
             # exception. Keep the same safe public reason as the persisted
             # status, so the CLI can continue with independent entries.
             raise DataStoreError(summary['reason']) from None
+        error.entry_result=summary
         raise
 
 
