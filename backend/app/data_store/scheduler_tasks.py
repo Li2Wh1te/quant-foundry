@@ -55,11 +55,11 @@ def update_local(context: TaskContext, parameters: LocalUpdateParameters) -> dic
                if parameters.datasets else list(BUSINESS.values()))
     with Session(engine) as session:
         availability = require_local_update_ready(session)
-        # Old plans can retain large pass counts. During unfinished rebuilds,
-        # advance one bounded pass per entry without editing their parameters
-        # or silently resuming thousands of claims after this admission fix.
-        maximum_passes = parameters.maximum_passes if availability.ready else 1
-        pass_seconds = parameters.pass_seconds if availability.ready else min(parameters.pass_seconds, 180)
+        # An unsealed source read cannot resume after its deadline. Honor the
+        # validated plan bounds during reset_done as well; the shared dispatcher
+        # still enforces entry/call deadlines and the unchanged store budgets.
+        maximum_passes = parameters.maximum_passes
+        pass_seconds = parameters.pass_seconds
         with CurrentStore(
             engine, settings.data_store_root,
             cursor_key=settings.cursor_signing_key.get_secret_value().encode(),

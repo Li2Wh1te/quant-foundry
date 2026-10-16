@@ -186,7 +186,7 @@ def test_finish_waits_before_catalogue_locks_and_keeps_strict_conditions(admissi
 
 
 @pytest.mark.parametrize('qualified', [True, False])
-def test_handler_retains_fence_and_bounds_legacy_plan_without_promoting_quality(
+def test_handler_retains_fence_and_configured_bounds_without_promoting_quality(
         admission, monkeypatch, tmp_path, qualified):
     monkeypatch.setattr(tasks, 'get_engine', lambda: admission)
     monkeypatch.setattr(tasks, 'get_settings', lambda: SimpleNamespace(
@@ -210,7 +210,7 @@ def test_handler_retains_fence_and_bounds_legacy_plan_without_promoting_quality(
     else:
         with pytest.raises(RuntimeError, match='DATA_STORE_UPDATE_INCOMPLETE'):
             tasks.update_local(context, parameters)
-    assert observed == [(1, 180, ['E41'])]
+    assert observed == [(4096, 300, ['E41'])]
     assert parameters.maximum_passes == 4096 and parameters.pass_seconds == 300
     with Session(admission) as session:
         assert not read_availability(session).ready

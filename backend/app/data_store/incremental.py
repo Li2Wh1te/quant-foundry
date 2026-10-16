@@ -414,8 +414,9 @@ def run(store,entry,sources,*,options,cancelled=None):
             _status(store,entry,marker)
             try:
                 result=_run_entry_locked(store,entry,segment,options=options,cancelled=cancelled)
-            except BaseException:
-                _accumulate(totals,read_entry_status(store,entry.id),segment)
+            except BaseException as error:
+                result=getattr(error,'entry_result',None)
+                _accumulate(totals,result if result is not None else read_entry_status(store,entry.id),segment)
                 raise
             _accumulate(totals,result,segment)
             if not result.get('complete'):break
@@ -437,6 +438,7 @@ def run(store,entry,sources,*,options,cancelled=None):
                 if key in latest:totals[key]=latest[key]
             totals.update(state='incomplete',complete=False,qualified=False,reason=getattr(error,'code','INTERRUPTED'))
             _status(store,entry,totals)
+            error.entry_result=totals
         except Exception:
             pass  # A catalog outage must not replace a process exit signal.
         raise

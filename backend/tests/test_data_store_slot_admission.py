@@ -18,7 +18,7 @@ from app.data_store.catalog import Catalog
 from app.data_store.coverage import check_coverage
 from app.data_store.errors import DataStoreError
 from app.data_store.limits import MiB, StoreLimits
-from app.data_store.pipeline import read_entry_status, run_local
+from app.data_store.pipeline import PipelineOptions, read_entry_status, run_local
 from tests.test_data_store_domain_samples import sample
 from tests.test_data_store_kernel import database, store, KEY  # noqa: F401
 from tests.test_data_store_local_pipeline import Inputs, company
@@ -65,7 +65,7 @@ def test_slot_wait_preserves_attempt_clocks_and_source_until_capacity_released(c
         with current.budget.reserve('write'):pass
         status=read_entry_status(current,entry.id)
         with current.catalog.transaction() as c:
-            assert not check_coverage(c,entry,status)['satisfied']
+            assert check_coverage(c,entry,status)['satisfied']
     with current.budget.reserve('read',pending='pipeline.E68') as space:
         assert (space.spill/'retained.sqlite').read_bytes()==b'pipeline.E68'
         space.discard=True
@@ -73,6 +73,52 @@ def test_slot_wait_preserves_attempt_clocks_and_source_until_capacity_released(c
     assert recovered['complete'] and recovered['qualified'] and recovered['outcome']=='updated'
     assert recovered['refresh']['last_success_at']==1040
     assert current.budget.pending_keys()=={'pipeline.E70'}
+
+
+def test_capacity_wait_does_not_clear_existing_quality_restriction(current):
+    entry = BY_ID['E41']
+    run_local(current, Inputs(company(failure='SOURCE_REFRESH_FAILED')),
+              entries=[entry], clock=lambda: 1000)
+    issues = current.catalog.issues(entry.spec.name, limit=10)
+    for owner in ('pipeline.E68', 'pipeline.E70'):
+        with current.budget.reserve('read', pending=owner):
+            pass
+
+    class MustNotScan(Inputs):
+        def iter_entry(self, entry):
+            raise AssertionError('capacity waiting must not inspect new input')
+
+    result = run_local(current, MustNotScan(), entries=[entry], clock=lambda: 1040)[0]
+    assert result['outcome'] == 'deferred' and not result['attempted']
+    status = read_entry_status(current, entry.id)
+    assert not status['qualified']
+    assert current.catalog.issues(entry.spec.name, limit=10) == issues
+    with current.catalog.transaction() as c:
+        assert check_coverage(c, entry, status)['reason'] == 'CURRENT_QUALITY_UNRESOLVED'
+
+
+def test_capacity_wait_does_not_promote_an_existing_partial_scan(current):
+    entry = BY_ID['E41']
+    inputs = Inputs(*(company(subject=f'C{i:03}') for i in range(40)))
+    first = run_local(current, inputs, entries=[entry],
+                      options=PipelineOptions(maximum_passes=1), clock=lambda: 1000)[0]
+    assert not first['complete'] and first['full_coverage']['remaining'] > 0
+    with current.budget.reserve('read', pending='pipeline.E68'):
+        pass
+
+    class MustNotScan(Inputs):
+        def iter_entry(self, entry):
+            raise AssertionError('a blocked continuation must retain its seal')
+
+    with current.budget.reserve('write'):
+        result = run_local(current, MustNotScan(), entries=[entry], clock=lambda: 1010)[0]
+    assert result['outcome'] == 'deferred' and not result['attempted']
+    status = read_entry_status(current, entry.id)
+    assert not status['complete']
+    assert status['full_coverage'] == first['full_coverage']
+    assert current.budget.pending_keys() == {'pipeline.E41', 'pipeline.E68'}
+    with current.catalog.transaction() as c:
+        assert not check_coverage(c, entry, status)['satisfied']
 
 
 def test_fixed_three_slots_advance_and_release_across_24_scheduler_cycles(current,monkeypatch):
@@ -101,7 +147,7 @@ def test_fixed_three_slots_advance_and_release_across_24_scheduler_cycles(curren
     source_scans=Counter();total_committed=0
     for cycle in range(24):
         result=tasks.update_local(TaskContext(task_id=uuid4(),run_id=uuid4()),
-            tasks.LocalUpdateParameters(datasets=[e.spec.name for e in entries],maximum_passes=4096))
+            tasks.LocalUpdateParameters(datasets=[e.spec.name for e in entries],maximum_passes=1))
         assert not result['complete'] and result['pending']>0
         total_committed+=result['committed_partitions']
         pending=current.budget.pending_keys();assert len(pending)<=2
@@ -124,6 +170,54 @@ def test_fixed_three_slots_advance_and_release_across_24_scheduler_cycles(curren
     assert phase(current.catalog.engine)=='reset_done'
     with current.catalog.transaction() as c:
         assert c.scalar(text('SELECT count(*) FROM data_store_issues'))==0
+
+
+@pytest.mark.parametrize('source_seconds,complete', [(272, True), (301, False)])
+def test_configured_scan_bound_can_finish_manager_input_and_still_stops_at_deadline(
+        current, monkeypatch, source_seconds, complete):
+    # The real manager input needs more than180 seconds. Virtual elapsed time
+    # exercises the actual dispatcher cancellation guard without a long test.
+    entry = BY_ID['E54']
+    raw = sample(entry.id)
+    inputs = [replace(raw, subject=f'bounded-manager-{i:03}',
+                      token=digest([raw.token, i])) for i in range(40)]
+    elapsed = [0.0]
+
+    class ManagerInputs:
+        def __init__(self, *a, **k):
+            self.summary = {}
+
+        def iter_entry(self, entry):
+            self.summary = {'complete': False}
+            elapsed[0] = source_seconds
+            yield from inputs
+            self.summary = {'complete': True, 'source_rows': len(inputs)}
+
+    monkeypatch.setattr(tasks, 'get_engine', lambda: current.catalog.engine)
+    monkeypatch.setattr(tasks, 'get_settings', lambda: SimpleNamespace(
+        data_store_root=current.files.root, cursor_signing_key=SecretStr(KEY.decode())))
+    monkeypatch.setattr(tasks, 'NativeSources', ManagerInputs)
+    dispatch = tasks.run_local
+    monkeypatch.setattr(tasks, 'run_local', lambda *a, **k:
+                        dispatch(*a, **k, monotonic=lambda: elapsed[0]))
+    policy = asdict(Catalog.existing_limits(current.catalog.engine))
+    result = tasks.update_local(TaskContext(task_id=uuid4(), run_id=uuid4()),
+        tasks.LocalUpdateParameters(datasets=[entry.spec.name],
+                                    maximum_passes=16, pass_seconds=300))
+    status = read_entry_status(current, entry.id)
+    assert result['complete'] is complete
+    if complete:
+        assert result['committed_partitions'] > 1
+        assert status['qualified'] and status['refresh']['outcome'] == 'updated'
+        with current.catalog.transaction() as c:
+            assert check_coverage(c, entry, status)['satisfied']
+    else:
+        assert not result['committed_partitions'] and result['pending'] == 1
+        assert status['refresh']['reason'] == 'LOCAL_UPDATE_BUDGET_EXCEEDED'
+        assert status['refresh']['outcome'] == 'continued'
+        assert current.catalog.dataset(entry.spec.name)['row_count'] == 0
+    assert asdict(Catalog.existing_limits(current.catalog.engine)) == policy
+    assert phase(current.catalog.engine) == 'reset_done'
 
 
 @pytest.mark.parametrize('code',['SCRATCH_BUDGET_EXCEEDED','SOURCE_CONFLICT','COMMIT_UNKNOWN'])
