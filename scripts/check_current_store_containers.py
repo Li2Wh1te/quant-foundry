@@ -126,6 +126,9 @@ def main():
                             'tests/test_data_store_kernel.py','tests/test_data_store_schema.py',
                             'tests/test_data_store_local_pipeline.py',
                             'tests/test_data_store_runtime_budget.py',
+                            'tests/test_data_store_handoff.py',
+                            'tests/test_data_store_closeout_driver.py',
+                            'tests/test_data_store_closeout_driver_integration.py',
                             '--basetemp=/work/pytest','-q','--tb=short'],timeout=240)
             result['kernel_tests']={'passed':True,'summary':output.splitlines()[-1]}
             if args.docker_volume:

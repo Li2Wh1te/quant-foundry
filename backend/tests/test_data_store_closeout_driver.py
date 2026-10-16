@@ -157,5 +157,7 @@ def test_cancel_during_backoff_is_responsive_and_never_invokes_sibling():
 def test_cli_rejects_unbounded_deadline_before_database_access(tmp_path):
     from app.data_store.closeout import main
     with pytest.raises(SystemExit):
-        main(['--root', str(tmp_path), '--state', str(tmp_path / 'state.json'),
-              '--entry', 'E50', '--deadline', '2026-10-01T10:00:00'])
+        main(['--root', str(tmp_path), '--state', str(tmp_path / '.locks' / 'closeout-handoff.json'),
+              '--entry', 'E50', '--deadline', '2026-10-01T10:00:00',
+              '--handoff-epoch', '10000000-0000-4000-8000-000000000001',
+              '--run-id', '10000000-0000-4000-8000-000000000002'])
