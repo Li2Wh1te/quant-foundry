@@ -5,11 +5,13 @@ source claim survives process exits; its cursor advances only after the current
 commit. Concurrent writes merge into a separate pending range, so an acknowledgement
 cannot erase a late commit or r+1. No completed observation ledger is retained.
 """
-from dataclasses import replace
+from collections import OrderedDict
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
 import json
 from uuid import UUID, uuid4
+from types import MappingProxyType
 
 from sqlalchemy import text
 
@@ -22,6 +24,76 @@ from .errors import DataStoreError
 IDS = frozenset(('E23','E44','E50','E51','E52','E69','E70'))
 WHERE = 'source=:source AND dataset=:dataset AND subject=:subject AND variant=:variant AND range_key=:range_key'
 ZERO = '00000000-0000-0000-0000-000000000000'
+
+
+@dataclass(frozen=True)
+class _Dependency:
+    version: str
+    row: object
+    encoded_bytes: int
+
+
+class _BatchDependencies:
+    """Bound reusable observation versions to one finite source batch.
+
+    RangeSources intentionally keeps its existing repeatable-read transaction
+    per observation. A UUID alone therefore cannot authorize a cache hit: a
+    repair or corruption between those snapshots must still be seen. PostgreSQL
+    xmin and ctid identify the visible tuple version; the CASE avoids sending
+    its large JSON again only when that exact version was already decoded.
+
+    Only the outer immutable record is reused. Every consumer still reconstructs
+    its chain and checks scopes, hashes, returned keys, byte limits and ordering.
+    Both entry count and encoded bytes are bounded, and no cache survives a batch.
+    """
+
+    def __init__(self, max_bytes, max_rows=128):
+        self.max_bytes, self.max_rows = max_bytes, max_rows
+        self.rows = OrderedDict()
+        self.bytes = 0
+
+    def remember(self, identity, version, row, encoded_bytes):
+        previous = self.rows.pop(identity, None)
+        if previous is not None:
+            self.bytes -= previous.encoded_bytes
+        if encoded_bytes > self.max_bytes or self.max_rows <= 0:
+            return
+        while self.rows and (len(self.rows) >= self.max_rows or
+                             self.bytes + encoded_bytes > self.max_bytes):
+            _, removed = self.rows.popitem(last=False)
+            self.bytes -= removed.encoded_bytes
+        # Observation columns contain scalars and JSON text. A private top-level
+        # copy prevents an accidental consumer assignment from changing a later
+        # dependency; materialization always decodes those JSON strings afresh.
+        self.rows[identity] = _Dependency(version, MappingProxyType(dict(row)), encoded_bytes)
+        self.bytes += encoded_bytes
+
+    def load(self, connection, identity, limits, *, dependency):
+        cached = self.rows.get(identity) if dependency else None
+        if cached is not None and cached.encoded_bytes > limits.payload_bytes:
+            cached = None
+        record = connection.execute(text(
+            "SELECT t.xmin::text || ':' || t.ctid::text AS row_version, "
+            'CASE WHEN CAST(:known_version AS text)=t.xmin::text || \':\' || t.ctid::text '
+            'THEN NULL WHEN octet_length(row_to_json(t)::text)<=:n '
+            'THEN row_to_json(t)::text ELSE NULL END AS encoded '
+            'FROM tonghuashun_observations t WHERE id=:id'),
+            {'id': UUID(identity), 'n': limits.payload_bytes,
+             'known_version': cached.version if cached is not None else None}).mappings().one_or_none()
+        if record is not None and cached is not None and record['row_version'] == cached.version:
+            self.rows.move_to_end(identity)
+            return cached.row, cached.encoded_bytes
+        if record is None or record['encoded'] is None:
+            raise NativeInputError('SOURCE_DEPENDENCY_MISSING', '原生观察或必要依赖缺失。')
+        encoded = record['encoded']
+        value = _json(encoded, limits.payload_bytes)
+        size = len(encoded.encode())
+        self.remember(identity, record['row_version'], value, size)
+        return value, size
+
+    def clear(self):
+        self.rows.clear()
+        self.bytes = 0
 
 
 def enabled(sources, entry, options):
@@ -146,9 +218,10 @@ class RangeSources:
     """A stable, bounded input for the existing current merger, never full proof."""
     incremental_slice=True
 
-    def __init__(self,native,entry,job,observation=None,jobs=None):
+    def __init__(self,native,entry,job,observation=None,jobs=None,dependency_cache=None):
         self.native,self.entry,self.job,self.observation=native,entry,job,observation
         self.jobs=jobs or [job]
+        self.dependency_cache=dependency_cache
         self.summary={};self.snapshot_scope=None
         self.metrics={'metadata_rows':1,'payload_rows':0,'payload_bytes':0,
                       'dependency_rows':0,'dependency_bytes':0,'decoded_rows':0,'decode_calls':0}
@@ -180,13 +253,20 @@ class RangeSources:
                 cache={}
                 def lookup(identity,dependency=True):
                     if identity in cache:return cache[identity]
-                    encoded=c.execute(text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:n '
-                         'THEN row_to_json(t)::text ELSE NULL END FROM tonghuashun_observations t WHERE id=:id'),
-                         {'id':UUID(identity),'n':self.native.limits.payload_bytes}).scalar_one_or_none()
-                    if encoded is None:raise NativeInputError('SOURCE_DEPENDENCY_MISSING','原生观察或必要依赖缺失。')
-                    value=_json(encoded,self.native.limits.payload_bytes);cache[identity]=value
+                    if self.dependency_cache is None:
+                        encoded=c.execute(text('SELECT CASE WHEN octet_length(row_to_json(t)::text)<=:n '
+                             'THEN row_to_json(t)::text ELSE NULL END FROM tonghuashun_observations t WHERE id=:id'),
+                             {'id':UUID(identity),'n':self.native.limits.payload_bytes}).scalar_one_or_none()
+                        if encoded is None:raise NativeInputError('SOURCE_DEPENDENCY_MISSING','原生观察或必要依赖缺失。')
+                        value=_json(encoded,self.native.limits.payload_bytes)
+                        size=len(encoded.encode())
+                    else:
+                        value,size=self.dependency_cache.load(c,identity,self.native.limits,dependency=dependency)
+                    cache[identity]=value
                     prefix='dependency' if dependency else 'payload'
-                    self.metrics[prefix+'_rows']+=1;self.metrics[prefix+'_bytes']+=len(encoded.encode())
+                    # These remain logical per-consumer source counts. Reusing
+                    # transfer bytes must not reduce input accounting or failures.
+                    self.metrics[prefix+'_rows']+=1;self.metrics[prefix+'_bytes']+=size
                     return value
                 row=lookup(self.observation['id'],False)
                 body,basis,field=materialize_observation(row,lookup,self.native.limits,metrics=self.metrics)
@@ -239,16 +319,20 @@ class FundBatchSources:
 
     def iter_entry(self,entry):
         self.summary={'complete':False,'source_rows':0,'scan_policy':'transactional_native_object_batch'}
-        for job,observation in self.pairs:
-            segment=RangeSources(self.native,entry,job,observation)
-            try:
-                for raw in segment.iter_entry(entry):
-                    self.summary['source_rows']+=1
-                    yield raw
-            finally:
-                for key,value in segment.metrics.items():self.metrics[key]+=value
-            if not segment.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','基金原生范围尚未完整读取。')
-        self.summary['complete']=True
+        cache=_BatchDependencies(min(self.native.limits.chain_bytes,32*1024**2))
+        try:
+            for job,observation in self.pairs:
+                segment=RangeSources(self.native,entry,job,observation,dependency_cache=cache)
+                try:
+                    for raw in segment.iter_entry(entry):
+                        self.summary['source_rows']+=1
+                        yield raw
+                finally:
+                    for key,value in segment.metrics.items():self.metrics[key]+=value
+                if not segment.summary.get('complete'):raise NativeInputError('LOCAL_SCAN_INCOMPLETE','基金原生范围尚未完整读取。')
+            self.summary['complete']=True
+        finally:
+            cache.clear()
 
 
 def next_observation(sources,entry,job):
