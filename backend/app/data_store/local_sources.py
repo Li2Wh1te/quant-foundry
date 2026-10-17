@@ -10,6 +10,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
 import gzip
+import hashlib
 from datetime import datetime, timezone
 import os
 from pathlib import Path
@@ -216,9 +217,13 @@ def materialize_observation(row, lookup, limits=SourceLimits(), *, metrics=None)
                 data = {**body['metadata'], 'item': [records[k] for k in sorted(records)]}
             except TypeError:
                 raise NativeInputError('SOURCE_DEPENDENCY_INVALID', '增量业务键类型不一致。') from None
-        if digest(data) != current['content_hash']:
+        # The materialized prefix is immutable until the next dependency is
+        # applied. Reuse its exact canonical bytes for both existing checks;
+        # hashing and the payload limit still run for every consumer/prefix.
+        encoded = native_json(data).encode()
+        if hashlib.sha256(encoded).hexdigest() != current['content_hash']:
             raise NativeInputError('SOURCE_HASH_MISMATCH', '原生观察内容校验失败。')
-        if len(native_json(data).encode()) > limits.payload_bytes:
+        if len(encoded) > limits.payload_bytes:
             raise NativeInputError('SOURCE_BUDGET_EXCEEDED', '重建窗口超过解析预算。')
     return data, basis, field
 
