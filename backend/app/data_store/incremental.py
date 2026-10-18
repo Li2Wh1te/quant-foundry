@@ -175,6 +175,38 @@ def claim_funds(sources,entry,limit):
         return sorted(jobs,key=lambda j:(j['subject'],j['variant']))
 
 
+def _resume_fund_group(sources, entry, observations):
+    """Recover exactly the source identities owned by an existing sealed scan.
+
+    A small-budget scan may own just one member of a larger active metadata
+    group. Other active scopes, including newly eligible ones sorting before
+    it, must not widen that sealed selector or force its input to be decoded
+    again. Only identity metadata is read here; the ordinary source reader and
+    merger still validate the frozen observations and their selection token.
+    """
+    try:
+        identities = [UUID(item['id']) for item in observations]
+        if not 1 <= len(identities) <= 64 or len(set(identities)) != len(identities):
+            raise ValueError()
+    except (KeyError, TypeError, ValueError, AttributeError):
+        raise DataStoreError('SOURCE_CONFLICT') from None
+    with sources.engine.begin() as connection:
+        jobs = [dict(row) for row in connection.execute(text(
+            'SELECT r.source,r.dataset,r.subject,r.variant,r.range_key,r.pending,'
+            'r.bootstrap_pending,r.active,r.lower_at::text AS lower_text '
+            'FROM data_store_source_ranges r JOIN tonghuashun_observations o '
+            'ON o.dataset=r.dataset AND o.subject=r.subject AND o.variant=r.variant '
+            'WHERE r.source=:source AND r.dataset=:dataset '
+            "AND r.active IS NOT NULL AND r.active->'blocked' IS NULL "
+            'AND o.id=ANY(CAST(:ids AS uuid[])) '
+            'ORDER BY r.subject,r.variant,r.range_key FOR UPDATE OF r'),
+            {**_params(entry), 'ids': identities}).mappings()]
+    if (len(jobs) != len(identities) or
+            len({(job['subject'], job['variant'], job['range_key']) for job in jobs}) != len(jobs)):
+        raise DataStoreError('SOURCE_CONFLICT')
+    return jobs
+
+
 def claim_tables(sources,entry,limit):
     """Batch adjacent monthly ranges into one bounded merge, not one file per symbol.
 
@@ -467,7 +499,18 @@ def run(store,entry,sources,*,options,cancelled=None):
             if totals['budget_units']>=options.maximum_passes:break
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
             fund_batch=entry.id in ('E23','E44')
-            jobs=(claim_funds(sources,entry,min(64,options.maximum_passes)) if fund_batch else
+            # A complete E23 source object expands substantially in the merge
+            # spool. Under the existing small disk allowance, acquire one
+            # whole object at a time while retaining the 64-scope metadata/EOF
+            # batch. Never split an object or truncate its historical rows.
+            small_fund = (entry.id == 'E23' and
+                (options.pipeline_spill_bytes or store.limits.pipeline_spill_bytes) <= 256*1024**2)
+            sealed_fund = small_fund and 'pipeline.'+entry.id in store.budget.pending_keys()
+            captured = ((read_entry_status(store,entry.id).get('incremental') or {})
+                        .get('active_observation') or {}) if sealed_fund else {}
+            resume_observations = captured.get('batch') if isinstance(captured, dict) else None
+            jobs=(_resume_fund_group(sources,entry,resume_observations) if resume_observations else
+                  claim_funds(sources,entry,min(64,options.maximum_passes)) if fund_batch else
                   claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
             if not jobs or jobs[0] is None:break
@@ -485,6 +528,14 @@ def run(store,entry,sources,*,options,cancelled=None):
                 if not pairs:
                     totals['budget_units']+=1
                     continue
+                if resume_observations:
+                    if {item['id'] for _,item in pairs} != {item['id'] for item in resume_observations}:
+                        raise DataStoreError('SOURCE_CONFLICT')
+                elif small_fund and not sealed_fund:
+                    # Other claimed scopes remain active with their original
+                    # stop/after boundaries. Subsequent bounded turns consume
+                    # them normally; none is acknowledged or discarded here.
+                    pairs=pairs[:1]
                 jobs=[j for j,_ in pairs];job=jobs[0]
                 observation={'batch':[o for _,o in pairs]}
                 segment=FundBatchSources(sources,entry,pairs)
@@ -556,6 +607,13 @@ def run(store,entry,sources,*,options,cancelled=None):
                            'bootstrap_complete':bootstrap_remaining==0,
                            'bootstrap_boundary':old.get('incremental',{}).get('bootstrap_boundary'),
                            'bootstrap_remaining_ranges':bootstrap_remaining,'blocked_ranges':blocked}
+    if small_fund and 'pipeline.'+entry.id in store.budget.pending_keys():
+        # A normal pass-budget return needs the same frozen selector as an
+        # exception. Queue counters alone cannot identify a smaller sealed
+        # group among the other still-active source scopes after a restart.
+        for key in ('active_range','active_observation'):
+            if key in latest.get('incremental',{}):
+                totals['incremental'][key]=latest['incremental'][key]
     for key in ('full_coverage','last_complete_coverage','coverage_pending','overflow_restriction'):
         if key in latest:totals[key]=latest[key]
     totals['complete']=remaining==0

@@ -109,6 +109,11 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 # Database failure must not replace a process exit/cancel signal.
                 status=_skipped(old,'failed',_code(caught))
             result=dict(status,state='incomplete',complete=False,qualified=False,reason=_code(caught))
+        # Complete-table adapters use the same finite pass allowance as native
+        # ranges. Publish their actual units too; a real admitted empty scan or
+        # acquisition failure costs one unit, while an unadmitted wait costs none.
+        result.setdefault('budget_units',max(1,result.get('passes',0))
+                          if result.get('work_admitted') else 0)
         if (isinstance(error,DataStoreError) and error.code in WAITING
                 and not result.get('work_admitted')):
             # The entry lock was checked, but no input/commit was admitted.

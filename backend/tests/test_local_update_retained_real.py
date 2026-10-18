@@ -230,6 +230,7 @@ def test_real_entries_share_call_budget_and_old_deferral_gets_next_turn(ready,re
     entries=[BY_ID['E17'],BY_ID['E24']]
     first=run_local(ready,sources,entries=entries,options=options)
     assert first[0]['entry_id']=='E17' and first[0]['committed_partitions']==1
+    assert first[0]['budget_units']==first[0]['passes']==1
     assert first[1]['entry_id']=='E24' and first[1]['outcome']=='deferred'
     assert first[1]['source_rows']==0 and first[1]['attempted'] is False
     assert sum(row.get('budget_units',row.get('passes',0)) for row in first)<=1
