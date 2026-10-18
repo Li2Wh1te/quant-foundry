@@ -4,6 +4,7 @@ import json
 
 from sqlalchemy import text
 
+from .adapters.contracts import digest
 from .local_sources import NativeSources
 
 
@@ -24,15 +25,36 @@ def source_revision(sources, entry):
     than using MAX(timestamp), which misses corrections to an older subject.
     Neither payloads nor provider requests are needed to detect that change.
 
-    E57's bounded snapshot adapter also consumes these immutable provider
-    heads. Its unresolved source failures must wait for a real revision instead
-    of repeatedly scanning the same history on every recurring invocation.
-    This admission guard never grants snapshot or whole-history coverage.
+    Every registered Tonghuashun business adapter consumes these immutable
+    provider heads, including bounded snapshots, reports and directories.
+    Existing unresolved scopes must wait for a real revision instead of
+    rescanning unchanged history on every recurring invocation. Other source
+    families and custom/combined source implementations retain their existing
+    acquisition rules. This guard never grants source or historical coverage.
     """
-    if type(sources) is not NativeSources or entry.id not in {'E23','E44','E50','E51','E52','E57'}:
+    if type(sources) is not NativeSources or entry.source != 'tonghuashun' or not entry.business:
         return None
     result = hashlib.sha256()
+    if entry.id not in {'E23','E44','E50','E51','E52','E57'}:
+        # Keep the original six persisted fingerprints byte-for-byte stable;
+        # upgrading admission must not reopen their already blocked batches.
+        # Newly covered adapters also bind their declared contract so a later
+        # legitimate contract upgrade can reconsider the same retained input.
+        result.update(digest(entry.spec.descriptor()).encode())
+        result.update(b'\n')
     with sources._snapshot() as (connection, _):
+        # Supported retained stores can have the old failure-only state table,
+        # without a revision or observation pointer. The ordinary iterator
+        # already handles that layout. Check the exact metadata capability so
+        # admission never turns it into a global error that blocks siblings.
+        columns = connection.execute(text(
+            "SELECT count(*) FROM pg_attribute "
+            "WHERE attrelid=to_regclass('tonghuashun_collection_states') "
+            "AND attnum>0 AND NOT attisdropped AND attname IN "
+            "('dataset','subject','variant','revision','status','observation_id')"
+        )).scalar_one()
+        if columns != 6:
+            return None
         rows = connection.execution_options(stream_results=True).execute(text(
             'SELECT subject,variant,revision,status,observation_id '
             'FROM tonghuashun_collection_states WHERE dataset=:dataset ORDER BY subject,variant'

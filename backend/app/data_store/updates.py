@@ -154,11 +154,21 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             sealed='pipeline.'+entry.id in store.budget.pending_keys())
         if revision is not None:
             patch['input_revision']=revision
-            if success:
+            if success or result.get('reason') in FATAL:
+                # A capacity/storage error is not evidence that this source
+                # version was disposed. It must remain eligible after the
+                # actual global problem is repaired, including explicit retry.
                 patch['blocked_input_revision']=None
             elif (not patch['continuation']['eligible'] and
-                    (result.get('input_failures') or result.get('new_issues') or
-                     result.get('reason')=='SOURCE_RANGES_BLOCKED')):
+                    (result.get('reason')=='SOURCE_RANGES_BLOCKED' or
+                     result.get('source_scanned') and (
+                         result.get('input_failures') or result.get('new_issues') or
+                         result.get('complete') and not result.get('qualified')))):
+                # A complete narrow report may preserve an older whole-subject
+                # restriction even when every fresh unit is valid. Repeating
+                # that exact source cannot supply the missing authority. In
+                # contrast, failures seen before acquisition reached EOF must
+                # not pin an incomplete input and silently skip its remainder.
                 patch['blocked_input_revision']=revision
             elif success or progressed:
                 patch['blocked_input_revision']=None
