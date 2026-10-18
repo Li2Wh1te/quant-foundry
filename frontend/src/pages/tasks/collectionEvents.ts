@@ -1,5 +1,9 @@
 /** Operator-facing event copy is separate from stable structured log keys. */
 export const collectionEvents: Record<string, { title: string; summary: string }> = {
+  data_store_local_update_admitted: { title: "本地更新已准入", summary: "维护准入已通过，本轮来源读取和处理断点请查看运行详情。" },
+  data_store_local_update_pending: { title: "本地更新待续作", summary: "本轮进度已保存，未完成范围等待后续处理，完整覆盖尚未通过。" },
+  data_store_local_update_continuation_queued: { title: "本地更新续作已排队", summary: "已按持久断点去重排队，等待预算和共享写入准入后继续。" },
+  data_store_local_update_continuation_failed: { title: "本地更新续作未排队", summary: "续作状态读取或排队失败，原断点保留，其他采集任务继续。" },
   data_store_local_update: { title: "本地数据更新", summary: "本地来源的当前数据处理结果已保存，请查看任务运行详情。" },
   data_store_local_update_failed: { title: "本地数据更新失败", summary: "本地处理未完成，已提交分区和断点保留，请查看错误详情。" },
   data_store_local_update_incomplete: { title: "本地数据更新未合格", summary: "部分数据仍有问题，当前数据按各自状态提供。" },

@@ -5,7 +5,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 import structlog
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, false, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from app.scheduling.models import ScheduledTask, TaskRun
@@ -24,6 +24,7 @@ TERMINAL_RUN_STATUSES = (
 
 
 logger = structlog.get_logger(__name__)
+LOCAL_UPDATE_TASK_KEY = "data_store.update_local"
 
 
 class RunClockRegression(RuntimeError):
@@ -188,6 +189,30 @@ class SchedulerRepository:
             TaskRun.created_at,
             TaskRun.id,
         )
+        # The current store admits one writer across every local-update task,
+        # not one writer per ScheduledTask. Serialize the short claim decision
+        # in PostgreSQL, then retain its durable RUNNING row until the worker's
+        # terminal outcome is committed. A process-local mutex or a naked count
+        # lets independent dispatch transactions both observe zero writers.
+        local_admitted = task_types is None or LOCAL_UPDATE_TASK_KEY in task_types
+        if local_admitted and self.session.get_bind().dialect.name == "postgresql":
+            local_admitted = (
+                self.session.connection().get_isolation_level() == "READ COMMITTED"
+                and bool(self.session.scalar(select(func.pg_try_advisory_xact_lock(0x51464C55, 1))))
+            )
+        if local_admitted:
+            local_admitted = not self.session.scalar(select(TaskRun.id).where(
+                TaskRun.task_type == LOCAL_UPDATE_TASK_KEY,
+                TaskRun.status == RunStatus.RUNNING.value,
+            ).limit(1))
+        local_candidate = (
+            select(TaskRun.id).join(ScheduledTask, ScheduledTask.id == TaskRun.task_id)
+            .where(TaskRun.task_type == LOCAL_UPDATE_TASK_KEY,
+                   TaskRun.status == RunStatus.QUEUED.value,
+                   TaskRun.available_at <= now, TaskRun.created_at <= now,
+                   ScheduledTask.state != TaskState.ARCHIVED.value)
+            .order_by(*task_order).limit(1).correlate(None).scalar_subquery()
+        )
         eligible_runs = (
             select(
                 TaskRun.id.label("run_id"),
@@ -208,6 +233,8 @@ class SchedulerRepository:
                 TaskRun.created_at <= now,
                 ScheduledTask.state != TaskState.ARCHIVED.value,
                 running_count < ScheduledTask.concurrency_limit,
+                or_(TaskRun.task_type != LOCAL_UPDATE_TASK_KEY,
+                    TaskRun.id == local_candidate if local_admitted else false()),
                 # Optional scoping is useful for provider-specific dispatch
                 # and keeps isolated admission tests away from unrelated runs.
                 TaskRun.task_type.in_(task_types) if task_types is not None else True,

@@ -420,12 +420,16 @@ def _accumulate(totals,result,segment):
     """Include work before budget/cancel exits, not only the final small slice."""
     for key in ('source_rows','normalized_units','input_failures','passes','committed_partitions','new_issues','resolved'):
         totals[key]+=result.get(key,0)
+    # A source group shares its final partition pass with the acknowledgement.
+    # Metadata-only EOF/ACK groups still consume one finite unit, so neither
+    # empty ranges nor the nested merger can multiply the caller's pass bound.
+    totals['budget_units']+=max(1,result.get('passes',0))
     for key,value in result['metrics'].items():
         totals['metrics'][key]=(max(totals['metrics'].get(key,0),value) if key.endswith('peak_bytes')
                                  else totals['metrics'].get(key,0)+value)
     for key,value in segment.metrics.items():totals['source_metrics'][key]+=value
     totals['source_scanned']|=result.get('source_scanned',False)
-    totals['work_admitted']=result.get('work_admitted',False)
+    totals['work_admitted']=totals.get('work_admitted',False) or result.get('work_admitted',False)
 
 
 def run(store,entry,sources,*,options,cancelled=None):
@@ -454,33 +458,43 @@ def run(store,entry,sources,*,options,cancelled=None):
     store.register(entry.spec,prepare_rebuild=options.allow_incompatible_rebuild)
     totals={'entry_id':entry.id,'mode':options.mode,'scope':'native_incremental','state':'running',
         'complete':False,'qualified':False,'source_rows':0,'normalized_units':0,'input_failures':0,
-        'passes':0,'committed_partitions':0,'new_issues':0,'resolved':0,'metrics':{'files_written':0},
+        'passes':0,'committed_partitions':0,'new_issues':0,'resolved':0,
+        'budget_units':0,'range_batches':0,'acknowledged_ranges':0,'metrics':{'files_written':0},
         'source_metrics':{'metadata_rows':0,'payload_rows':0,'payload_bytes':0,'dependency_rows':0,
                           'dependency_bytes':0,'decoded_rows':0,'decode_calls':0},'source_scanned':False}
     try:
         for _ in range(options.maximum_passes):
+            if totals['budget_units']>=options.maximum_passes:break
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
             fund_batch=entry.id in ('E23','E44')
             jobs=(claim_funds(sources,entry,min(64,options.maximum_passes)) if fund_batch else
                   claim_tables(sources,entry,min(64,options.maximum_passes)) if entry.source=='tushare' else [claim(sources,entry)])
             totals['source_metrics']['metadata_rows']+=len(jobs)
             if not jobs or jobs[0] is None:break
+            totals['range_batches']+=1
             job=jobs[0]
             if fund_batch:
                 pairs=[]
                 for candidate in jobs:
                     item=next_observation(sources,entry,candidate)
                     if item is None:
-                        if check_state(sources,entry,candidate):acknowledge(sources,candidate)
+                        if check_state(sources,entry,candidate):
+                            acknowledge(sources,candidate)
+                            totals['acknowledged_ranges']+=1
                     else:pairs.append((candidate,item))
-                if not pairs:continue
+                if not pairs:
+                    totals['budget_units']+=1
+                    continue
                 jobs=[j for j,_ in pairs];job=jobs[0]
                 observation={'batch':[o for _,o in pairs]}
                 segment=FundBatchSources(sources,entry,pairs)
             else:
                 observation=next_observation(sources,entry,job) if entry.source=='tonghuashun' else None
                 if entry.source=='tonghuashun' and observation is None:
-                    if check_state(sources,entry,job):acknowledge(sources,job)
+                    if check_state(sources,entry,job):
+                        acknowledge(sources,job)
+                        totals['acknowledged_ranges']+=1
+                    totals['budget_units']+=1
                     continue
                 marker=read_entry_status(store,entry.id)
                 legacy=('pipeline.'+entry.id in store.budget.pending_keys() and
@@ -497,10 +511,14 @@ def run(store,entry,sources,*,options,cancelled=None):
                 active_observation=observation)
             _status(store,entry,marker)
             try:
-                result=_run_entry_locked(store,entry,segment,options=options,cancelled=cancelled)
+                result=_run_entry_locked(store,entry,segment,
+                    options=replace(options,maximum_passes=options.maximum_passes-totals['budget_units']),
+                    cancelled=cancelled)
             except BaseException as error:
                 result=getattr(error,'entry_result',None)
-                _accumulate(totals,result if result is not None else read_entry_status(store,entry.id),segment)
+                # An exception before a fresh merger receipt is not permission
+                # to count the previous group's persisted counters a second time.
+                _accumulate(totals,result if result is not None else {'metrics':{}},segment)
                 raise
             _accumulate(totals,result,segment)
             if not result.get('complete'):break
@@ -510,9 +528,13 @@ def run(store,entry,sources,*,options,cancelled=None):
                 # Each scope advances once to the last actually committed item.
                 final={}
                 for done,item in pairs:final[(done['subject'],done['variant'])]=(done,item)
-                for done,item in final.values():acknowledge(sources,done,after=item)
+                for done,item in final.values():
+                    acknowledge(sources,done,after=item)
+                    totals['acknowledged_ranges']+=1
             else:
-                for done in jobs:acknowledge(sources,done,after=observation)
+                for done in jobs:
+                    acknowledge(sources,done,after=observation)
+                    totals['acknowledged_ranges']+=1
     except BaseException as error:
         # A finite pass may have committed many independent ranges. Preserve
         # their measured work even when the final range is interrupted.

@@ -247,7 +247,7 @@ class Budget:
                 if slot is None or used + quota > self.limits.scratch_bytes:
                     raise DataStoreError('SCRATCH_BUDGET_EXCEEDED')
                 if kind == 'write' and writers >= self.limits.parallel_writers:
-                    raise DataStoreError('LOCK_TIMEOUT')
+                    raise DataStoreError('WRITE_ADMISSION_DEFERRED')
                 available = os.fstatvfs(self.files.fd)
                 if available.f_bavail * available.f_frsize - used - quota < self.limits.minimum_free_bytes:
                     raise DataStoreError('DISK_PRESSURE')

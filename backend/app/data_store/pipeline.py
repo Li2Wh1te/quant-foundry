@@ -541,7 +541,7 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                        reason=error.code if isinstance(error,(NativeInputError,DataStoreError)) else ('SCRATCH_BUDGET_EXCEEDED' if getattr(error,'sqlite_errorcode',None)==sqlite3.SQLITE_FULL or 'database or disk is full' in str(error) else 'FILE_INVALID'))
         # Previously committed independent partitions remain authoritative.
         # Never mark a truncated pass as an empty or completed source range.
-        if summary['reason']!='SCRATCH_ADMISSION_DEFERRED' or summary.get('work_admitted'):
+        if summary['reason'] not in {'SCRATCH_ADMISSION_DEFERRED','WRITE_ADMISSION_DEFERRED'} or summary.get('work_admitted'):
             _status(store,entry,summary)
         if isinstance(error, sqlite3.Error):
             # SQLite's bounded working file reports SQLITE_FULL as a native
