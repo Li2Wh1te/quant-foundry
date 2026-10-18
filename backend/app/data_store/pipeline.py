@@ -7,7 +7,7 @@ process boundaries; the current spool is removed when the sweep completes.
 from __future__ import annotations
 
 from contextlib import ExitStack
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import errno
 import hashlib
 import json
@@ -39,6 +39,10 @@ class PipelineOptions:
     pass_seconds: int = 300
     allow_incompatible_rebuild: bool = False
     pipeline_spill_bytes: int | None = None
+    # Internal admission metadata belongs to the acquisition that creates a
+    # seal. It deliberately does not participate in the spool identity: a
+    # newer source must never invalidate an older unfinished acquisition.
+    acquisition_revision: str | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self):
         if (self.mode not in ('rebuild','update','retry') or
@@ -54,6 +58,10 @@ class PipelineOptions:
             raise ValueError('Invalid bounded pipeline options')
         from .schema import identifier
         for p in self.partitions: identifier(p)
+        if self.acquisition_revision is not None and (
+                type(self.acquisition_revision) is not str or len(self.acquisition_revision) != 64 or
+                any(character not in '0123456789abcdef' for character in self.acquisition_revision)):
+            raise ValueError('Invalid acquisition revision')
 
 
 def _scope(partition):
@@ -393,12 +401,18 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
                               'source_rows':summary['source_rows'],
                               'normalized_units':summary['normalized_units'],
                               'input_failures':summary['input_failures'],
+                              'acquisition_revision':options.acquisition_revision,
                               'boundary':input_hash.hexdigest(),'source_selection':source_selection}
                     spool.db.execute('INSERT OR REPLACE INTO progress VALUES (1,?)',
                                      (json.dumps(progress),))
                     spool.db.commit();spool.check()
                 else:
                     summary['resumed']=True
+                # A resumed call may observe newer native heads while draining
+                # this immutable seal. Carry only the revision saved at its
+                # acquisition; legacy seals without it remain unknown rather
+                # than acknowledging a source that was never acquired here.
+                summary['captured_input_revision']=progress.get('acquisition_revision')
                 if full_scan:
                     # Upgrade a legacy sealed continuation from its actual
                     # ordered range and cursor, never from old booleans.

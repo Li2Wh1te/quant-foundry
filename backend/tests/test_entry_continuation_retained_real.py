@@ -20,6 +20,7 @@ from app.data_ingestion.models.tonghuashun import TonghuashunCollectionState, To
 from app.data_store.adapters.registry import BY_ID
 from app.data_store.catalog import Issue
 from app.data_store.coverage import check_coverage
+from app.data_store.continuation import source_revision
 from app.data_store.errors import DataStoreError
 from app.data_store.limits import MiB, StoreLimits
 from app.data_store.local_sources import NativeSources
@@ -205,3 +206,75 @@ def test_global_commit_error_after_actual_acquisition_does_not_pin_source_versio
     assert status.get('source_scanned') and status['input_failures'] > 0
     assert status['refresh']['continuation']['state'] == 'blocked_global_error'
     assert not status['refresh'].get('blocked_input_revision')
+
+
+@pytest.mark.parametrize('changed_while_sealed', (False, True))
+def test_real_sealed_disposal_binds_the_acquired_revision(ready, retained, monkeypatch,
+                                                        changed_while_sealed):
+    case = retained['cases']['E40']
+    entry = BY_ID['E40']
+    insert_originals(ready, case['base_observations'], case['base_states'])
+    acquired = source_revision(NativeSources(ready.catalog.engine), entry)
+    clock = [int(time.time())]
+    options = PipelineOptions(maximum_passes=128, pass_seconds=240)
+    first = run_entry(ready, entry, NativeSources(ready.catalog.engine),
+                      options=replace(options, maximum_passes=1),
+                      _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert first['source_scanned'] and first['source_rows'] > 0
+    assert not first['complete'] and first['full_coverage']['remaining'] > 0
+    if changed_while_sealed:
+        # Add a second actual retained identity while the first acquisition is
+        # sealed. Draining that seal cannot acknowledge this newer source.
+        insert_originals(ready, case['later_observations'], [case['later_state']])
+        assert source_revision(NativeSources(ready.catalog.engine), entry) != acquired
+
+    def no_reacquisition(*args, **kwargs):
+        raise AssertionError('sealed disposal must not reread provider history')
+
+    clock[0] += 1801
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeSources, 'iter_entry', no_reacquisition)
+        drained = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                            _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert drained['resumed'] and drained['source_rows'] == 0
+    assert drained['complete'] and drained['qualified'] is False
+    assert drained['refresh']['blocked_input_revision'] == acquired
+    if changed_while_sealed:
+        clock[0] += 1801
+        later = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                          _policy=RetryPolicy(), clock=lambda: clock[0])
+        assert later['source_scanned'] and later['source_rows'] > 0
+        assert later['complete'] and later['qualified'] is False
+        assert later['refresh']['blocked_input_revision'] != acquired
+    assert_unchanged_wait(ready, entry, options, clock)
+
+
+def test_real_legacy_seal_drains_without_inventing_its_source_revision(ready, retained, monkeypatch):
+    case = retained['cases']['E40']
+    entry = BY_ID['E40']
+    insert_originals(ready, case['base_observations'], case['base_states'])
+    clock = [int(time.time())]
+    options = PipelineOptions(maximum_passes=128, pass_seconds=240)
+    # An acquisition without recurring admission has no captured head revision,
+    # matching the durable metadata available in a pre-upgrade sealed spool.
+    first = run_entry(ready, entry, NativeSources(ready.catalog.engine),
+                      options=replace(options, maximum_passes=1), clock=lambda: clock[0])
+    assert not first['complete'] and first['full_coverage']['remaining'] > 0
+
+    def no_reacquisition(*args, **kwargs):
+        raise AssertionError('legacy seal must be drained before new acquisition')
+
+    clock[0] += 1801
+    with monkeypatch.context() as patch:
+        patch.setattr(NativeSources, 'iter_entry', no_reacquisition)
+        drained = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                            _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert drained['resumed'] and drained['source_rows'] == 0
+    assert drained['complete'] and drained['qualified'] is False
+    assert not drained['refresh'].get('blocked_input_revision')
+    clock[0] += 1801
+    baseline = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                         _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert baseline['source_scanned'] and baseline['source_rows'] > 0
+    assert baseline['complete'] and baseline['qualified'] is False
+    assert_unchanged_wait(ready, entry, options, clock)
