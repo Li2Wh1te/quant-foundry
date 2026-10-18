@@ -99,7 +99,13 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             legacy_pending=('pipeline.'+entry.id in store.budget.pending_keys() and
                             not old.get('incremental') and old.get('scope')!='native_incremental')
             execute=incremental_run if enabled(sources,entry,options) and not legacy_pending else _run_entry_locked
-            result=execute(store,entry,sources,options=options,cancelled=cancelled)
+            # Range batches have their own acknowledgement protocol. Only a
+            # normal complete-table acquisition binds this metadata to its
+            # durable spool, leaving existing sealed revisions untouched.
+            execution_options=(replace(options,acquisition_revision=revision)
+                if execute is _run_entry_locked and revision is not None and not options.partitions
+                else options)
+            result=execute(store,entry,sources,options=execution_options,cancelled=cancelled)
         except BaseException as caught:
             error=caught
             try:
@@ -154,12 +160,30 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             sealed='pipeline.'+entry.id in store.budget.pending_keys())
         if revision is not None:
             patch['input_revision']=revision
-            if success:
+            disposed_revision=result.get('captured_input_revision') or (
+                revision if result.get('source_scanned') or
+                result.get('reason')=='SOURCE_RANGES_BLOCKED' else None)
+            if success or result.get('reason') in FATAL:
+                # A capacity/storage error is not evidence that this source
+                # version was disposed. It must remain eligible after the
+                # actual global problem is repaired, including explicit retry.
                 patch['blocked_input_revision']=None
-            elif (not patch['continuation']['eligible'] and
-                    (result.get('input_failures') or result.get('new_issues') or
-                     result.get('reason')=='SOURCE_RANGES_BLOCKED')):
-                patch['blocked_input_revision']=revision
+            elif (disposed_revision is not None and not patch['continuation']['eligible'] and
+                    (result.get('reason')=='SOURCE_RANGES_BLOCKED' or
+                     result.get('source_scanned') and (
+                         result.get('input_failures') or result.get('new_issues') or
+                         result.get('complete') and not result.get('qualified')) or
+                     result.get('captured_input_revision') and result.get('complete') and
+                     not result.get('qualified'))):
+                # A complete narrow report may preserve an older whole-subject
+                # restriction even when every fresh unit is valid. Repeating
+                # that exact source cannot supply the missing authority. In
+                # contrast, failures seen before acquisition reached EOF must
+                # not pin an incomplete input and silently skip its remainder.
+                # When disposal spans calls, block the seal's captured revision
+                # instead of the newer heads observed while draining it. An
+                # unknown legacy seal gets one fresh baseline after disposal.
+                patch['blocked_input_revision']=disposed_revision
             elif success or progressed:
                 patch['blocked_input_revision']=None
         # A repeatedly failing sealed unit must not retain every shared slot
