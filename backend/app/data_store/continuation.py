@@ -23,8 +23,13 @@ def source_revision(sources, entry):
     including a changed failure state. Stream every identity/revision rather
     than using MAX(timestamp), which misses corrections to an older subject.
     Neither payloads nor provider requests are needed to detect that change.
+
+    E57's bounded snapshot adapter also consumes these immutable provider
+    heads. Its unresolved source failures must wait for a real revision instead
+    of repeatedly scanning the same history on every recurring invocation.
+    This admission guard never grants snapshot or whole-history coverage.
     """
-    if type(sources) is not NativeSources or entry.id not in {'E23','E44','E50','E51','E52'}:
+    if type(sources) is not NativeSources or entry.id not in {'E23','E44','E50','E51','E52','E57'}:
         return None
     result = hashlib.sha256()
     with sources._snapshot() as (connection, _):
