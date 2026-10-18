@@ -313,6 +313,83 @@ def test_handler_failure_is_failed_with_original_evidence(engine, runtime):
     assert handler.call_count == 1
 
 
+def test_failed_bounded_handler_retains_partial_progress_without_success(engine, runtime):
+    run_id = make_run(engine)
+    failure = RuntimeError('DATA_STORE_UPDATE_INCOMPLETE')
+    failure.task_result = {'complete': False, 'pending': 1, 'committed_partitions': 2,
+                           'continuation': {'eligible': True, 'available_at': 1}}
+    handler = runtime.registry.require('data.ths.terminal_fixture').handler
+    handler.side_effect = failure
+    execute_to_future(runtime, run_id)
+    after = read_run(engine, run_id)
+    assert after.status == 'failed' and after.result == failure.task_result
+    assert after.error_message == 'DATA_STORE_UPDATE_INCOMPLETE'
+    assert handler.call_count == 1
+
+
+def test_local_writer_group_is_serial_across_task_ids_and_keeps_collectors(engine):
+    key = 'data_store.update_local'
+    first = make_run(engine, key=key, running=False)
+    second = make_run(engine, key=key, running=False)
+    collector = make_run(engine, running=False)
+    with Session(engine) as owner:
+        claimed = SchedulerRepository(owner).claim_queued_runs(4)
+        assert collector in claimed and len(set(claimed) & {first, second}) == 1
+        # An independent transaction must not pass the uncommitted admission
+        # decision, even before the first RUNNING row becomes visible to it.
+        with Session(engine) as competitor:
+            assert SchedulerRepository(competitor).claim_queued_runs(4) == []
+            competitor.commit()
+        owner.commit()
+    waiting = second if first in claimed else first
+    after = read_run(engine, waiting)
+    assert after.status == 'queued' and after.started_at is None
+    assert after.last_heartbeat_at is None and after.result is None
+    with Session(engine) as session:
+        assert SchedulerRepository(session).claim_queued_runs(4) == []
+        local = next(identity for identity in claimed if identity != collector)
+        assert SchedulerRepository(session).finish_run(local, status=RunStatus.FAILED,
+            result={'complete': False}, error_message='original failure retained')
+        session.commit()
+    with Session(engine) as session:
+        assert SchedulerRepository(session).claim_queued_runs(4) == [waiting]
+        session.commit()
+
+
+def test_two_simultaneous_claim_transactions_cannot_start_two_local_writers(engine):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    first = make_run(engine, key='data_store.update_local', running=False)
+    second = make_run(engine, key='data_store.update_local', running=False)
+    begin, decided = Barrier(2), Barrier(2)
+
+    def claim():
+        with Session(engine) as session:
+            begin.wait(timeout=10)
+            result = SchedulerRepository(session).claim_queued_runs(2)
+            decided.wait(timeout=10)
+            session.commit()
+            return result
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(lambda _: claim(), range(2)))
+    assert sorted(map(len, outcomes)) == [0, 1]
+    assert {identity for batch in outcomes for identity in batch} <= {first, second}
+
+
+def test_local_group_preserves_existing_one_hour_fairness(engine):
+    old=make_run(engine,key='data_store.update_local',running=False)
+    fresh=make_run(engine,key='data_store.update_local',running=False)
+    with Session(engine) as session:
+        run=session.get(TaskRun,old);run.priority=-100
+        run.available_at-=timedelta(hours=2)
+        session.get(TaskRun,fresh).priority=100
+        session.commit()
+    with Session(engine) as session:
+        assert SchedulerRepository(session).claim_queued_runs(2)==[old]
+        session.commit()
+
+
 def test_cooperative_stop_preserves_checkpoint_result_and_cancelled_status(engine, runtime):
     run_id = make_run(engine)
     with Session(engine) as session:

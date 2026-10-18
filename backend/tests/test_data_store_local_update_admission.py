@@ -257,6 +257,7 @@ def test_runtime_claims_use_independent_admission_and_keep_other_types(
     monkeypatch.setattr(scheduling_runtime, 'lock_source_gates', lambda *a: {})
     monkeypatch.setattr(scheduling_runtime, 'skip_source_queue', lambda *a: None)
     monkeypatch.setattr(scheduling_runtime, 'SchedulerRepository', lambda *a: repository)
+    monkeypatch.setattr(scheduling_runtime, 'enqueue_pending_local_updates', lambda *a, **k: [])
     runtime = scheduling_runtime.SchedulerRuntime(Settings(api_token='a' * 64,
         database_password='isolated', scheduler_enabled=False, _env_file=None), registry)
     try:

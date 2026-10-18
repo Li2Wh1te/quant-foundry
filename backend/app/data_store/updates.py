@@ -1,7 +1,7 @@
 """Finite entry-local refresh scheduling; no shared campaign completion gate."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import errno
 import fcntl
 import json
@@ -15,6 +15,7 @@ from .adapters.registry import BY_ID, ENTRIES
 from .errors import DataStoreError
 from .locking import _deadline
 from .values import control_json
+from .continuation import FATAL, WAITING, disposition, source_revision
 
 
 @dataclass(frozen=True)
@@ -29,12 +30,8 @@ class RetryPolicy:
             raise ValueError('Positive finite retry limits required')
 
 
-FATAL = frozenset({'OPERATION_CANCELLED','CATALOG_UNAVAILABLE','CATALOG_MISMATCH',
-    'DATA_STORE_NOT_INITIALIZED','DATA_STORE_REBUILDING','DISK_PRESSURE',
-    'UNSAFE_STORAGE_PATH','UNSUPPORTED_FILESYSTEM','STORAGE_UNAVAILABLE','MEMORY_PRESSURE',
-    'COMMIT_UNKNOWN','GARBAGE_BUDGET_EXCEEDED'})
 COUNTERS = ('passes','committed_partitions','source_rows','normalized_units','new_issues',
-            'resolved','input_failures')
+            'resolved','input_failures','budget_units','range_batches','acknowledged_ranges')
 
 
 def _read(store, entry):
@@ -83,9 +80,17 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
     with store.locks._hold(dataset,'pipeline',fcntl.LOCK_EX,_deadline(store.limits.lock_timeout_ms),cancelled):
         old=_read(store,entry);previous=old.get('refresh',{});now=int(clock())
         if (_policy is not None and options.mode!='retry' and previous.get('next_retry_at',0)>now):
-            state=_refresh(store,entry,{'outcome':'backoff','attempted':False})
-            return dict(_skipped(old,'backoff','RETRY_BACKOFF'),refresh=state)
-        _refresh(store,entry,{'last_attempt_at':now,'attempted':True,'outcome':'running','deferred_since':0})
+            skipped=dict(_skipped(old,'backoff','RETRY_BACKOFF'),refresh=previous)
+            state=_refresh(store,entry,{'outcome':'backoff','attempted':False,
+                'continuation':disposition(skipped,now=now,
+                    sealed='pipeline.'+entry.id in store.budget.pending_keys())})
+            return dict(skipped,refresh=state)
+        revision=source_revision(sources,entry) if _policy is not None else None
+        if (options.mode!='retry' and revision is not None and
+                previous.get('blocked_input_revision')==revision):
+            return dict(_skipped(old,'blocked','SOURCE_INPUT_UNCHANGED'),refresh=previous)
+        _refresh(store,entry,{'last_attempt_at':now,'attempted':True,'outcome':'running','deferred_since':0,
+            'continuation':{'version':1,'state':'running','eligible':True,'available_at':now+30}})
         error=None
         try:
             from .incremental import enabled, run as incremental_run
@@ -104,7 +109,7 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                 # Database failure must not replace a process exit/cancel signal.
                 status=_skipped(old,'failed',_code(caught))
             result=dict(status,state='incomplete',complete=False,qualified=False,reason=_code(caught))
-        if (isinstance(error,DataStoreError) and error.code=='SCRATCH_ADMISSION_DEFERRED'
+        if (isinstance(error,DataStoreError) and error.code in WAITING
                 and not result.get('work_admitted')):
             # The entry lock was checked, but no input/commit was admitted.
             # Restore its prior attempt/backoff clocks; only this invocation's
@@ -112,9 +117,10 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
             # current-data proof and any pending/quality restrictions survive.
             state=_refresh(store,entry,{'outcome':'deferred','attempted':False,
                 'deferred_since':previous.get('deferred_since') or now,
-                'reason':error.code,'error_type':None},previous=previous)
+                'reason':error.code,'error_type':None,
+                'continuation':disposition(dict(result,outcome='deferred',reason=error.code),now=now)},previous=previous)
             return dict(_skipped(result,'deferred',error.code),refresh=state)
-        if isinstance(error,DataStoreError) and error.code=='SCRATCH_ADMISSION_DEFERRED':
+        if isinstance(error,DataStoreError) and error.code in WAITING:
             # Earlier ranges in this invocation may already have committed.
             # Their counters/checkpoints survive ordinary capacity waiting.
             error=None
@@ -126,7 +132,7 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         outcome=('updated' if result.get('metrics',{}).get('files_written',0) else 'unchanged') if success else (
             'continued' if continued else 'failed')
         failures=0 if success or continued else min(32,previous.get('consecutive_failures',0)+1)
-        progressed=(result.get('committed_partitions',0)>0 or
+        progressed=(result.get('committed_partitions',0)>0 or result.get('acknowledged_ranges',0)>0 or
                     result.get('last_partition') and result.get('last_partition')!=old.get('last_partition'))
         stalls=min(32,previous.get('stalled_failures',0)+1) if failures and not progressed else 0
         patch={'outcome':outcome,'attempted':True,'consecutive_failures':failures,
@@ -136,8 +142,21 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
                'reason':result.get('reason') if not success else None}
         if success:patch['last_success_at']=int(clock())
         if success or continued:patch['continuation_aborted']=None
-        if result.get('work_admitted'):patch['last_work_at']=now
+        if result.get('work_admitted') or progressed:patch['last_work_at']=now
         if result.get('source_scanned'):patch['last_source_scan_at']=now
+        candidate=dict(result,outcome=outcome,refresh=patch)
+        patch['continuation']=disposition(candidate,now=int(clock()),
+            sealed='pipeline.'+entry.id in store.budget.pending_keys())
+        if revision is not None:
+            patch['input_revision']=revision
+            if success:
+                patch['blocked_input_revision']=None
+            elif (not patch['continuation']['eligible'] and
+                    (result.get('input_failures') or result.get('new_issues') or
+                     result.get('reason')=='SOURCE_RANGES_BLOCKED')):
+                patch['blocked_input_revision']=revision
+            elif success or progressed:
+                patch['blocked_input_revision']=None
         # A repeatedly failing sealed unit must not retain every shared slot
         # forever. Explicitly invalidate its pending coverage before releasing
         # only its idle scratch. Current files and committed checkpoints survive.
@@ -184,28 +203,34 @@ def run_local(store,sources,*,entries,options,cancelled=None,policy=None,clock=N
                                 'pipeline.'+e.id not in pending,
                                 statuses[e.id].get('refresh',{}).get('last_work_at',0)))
     results=[]
+    remaining_passes=options.maximum_passes
     for entry in selected:
         try:
             if cancelled and cancelled():raise DataStoreError('OPERATION_CANCELLED')
-            if monotonic()>=deadline:
-                _refresh(store,entry,{'deferred_since':int(clock())})
-                results.append(_skipped(_read(store,entry),'deferred','LOCAL_UPDATE_BUDGET_EXCEEDED'))
+            if monotonic()>=deadline or remaining_passes<=0:
+                result=_skipped(_read(store,entry),'deferred','LOCAL_UPDATE_BUDGET_EXCEEDED')
+                result['refresh']=_refresh(store,entry,{'deferred_since':int(clock()),
+                    'continuation':disposition(result,now=int(clock()))})
+                results.append(result)
                 continue
             entry_deadline=min(deadline,monotonic()+options.pass_seconds)
             def stop():
                 if cancelled and cancelled():return True
                 if monotonic()>=entry_deadline:raise DataStoreError('LOCAL_UPDATE_BUDGET_EXCEEDED')
                 return False
-            result=attempt(store,entry,sources,options=options,cancelled=stop,_policy=policy,clock=clock)
+            result=attempt(store,entry,sources,options=replace(options,maximum_passes=remaining_passes),
+                           cancelled=stop,_policy=policy,clock=clock)
         except Exception as error:
             code=_code(error)
             result=getattr(error,'entry_result',None)
             if result is None:
                 result=dict(_skipped(statuses[entry.id],'failed',code),error_type=type(error).__name__)
             results.append(result)
+            remaining_passes-=result.get('budget_units',result.get('passes',0))
             if code in FATAL or code=='UNEXPECTED_ERROR':
                 error.results=results
                 raise
         else:
             results.append(result)
+            remaining_passes-=result.get('budget_units',result.get('passes',0))
     return results

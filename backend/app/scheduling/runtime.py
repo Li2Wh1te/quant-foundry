@@ -31,6 +31,7 @@ from app.scheduling.schemas import (
 )
 from app.scheduling.service import SchedulerService, TaskConflictError
 from app.scheduling.models import TaskRun
+from app.scheduling.continuations import enqueue_pending_local_updates
 from app.data_store.availability import RETIRED_TASK_TYPES, require_local_update_ready
 from app.data_store.errors import DataStoreError
 from app.data_store.scheduler_tasks import TASK_KEY as LOCAL_UPDATE_TASK_KEY
@@ -241,24 +242,49 @@ class SchedulerRuntime:
                 skip_source_queue(session, blocked_types, "数据源已停用或尚未配置，本次等待运行已跳过。")
                 repository = SchedulerRepository(session)
                 allowed_types = [item.key for item in self.registry.list()]
+                continuation_ids = []
                 queued_local = session.scalar(
                     select(TaskRun.id).where(
                         TaskRun.task_type == LOCAL_UPDATE_TASK_KEY,
                         TaskRun.status == RunStatus.QUEUED.value,
                     ).limit(1)
                 )
-                if queued_local:
+                if queued_local or LOCAL_UPDATE_TASK_KEY in allowed_types:
                     try:
                         require_local_update_ready(session)
                     except DataStoreError:
                         allowed_types = [key for key in allowed_types if key != LOCAL_UPDATE_TASK_KEY]
+                if LOCAL_UPDATE_TASK_KEY in allowed_types:
+                    try:
+                        # A broken local continuation receipt must not abort
+                        # the unrelated collectors' claim transaction.
+                        with session.begin_nested():
+                            continuation_ids = enqueue_pending_local_updates(session, self.registry,
+                                maximum_queued=self.settings.scheduler_max_queued_runs)
+                    except Exception as error:
+                        allowed_types = [key for key in allowed_types if key != LOCAL_UPDATE_TASK_KEY]
+                        logger.exception('data_store_local_update_continuation_failed',
+                            message='本地数据更新：数据类型和起止日期按原计划范围保留，续作状态读取或排队失败，读取 0 条、提交 0 个分区，断点未推进，其他采集任务继续。',
+                            error_type=type(error).__name__, source='scheduler')
                 run_ids = repository.claim_queued_runs(slots, task_types=allowed_types)
                 run_context = {
                     run.id: (run.task_id, run.task_type)
                     for run in (repository.get_run(run_id) for run_id in run_ids)
                     if run is not None
                 }
+                continuation_context = {
+                    run.id: {'task_id':str(run.task_id),'available_at':run.available_at.isoformat()}
+                    for run in (repository.get_run(identity) for identity in continuation_ids)
+                    if run is not None
+                }
                 session.commit()
+
+            # Announce a queued continuation only after its transaction commits;
+            # a failed claim/commit must never leave a successful queue receipt.
+            for identity, metadata in continuation_context.items():
+                logger.info('data_store_local_update_continuation_queued',
+                    message='本地数据更新：数据类型和起止日期按原计划范围保留，读取 0 条、提交 0 个分区，续作已去重排队，本次断点未推进。',
+                    run_id=str(identity),task_type=LOCAL_UPDATE_TASK_KEY,source='scheduler',**metadata)
 
             for run_id in run_ids:
                 logger.info(
@@ -391,9 +417,21 @@ class SchedulerRuntime:
                 error_type=type(exc).__name__, error_message=str(exc)[:10_000],
                 failure_phase="handler",
             )
+            # A bounded handler may fail whole-domain acceptance after real
+            # progress. Preserve its explicit JSON report without changing the
+            # failed lifecycle or granting that domain a successful read gate.
+            partial_result = getattr(exc, 'task_result', None)
+            if partial_result is not None:
+                if not isinstance(partial_result, dict):
+                    partial_result = None
+                else:
+                    try:
+                        json.dumps(partial_result, allow_nan=False)
+                    except (TypeError, ValueError):
+                        partial_result = None
             return _RunOutcome(
                 status=RunStatus.FAILED, error_type=type(exc).__name__,
-                error_message=str(exc)[:10_000], failure_phase="handler",
+                error_message=str(exc)[:10_000], failure_phase="handler", result=partial_result,
             )
         finally:
             # Future retains an escaping BaseException and its traceback until
@@ -499,8 +537,12 @@ class SchedulerRuntime:
             failure_phase=outcome.failure_phase,
         )
         if finished and outcome.status == RunStatus.SUCCEEDED:
+            pending_local = (run_meta.get('task_type') == LOCAL_UPDATE_TASK_KEY
+                             and isinstance(outcome.result, dict)
+                             and outcome.result.get('complete') is False)
             logger.info(
-                "task_run_succeeded", message="任务运行执行成功，结果已提交。",
+                "task_run_succeeded", message=("本地更新本轮执行结束，进度和未合格范围已保存，后续处理仍待完成。"
+                    if pending_local else "任务运行执行成功，结果已提交。"),
                 run_id=str(run_id), source="scheduler", **run_meta,
                 has_result=outcome.result is not None, exit_code=outcome.exit_code,
                 completion_marker=outcome.completion_marker,
