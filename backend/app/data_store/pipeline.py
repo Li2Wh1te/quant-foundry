@@ -546,8 +546,12 @@ def _run_entry_locked(store, entry: Entry, sources, *, options=PipelineOptions()
         if isinstance(error, sqlite3.Error):
             # SQLite's bounded working file reports SQLITE_FULL as a native
             # exception. Keep the same safe public reason as the persisted
-            # status, so the CLI can continue with independent entries.
-            raise DataStoreError(summary['reason']) from None
+            # status and this invocation's measured acquisition counters. The
+            # caller must not replace fresh work with a previous status (or
+            # zero counters) merely because the public exception is mapped.
+            failure=DataStoreError(summary['reason'])
+            failure.entry_result=summary
+            raise failure from None
         error.entry_result=summary
         raise
 
