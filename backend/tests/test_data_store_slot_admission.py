@@ -121,7 +121,7 @@ def test_capacity_wait_does_not_promote_an_existing_partial_scan(current):
         assert not check_coverage(c, entry, status)['satisfied']
 
 
-def test_fixed_three_slots_advance_and_release_across_24_scheduler_cycles(current,monkeypatch):
+def test_fixed_three_slots_advance_and_release_across_bounded_scheduler_cycles(current,monkeypatch):
     entries=[BY_ID[e] for e in ('E41','E42','E68')];calls=Counter();rows={}
     for entry,field,prefix in [(entries[0],'company_id','COMP'),(entries[1],'manager_id','MGR')]:
         rows[entry.id]=[]
@@ -145,31 +145,52 @@ def test_fixed_three_slots_advance_and_release_across_24_scheduler_cycles(curren
     monkeypatch.setattr(tasks,'NativeSources',LocalInputs)
     policy=asdict(Catalog.existing_limits(current.catalog.engine));completed=set();deferred=set()
     source_scans=Counter();total_committed=0
-    for cycle in range(24):
+    # One invocation owns one total unit. Bound the fixture's drain by its
+    # original source-object count plus final entry checks, not 24 calls that
+    # assumed a separate allowance for each sibling.
+    # Retire completed test selections so an unrelated fresh scan does not
+    # masquerade as continuation of the original sealed input.
+    maximum_cycles=sum(len(values) for values in rows.values())+len(entries)
+    for cycle in range(maximum_cycles):
+        selected=[e for e in entries if e.id not in completed]
         result=tasks.update_local(TaskContext(task_id=uuid4(),run_id=uuid4()),
-            tasks.LocalUpdateParameters(datasets=[e.spec.name for e in entries],maximum_passes=1))
-        assert not result['complete'] and result['pending']>0
+            tasks.LocalUpdateParameters(datasets=[e.spec.name for e in selected],maximum_passes=1))
+        assert result['budget_units']<=1
+        assert result['complete'] or result['pending']>0
         total_committed+=result['committed_partitions']
         pending=current.budget.pending_keys();assert len(pending)<=2
-        for e in entries:
+        actual={row['entry_id']:row for row in result['entries_results']}
+        for e in selected:
             status=read_entry_status(current,e.id);refresh=status['refresh']
-            assert refresh['outcome'] in ('updated','unchanged','continued','deferred')
+            # A call-budget deferral preserves the last attempted refresh,
+            # which can be absent on a never-served entry. Classify this turn
+            # by its explicit result rather than rewriting attempt history.
+            row=actual[e.id]
+            assert row['outcome'] in ('updated','unchanged','continued','deferred')
             assert refresh.get('consecutive_failures',0)==0
-            if refresh['outcome']=='deferred':
-                deferred.add(e.id);assert not refresh['attempted']
-            if status.get('source_scanned') and refresh.get('attempted'):
+            if row['outcome']=='deferred':
+                deferred.add(e.id)
+                assert row['source_rows']==row['committed_partitions']==0
+                assert refresh['deferred_since']>0
+            if row['source_rows']:
                 source_scans[e.id]+=1
             if status.get('complete'):
                 completed.add(e.id);assert 'pipeline.'+e.id not in pending
         # The reserved writer headroom remains usable in every real cycle.
         with current.budget.reserve('write'):pass
+        if completed=={e.id for e in entries}:break
     assert completed=={e.id for e in entries} and deferred
-    assert total_committed>=40 and all(calls[e.id]>=1 for e in entries)
+    assert 0<total_committed<=maximum_cycles
+    assert all(calls[e.id]==1 for e in entries)
     assert calls==source_scans
+    assert not current.budget.pending_keys()
     assert asdict(Catalog.existing_limits(current.catalog.engine))==policy
     assert phase(current.catalog.engine)=='reset_done'
     with current.catalog.transaction() as c:
         assert c.scalar(text('SELECT count(*) FROM data_store_issues'))==0
+        for e in entries:
+            assert check_coverage(c,e,read_entry_status(current,e.id))['satisfied']
+            assert current.catalog.dataset(e.spec.name)['row_count']==len(rows[e.id])
 
 
 @pytest.mark.parametrize('source_seconds,complete', [(272, True), (301, False)])
@@ -239,7 +260,7 @@ def test_admitted_failures_are_not_reclassified_as_capacity_wait(current,monkeyp
                                   {'unresolved_issues':1},{'overflow_restriction':{'blocking_objects':1}},
                                   {'outcome':'backoff','reason':'RETRY_BACKOFF',
                                    'refresh':{'reason':'COMMIT_UNKNOWN'}}])
-def test_budget_continuation_with_quality_failure_still_fails(current,monkeypatch,patch):
+def test_budget_continuation_preserves_quality_and_rejects_new_failures(current,monkeypatch,patch):
     from contextlib import nullcontext
     monkeypatch.setattr(tasks,'get_engine',lambda:current.catalog.engine)
     monkeypatch.setattr(tasks,'get_settings',lambda:SimpleNamespace(
@@ -249,6 +270,14 @@ def test_budget_continuation_with_quality_failure_still_fails(current,monkeypatc
     row={'entry_id':'E41','outcome':'continued','reason':'PASS_BUDGET_EXCEEDED',
          'complete':False,'qualified':False,**patch}
     monkeypatch.setattr(tasks,'run_local',lambda *a,**k:[row])
+    if patch=={'unresolved_issues':1}:
+        # Existing domain issues do not make a valid bounded turn a new
+        # execution error. Its completion and quality gates must stay closed.
+        result=tasks.update_local(TaskContext(task_id=uuid4(),run_id=uuid4()),
+            tasks.LocalUpdateParameters(datasets=[BY_ID['E41'].spec.name]))
+        assert result['complete'] is False and result['pending']==1
+        assert result['entries_results'][0]['qualified'] is False
+        return
     with pytest.raises(RuntimeError,match='DATA_STORE_UPDATE_INCOMPLETE'):
         tasks.update_local(TaskContext(task_id=uuid4(),run_id=uuid4()),
             tasks.LocalUpdateParameters(datasets=[BY_ID['E41'].spec.name]))
