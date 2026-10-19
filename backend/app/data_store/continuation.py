@@ -76,10 +76,14 @@ def disposition(result, *, now, sealed=False):
                             (result.get('refresh') or {}).get('reason') in FATAL):
         state, eligible = 'blocked_global_error', False
     elif (reason in PENDING and (progress or sealed)
-          and not (result.get('overflow_restriction') or {}).get('blocking_objects')):
-        # Remaining sealed partitions are new disposition work, even when the
-        # captured input contains invalid objects. Draining them never replays
-        # already committed partitions or grants the input a valid/whole scope.
+          and (not (result.get('overflow_restriction') or {}).get('blocking_objects')
+               or sealed and progress and not result.get('complete')
+               and reason in {'PASS_BUDGET_EXCEEDED','LOCAL_UPDATE_BUDGET_EXCEEDED'})):
+        # A budget-stopped seal with fresh committed progress still owns
+        # unfinished partitions, including when an older exception summary
+        # remains restrictive. Only that finite forward work may continue; an
+        # unchanged source, an unsealed failure or a stalled turn stays blocked.
+        # Draining the seal never clears issues or grants valid/whole coverage.
         # Its restrictions remain until a later exact valid source resolves them.
         state = 'progressed_pending_with_issues' if result.get('input_failures') or result.get('new_issues') else 'progressed_pending'
         eligible = True
