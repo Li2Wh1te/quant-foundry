@@ -86,9 +86,14 @@ def enqueue_pending_local_updates(session, registry, *, maximum_queued):
             scheduled_at=repository.current_time())
         if run.status != RunStatus.QUEUED.value:
             continue
-        # Keep the actual eligibility time across restarts; creation time must
-        # not reset fair queue age. A future backoff cannot age before it is due.
+        # Preserve an unserved intent's age across process restarts, but a
+        # completed execution has already received its turn. A follow-up must
+        # not reuse that old age to jump ahead of other waiting writers on
+        # every dispatch tick. Future backoff and newly advanced checkpoints
+        # retain their actual eligibility time, without changing task priority.
         run.available_at = datetime.fromtimestamp(min(pending[eid]['available_at'] for eid in wanted), UTC)
+        if latest is not None and latest.finished_at is not None:
+            run.available_at = max(run.available_at, latest.finished_at)
         covered.update(entries(task.parameters))
         created.append(run.id)
     session.flush()

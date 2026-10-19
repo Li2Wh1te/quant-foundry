@@ -88,7 +88,17 @@ def run_entry(store,entry,sources,*,options,cancelled=None,_policy=None,clock=No
         revision=source_revision(sources,entry) if _policy is not None else None
         if (options.mode!='retry' and revision is not None and
                 previous.get('blocked_input_revision')==revision):
-            return dict(_skipped(old,'blocked','SOURCE_INPUT_UNCHANGED'),refresh=previous)
+            skipped=_skipped(old,'blocked','SOURCE_INPUT_UNCHANGED')
+            state=previous
+            if (previous.get('continuation') or {}).get('eligible'):
+                # A prior capacity/backoff turn may have left an eligible
+                # receipt before this same source revision became blocked.
+                # Returning that receipt unchanged lets every dispatcher tick
+                # submit the already disposed input again. Retire only that
+                # stale intent once; keep all attempt clocks, coverage, source
+                # fingerprints, quality restrictions and current files intact.
+                state=_refresh(store,entry,{'continuation':disposition(skipped,now=now)})
+            return dict(skipped,refresh=state)
         _refresh(store,entry,{'last_attempt_at':now,'attempted':True,'outcome':'running','deferred_since':0,
             'continuation':{'version':1,'state':'running','eligible':True,'available_at':now+30}})
         error=None

@@ -111,14 +111,30 @@ def test_A03_sealed_300_partition_work_does_not_freeze_siblings(ready,monkeypatc
     def counted(self,entry):
         calls.append(entry.id);yield from original(self,entry)
     monkeypatch.setattr(NativeSources,'iter_entry',counted)
+    remaining=300
     for round in range(5):
         changed(ready,round);clock[0]+=60
-        result=run_local(ready,native,entries=[A,B,C],options=PipelineOptions(maximum_passes=64))
+        # maximum_passes is the whole invocation's allowance, not 64 units
+        # for the backlog plus extra units for every sibling. Give deferred
+        # siblings a bounded next turn while keeping the same fresh inputs.
+        # Once the original seal drains, do not reacquire it just to fill the
+        # outer loop; the final explicit refresh below tests that separately.
+        for _ in range(2):
+            selected=[A,B,C] if remaining else [A,C]
+            result=run_local(ready,native,entries=selected,options=PipelineOptions(maximum_passes=64))
+            assert sum(row.get('budget_units',0) for row in result)<=64
+            if remaining:
+                b=next(row for row in result if row['entry_id']==B.id)
+                following=b['full_coverage']['remaining']
+                assert following<remaining
+                assert remaining-following==b['committed_partitions']
+                remaining=following
+                assert b['outcome']==('continued' if remaining else 'updated')
         values(ready,round)
-        b=next(r for r in result if r['entry_id']==B.id)
-        assert b['full_coverage']['remaining']==max(0,300-64*(round+1))
-        assert b['outcome']==('continued' if round<4 else 'updated')
-    assert calls.count(B.id)==1 and calls.count(A.id)==calls.count(C.id)==5
+        if not remaining:break
+    assert remaining==0
+    assert calls.count(B.id)==1
+    assert calls.count(A.id)>=round+1 and calls.count(C.id)>=round+1
     assert len(calendar_rows(ready,B))==300
     run_local(ready,native,entries=[B])
     assert calls.count(B.id)==2

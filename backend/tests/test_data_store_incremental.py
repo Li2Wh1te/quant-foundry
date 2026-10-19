@@ -475,9 +475,20 @@ def test_fund_batch_sealed_resume_keeps_same_native_claims(ready,monkeypatch):
     with ready.catalog.transaction() as c:
         claims=c.execute(text('SELECT active FROM data_store_source_ranges ORDER BY subject')).scalars().all()
     monkeypatch.setattr(ready,'replace_partition',original)
+    reader=incremental.FundBatchSources.iter_entry
     def forbidden(*args,**kwargs):raise AssertionError('Sealed source batch must not be decoded again')
     monkeypatch.setattr(incremental.FundBatchSources,'iter_entry',forbidden)
+    # The small-spool contract seals one whole source object, while retaining
+    # the other two native claims. Drain only that sealed object in this turn;
+    # decoding a previously unread sibling belongs to a later bounded turn.
+    result=update(ready,'E23',options=PipelineOptions(maximum_passes=1))
+    assert not result['complete'] and result['qualified']
+    assert result['source_metrics']['payload_rows']==0
+    with ready.catalog.transaction() as c:
+        resumed=c.execute(text('SELECT active FROM data_store_source_ranges ORDER BY subject')).scalars().all()
+    assert [claim['id'] for claim in resumed]==[claim['id'] for claim in claims]
+    monkeypatch.setattr(incremental.FundBatchSources,'iter_entry',reader)
     result=update(ready,'E23')
     assert result['complete'] and result['qualified']
-    assert result['source_metrics']['payload_rows']==0
+    assert result['source_metrics']['payload_rows']==2
     assert len(claims)==3

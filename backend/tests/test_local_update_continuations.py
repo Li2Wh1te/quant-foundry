@@ -113,6 +113,58 @@ def test_backoff_is_queued_once_but_not_claimed_early(queue):
         assert enqueue_pending_local_updates(session,registry,maximum_queued=10)==[]
 
 
+def test_hourly_boundaries_allow_zero_change_checks_without_poll_replay(queue, monkeypatch):
+    """Advance two real interval boundaries without waiting or a supplier."""
+    from types import SimpleNamespace
+    from app.core.config import get_settings
+    from app.scheduling import runtime as scheduling_runtime
+    from app.scheduling.schemas import IntervalSchedule
+    from app.scheduling.triggers import build_trigger
+    engine, registry, identity = queue
+    start = datetime.now(UTC) + timedelta(days=1)
+    clock = [start]
+    intent(engine, eligible=False)
+    monkeypatch.setattr(SchedulerRepository, 'current_time', lambda _: clock[0])
+    monkeypatch.setattr(scheduling_runtime, 'get_engine', lambda: engine)
+    monkeypatch.setattr(scheduling_runtime, 'datetime', SimpleNamespace(now=lambda _: clock[0]))
+    with Session(engine) as session:
+        session.get(ScheduledTask, identity).schedule = {
+            'type':'interval', 'seconds':3600, 'start_at':(start+timedelta(hours=1)).isoformat()}
+        session.commit()
+    trigger = build_trigger(IntervalSchedule(type='interval', seconds=3600,
+        start_at=start+timedelta(hours=1)))
+    next_due = trigger.get_next_fire_time(None, start)
+    runtime = scheduling_runtime.SchedulerRuntime(
+        get_settings().model_copy(update={'scheduler_enabled':False}), registry)
+    try:
+        for elapsed in (0, 1, 30, 3599, 3600, 3600.5, 3601, 7199, 7200):
+            clock[0] = start + timedelta(seconds=elapsed)
+            if next_due <= clock[0]:
+                runtime._enqueue_scheduled_run(identity)
+                next_due = trigger.get_next_fire_time(next_due, clock[0])
+            with Session(engine) as session:
+                for _ in range(3):
+                    assert enqueue_pending_local_updates(session, registry, maximum_queued=10) == []
+                repository = SchedulerRepository(session)
+                claimed = repository.claim_queued_runs(1)
+                for run_id in claimed:
+                    # A due no-change check is legitimate; its zero counters
+                    # must not create another continuation or clear domain
+                    # restrictions stored separately from this task result.
+                    assert repository.finish_run(run_id, status=RunStatus.SUCCEEDED,
+                        result={'source_rows':0, 'committed_partitions':0,
+                            'continuation':{'eligible':False, 'global_stop':False}})
+                session.commit()
+                rows = list(session.scalars(select(TaskRun).order_by(TaskRun.created_at)))
+                assert len(rows) == int(elapsed // 3600)
+                assert all(row.trigger_type == 'scheduled' and row.status == 'succeeded' for row in rows)
+        with Session(engine) as session:
+            saved = json.loads(session.scalar(text("SELECT summary_json FROM data_store_entry_status WHERE entry_id='E44'")))
+            assert saved['qualified'] is False and saved['complete'] is False
+    finally:
+        runtime.executor.shutdown(wait=True)
+
+
 def test_overlapping_plan_waits_for_an_existing_covering_run(queue):
     engine,registry,identity=queue
     intent(engine)
@@ -191,6 +243,48 @@ def test_global_stop_receipt_prevents_automatic_replay(queue):
         session.commit()
     with Session(engine) as session:
         assert enqueue_pending_local_updates(session,registry,maximum_queued=10)==[]
+
+
+def test_finished_followup_cannot_reuse_old_queue_age_ahead_of_waiting_sibling(queue):
+    """An already served intent must not keep winning with its original age."""
+    from app.scheduling.schemas import TriggerType
+    from app.scheduling.service import SchedulerService
+    engine, registry, identity = queue
+    due = intent(engine)
+    with Session(engine) as session:
+        first = enqueue_pending_local_updates(session, registry, maximum_queued=10)[0]
+        sibling = ScheduledTask(name='独立日线更新', task_type=TASK_KEY,
+            parameters={'datasets':['market.stock_daily.reported']}, parameter_version=1,
+            schedule={'type':'interval','seconds':3600,
+                'start_at':datetime.now(UTC).isoformat()}, state='active', priority=0)
+        session.add(sibling); session.flush()
+        other = SchedulerService(session, registry).enqueue_run(sibling.id,
+            trigger_type=TriggerType.SCHEDULED, max_queued_runs=10)
+        other.available_at = datetime.fromtimestamp(due, UTC) + timedelta(minutes=30)
+        other.created_at = other.available_at
+        other_id = other.id
+        session.commit()
+    with Session(engine) as session:
+        repository = SchedulerRepository(session)
+        assert repository.claim_queued_runs(2) == [first]
+        assert repository.finish_run(first, status=RunStatus.FAILED,
+            error_type='DATA_STORE_UPDATE_INCOMPLETE', result={
+                'complete':False, 'source_rows':0, 'committed_partitions':0,
+                'checkpoint_advanced':False,
+                'continuation':{'eligible':True, 'available_at':due, 'global_stop':False}})
+        session.commit()
+    with Session(engine) as restarted:
+        following = enqueue_pending_local_updates(restarted, registry, maximum_queued=10)
+        assert len(following) == 1
+        assert restarted.get(TaskRun, following[0]).available_at >= restarted.get(TaskRun, first).finished_at
+        # The low-priority sibling has already waited for more than an hour.
+        # A high-priority follow-up must rejoin behind it without widening the
+        # shared single-writer limit, even when the saved intent is unchanged.
+        assert SchedulerRepository(restarted).claim_queued_runs(2) == [other_id]
+        assert enqueue_pending_local_updates(restarted, registry, maximum_queued=10) == []
+        assert restarted.get(TaskRun, following[0]).status == 'queued'
+        assert restarted.get(ScheduledTask, identity).priority == 100
+        restarted.commit()
 
 
 def test_bad_continuation_metadata_does_not_block_unrelated_collector(queue,monkeypatch):
