@@ -410,12 +410,16 @@ def test_C12_two_writers_one_dataset_and_independent_reader(store,database):
 
 def test_C15_shared_scratch_reservations_and_actual_file_growth(store):
     with store.budget.reserve('write') as space:
-        assert_error('LOCK_TIMEOUT',lambda:_reserve_write(store))
+        # The occupied shared writer is a resumable admission wait, rather
+        # than a dataset lock failure. Reject the second writer without
+        # disturbing the active reservation or weakening its byte quota.
+        assert_error('WRITE_ADMISSION_DEFERRED',lambda:_reserve_write(store))
         file=space.new_file()
         with QuotaFile(file,space) as f:
             assert_error('SCRATCH_BUDGET_EXCEEDED',lambda:f.write(b'x'*(space.stage_limit+1)))
         assert space.usage()[0]==0
     assert not list((store.files.root/'.scratch').rglob('*.parquet'))
+    _reserve_write(store)
 
 
 def _reserve_write(store):
