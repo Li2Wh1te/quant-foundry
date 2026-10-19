@@ -160,6 +160,47 @@ def test_real_valid_report_windows_do_not_replay_an_unresolved_whole_subject(rea
     assert_unchanged_wait(ready, entry, options, clock)
 
 
+@pytest.mark.parametrize('entry_id', ('E36', 'E40'))
+def test_real_unchanged_source_retires_stale_eligible_intent_once(ready, retained, entry_id):
+    """Repair the observed old receipt without reacquiring blocked originals."""
+    case = retained['cases'][entry_id]
+    insert_originals(ready, case['base_observations'], case['base_states'])
+    entry = BY_ID[entry_id]
+    options = PipelineOptions(maximum_passes=128, pass_seconds=240)
+    clock = [int(time.time())]
+    first = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                      _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert first['complete'] and first['qualified'] is False
+    original = read_entry_status(ready, entry.id)
+    assert original['refresh']['blocked_input_revision']
+    # Production retained a due deferred receipt after marking this exact
+    # native revision blocked. Only scheduler metadata is reproduced here;
+    # real provider payloads, restrictions and current files stay unchanged.
+    original['refresh']['continuation'] = {'version':1, 'state':'deferred',
+        'eligible':True, 'available_at':clock[0] - 7200, 'checkpoint_advanced':False}
+    with ready.catalog.transaction() as connection:
+        connection.execute(text('UPDATE data_store_entry_status SET summary_json=:body WHERE entry_id=:entry'),
+                           {'body':json.dumps(original), 'entry':entry.id})
+    issues = ready.catalog.issues(entry.spec.name, limit=1000)
+    catalogue = ready.catalog.dataset(entry.spec.name)
+    clock[0] += 1801
+    result = run_entry(ready, entry, NativeSources(ready.catalog.engine), options=options,
+                       _policy=RetryPolicy(), clock=lambda: clock[0])
+    assert result['reason'] == 'SOURCE_INPUT_UNCHANGED'
+    assert result['source_rows'] == result['committed_partitions'] == 0
+    assert result['attempted'] is False and result['source_scanned'] is False
+    repaired = read_entry_status(ready, entry.id)
+    assert repaired['refresh']['continuation']['eligible'] is False
+    assert repaired['refresh']['continuation']['state'] == 'blocked_source'
+    original['refresh']['continuation'] = repaired['refresh']['continuation']
+    assert repaired == original
+    assert ready.catalog.issues(entry.spec.name, limit=1000) == issues
+    assert ready.catalog.dataset(entry.spec.name) == catalogue
+    # Once repaired, later unchanged checks remain read-only and retain the
+    # source restriction. The existing changed-source cases prove re-entry.
+    assert_unchanged_wait(ready, entry, options, clock)
+
+
 def test_interrupted_actual_failed_input_is_not_a_completed_blocked_source(ready, retained, monkeypatch):
     import app.data_store.pipeline as pipeline
     case = retained['cases']['E10']
