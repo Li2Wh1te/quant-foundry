@@ -25,7 +25,8 @@ def relevant_issue_count(store, spec, query, check=lambda:None):
             elif restriction.get('blocking_objects'):
                 partition=restriction.get('partition')
                 if not isinstance(partition,str) or not partition or partition in query.partitions:
-                    count+=1
+                    from .problem_samples import overflow_restricts_query
+                    count+=int(overflow_restricts_query(store,spec,query,restriction,check))
         result=c.execution_options(stream_results=True,max_row_buffer=1).execute(
             text("SELECT * FROM data_store_issues WHERE dataset=:d AND (scope_key=ANY(:scopes) OR target_json::jsonb->>'partition' IS NULL OR target_json::jsonb->>'scope_version' IS NULL OR target_json::jsonb->>'scope_version' NOT IN ('object-key-v1','object-key-set-v1')) ORDER BY issue_key LIMIT :n"),
             {'d':spec.name,'scopes':['local.partition.'+p for p in query.partitions],'n':store.limits.issue_count+1})
