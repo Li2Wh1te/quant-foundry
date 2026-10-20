@@ -166,6 +166,16 @@ def _api_client(base_url: str, token: str, timeout: int):
     return call
 
 
+def _require_api_available(status: int, response: dict) -> None:
+    # The real routes hide current metadata until maintenance is ready. That
+    # gate is incomplete acceptance, not a disagreement with stored files.
+    # A gate reached between the descriptor and query is reported identically.
+    detail = response.get('detail')
+    if ((status == 200 and response.get('status') == 'rebuilding') or
+            (status == 503 and isinstance(detail, dict) and detail.get('code') == 'DATA_STORE_REBUILDING')):
+        raise AuditIncomplete('DATA_STORE_REBUILDING')
+
+
 def _directory_bytes(files: LocalFiles, directory: str, *, cap: int,
                      check_time: Callable[[], None]) -> int:
     """Count existing scratch/log bytes without following links or creating files."""
@@ -483,6 +493,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
             try:
                 time_check()
                 status, detail = api_request("GET", "/datasets/" + urlparse.quote(entry.spec.name, safe=""))
+                _require_api_available(status, detail)
                 if (status != 200 or detail.get("generation") != generation
                         or detail.get("row_count") != expected_rows):
                     raise AuditIncomplete("API_DESCRIPTOR_MISMATCH")
@@ -491,6 +502,7 @@ def export_audit(engine, root: Path, output_dir: Path, *, entries: tuple[Entry, 
                            "representation": sample[0], "subject": sample[1],
                            "from_key": sample[2], "to_key": sample[2], "page_size": 1}
                 status, page = api_request("POST", "/query", payload)
+                _require_api_available(status, page)
                 if status != 200 or page.get("generation") != generation or not page.get("rows"):
                     raise AuditIncomplete("API_QUERY_MISMATCH")
                 if (tuple(str(page["rows"][0].get(key)) for key in
