@@ -1,5 +1,6 @@
 """AR-03 real PostgreSQL producer/consumer acceptance; no supplier access."""
 from copy import deepcopy
+from contextlib import closing
 from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -418,6 +419,161 @@ def test_multi_month_claim_resumes_same_order_after_partial_commit(ready,monkeyp
     assert r['complete'] and r['source_metrics']['payload_rows']==0
     assert set(before)<=set(files(ready,'E70'))
     for month in (1,2,3):assert obj(ready,'E70',f'2025-{month:02}-01')['found']
+
+
+def publish_r01_overlap(engine):
+    from tests.data_store_r01_fixture import overlapping_observations
+    body, observations = overlapping_observations()
+    for row in observations:
+        publish(engine, body=body, subject=row['subject'], now=row['observed_at'],
+                requests=json.loads(row['request_json']))
+    return body
+
+
+def test_r01_native_overlap_counts_and_pending_without_a_new_observation(database):
+    from app.data_store.adapters.normalize import normalize
+
+    engine = database[0]
+    with engine.begin() as c:
+        for model in (Observation, State, EtfDailyBar, EtfAdjustmentFactor):
+            model.__table__.create(c)
+        install(c)
+    body = publish_r01_overlap(engine)
+    native = NativeSources(engine)
+    entry = BY_ID['E50']
+    job = incremental.claim(native, entry)
+    assert job['range_key'] == '*' and job['active']['after'] is None
+    pairs = [(job, observation) for observation in incremental.next_batch(native, entry, job)]
+    segment = incremental.FundBatchSources(native, entry, pairs)
+    units = [unit for raw in segment.iter_entry(entry) for unit in normalize(entry, raw)]
+    assert segment.summary == {'complete': True, 'source_rows': 2,
+                               'scan_policy': 'transactional_native_object_batch'}
+    assert len(units) == sum(bool(u.failure) for u in units) == 4
+    assert {u.failure for u in units} == {'SOURCE_CONFIRMATION_UNPROVEN'}
+    assert len({u.key for u in units}) == 2
+    assert len({entry.spec.partitioner((*u.key, 'root')) for u in units}) == 2
+    assert incremental.next_observation(native, entry, job) == pairs[0][1]
+
+    # Source acknowledgement is explicitly supplied here, without claiming a
+    # formal current-store commit; the integration test below verifies that fence.
+    incremental.acknowledge(native, job, after=pairs[-1][1])
+    with engine.begin() as c:
+        assert c.execute(text('SELECT status FROM tonghuashun_collection_states')).scalar_one() == 'succeeded'
+        c.execute(text('UPDATE tonghuashun_collection_states SET revision=revision+1'))
+        assert c.execute(text('SELECT count(*) FROM tonghuashun_observations')).scalar_one() == 2
+    incremental.acknowledge(native, job)
+    with engine.connect() as c:
+        range_row = c.execute(text('SELECT pending,active FROM data_store_source_ranges')).mappings().one()
+        assert range_row['pending'] and range_row['active'] is None
+    pending = incremental.claim(native, entry)
+    assert pending['subject'] == body['thscode']
+    assert incremental.next_observation(native, entry, pending) is None
+    incremental.acknowledge(native, pending)
+    with engine.connect() as c:
+        assert c.execute(text('SELECT count(*) FROM data_store_source_ranges')).scalar_one() == 0
+
+
+def test_r01_cancelled_two_month_batch_preserves_commits_and_dirty_range(ready, monkeypatch):
+    import sqlite3
+    from app.data_store import pipeline
+    from app.data_store.errors import DataStoreError
+    from app.data_store.issue_sets import logical_count
+
+    body = publish_r01_overlap(ready.catalog.engine)
+    entry = BY_ID['E50']
+    committed = []
+    stop = False
+    original = pipeline._commit_partition
+
+    def record_commit(*args, **kwargs):
+        nonlocal stop
+        result = original(*args, **kwargs)
+        if result is not None:
+            committed.append((args[2], result))
+            stop = True
+        return result
+
+    monkeypatch.setattr(pipeline, '_commit_partition', record_commit)
+    with pytest.raises(DataStoreError) as error:
+        update(ready, options=PipelineOptions(maximum_passes=2), cancelled=lambda: stop)
+    assert error.value.code == 'OPERATION_CANCELLED'
+    status = read_entry_status(ready, 'E50')
+    assert status['reason'] == 'OPERATION_CANCELLED' and not status['complete']
+    assert (status['source_rows'], status['normalized_units'], status['input_failures']) == (2, 4, 4)
+    assert status['committed_partitions'] == status['new_issues'] == 1
+    assert status['passes'] == 2  # The cancelled partition loop also counts.
+    assert len(committed) == 1
+    first, result = committed[0]
+    before = files(ready, 'E50')
+    checkpoint = ready.source_state(entry.spec.name, 'local.partition.' + first)
+    paths = list(ready.files.root.glob('.scratch/*/spill/lfd02-merge.sqlite'))
+    assert len(paths) == 1 and ready.budget.pending_keys() == {'pipeline.E50'}
+    with closing(sqlite3.connect(paths[0])) as spool:
+        progress = json.loads(spool.execute('SELECT body FROM progress').fetchone()[0])
+        assert progress['scan_complete'] and progress['after'] == first
+        assert progress['input_failures'] == 4
+        assert progress['cycle'] == checkpoint['checkpoint']['cycle']
+        assert spool.execute('SELECT count(*) FROM partitions').fetchone()[0] == 2
+        assert spool.execute('SELECT count(*) FROM objects').fetchone()[0] == 1
+        assert spool.execute('SELECT count(*) FROM problems').fetchone()[0] == 1
+    with ready.catalog.transaction() as c:
+        assert logical_count(c, entry.spec.name, cached=True) == 1
+        active = c.execute(text('SELECT active,pending FROM data_store_source_ranges')).mappings().one()
+        claim_id = active['active']['id']
+        assert active['active']['after'] is None and not active['pending']
+        assert len(status['incremental']['active_observation']['batch']) == 2
+
+    # A state-only producer commit dirties the range immediately before its
+    # final acknowledgement. There is still no third observation to consume.
+    acknowledge = incremental.acknowledge
+    dirty = False
+
+    def producer_before_ack(sources, job, **kwargs):
+        nonlocal dirty
+        assert job['active']['id'] == claim_id
+        if kwargs.get('after') is None and not dirty:
+            with sources.engine.begin() as c:
+                active = c.execute(text('SELECT active FROM data_store_source_ranges')).scalar_one()
+                assert active['after'] == status['incremental']['active_observation']['batch'][-1]
+                c.execute(text('UPDATE tonghuashun_collection_states SET revision=revision+1'))
+                assert c.execute(text('SELECT count(*) FROM tonghuashun_observations')).scalar_one() == 2
+            dirty = True
+        return acknowledge(sources, job, **kwargs)
+
+    def forbidden_scan(*args, **kwargs):
+        raise AssertionError('The sealed two-observation batch must resume without decoding it again')
+
+    monkeypatch.setattr(incremental, 'acknowledge', producer_before_ack)
+    monkeypatch.setattr(incremental.FundBatchSources, 'iter_entry', forbidden_scan)
+    resumed = update(ready, options=PipelineOptions(maximum_passes=2))
+    assert dirty and not resumed['complete'] and not resumed['qualified']
+    assert (resumed['source_rows'], resumed['normalized_units'], resumed['input_failures']) == (0, 0, 0)
+    assert resumed['source_metrics']['payload_rows'] == resumed['source_metrics']['dependency_rows'] == 0
+    assert resumed['committed_partitions'] == resumed['new_issues'] == 1
+    assert resumed['passes'] == 2  # One commit and the final empty partition loop.
+    assert len(committed) == 2 and committed[0][0] < committed[1][0]
+    assert ready.catalog.dataset(entry.spec.name)['generation'] == result['generation'] + 1
+    assert ready.source_state(entry.spec.name, 'local.partition.' + first) == checkpoint
+    assert all(files(ready, 'E50').get(path) == hashed for path, hashed in before.items())
+    assert ready.budget.pending_keys() == set()
+    assert resumed['incremental']['remaining_ranges'] == 1
+    assert resumed['incremental']['blocked_ranges'] == 0
+    with ready.catalog.transaction() as c:
+        assert logical_count(c, entry.spec.name, cached=True) == 2
+        queued = c.execute(text('SELECT pending,active FROM data_store_source_ranges')).mappings().one()
+        assert queued['pending'] and queued['active'] is None
+
+    monkeypatch.setattr(incremental, 'acknowledge', acknowledge)
+    drained = update(ready, options=PipelineOptions(maximum_passes=2))
+    assert drained['complete'] and not drained['qualified']
+    assert drained['committed_partitions'] == drained['normalized_units'] == drained['input_failures'] == 0
+    assert drained['passes'] == 0  # State-only acknowledgement needs no partition loop.
+    assert drained['source_metrics']['payload_rows'] == 0
+    assert ready.catalog.dataset(entry.spec.name)['generation'] == result['generation'] + 1
+    for day in ('2026-01-02', '2026-02-02'):
+        with pytest.raises(DataStoreError) as restricted:
+            read_object(ready, 'E50', sample('E50').representation_key, body['thscode'], day)
+        assert restricted.value.code == 'DATA_RESTRICTED'
 
 
 @pytest.mark.parametrize('entry',['E23','E44'])

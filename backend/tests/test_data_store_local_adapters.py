@@ -110,6 +110,45 @@ def test_sparse_actual_empty_receipt_preserves_unreturned_confirmation():
     assert not uncertain and basis==old
 
 
+@pytest.mark.parametrize('second_confirmed', [True, False])
+def test_r01_row_basis_and_unconfirmed_keys_reach_normalized_order(second_confirmed):
+    from tests.data_store_r01_fixture import overlapping_observations, NOW as R01_NOW
+    from app.data_store.adapters.contracts import instant_ns
+
+    body, observations = overlapping_observations(first_confirmed=True,
+                                                  second_confirmed=second_confirmed)
+    tracker = EffectiveBasis()
+    bases = []
+    for row in observations:
+        restored, basis, field = materialize_observation(row, lambda _: None)
+        requests = json.loads(row['request_json'])
+        basis, uncertain = tracker.apply(row, restored, basis, field, requests)
+        bases.append(dict(basis))
+        source = LocalInput('tonghuashun', row['dataset'], row['subject'], row['variant'],
+                            row['observed_at'], restored,
+                            digest([(row['dataset'], row['subject'], row['variant']),
+                                    row['content_hash'], row['observed_at'], requests]),
+                            row_basis=basis, basis_field=field, unconfirmed_keys=uncertain)
+        units = list(normalize(BY_ID['E50'], source))
+        assert {u.object_key for u in units} == {'2026-01-02', '2026-02-02'}
+        if row is observations[0]:
+            assert not uncertain and all(not u.failure for u in units)
+
+    keys = [str(point['date_ms']) for point in body['item']]
+    if second_confirmed:
+        assert uncertain == ()
+        assert bases[1][keys[0]][0] == instant_ns(R01_NOW + timedelta(seconds=2))
+        assert bases[1][keys[1]] == bases[0][keys[1]]
+        assert [(u.order, u.token) for u in units] == [bases[1][key] for key in keys]
+        assert all(not u.failure for u in units)
+    else:
+        assert set(uncertain) == set(keys)
+        assert bases[1] == bases[0]  # Retained basis cannot prove a new confirmation.
+        assert all(u.failure == 'SOURCE_CONFIRMATION_UNPROVEN' and not u.rows for u in units)
+        assert all((u.order, u.token) == (source.order_ns, source.token) for u in units)
+        assert all(u.order > bases[0][key][0] for u, key in zip(units, keys))
+
+
 def test_import_receipt_keeps_inherited_groups_and_original_acquisition_order():
     firstdata={'item':[{'ex_date_ms':1743350400000,'event':'a'},
                         {'ex_date_ms':1743350400000,'event':'b'}]}
