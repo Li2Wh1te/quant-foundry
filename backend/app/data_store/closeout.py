@@ -16,6 +16,58 @@ from .updates import FATAL
 CONTINUATIONS = frozenset({
     'PASS_BUDGET_EXCEEDED', 'NATIVE_RANGES_PENDING', 'LOCAL_UPDATE_BUDGET_EXCEEDED',
 })
+TERMINAL_REASONS = FATAL | frozenset({
+    'UNEXPECTED_ERROR', 'CLOSEOUT_DEADLINE_REACHED', 'CLOSEOUT_PROCESSING_FINISHED',
+})
+
+
+def terminal_reason(state):
+    """Retain terminal decisions even if the owner died just before release."""
+    if state is None:
+        return None
+    reason = state.get('stop_reason')
+    if reason in TERMINAL_REASONS:
+        return reason
+    # The fatal attempt result is checkpointed immediately before stop_reason.
+    # A crash in that interval must not convert failure into another attempt.
+    return next((job.get('reason') for job in state['jobs'].values()
+                 if job['status'] == 'pending'
+                 and job.get('reason') in FATAL | {'UNEXPECTED_ERROR'}), None)
+
+
+def validate_state(state, *, entries, deadline, max_attempts, pass_seconds):
+    """Validate a checkpoint without repairing, resetting or accepting it."""
+    if (type(state) is not dict or type(state.get('version')) is not int
+            or state['version'] != 1 or state.get('deadline') != deadline
+            or type(state.get('deadline')) not in (int, float)
+            or state.get('max_attempts') != max_attempts
+            or type(state.get('max_attempts')) is not int
+            or state.get('pass_seconds') != pass_seconds
+            or type(state.get('pass_seconds')) is not int
+            or state.get('entries') != list(entries)
+            or type(state.get('jobs')) is not dict
+            or set(state['jobs']) != set(entries)
+            or type(state.get('processing_finished')) is not bool
+            or state.get('acceptance_complete') is not False
+            or state.get('supplier_collection_executed') is not False):
+        raise ValueError('Resume must retain the original scope and budgets')
+    for job in state['jobs'].values():
+        if (type(job) is not dict
+                or job.get('status') not in ('pending', 'running', 'done', 'blocked', 'limited')
+                or type(job.get('attempts')) is not int
+                or not 0 <= job['attempts'] <= max_attempts
+                or type(job.get('due')) not in (int, float)
+                or not math.isfinite(job['due']) or job['due'] < 0
+                or job['status'] == 'running' and job['attempts'] == 0
+                or job['status'] in ('blocked', 'done') and job['attempts'] == 0
+                or job['status'] == 'limited' and job['attempts'] != max_attempts
+                or job['status'] == 'done' and (job.get('complete') is not True
+                                              or job.get('qualified') is not True)
+                or any(key in job and type(job[key]) is not bool for key in ('complete', 'qualified'))):
+            raise ValueError('Invalid persisted job')
+    if state['processing_finished'] and any(
+            job['status'] in ('pending', 'running') for job in state['jobs'].values()):
+        raise ValueError('Invalid completion checkpoint')
 
 
 def disposition(result, *, now, progressed):
@@ -63,21 +115,15 @@ def run(entries, attempt, *, deadline, max_attempts=128, pass_seconds=840,
                           for entry in entries},
                  'processing_finished': False, 'acceptance_complete': False,
                  'supplier_collection_executed': False}
-    elif (state.get('version') != 1 or state.get('deadline') != deadline
-          or state.get('max_attempts') != max_attempts
-          or state.get('pass_seconds') != pass_seconds
-          or state.get('entries') != list(entries)):
-        raise ValueError('Resume must retain the original scope and budgets')
+    validate_state(state, entries=entries, deadline=deadline, max_attempts=max_attempts,
+                   pass_seconds=pass_seconds)
+    final_reason = terminal_reason(state)
+    if final_reason is not None:
+        state['stop_reason'] = final_reason
+        save(state)
+        return state
     jobs = state['jobs']
-    if set(jobs) != set(entries):
-        raise ValueError('Resume scope mismatch')
     for job in jobs.values():
-        if (job.get('status') not in ('pending', 'running', 'done', 'blocked', 'limited')
-                or type(job.get('attempts')) is not int
-                or not 0 <= job['attempts'] <= max_attempts
-                or type(job.get('due')) not in (int, float)
-                or not math.isfinite(job['due'])):
-            raise ValueError('Invalid persisted job')
         if job['status'] == 'running':
             job['status'] = 'pending'
     state.update(processing_finished=False, acceptance_complete=False)
@@ -145,21 +191,25 @@ def run(entries, attempt, *, deadline, max_attempts=128, pass_seconds=840,
 
 
 def main(argv=None):
-    """Explicit local-update driver with a private, restartable state file."""
+    """Local-update driver for an explicitly adopted cooperative store only."""
     import argparse
     from datetime import datetime
-    import fcntl
     import json
     import os
     from pathlib import Path
     import signal
+    from .errors import DataStoreError
+    from .handoff import HandoffGate, validate_spec
 
     parser = argparse.ArgumentParser(description='Continue selected existing local work; no supplier requests')
     parser.add_argument('--root', type=Path, required=True)
     parser.add_argument('--entry', action='append', required=True)
     parser.add_argument('--state', type=Path, required=True)
+    parser.add_argument('--handoff-epoch', required=True, help='Previously approved offline adoption UUID')
+    parser.add_argument('--run-id', required=True, help='Immutable closeout UUID, retained on recovery')
     parser.add_argument('--deadline', required=True, help='Original absolute ISO-8601 deadline, with timezone')
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--cancel', action='store_true', help='Recover and cancel an abandoned run; requires --resume')
     parser.add_argument('--max-attempts', type=int, default=128)
     parser.add_argument('--pass-seconds', type=int, default=840)
     parser.add_argument('--max-passes', type=int, default=4096)
@@ -172,16 +222,18 @@ def main(argv=None):
             raise ValueError('Deadline needs a timezone')
         deadline = deadline_date.timestamp()
         if (not args.root.is_absolute() or not args.state.is_absolute()
-                or not args.state.parent.is_dir() or args.state.is_symlink()
+                or args.state != args.root / '.locks' / 'closeout-handoff.json'
                 or len(args.entry) != len(set(args.entry))
                 or any(not BY_ID[e].business for e in args.entry)
+                or args.cancel and not args.resume
                 or not 1 <= args.max_attempts <= 128 or not 1 <= args.pass_seconds <= 840):
             raise ValueError('Invalid scope or paths')
         PipelineOptions(mode='update', maximum_passes=args.max_passes, pass_seconds=args.pass_seconds)
+        spec = {'entries': args.entry, 'deadline': deadline, 'max_attempts': args.max_attempts,
+                'pass_seconds': args.pass_seconds, 'max_passes': args.max_passes}
+        validate_spec(spec)
     except (ValueError, KeyError, OverflowError):
         parser.error('Use unique business entries, absolute existing paths and finite valid limits')
-    if args.resume != args.state.exists():
-        parser.error('Use a new state path, or --resume for an existing state; never overwrite a prior run')
     key = os.environ.get('QF_CURSOR_SIGNING_KEY', '').encode()
     if len(key) < 32:
         parser.error('Provide QF_CURSOR_SIGNING_KEY through the existing environment')
@@ -189,60 +241,45 @@ def main(argv=None):
     prior_handlers = {}
     def stop(*_):
         stopping[0] = True
-    def save(value):
-        pending = args.state.with_name(args.state.name + '.pending')
-        # A state file contains no credentials or source response payloads.
-        # Atomic replacement prevents a torn checkpoint from looking complete.
-        fd = os.open(pending, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'w') as handle:
-            json.dump(value, handle, ensure_ascii=False, indent=2)
-            handle.flush()
-            os.fsync(handle.fileno())
-        pending.replace(args.state)
     try:
-        lock_path = args.state.with_name(args.state.name + '.lock')
-        fd = os.open(lock_path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, 'r+') as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            # Recheck after acquiring ownership: two callers may both have
-            # observed a previously absent state file before one acquired it.
-            if args.resume != args.state.exists():
-                raise ValueError('State ownership changed')
-            state = json.loads(args.state.read_text()) if args.resume else None
-            binding = {'root': str(args.root.resolve()), 'max_passes': args.max_passes}
-            if state is not None and state.get('binding') != binding:
-                raise ValueError('Resume binding changed')
+        with HandoffGate(args.root) as gate:
             for sig in (signal.SIGINT, signal.SIGTERM):
                 prior_handlers[sig] = signal.signal(sig, stop)
-            from app.db.session import get_engine
-            from .storage import CurrentStore
-            from .local_sources import NativeSources, SourceLimits
-            from .updates import RetryPolicy, run_local
-            from .errors import DataStoreError
-            from .adapters.canonical import NativeInputError
-            engine = get_engine()
-            with CurrentStore(engine, args.root, cursor_key=key) as store:
-                def attempt(eid, seconds):
-                    options = PipelineOptions(mode='update', maximum_passes=args.max_passes,
-                                              pass_seconds=seconds)
-                    sources = NativeSources(engine, limits=SourceLimits(pass_seconds=seconds),
-                                            cancelled=lambda: stopping[0])
-                    try:
-                        rows = run_local(store, sources, entries=[BY_ID[eid]], options=options,
-                                         cancelled=lambda: stopping[0],
-                                         policy=RetryPolicy(call_seconds=seconds))
-                    except (DataStoreError, NativeInputError) as error:
-                        rows = getattr(error, 'results', [])
-                        if not rows:
-                            return {'reason': error.code, 'complete': False, 'qualified': False}
-                    row = next(row for row in rows if row['entry_id'] == eid)
-                    return row
-                def bound_save(value):
-                    value['binding'] = binding
-                    save(value)
-                result = run(args.entry, attempt, deadline=deadline,
-                             max_attempts=args.max_attempts, pass_seconds=args.pass_seconds,
-                             state=state, save=bound_save, cancelled=lambda: stopping[0])
+            def work(session):
+                def drive(attempt):
+                    return run(args.entry, attempt, deadline=deadline,
+                               max_attempts=args.max_attempts, pass_seconds=args.pass_seconds,
+                               state=session.checkpoint, save=session.save,
+                               cancelled=lambda: stopping[0] or args.cancel)
+                # Recovery after expiry/cancellation touches only the journal.
+                # It neither initializes the store nor sweeps scratch resources.
+                if args.cancel or stopping[0] or time.time() >= deadline:
+                    return drive(lambda *_: None)
+                from app.db.session import get_engine
+                from .storage import CurrentStore
+                from .local_sources import NativeSources, SourceLimits
+                from .updates import RetryPolicy, run_local
+                from .adapters.canonical import NativeInputError
+                engine = get_engine()
+                with CurrentStore(engine, args.root, cursor_key=key) as store:
+                    def attempt(eid, seconds):
+                        options = PipelineOptions(mode='update', maximum_passes=args.max_passes,
+                                                  pass_seconds=seconds)
+                        sources = NativeSources(engine, limits=SourceLimits(pass_seconds=seconds),
+                                                cancelled=lambda: stopping[0])
+                        try:
+                            rows = run_local(store, sources, entries=[BY_ID[eid]], options=options,
+                                             cancelled=lambda: stopping[0],
+                                             policy=RetryPolicy(call_seconds=seconds))
+                        except (DataStoreError, NativeInputError) as error:
+                            rows = getattr(error, 'results', [])
+                            if not rows:
+                                return {'reason': error.code, 'complete': False, 'qualified': False}
+                        return next(row for row in rows if row['entry_id'] == eid)
+                    return drive(attempt)
+                # CurrentStore and all per-attempt contexts are closed before
+                # gate.execute records release and permits scheduler admission.
+            result = gate.execute(args.handoff_epoch, args.run_id, spec, work, resume=args.resume)
         # A drained queue is never a substitute for independent full coverage,
         # formal reads and audit-export. This driver intentionally claims none.
         print(json.dumps({'processing_finished': result['processing_finished'],
@@ -250,9 +287,10 @@ def main(argv=None):
                           'jobs': result['jobs']}, ensure_ascii=False))
         return (130 if stopping[0] or result['stop_reason'] == 'OPERATION_CANCELLED' else
                 0 if all(j['status'] == 'done' for j in result['jobs'].values()) else 2)
-    except Exception:
+    except Exception as error:
         print(json.dumps({'processing_finished': False, 'acceptance_complete': False,
-                          'reason': 'CLOSEOUT_CONFIGURATION_OR_EXECUTION_ERROR'}))
+                          'reason': (error.code if isinstance(error, DataStoreError) else
+                                     'CLOSEOUT_CONFIGURATION_OR_EXECUTION_ERROR')}))
         return 2
     finally:
         for sig, handler in prior_handlers.items():

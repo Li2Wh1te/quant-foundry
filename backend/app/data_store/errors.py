@@ -1,6 +1,18 @@
 """Stable, non-sensitive errors for the current data store."""
 
 MESSAGES = {
+    'HANDOFF_ADOPTION_REQUIRED': 'Approved offline adoption is required before cooperative handoff.',
+    'HANDOFF_ALREADY_ADOPTED': 'The handoff journal already exists and cannot be replaced.',
+    'HANDOFF_UNSUPPORTED_OWNER': 'Only integrated in-process owners support cooperative handoff.',
+    'HANDOFF_EPOCH_REQUIRED': 'An adopted store requires the configured handoff epoch.',
+    'HANDOFF_EPOCH_MISMATCH': 'The handoff epoch does not match this store.',
+    'HANDOFF_RUN_MISMATCH': 'Recovery must retain the original run, scope and budgets.',
+    'HANDOFF_RECOVERY_REQUIRED': 'Closeout ownership remains fenced; recover the original run first.',
+    'HANDOFF_OWNER_STILL_LIVE': 'The previous closeout process is still present; recovery is blocked.',
+    'HANDOFF_OWNER_UNVERIFIED': 'The previous process identity cannot be verified; recovery is blocked.',
+    'HANDOFF_STATE_INVALID': 'The handoff journal is invalid; admission remains blocked.',
+    'HANDOFF_CHECKPOINT_MISMATCH': 'The checkpoint does not retain the recorded attempts and progress.',
+    'HANDOFF_RECOVERY_LIMIT': 'The finite handoff recovery limit has been reached.',
     'SOURCE_RANGES_BLOCKED':'来源采集仍失败，相关范围保留待处理，其余范围已继续。',
     'CURRENT_SOURCE_MISMATCH':'本地来源与当前数据尚未完全对齐，完整覆盖核验未通过。',
     'LOCAL_UPDATE_BUDGET_EXCEEDED': '本次本地更新达到工作预算，未完成入口将在后续继续处理。',
